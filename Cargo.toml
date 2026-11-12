@@ -31,17 +31,38 @@ gpui-sum-tree = { package = "gpui-pre-sum-tree", version = "=0.3.12" }
 
 anyhow = "1"
 regex = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "2"
 toml = "1"
-uuid = { version = "1", features = ["serde"] }
 # The terminal model (Apache-2.0). Pinned exactly: the daemon's snapshots and core's screen
 # observation read its grid, so a bump is a deliberate, tested change.
 alacritty_terminal = "=0.26.0"
 # The escape-sequence parser alacritty_terminal uses, for the OSC 9;4 and 7501 sequences it
 # ignores. Kept at the version alacritty_terminal pulls in.
 vte = { version = "0.15", default-features = false, features = ["std"] }
+
+# Exact pins, each at least two weeks old when added. dropshot 0.17 is on schemars 0.8 and slog;
+# rusqlite follows the line rusqlite_migration 2.6 supports; reqwest follows progenitor-client.
+async-trait = "=0.1.92"
+chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
+dropshot = "=0.17.1"
+openapiv3 = "=2.2.0"
+prettyplease = "=0.3.0"
+progenitor = { version = "=0.15.1", default-features = false }
+progenitor-client = "=0.15.1"
+reqwest = { version = "=0.13.5", default-features = false, features = ["json", "query"] }
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+rusqlite_migration = "=2.6.0"
+schemars = { version = "=0.8.22", features = ["uuid1"] }
+semver = "=1.0.28"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+slog = "=2.8.2"
+syn = { version = "=3.0.9", features = ["full"] }
+tempfile = "=3.27.0"
+thiserror = "=2.0.21"
+tokio = { version = "=1.54.1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "=0.1.44"
+tracing-subscriber = "=0.3.23"
+uuid = { version = "=1.28.0", features = ["serde", "v4", "v7"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

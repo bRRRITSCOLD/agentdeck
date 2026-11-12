@@ -18,6 +18,8 @@ Linux only. Install GPUI's system packages once with `script/install-linux-deps.
 cargo ci                    # what CI runs: fmt, clippy, unit, integration and doc, warnings denied
 cargo test-unit             # one tier; `cargo test-integration` for the other
 cargo run -p agentdeck-gui  # the GUI
+cargo xtask openapi         # rewrite openapi.json after changing the daemon's API
+cargo xtask client          # then regenerate agentdeck-client from it
 ```
 
 | Crate | Kind | |

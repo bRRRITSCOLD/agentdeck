@@ -1,0 +1,1508 @@
+{
+  "components": {
+    "responses": {
+      "DeleteWorkspaceError": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/DeleteWorkspaceError"
+            }
+          }
+        },
+        "description": "DeleteWorkspaceError"
+      },
+      "Error": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "Error"
+      }
+    },
+    "schemas": {
+      "DeleteWorkspaceError": {
+        "description": "`DELETE /v1/workspaces/{id}`'s error: dropshot's error body, plus the dirty report when `error_code` is `dirty` (409).",
+        "properties": {
+          "dirty": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DirtyReport"
+              }
+            ],
+            "description": "What deleting would lose; set only with `error_code` `dirty`.",
+            "nullable": true
+          },
+          "error_code": {
+            "description": "A machine-readable code: `dirty`, `not_found`, `unauthorized`, …",
+            "nullable": true,
+            "type": "string"
+          },
+          "message": {
+            "description": "What went wrong.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "type": "object"
+      },
+      "DirtyRepo": {
+        "description": "One dirty git repo.",
+        "properties": {
+          "path": {
+            "description": "The repo's absolute path.",
+            "type": "string"
+          },
+          "uncommitted": {
+            "description": "Changed, staged and untracked files, as `git status --porcelain` prints them.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "unpushed_branches": {
+            "description": "Local branches with commits that are on no remote.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "path",
+          "uncommitted",
+          "unpushed_branches"
+        ],
+        "type": "object"
+      },
+      "DirtyReport": {
+        "description": "The git repos under a workspace's dir that hold work not on any remote.",
+        "properties": {
+          "repos": {
+            "description": "Only the dirty repos; an empty list means deleting loses nothing git knows about.",
+            "items": {
+              "$ref": "#/components/schemas/DirtyRepo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "repos"
+        ],
+        "type": "object"
+      },
+      "Error": {
+        "description": "Error information from a response.",
+        "properties": {
+          "error_code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message",
+          "request_id"
+        ],
+        "type": "object"
+      },
+      "Health": {
+        "description": "`GET /v1/health`.",
+        "properties": {
+          "uptime_secs": {
+            "description": "Seconds since the daemon started.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "version": {
+            "description": "The daemon's version.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "uptime_secs",
+          "version"
+        ],
+        "type": "object"
+      },
+      "Layout": {
+        "anyOf": [
+          {
+            "additionalProperties": false,
+            "description": "One pane filling the space.",
+            "properties": {
+              "pane": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/PaneId"
+                  }
+                ],
+                "description": "The pane shown here."
+              }
+            },
+            "required": [
+              "pane"
+            ],
+            "title": "Pane",
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Two subtrees sharing the space.",
+            "properties": {
+              "a": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/Layout"
+                  }
+                ],
+                "description": "The left or top side."
+              },
+              "b": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/Layout"
+                  }
+                ],
+                "description": "The right or bottom side."
+              },
+              "ratio": {
+                "description": "The share `a` takes.",
+                "exclusiveMaximum": true,
+                "exclusiveMinimum": true,
+                "format": "float",
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              "split": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/SplitDirection"
+                  }
+                ],
+                "description": "How `a` and `b` are arranged."
+              }
+            },
+            "required": [
+              "a",
+              "b",
+              "ratio",
+              "split"
+            ],
+            "title": "Split",
+            "type": "object"
+          }
+        ],
+        "description": "A tab's split tree. Every pane appears once; [`Layout::split`] keeps it that way."
+      },
+      "NewNote": {
+        "description": "`POST /v1/notes`: exactly one of `workspace_id` and `task_id`.",
+        "properties": {
+          "body": {
+            "description": "The message.",
+            "type": "string"
+          },
+          "task_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TaskId"
+              }
+            ],
+            "description": "The task to leave it on.",
+            "nullable": true
+          },
+          "workspace_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ],
+            "description": "The workspace to leave it on.",
+            "nullable": true
+          }
+        },
+        "required": [
+          "body"
+        ],
+        "type": "object"
+      },
+      "NewTab": {
+        "description": "`POST /v1/workspaces/{id}/tabs`.",
+        "properties": {
+          "layout": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Layout"
+              }
+            ],
+            "description": "The initial split tree, if any.",
+            "nullable": true
+          },
+          "title": {
+            "description": "The tab's title.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "type": "object"
+      },
+      "NewTask": {
+        "description": "`POST /v1/tasks`.",
+        "properties": {
+          "body": {
+            "description": "The body; empty when absent.",
+            "nullable": true,
+            "type": "string"
+          },
+          "status": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TaskStatus"
+              }
+            ],
+            "description": "The status; `todo` when absent.",
+            "nullable": true
+          },
+          "title": {
+            "description": "The title.",
+            "type": "string"
+          },
+          "workspace_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ],
+            "description": "The workspace to link; the inbox when absent.",
+            "nullable": true
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "type": "object"
+      },
+      "NewWorkspace": {
+        "description": "`POST /v1/workspaces`.",
+        "properties": {
+          "dir": {
+            "description": "An existing absolute directory to attach. Without it, agentdeck creates a scratch dir.",
+            "nullable": true,
+            "type": "string"
+          },
+          "name": {
+            "description": "The display name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "Note": {
+        "description": "A message left on a workspace or a task for agents.",
+        "properties": {
+          "body": {
+            "description": "The message.",
+            "type": "string"
+          },
+          "created_at": {
+            "description": "When the note was created.",
+            "type": "string"
+          },
+          "id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/NoteId"
+              }
+            ],
+            "description": "The note's id."
+          },
+          "read_at": {
+            "description": "When the note was delivered or marked read.",
+            "nullable": true,
+            "type": "string"
+          },
+          "read_by_pane": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PaneId"
+              }
+            ],
+            "description": "The pane it was delivered to, if a pane read it.",
+            "nullable": true
+          },
+          "task_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TaskId"
+              }
+            ],
+            "description": "The task it's on; exactly one of this and `workspace_id` is set.",
+            "nullable": true
+          },
+          "workspace_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ],
+            "description": "The workspace it's on; exactly one of this and `task_id` is set.",
+            "nullable": true
+          }
+        },
+        "required": [
+          "body",
+          "created_at",
+          "id"
+        ],
+        "type": "object"
+      },
+      "NoteId": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "NotePatch": {
+        "description": "`PATCH /v1/notes/{id}`: the fields to change.",
+        "properties": {
+          "body": {
+            "description": "A new message.",
+            "nullable": true,
+            "type": "string"
+          },
+          "read": {
+            "description": "`true` marks the note read now, `false` marks it unread.",
+            "nullable": true,
+            "type": "boolean"
+          },
+          "read_by_pane": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PaneId"
+              }
+            ],
+            "description": "The pane that read it; recorded only with `read: true`.",
+            "nullable": true
+          }
+        },
+        "type": "object"
+      },
+      "PaneId": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "SplitDirection": {
+        "enum": [
+          "h",
+          "v"
+        ],
+        "type": "string"
+      },
+      "Tab": {
+        "description": "A tab in a workspace, holding a split tree of panes.",
+        "properties": {
+          "id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TabId"
+              }
+            ],
+            "description": "The tab's id."
+          },
+          "layout": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Layout"
+              }
+            ],
+            "description": "The split tree; `None` until the tab has a pane.",
+            "nullable": true
+          },
+          "position": {
+            "description": "Sort key among the workspace's tabs.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "title": {
+            "description": "The tab's title.",
+            "type": "string"
+          },
+          "workspace_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ],
+            "description": "The workspace it belongs to."
+          }
+        },
+        "required": [
+          "id",
+          "position",
+          "title",
+          "workspace_id"
+        ],
+        "type": "object"
+      },
+      "TabId": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "TabPatch": {
+        "description": "`PATCH /v1/tabs/{id}`: the fields to change.",
+        "properties": {
+          "layout": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Layout"
+              }
+            ],
+            "description": "A new split tree.",
+            "nullable": true
+          },
+          "position": {
+            "description": "A new sort key.",
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          },
+          "title": {
+            "description": "A new title.",
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Task": {
+        "description": "An item in the one global task list.",
+        "properties": {
+          "body": {
+            "description": "The body, possibly empty.",
+            "type": "string"
+          },
+          "created_at": {
+            "description": "When the task was created.",
+            "type": "string"
+          },
+          "done_at": {
+            "description": "When the task last moved to done; `None` while it isn't done.",
+            "nullable": true,
+            "type": "string"
+          },
+          "id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TaskId"
+              }
+            ],
+            "description": "The task's id."
+          },
+          "kind": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TaskKind"
+              }
+            ],
+            "description": "Plain or PR."
+          },
+          "status": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TaskStatus"
+              }
+            ],
+            "description": "The status."
+          },
+          "title": {
+            "description": "The title.",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "When the task last changed.",
+            "type": "string"
+          },
+          "workspace_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ],
+            "description": "The linked workspace; `None` puts the task in the inbox.",
+            "nullable": true
+          }
+        },
+        "required": [
+          "body",
+          "created_at",
+          "id",
+          "kind",
+          "status",
+          "title",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "TaskId": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "TaskKind": {
+        "enum": [
+          "plain",
+          "pr"
+        ],
+        "type": "string"
+      },
+      "TaskPatch": {
+        "description": "`PATCH /v1/tasks/{id}`: the fields to change.",
+        "properties": {
+          "body": {
+            "description": "A new body.",
+            "nullable": true,
+            "type": "string"
+          },
+          "status": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TaskStatus"
+              }
+            ],
+            "description": "A new status.",
+            "nullable": true
+          },
+          "title": {
+            "description": "A new title.",
+            "nullable": true,
+            "type": "string"
+          },
+          "workspace_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ],
+            "description": "A workspace to link.",
+            "nullable": true
+          }
+        },
+        "type": "object"
+      },
+      "TaskStatus": {
+        "enum": [
+          "todo",
+          "doing",
+          "review",
+          "done"
+        ],
+        "type": "string"
+      },
+      "Workspace": {
+        "description": "A free-form unit of work with its own directory.",
+        "properties": {
+          "archived_at": {
+            "description": "When the workspace was archived; archived workspaces keep their data.",
+            "nullable": true,
+            "type": "string"
+          },
+          "created_at": {
+            "description": "When the workspace was created.",
+            "type": "string"
+          },
+          "dir": {
+            "description": "The absolute path of the workspace's directory.",
+            "type": "string"
+          },
+          "dir_owned": {
+            "description": "True when agentdeck created `dir` as a scratch dir, so deleting the workspace removes it.",
+            "type": "boolean"
+          },
+          "id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ],
+            "description": "The workspace's id."
+          },
+          "muted": {
+            "description": "Notifications are muted.",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "The display name.",
+            "type": "string"
+          },
+          "slug": {
+            "description": "Unique, derived from the name at creation; names a scratch dir.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "created_at",
+          "dir",
+          "dir_owned",
+          "id",
+          "muted",
+          "name",
+          "slug"
+        ],
+        "type": "object"
+      },
+      "WorkspaceId": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "WorkspacePatch": {
+        "description": "`PATCH /v1/workspaces/{id}`: the fields to change.",
+        "properties": {
+          "muted": {
+            "description": "Mute or unmute notifications.",
+            "nullable": true,
+            "type": "boolean"
+          },
+          "name": {
+            "description": "A new display name. The slug and the dir stay as they are.",
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "The agentdeck daemon's HTTP API. Every request carries `Authorization: Bearer <token>`, with the token from daemon.json.",
+    "title": "agentdeck",
+    "version": "1.0.0"
+  },
+  "openapi": "3.0.3",
+  "paths": {
+    "/v1/health": {
+      "get": {
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "The daemon's version and uptime."
+      }
+    },
+    "/v1/notes": {
+      "get": {
+        "operationId": "note_list",
+        "parameters": [
+          {
+            "description": "Only notes on this task.",
+            "in": "query",
+            "name": "task",
+            "schema": {
+              "$ref": "#/components/schemas/TaskId"
+            }
+          },
+          {
+            "description": "`true`: only unread notes; `false`: only read ones.",
+            "in": "query",
+            "name": "unread",
+            "schema": {
+              "nullable": true,
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Only notes on this workspace.",
+            "in": "query",
+            "name": "workspace",
+            "schema": {
+              "$ref": "#/components/schemas/WorkspaceId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Note"
+                  },
+                  "title": "Array_of_Note",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "The notes matching every filter given, oldest first."
+      },
+      "post": {
+        "operationId": "note_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewNote"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Note"
+                }
+              }
+            },
+            "description": "successful creation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Leaves a note on a workspace or a task."
+      }
+    },
+    "/v1/notes/{id}": {
+      "delete": {
+        "operationId": "note_delete",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/NoteId"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "successful deletion"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Deletes a note."
+      },
+      "patch": {
+        "operationId": "note_update",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/NoteId"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotePatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Note"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Edits a note, or marks it read or unread."
+      }
+    },
+    "/v1/tabs/{id}": {
+      "delete": {
+        "operationId": "tab_delete",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/TabId"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "successful deletion"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Deletes a tab and its panes."
+      },
+      "patch": {
+        "operationId": "tab_update",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/TabId"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TabPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Tab"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Renames, moves or re-lays-out a tab."
+      }
+    },
+    "/v1/tasks": {
+      "get": {
+        "operationId": "task_list",
+        "parameters": [
+          {
+            "description": "`true`: only tasks with no workspace; `false`: only tasks with one.",
+            "in": "query",
+            "name": "inbox",
+            "schema": {
+              "nullable": true,
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Only tasks of this kind.",
+            "in": "query",
+            "name": "kind",
+            "schema": {
+              "$ref": "#/components/schemas/TaskKind"
+            }
+          },
+          {
+            "description": "Only tasks with this status.",
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "$ref": "#/components/schemas/TaskStatus"
+            }
+          },
+          {
+            "description": "Only tasks linked to this workspace.",
+            "in": "query",
+            "name": "workspace",
+            "schema": {
+              "$ref": "#/components/schemas/WorkspaceId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Task"
+                  },
+                  "title": "Array_of_Task",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "The tasks matching every filter given, oldest first."
+      },
+      "post": {
+        "operationId": "task_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewTask"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Task"
+                }
+              }
+            },
+            "description": "successful creation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Creates a plain task."
+      }
+    },
+    "/v1/tasks/{id}": {
+      "delete": {
+        "operationId": "task_delete",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/TaskId"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "successful deletion"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Deletes a task and its notes."
+      },
+      "get": {
+        "operationId": "task_get",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/TaskId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Task"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "One task."
+      },
+      "patch": {
+        "operationId": "task_update",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/TaskId"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Task"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Changes a task's title, body, status or workspace."
+      }
+    },
+    "/v1/workspaces": {
+      "get": {
+        "operationId": "workspace_list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Workspace"
+                  },
+                  "title": "Array_of_Workspace",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Every workspace, archived ones included, oldest first."
+      },
+      "post": {
+        "operationId": "workspace_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewWorkspace"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workspace"
+                }
+              }
+            },
+            "description": "successful creation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Creates a workspace on an existing dir, or on a new scratch dir when `dir` is absent."
+      }
+    },
+    "/v1/workspaces/{id}": {
+      "delete": {
+        "description": "Without `force`, a dir holding uncommitted or unpushed work is a 409 `dirty` carrying the dirty report.",
+        "operationId": "workspace_delete",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/WorkspaceId"
+            }
+          },
+          {
+            "description": "Delete even when the dir holds uncommitted or unpushed work.",
+            "in": "query",
+            "name": "force",
+            "schema": {
+              "nullable": true,
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "successful deletion"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/DeleteWorkspaceError"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/DeleteWorkspaceError"
+          }
+        },
+        "summary": "Deletes a workspace, and its dir when agentdeck created it. Its tasks move to the inbox."
+      },
+      "get": {
+        "operationId": "workspace_get",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/WorkspaceId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workspace"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "One workspace."
+      },
+      "patch": {
+        "operationId": "workspace_update",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/WorkspaceId"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkspacePatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workspace"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Renames, mutes or unmutes a workspace."
+      }
+    },
+    "/v1/workspaces/{id}/archive": {
+      "post": {
+        "operationId": "workspace_archive",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/WorkspaceId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workspace"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Archives a workspace; its tasks, notes and dir are kept."
+      }
+    },
+    "/v1/workspaces/{id}/dirty": {
+      "get": {
+        "operationId": "workspace_dirty",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/WorkspaceId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DirtyReport"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Each git repo under the workspace's dir with uncommitted files or unpushed branches."
+      }
+    },
+    "/v1/workspaces/{id}/tabs": {
+      "get": {
+        "operationId": "tab_list",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/WorkspaceId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Tab"
+                  },
+                  "title": "Array_of_Tab",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "A workspace's tabs, in position order."
+      },
+      "post": {
+        "operationId": "tab_create",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/WorkspaceId"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewTab"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Tab"
+                }
+              }
+            },
+            "description": "successful creation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Adds a tab after the workspace's last one."
+      }
+    },
+    "/v1/workspaces/{id}/unarchive": {
+      "post": {
+        "operationId": "workspace_unarchive",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/WorkspaceId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workspace"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Brings an archived workspace back."
+      }
+    }
+  }
+}
