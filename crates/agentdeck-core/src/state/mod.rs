@@ -2,15 +2,19 @@
 //!
 //! - [`rules`]: the rule file format, and [`RuleSet::evaluate`], a pure function from one
 //!   [`Observation`] to a state.
+//! - [`tracker`]: [`StateTracker`] settles those states over time and adds `done` and
+//!   `exited`.
 //! - [`osc`]: reads OSC 9;4 and OSC 7501 out of raw output for the observation.
 
 use crate::text_enum::text_enum;
 
 pub mod osc;
 pub mod rules;
+pub mod tracker;
 
 pub use osc::{OscScanner, ProgramState, Progress};
 pub use rules::{Observation, RuleSet, RuleState, RulesError};
+pub use tracker::StateTracker;
 
 text_enum! {
     /// A pane's agent state (spec §3 `panes.state`, §7).
