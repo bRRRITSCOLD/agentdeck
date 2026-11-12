@@ -1,25 +1,28 @@
 //! The main window's content: what the daemon connection allows. Until it connects, a
-//! centred status; once it does, the workspace shell (the sidebar and panes arrive with the
-//! following #12 PRs). When the compositor leaves decorations to the app, a title bar and
+//! centred status; once it does, the sidebar beside the selected view (the panes arrive with
+//! the following #12 PRs). When the compositor leaves decorations to the app, a title bar and
 //! resize edges frame it.
 
 use brrritscold_core_gpui::{
     ActiveTheme as _, Alert, AlertAction, AlertDescription, AlertTitle, AlertVariant, Button,
-    ButtonSize, ButtonVariant, IconName, Separator,
+    ButtonSize, ButtonVariant, IconName, Separator, SeparatorOrientation,
 };
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Context, Decorations, Entity, FocusHandle, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Styled as _, Window, div, px,
+    AnyElement, AppContext as _, Context, Decorations, Entity, FocusHandle,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _, Window, div, px,
 };
 
 use crate::connection::{Connection, Status};
 use crate::frame;
+use crate::sidebar::SidebarView;
 use crate::title_bar::{Close, Minimize, TitleBar, ToggleMaximize};
 
 /// The main window's root view, inside core-gpui's `Root`.
 pub struct Shell {
     connection: Entity<Connection>,
+    /// The sidebar, while connected; a new connection gets a new one.
+    sidebar: Option<Entity<SidebarView>>,
     /// Held by the shell so the title bar's actions reach its handlers while nothing inside
     /// has focus.
     focus: FocusHandle,
@@ -32,10 +35,34 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        cx.observe(&connection, |_, _, cx| cx.notify()).detach();
+        cx.observe(&connection, |shell, _, cx| {
+            shell.follow_connection(cx);
+            cx.notify();
+        })
+        .detach();
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        Shell { connection, focus }
+        let mut shell = Shell {
+            connection,
+            sidebar: None,
+            focus,
+        };
+        shell.follow_connection(cx);
+        shell
+    }
+
+    /// Opens a sidebar on a new session, and drops it once the connection is lost.
+    fn follow_connection(&mut self, cx: &mut Context<Self>) {
+        match self.connection.read(cx).status() {
+            Status::Connected(session) => {
+                if self.sidebar.is_none() {
+                    let api = session.api.clone();
+                    let connection = self.connection.clone();
+                    self.sidebar = Some(cx.new(|cx| SidebarView::new(api, &connection, cx)));
+                }
+            }
+            Status::Connecting | Status::Failed(_) => self.sidebar = None,
+        }
     }
 
     /// What the connection allows, filling the space under the title bar.
@@ -69,7 +96,15 @@ impl Shell {
                     )
                     .into_any_element()
             }
-            Status::Connected(_) => centred.into_any_element(),
+            // Penpot "Main window" `Body`: Sidebar | Separator | the selected view.
+            Status::Connected(_) => div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .children(self.sidebar.clone())
+                .child(Separator::new().orientation(SeparatorOrientation::Vertical))
+                .child(div().flex_1())
+                .into_any_element(),
         }
     }
 }
@@ -105,13 +140,14 @@ impl Render for Shell {
 #[cfg(test)]
 mod tests {
     use std::rc::Rc;
+    use std::sync::Arc;
 
-    use agentdeck_client::daemon::Daemon;
     use agentdeck_client::ws::Socket;
     use brrritscold_core_gpui::{Root, Theme, ThemePreference};
-    use gpui::{App, AppContext as _, Task, TestAppContext, VisualTestContext};
+    use gpui::{App, Task, TestAppContext, VisualTestContext};
 
     use super::*;
+    use crate::api::Api;
     use crate::connection::Connector;
     use crate::connection::fake::FakeConnector;
 
@@ -119,7 +155,7 @@ mod tests {
     struct Pending;
 
     impl Connector for Pending {
-        fn connect(&self, cx: &App) -> Task<anyhow::Result<(Daemon, Socket)>> {
+        fn connect(&self, cx: &App) -> Task<anyhow::Result<(Arc<dyn Api>, Socket)>> {
             cx.background_spawn(std::future::pending())
         }
     }

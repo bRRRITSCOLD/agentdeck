@@ -12,6 +12,7 @@ publish.workspace = true
 agentdeck-client.workspace = true
 agentdeck-core.workspace = true
 anyhow.workspace = true
+chrono.workspace = true
 brrritscold-core-gpui.workspace = true
 brrritscold-core-gpui-tokens.workspace = true
 gpui.workspace = true

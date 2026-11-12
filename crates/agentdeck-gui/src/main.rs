@@ -3,10 +3,15 @@
 //! `--version` prints the version. Otherwise it opens the main window, which connects to the
 //! daemon, starting `agentdeckd` when nothing answers (spec §2).
 
+mod api;
 mod connection;
+mod count;
 mod frame;
+mod overview;
 mod runtime;
 mod shell;
+mod sidebar;
+mod state_dot;
 mod title_bar;
 
 use std::rc::Rc;
