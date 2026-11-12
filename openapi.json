@@ -137,12 +137,16 @@
       "Layout": {
         "anyOf": [
           {
-            "description": "A leaf: one pane.",
+            "additionalProperties": false,
+            "description": "One pane filling the space.",
             "properties": {
               "pane": {
-                "description": "The pane's id.",
-                "format": "uuid",
-                "type": "string"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/PaneId"
+                  }
+                ],
+                "description": "The pane shown here."
               }
             },
             "required": [
@@ -152,7 +156,8 @@
             "type": "object"
           },
           {
-            "description": "Two subtrees side by side (`h`) or stacked (`v`).",
+            "additionalProperties": false,
+            "description": "Two subtrees sharing the space.",
             "properties": {
               "a": {
                 "allOf": [
@@ -160,7 +165,7 @@
                     "$ref": "#/components/schemas/Layout"
                   }
                 ],
-                "description": "The first subtree: left or top."
+                "description": "The left or top side."
               },
               "b": {
                 "allOf": [
@@ -168,20 +173,24 @@
                     "$ref": "#/components/schemas/Layout"
                   }
                 ],
-                "description": "The second subtree: right or bottom."
+                "description": "The right or bottom side."
               },
               "ratio": {
-                "description": "The share of the space `a` takes, strictly between 0 and 1.",
-                "format": "double",
+                "description": "The share `a` takes.",
+                "exclusiveMaximum": true,
+                "exclusiveMinimum": true,
+                "format": "float",
+                "maximum": 1.0,
+                "minimum": 0.0,
                 "type": "number"
               },
               "split": {
                 "allOf": [
                   {
-                    "$ref": "#/components/schemas/SplitAxis"
+                    "$ref": "#/components/schemas/SplitDirection"
                   }
                 ],
-                "description": "The direction of the split."
+                "description": "How `a` and `b` are arranged."
               }
             },
             "required": [
@@ -194,7 +203,7 @@
             "type": "object"
           }
         ],
-        "description": "A tab's split tree: `{\"pane\":id}` or `{\"split\":\"h\"|\"v\",\"ratio\":f,\"a\":…,\"b\":…}`."
+        "description": "A tab's split tree. Every pane appears once; [`Layout::split`] keeps it that way."
       },
       "NewNote": {
         "description": "`POST /v1/notes`: exactly one of `workspace_id` and `task_id`.",
@@ -204,16 +213,22 @@
             "type": "string"
           },
           "task_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TaskId"
+              }
+            ],
             "description": "The task to leave it on.",
-            "format": "uuid",
-            "nullable": true,
-            "type": "string"
+            "nullable": true
           },
           "workspace_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ],
             "description": "The workspace to leave it on.",
-            "format": "uuid",
-            "nullable": true,
-            "type": "string"
+            "nullable": true
           }
         },
         "required": [
@@ -265,10 +280,13 @@
             "type": "string"
           },
           "workspace_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ],
             "description": "The workspace to link; the inbox when absent.",
-            "format": "uuid",
-            "nullable": true,
-            "type": "string"
+            "nullable": true
           }
         },
         "required": [
@@ -306,9 +324,12 @@
             "type": "string"
           },
           "id": {
-            "description": "The note's id.",
-            "format": "uuid",
-            "type": "string"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/NoteId"
+              }
+            ],
+            "description": "The note's id."
           },
           "read_at": {
             "description": "When the note was delivered or marked read.",
@@ -316,22 +337,31 @@
             "type": "string"
           },
           "read_by_pane": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PaneId"
+              }
+            ],
             "description": "The pane it was delivered to, if a pane read it.",
-            "format": "uuid",
-            "nullable": true,
-            "type": "string"
+            "nullable": true
           },
           "task_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TaskId"
+              }
+            ],
             "description": "The task it's on; exactly one of this and `workspace_id` is set.",
-            "format": "uuid",
-            "nullable": true,
-            "type": "string"
+            "nullable": true
           },
           "workspace_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ],
             "description": "The workspace it's on; exactly one of this and `task_id` is set.",
-            "format": "uuid",
-            "nullable": true,
-            "type": "string"
+            "nullable": true
           }
         },
         "required": [
@@ -340,6 +370,10 @@
           "id"
         ],
         "type": "object"
+      },
+      "NoteId": {
+        "format": "uuid",
+        "type": "string"
       },
       "NotePatch": {
         "description": "`PATCH /v1/notes/{id}`: the fields to change.",
@@ -355,40 +389,38 @@
             "type": "boolean"
           },
           "read_by_pane": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PaneId"
+              }
+            ],
             "description": "The pane that read it; recorded only with `read: true`.",
-            "format": "uuid",
-            "nullable": true,
-            "type": "string"
+            "nullable": true
           }
         },
         "type": "object"
       },
-      "SplitAxis": {
-        "description": "The direction of a split.",
-        "oneOf": [
-          {
-            "description": "Side by side.",
-            "enum": [
-              "h"
-            ],
-            "type": "string"
-          },
-          {
-            "description": "Stacked.",
-            "enum": [
-              "v"
-            ],
-            "type": "string"
-          }
-        ]
+      "PaneId": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "SplitDirection": {
+        "enum": [
+          "h",
+          "v"
+        ],
+        "type": "string"
       },
       "Tab": {
         "description": "A tab in a workspace, holding a split tree of panes.",
         "properties": {
           "id": {
-            "description": "The tab's id.",
-            "format": "uuid",
-            "type": "string"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TabId"
+              }
+            ],
+            "description": "The tab's id."
           },
           "layout": {
             "allOf": [
@@ -409,9 +441,12 @@
             "type": "string"
           },
           "workspace_id": {
-            "description": "The workspace it belongs to.",
-            "format": "uuid",
-            "type": "string"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ],
+            "description": "The workspace it belongs to."
           }
         },
         "required": [
@@ -421,6 +456,10 @@
           "workspace_id"
         ],
         "type": "object"
+      },
+      "TabId": {
+        "format": "uuid",
+        "type": "string"
       },
       "TabPatch": {
         "description": "`PATCH /v1/tabs/{id}`: the fields to change.",
@@ -465,9 +504,12 @@
             "type": "string"
           },
           "id": {
-            "description": "The task's id.",
-            "format": "uuid",
-            "type": "string"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TaskId"
+              }
+            ],
+            "description": "The task's id."
           },
           "kind": {
             "allOf": [
@@ -494,10 +536,13 @@
             "type": "string"
           },
           "workspace_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ],
             "description": "The linked workspace; `None` puts the task in the inbox.",
-            "format": "uuid",
-            "nullable": true,
-            "type": "string"
+            "nullable": true
           }
         },
         "required": [
@@ -511,24 +556,16 @@
         ],
         "type": "object"
       },
+      "TaskId": {
+        "format": "uuid",
+        "type": "string"
+      },
       "TaskKind": {
-        "description": "Whether a task is plain or backed by a GitHub PR.",
-        "oneOf": [
-          {
-            "description": "Created by a person or an agent.",
-            "enum": [
-              "plain"
-            ],
-            "type": "string"
-          },
-          {
-            "description": "Created by PR sync.",
-            "enum": [
-              "pr"
-            ],
-            "type": "string"
-          }
-        ]
+        "enum": [
+          "plain",
+          "pr"
+        ],
+        "type": "string"
       },
       "TaskPatch": {
         "description": "`PATCH /v1/tasks/{id}`: the fields to change.",
@@ -553,46 +590,25 @@
             "type": "string"
           },
           "workspace_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ],
             "description": "A workspace to link.",
-            "format": "uuid",
-            "nullable": true,
-            "type": "string"
+            "nullable": true
           }
         },
         "type": "object"
       },
       "TaskStatus": {
-        "description": "A task's place in todo → doing → review → done.",
-        "oneOf": [
-          {
-            "description": "Not started.",
-            "enum": [
-              "todo"
-            ],
-            "type": "string"
-          },
-          {
-            "description": "In progress.",
-            "enum": [
-              "doing"
-            ],
-            "type": "string"
-          },
-          {
-            "description": "Waiting on review.",
-            "enum": [
-              "review"
-            ],
-            "type": "string"
-          },
-          {
-            "description": "Finished.",
-            "enum": [
-              "done"
-            ],
-            "type": "string"
-          }
-        ]
+        "enum": [
+          "todo",
+          "doing",
+          "review",
+          "done"
+        ],
+        "type": "string"
       },
       "Workspace": {
         "description": "A free-form unit of work with its own directory.",
@@ -615,9 +631,12 @@
             "type": "boolean"
           },
           "id": {
-            "description": "The workspace's id.",
-            "format": "uuid",
-            "type": "string"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ],
+            "description": "The workspace's id."
           },
           "muted": {
             "description": "Notifications are muted.",
@@ -642,6 +661,10 @@
           "slug"
         ],
         "type": "object"
+      },
+      "WorkspaceId": {
+        "format": "uuid",
+        "type": "string"
       },
       "WorkspacePatch": {
         "description": "`PATCH /v1/workspaces/{id}`: the fields to change.",
@@ -701,9 +724,7 @@
             "in": "query",
             "name": "task",
             "schema": {
-              "format": "uuid",
-              "nullable": true,
-              "type": "string"
+              "$ref": "#/components/schemas/TaskId"
             }
           },
           {
@@ -720,9 +741,7 @@
             "in": "query",
             "name": "workspace",
             "schema": {
-              "format": "uuid",
-              "nullable": true,
-              "type": "string"
+              "$ref": "#/components/schemas/WorkspaceId"
             }
           }
         ],
@@ -793,8 +812,7 @@
             "name": "id",
             "required": true,
             "schema": {
-              "format": "uuid",
-              "type": "string"
+              "$ref": "#/components/schemas/NoteId"
             }
           }
         ],
@@ -820,8 +838,7 @@
             "name": "id",
             "required": true,
             "schema": {
-              "format": "uuid",
-              "type": "string"
+              "$ref": "#/components/schemas/NoteId"
             }
           }
         ],
@@ -866,8 +883,7 @@
             "name": "id",
             "required": true,
             "schema": {
-              "format": "uuid",
-              "type": "string"
+              "$ref": "#/components/schemas/TabId"
             }
           }
         ],
@@ -893,8 +909,7 @@
             "name": "id",
             "required": true,
             "schema": {
-              "format": "uuid",
-              "type": "string"
+              "$ref": "#/components/schemas/TabId"
             }
           }
         ],
@@ -963,9 +978,7 @@
             "in": "query",
             "name": "workspace",
             "schema": {
-              "format": "uuid",
-              "nullable": true,
-              "type": "string"
+              "$ref": "#/components/schemas/WorkspaceId"
             }
           }
         ],
@@ -1036,8 +1049,7 @@
             "name": "id",
             "required": true,
             "schema": {
-              "format": "uuid",
-              "type": "string"
+              "$ref": "#/components/schemas/TaskId"
             }
           }
         ],
@@ -1063,8 +1075,7 @@
             "name": "id",
             "required": true,
             "schema": {
-              "format": "uuid",
-              "type": "string"
+              "$ref": "#/components/schemas/TaskId"
             }
           }
         ],
@@ -1097,8 +1108,7 @@
             "name": "id",
             "required": true,
             "schema": {
-              "format": "uuid",
-              "type": "string"
+              "$ref": "#/components/schemas/TaskId"
             }
           }
         ],
@@ -1204,8 +1214,7 @@
             "name": "id",
             "required": true,
             "schema": {
-              "format": "uuid",
-              "type": "string"
+              "$ref": "#/components/schemas/WorkspaceId"
             }
           },
           {
@@ -1240,8 +1249,7 @@
             "name": "id",
             "required": true,
             "schema": {
-              "format": "uuid",
-              "type": "string"
+              "$ref": "#/components/schemas/WorkspaceId"
             }
           }
         ],
@@ -1274,8 +1282,7 @@
             "name": "id",
             "required": true,
             "schema": {
-              "format": "uuid",
-              "type": "string"
+              "$ref": "#/components/schemas/WorkspaceId"
             }
           }
         ],
@@ -1320,8 +1327,7 @@
             "name": "id",
             "required": true,
             "schema": {
-              "format": "uuid",
-              "type": "string"
+              "$ref": "#/components/schemas/WorkspaceId"
             }
           }
         ],
@@ -1356,8 +1362,7 @@
             "name": "id",
             "required": true,
             "schema": {
-              "format": "uuid",
-              "type": "string"
+              "$ref": "#/components/schemas/WorkspaceId"
             }
           }
         ],
@@ -1392,8 +1397,7 @@
             "name": "id",
             "required": true,
             "schema": {
-              "format": "uuid",
-              "type": "string"
+              "$ref": "#/components/schemas/WorkspaceId"
             }
           }
         ],
@@ -1430,8 +1434,7 @@
             "name": "id",
             "required": true,
             "schema": {
-              "format": "uuid",
-              "type": "string"
+              "$ref": "#/components/schemas/WorkspaceId"
             }
           }
         ],
@@ -1476,8 +1479,7 @@
             "name": "id",
             "required": true,
             "schema": {
-              "format": "uuid",
-              "type": "string"
+              "$ref": "#/components/schemas/WorkspaceId"
             }
           }
         ],

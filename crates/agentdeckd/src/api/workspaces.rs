@@ -10,6 +10,8 @@ use dropshot::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use agentdeck_core::WorkspaceId;
+
 use super::{ApiContext, Authorized, IdPath, client_error};
 use crate::model::{DirtyReport, NewWorkspace, Workspace, WorkspacePatch};
 use crate::{db, git};
@@ -81,7 +83,7 @@ pub(crate) async fn workspace_create(
 pub(crate) async fn workspace_get(
     rqctx: RequestContext<ApiContext>,
     _auth: Authorized,
-    path: Path<IdPath>,
+    path: Path<IdPath<WorkspaceId>>,
 ) -> Result<HttpResponseOk<Workspace>, HttpError> {
     let id = path.into_inner().id;
     let workspace = rqctx
@@ -97,7 +99,7 @@ pub(crate) async fn workspace_get(
 pub(crate) async fn workspace_update(
     rqctx: RequestContext<ApiContext>,
     _auth: Authorized,
-    path: Path<IdPath>,
+    path: Path<IdPath<WorkspaceId>>,
     body: TypedBody<WorkspacePatch>,
 ) -> Result<HttpResponseOk<Workspace>, HttpError> {
     let id = path.into_inner().id;
@@ -116,7 +118,7 @@ pub(crate) async fn workspace_update(
 pub(crate) async fn workspace_archive(
     rqctx: RequestContext<ApiContext>,
     _auth: Authorized,
-    path: Path<IdPath>,
+    path: Path<IdPath<WorkspaceId>>,
 ) -> Result<HttpResponseOk<Workspace>, HttpError> {
     let id = path.into_inner().id;
     let workspace = rqctx
@@ -132,7 +134,7 @@ pub(crate) async fn workspace_archive(
 pub(crate) async fn workspace_unarchive(
     rqctx: RequestContext<ApiContext>,
     _auth: Authorized,
-    path: Path<IdPath>,
+    path: Path<IdPath<WorkspaceId>>,
 ) -> Result<HttpResponseOk<Workspace>, HttpError> {
     let id = path.into_inner().id;
     let workspace = rqctx
@@ -148,7 +150,7 @@ pub(crate) async fn workspace_unarchive(
 pub(crate) async fn workspace_dirty(
     rqctx: RequestContext<ApiContext>,
     _auth: Authorized,
-    path: Path<IdPath>,
+    path: Path<IdPath<WorkspaceId>>,
 ) -> Result<HttpResponseOk<DirtyReport>, HttpError> {
     let id = path.into_inner().id;
     let workspace = rqctx
@@ -219,7 +221,7 @@ impl HttpResponseError for DeleteWorkspaceError {
 pub(crate) async fn workspace_delete(
     rqctx: RequestContext<ApiContext>,
     _auth: Authorized,
-    path: Path<IdPath>,
+    path: Path<IdPath<WorkspaceId>>,
     query: Query<DeleteQuery>,
 ) -> Result<HttpResponseDeleted, DeleteWorkspaceError> {
     let id = path.into_inner().id;

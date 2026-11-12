@@ -1,10 +1,10 @@
 //! `tabs` queries.
 
+use agentdeck_core::{Layout, TabId, WorkspaceId};
 use rusqlite::{Connection, OptionalExtension, Row, params};
-use uuid::Uuid;
 
-use super::{DbError, exists, id, new_id};
-use crate::model::{Layout, Tab, TabPatch};
+use super::{DbError, exists, new_id, text};
+use crate::model::{Tab, TabPatch};
 
 const COLUMNS: &str = "id, workspace_id, title, position, layout";
 
@@ -14,8 +14,8 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Tab> {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, err.into())
     })?;
     Ok(Tab {
-        id: id(row, "id")?,
-        workspace_id: id(row, "workspace_id")?,
+        id: text(row, "id")?,
+        workspace_id: text(row, "workspace_id")?,
         title: row.get("title")?,
         position: row.get("position")?,
         layout,
@@ -27,7 +27,7 @@ fn layout_json(layout: Option<&Layout>) -> String {
 }
 
 /// A workspace's tabs, in position order.
-pub fn list(conn: &Connection, workspace_id: Uuid) -> Result<Vec<Tab>, DbError> {
+pub fn list(conn: &Connection, workspace_id: WorkspaceId) -> Result<Vec<Tab>, DbError> {
     if !exists(conn, "workspaces", workspace_id)? {
         return Err(DbError::NotFound("workspace"));
     }
@@ -39,7 +39,7 @@ pub fn list(conn: &Connection, workspace_id: Uuid) -> Result<Vec<Tab>, DbError> 
 }
 
 /// One tab.
-pub fn get(conn: &Connection, id: Uuid) -> Result<Tab, DbError> {
+pub fn get(conn: &Connection, id: TabId) -> Result<Tab, DbError> {
     conn.query_row(
         &format!("SELECT {COLUMNS} FROM tabs WHERE id = ?1"),
         [id.to_string()],
@@ -52,14 +52,14 @@ pub fn get(conn: &Connection, id: Uuid) -> Result<Tab, DbError> {
 /// Adds a tab after the workspace's last one.
 pub fn create(
     conn: &Connection,
-    workspace_id: Uuid,
+    workspace_id: WorkspaceId,
     title: &str,
     layout: Option<&Layout>,
 ) -> Result<Tab, DbError> {
     if !exists(conn, "workspaces", workspace_id)? {
         return Err(DbError::NotFound("workspace"));
     }
-    let id = new_id();
+    let id: TabId = new_id();
     conn.execute(
         "INSERT INTO tabs (id, workspace_id, title, position, layout)
          VALUES (?1, ?2, ?3,
@@ -75,7 +75,7 @@ pub fn create(
 }
 
 /// Applies the fields `patch` sets.
-pub fn update(conn: &Connection, id: Uuid, patch: &TabPatch) -> Result<Tab, DbError> {
+pub fn update(conn: &Connection, id: TabId, patch: &TabPatch) -> Result<Tab, DbError> {
     get(conn, id)?;
     if let Some(title) = &patch.title {
         conn.execute(
@@ -99,7 +99,7 @@ pub fn update(conn: &Connection, id: Uuid, patch: &TabPatch) -> Result<Tab, DbEr
 }
 
 /// Deletes a tab and its panes.
-pub fn delete(conn: &Connection, id: Uuid) -> Result<(), DbError> {
+pub fn delete(conn: &Connection, id: TabId) -> Result<(), DbError> {
     match conn.execute("DELETE FROM tabs WHERE id = ?1", [id.to_string()])? {
         0 => Err(DbError::NotFound("tab")),
         _ => Ok(()),

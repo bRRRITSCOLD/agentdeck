@@ -9,7 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-agentdeck-core.workspace = true
+agentdeck-core = { workspace = true, features = ["schemars"] }
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true

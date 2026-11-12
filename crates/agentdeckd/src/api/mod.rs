@@ -21,7 +21,6 @@ use dropshot::{
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
-use uuid::Uuid;
 
 use crate::auth::bearer_matches;
 use crate::db::{Db, DbError};
@@ -82,7 +81,10 @@ pub fn openapi_json() -> String {
         "The agentdeck daemon's HTTP API. Every request carries \
          `Authorization: Bearer <token>`, with the token from daemon.json.",
     );
-    let json = openapi.json().expect("the OpenAPI document serializes");
+    let mut json = openapi.json().expect("the OpenAPI document serializes");
+    // Key order follows serde_json's `preserve_order` feature, which another crate in the
+    // workspace may turn on; sorting keeps the file the same however the daemon was built.
+    json.sort_all_objects();
     let mut text = serde_json::to_string_pretty(&json).expect("JSON serializes");
     text.push('\n');
     text
@@ -125,11 +127,11 @@ impl SharedExtractor for Authorized {
     }
 }
 
-/// A `{id}` path.
+/// A `{id}` path, typed by the entity's id.
 #[derive(Deserialize, JsonSchema)]
-pub(crate) struct IdPath {
+pub(crate) struct IdPath<T> {
     /// The entity's id.
-    pub id: Uuid,
+    pub id: T,
 }
 
 /// An expected domain failure: `status` with a machine-readable `code`.

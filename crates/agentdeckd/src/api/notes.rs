@@ -5,6 +5,8 @@ use dropshot::{
     RequestContext, TypedBody, endpoint,
 };
 
+use agentdeck_core::NoteId;
+
 use super::{ApiContext, Authorized, IdPath};
 use crate::db;
 use crate::model::{NewNote, Note, NoteFilter, NotePatch};
@@ -46,7 +48,7 @@ pub(crate) async fn note_create(
 pub(crate) async fn note_update(
     rqctx: RequestContext<ApiContext>,
     _auth: Authorized,
-    path: Path<IdPath>,
+    path: Path<IdPath<NoteId>>,
     body: TypedBody<NotePatch>,
 ) -> Result<HttpResponseOk<Note>, HttpError> {
     let id = path.into_inner().id;
@@ -64,7 +66,7 @@ pub(crate) async fn note_update(
 pub(crate) async fn note_delete(
     rqctx: RequestContext<ApiContext>,
     _auth: Authorized,
-    path: Path<IdPath>,
+    path: Path<IdPath<NoteId>>,
 ) -> Result<HttpResponseDeleted, HttpError> {
     let id = path.into_inner().id;
     rqctx

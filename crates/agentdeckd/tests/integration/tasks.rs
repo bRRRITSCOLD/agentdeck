@@ -1,7 +1,8 @@
 //! The global task list: `/v1/tasks`.
 
 use agentdeck_client::Client;
-use agentdeck_client::types::{NewTask, NewWorkspace, Task, TaskKind, TaskStatus, Workspace};
+use agentdeck_client::types::{NewTask, NewWorkspace, Task, Workspace};
+use agentdeck_core::{TaskKind, TaskStatus};
 
 use crate::support::{TestDaemon, error_response};
 

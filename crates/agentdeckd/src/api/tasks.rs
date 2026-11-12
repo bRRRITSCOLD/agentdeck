@@ -5,6 +5,8 @@ use dropshot::{
     Path, Query, RequestContext, TypedBody, endpoint,
 };
 
+use agentdeck_core::TaskId;
+
 use super::{ApiContext, Authorized, IdPath, client_error};
 use crate::db;
 use crate::model::{NewTask, Task, TaskFilter, TaskPatch};
@@ -58,7 +60,7 @@ pub(crate) async fn task_create(
 pub(crate) async fn task_get(
     rqctx: RequestContext<ApiContext>,
     _auth: Authorized,
-    path: Path<IdPath>,
+    path: Path<IdPath<TaskId>>,
 ) -> Result<HttpResponseOk<Task>, HttpError> {
     let id = path.into_inner().id;
     let task = rqctx
@@ -74,7 +76,7 @@ pub(crate) async fn task_get(
 pub(crate) async fn task_update(
     rqctx: RequestContext<ApiContext>,
     _auth: Authorized,
-    path: Path<IdPath>,
+    path: Path<IdPath<TaskId>>,
     body: TypedBody<TaskPatch>,
 ) -> Result<HttpResponseOk<Task>, HttpError> {
     let id = path.into_inner().id;
@@ -93,7 +95,7 @@ pub(crate) async fn task_update(
 pub(crate) async fn task_delete(
     rqctx: RequestContext<ApiContext>,
     _auth: Authorized,
-    path: Path<IdPath>,
+    path: Path<IdPath<TaskId>>,
 ) -> Result<HttpResponseDeleted, HttpError> {
     let id = path.into_inner().id;
     rqctx

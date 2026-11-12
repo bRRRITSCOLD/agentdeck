@@ -10,6 +10,7 @@ pub mod workspaces;
 
 use std::fmt;
 use std::path::Path;
+use std::str::FromStr;
 
 use anyhow::Context;
 use rusqlite::Connection;
@@ -120,34 +121,42 @@ pub fn now() -> String {
 }
 
 /// A new id: a UUIDv7, so ids sort by creation time.
-pub fn new_id() -> Uuid {
-    Uuid::now_v7()
+pub fn new_id<T: From<Uuid>>() -> T {
+    Uuid::now_v7().into()
 }
 
-/// Reads a TEXT id column.
-pub fn id(row: &rusqlite::Row<'_>, column: &str) -> rusqlite::Result<Uuid> {
+/// Reads a TEXT column through its type's `FromStr`: an id or a column enum.
+pub fn text<T>(row: &rusqlite::Row<'_>, column: &str) -> rusqlite::Result<T>
+where
+    T: FromStr,
+    T::Err: std::error::Error + Send + Sync + 'static,
+{
     let text: String = row.get(column)?;
-    parse_id(column, &text)
+    parse(&text)
 }
 
-/// Reads a nullable TEXT id column.
-pub fn opt_id(row: &rusqlite::Row<'_>, column: &str) -> rusqlite::Result<Option<Uuid>> {
+/// Reads a nullable TEXT column through its type's `FromStr`.
+pub fn opt_text<T>(row: &rusqlite::Row<'_>, column: &str) -> rusqlite::Result<Option<T>>
+where
+    T: FromStr,
+    T::Err: std::error::Error + Send + Sync + 'static,
+{
     let text: Option<String> = row.get(column)?;
-    text.map(|text| parse_id(column, &text)).transpose()
+    text.as_deref().map(parse).transpose()
 }
 
-fn parse_id(column: &str, text: &str) -> rusqlite::Result<Uuid> {
-    Uuid::parse_str(text).map_err(|err| {
-        rusqlite::Error::FromSqlConversionFailure(
-            0,
-            rusqlite::types::Type::Text,
-            format!("{column}: {err}").into(),
-        )
+fn parse<T>(text: &str) -> rusqlite::Result<T>
+where
+    T: FromStr,
+    T::Err: std::error::Error + Send + Sync + 'static,
+{
+    text.parse().map_err(|err: T::Err| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, err.into())
     })
 }
 
 /// Whether a row with `id` exists in `table`. `table` is always a literal from this crate.
-pub fn exists(conn: &Connection, table: &str, id: Uuid) -> rusqlite::Result<bool> {
+pub fn exists(conn: &Connection, table: &str, id: impl fmt::Display) -> rusqlite::Result<bool> {
     conn.query_row(
         &format!("SELECT EXISTS (SELECT 1 FROM {table} WHERE id = ?1)"),
         [id.to_string()],

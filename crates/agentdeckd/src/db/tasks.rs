@@ -1,43 +1,27 @@
 //! `tasks` queries.
 
+use agentdeck_core::{TaskId, TaskKind, TaskStatus, WorkspaceId};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
-use uuid::Uuid;
 
-use super::{DbError, exists, id, new_id, now, opt_id};
-use crate::model::{NewTask, Task, TaskFilter, TaskKind, TaskPatch, TaskStatus};
+use super::{DbError, exists, new_id, now, opt_text, text};
+use crate::model::{NewTask, Task, TaskFilter, TaskPatch};
 
 const COLUMNS: &str =
     "id, title, body, status, kind, workspace_id, created_at, updated_at, done_at";
 
 fn from_row(row: &Row<'_>) -> rusqlite::Result<Task> {
     Ok(Task {
-        id: id(row, "id")?,
+        id: text(row, "id")?,
         title: row.get("title")?,
         body: row.get("body")?,
-        status: text_enum(row, "status")?,
-        kind: text_enum(row, "kind")?,
-        workspace_id: opt_id(row, "workspace_id")?,
+        status: text(row, "status")?,
+        kind: text(row, "kind")?,
+        workspace_id: opt_text(row, "workspace_id")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         done_at: row.get("done_at")?,
     })
-}
-
-/// Reads a TEXT column holding a lowercase enum, through its serde name.
-fn text_enum<T: serde::de::DeserializeOwned>(row: &Row<'_>, column: &str) -> rusqlite::Result<T> {
-    let text: String = row.get(column)?;
-    serde_json::from_value(serde_json::Value::String(text)).map_err(|err| {
-        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, err.into())
-    })
-}
-
-/// The serde name of a lowercase enum, as its TEXT column holds it.
-pub(crate) fn enum_text<T: serde::Serialize>(value: T) -> String {
-    match serde_json::to_value(value) {
-        Ok(serde_json::Value::String(text)) => text,
-        other => unreachable!("a unit enum serializes to a string, got {other:?}"),
-    }
 }
 
 /// The tasks matching every filter set, oldest first.
@@ -45,11 +29,11 @@ pub fn list(conn: &Connection, filter: &TaskFilter) -> Result<Vec<Task>, DbError
     let mut sql = format!("SELECT {COLUMNS} FROM tasks WHERE 1 = 1");
     let mut values: Vec<Value> = Vec::new();
     if let Some(status) = filter.status {
-        values.push(Value::Text(enum_text(status)));
+        values.push(Value::Text(status.as_str().into()));
         sql.push_str(&format!(" AND status = ?{}", values.len()));
     }
     if let Some(kind) = filter.kind {
-        values.push(Value::Text(enum_text(kind)));
+        values.push(Value::Text(kind.as_str().into()));
         sql.push_str(&format!(" AND kind = ?{}", values.len()));
     }
     if let Some(workspace) = filter.workspace {
@@ -68,7 +52,7 @@ pub fn list(conn: &Connection, filter: &TaskFilter) -> Result<Vec<Task>, DbError
 }
 
 /// One task.
-pub fn get(conn: &Connection, id: Uuid) -> Result<Task, DbError> {
+pub fn get(conn: &Connection, id: TaskId) -> Result<Task, DbError> {
     conn.query_row(
         &format!("SELECT {COLUMNS} FROM tasks WHERE id = ?1"),
         [id.to_string()],
@@ -83,7 +67,7 @@ pub fn create(conn: &Connection, new: &NewTask) -> Result<Task, DbError> {
     if let Some(workspace_id) = new.workspace_id {
         check_workspace(conn, workspace_id)?;
     }
-    let id = new_id();
+    let id: TaskId = new_id();
     let status = new.status.unwrap_or(TaskStatus::Todo);
     let now = now();
     let done_at = (status == TaskStatus::Done).then(|| now.clone());
@@ -94,8 +78,8 @@ pub fn create(conn: &Connection, new: &NewTask) -> Result<Task, DbError> {
             id.to_string(),
             new.title,
             new.body.as_deref().unwrap_or(""),
-            enum_text(status),
-            enum_text(TaskKind::Plain),
+            status.as_str(),
+            TaskKind::Plain.as_str(),
             new.workspace_id.map(|id| id.to_string()),
             now,
             done_at,
@@ -106,7 +90,7 @@ pub fn create(conn: &Connection, new: &NewTask) -> Result<Task, DbError> {
 
 /// Applies the fields `patch` sets and stamps `updated_at`. Moving to done stamps `done_at`;
 /// moving out of done clears it.
-pub fn update(conn: &Connection, id: Uuid, patch: &TaskPatch) -> Result<Task, DbError> {
+pub fn update(conn: &Connection, id: TaskId, patch: &TaskPatch) -> Result<Task, DbError> {
     let task = get(conn, id)?;
     if let Some(workspace_id) = patch.workspace_id {
         check_workspace(conn, workspace_id)?;
@@ -126,7 +110,7 @@ pub fn update(conn: &Connection, id: Uuid, patch: &TaskPatch) -> Result<Task, Db
             id.to_string(),
             patch.title.as_ref().unwrap_or(&task.title),
             patch.body.as_ref().unwrap_or(&task.body),
-            enum_text(status),
+            status.as_str(),
             patch
                 .workspace_id
                 .or(task.workspace_id)
@@ -139,14 +123,14 @@ pub fn update(conn: &Connection, id: Uuid, patch: &TaskPatch) -> Result<Task, Db
 }
 
 /// Deletes a task; its notes and PR row go with it, and its panes are unlinked.
-pub fn delete(conn: &Connection, id: Uuid) -> Result<(), DbError> {
+pub fn delete(conn: &Connection, id: TaskId) -> Result<(), DbError> {
     match conn.execute("DELETE FROM tasks WHERE id = ?1", [id.to_string()])? {
         0 => Err(DbError::NotFound("task")),
         _ => Ok(()),
     }
 }
 
-fn check_workspace(conn: &Connection, workspace_id: Uuid) -> Result<(), DbError> {
+fn check_workspace(conn: &Connection, workspace_id: WorkspaceId) -> Result<(), DbError> {
     if exists(conn, "workspaces", workspace_id)? {
         Ok(())
     } else {

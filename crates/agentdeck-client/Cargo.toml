@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+agentdeck-core.workspace = true
 progenitor-client.workspace = true
 reqwest.workspace = true
 serde.workspace = true

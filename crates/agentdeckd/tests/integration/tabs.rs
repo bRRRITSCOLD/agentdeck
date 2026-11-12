@@ -168,8 +168,7 @@ mod patch_v1_tabs_id {
         let daemon = TestDaemon::start().await;
         let ws = workspace(&daemon.client).await;
         let created = tab(&daemon.client, &ws, "old").await;
-        let layout: agentdeck_client::types::Layout =
-            serde_json::from_value(split(0.5)).expect("a layout");
+        let layout: agentdeck_core::Layout = serde_json::from_value(split(0.5)).expect("a layout");
 
         let updated = daemon
             .client

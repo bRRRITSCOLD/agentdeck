@@ -76,25 +76,6 @@ pub mod types {
             Default::default()
         }
     }
-    ///A tab's split tree: `{"pane":id}` or `{"split":"h"|"v","ratio":f,"a":…,"b":…}`.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
-    #[serde(untagged)]
-    pub enum Layout {
-        Pane {
-            ///The pane's id.
-            pane: ::uuid::Uuid,
-        },
-        Split {
-            ///The first subtree: left or top.
-            a: ::std::boxed::Box<Layout>,
-            ///The second subtree: right or bottom.
-            b: ::std::boxed::Box<Layout>,
-            ///The share of the space `a` takes, strictly between 0 and 1.
-            ratio: f64,
-            ///The direction of the split.
-            split: SplitAxis,
-        },
-    }
     ///`POST /v1/notes`: exactly one of `workspace_id` and `task_id`.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct NewNote {
@@ -102,10 +83,10 @@ pub mod types {
         pub body: ::std::string::String,
         ///The task to leave it on.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub task_id: ::std::option::Option<::uuid::Uuid>,
+        pub task_id: ::std::option::Option<agentdeck_core::TaskId>,
         ///The workspace to leave it on.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub workspace_id: ::std::option::Option<::uuid::Uuid>,
+        pub workspace_id: ::std::option::Option<agentdeck_core::WorkspaceId>,
     }
     impl NewNote {
         pub fn builder() -> builder::NewNote {
@@ -117,7 +98,7 @@ pub mod types {
     pub struct NewTab {
         ///The initial split tree, if any.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub layout: ::std::option::Option<Layout>,
+        pub layout: ::std::option::Option<agentdeck_core::Layout>,
         ///The tab's title.
         pub title: ::std::string::String,
     }
@@ -134,12 +115,12 @@ pub mod types {
         pub body: ::std::option::Option<::std::string::String>,
         ///The status; `todo` when absent.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub status: ::std::option::Option<TaskStatus>,
+        pub status: ::std::option::Option<agentdeck_core::TaskStatus>,
         ///The title.
         pub title: ::std::string::String,
         ///The workspace to link; the inbox when absent.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub workspace_id: ::std::option::Option<::uuid::Uuid>,
+        pub workspace_id: ::std::option::Option<agentdeck_core::WorkspaceId>,
     }
     impl NewTask {
         pub fn builder() -> builder::NewTask {
@@ -168,19 +149,19 @@ pub mod types {
         ///When the note was created.
         pub created_at: ::std::string::String,
         ///The note's id.
-        pub id: ::uuid::Uuid,
+        pub id: agentdeck_core::NoteId,
         ///When the note was delivered or marked read.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub read_at: ::std::option::Option<::std::string::String>,
         ///The pane it was delivered to, if a pane read it.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub read_by_pane: ::std::option::Option<::uuid::Uuid>,
+        pub read_by_pane: ::std::option::Option<agentdeck_core::PaneId>,
         ///The task it's on; exactly one of this and `workspace_id` is set.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub task_id: ::std::option::Option<::uuid::Uuid>,
+        pub task_id: ::std::option::Option<agentdeck_core::TaskId>,
         ///The workspace it's on; exactly one of this and `task_id` is set.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub workspace_id: ::std::option::Option<::uuid::Uuid>,
+        pub workspace_id: ::std::option::Option<agentdeck_core::WorkspaceId>,
     }
     impl Note {
         pub fn builder() -> builder::Note {
@@ -198,80 +179,27 @@ pub mod types {
         pub read: ::std::option::Option<bool>,
         ///The pane that read it; recorded only with `read: true`.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub read_by_pane: ::std::option::Option<::uuid::Uuid>,
+        pub read_by_pane: ::std::option::Option<agentdeck_core::PaneId>,
     }
     impl NotePatch {
         pub fn builder() -> builder::NotePatch {
             Default::default()
         }
     }
-    ///The direction of a split.
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum SplitAxis {
-        ///Side by side.
-        #[serde(rename = "h")]
-        H,
-        ///Stacked.
-        #[serde(rename = "v")]
-        V,
-    }
-    impl ::std::fmt::Display for SplitAxis {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::H => f.write_str("h"),
-                Self::V => f.write_str("v"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for SplitAxis {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "h" => Ok(Self::H),
-                "v" => Ok(Self::V),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for SplitAxis {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String> for SplitAxis {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
     ///A tab in a workspace, holding a split tree of panes.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct Tab {
         ///The tab's id.
-        pub id: ::uuid::Uuid,
+        pub id: agentdeck_core::TabId,
         ///The split tree; `None` until the tab has a pane.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub layout: ::std::option::Option<Layout>,
+        pub layout: ::std::option::Option<agentdeck_core::Layout>,
         ///Sort key among the workspace's tabs.
         pub position: i64,
         ///The tab's title.
         pub title: ::std::string::String,
         ///The workspace it belongs to.
-        pub workspace_id: ::uuid::Uuid,
+        pub workspace_id: agentdeck_core::WorkspaceId,
     }
     impl Tab {
         pub fn builder() -> builder::Tab {
@@ -283,7 +211,7 @@ pub mod types {
     pub struct TabPatch {
         ///A new split tree.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub layout: ::std::option::Option<Layout>,
+        pub layout: ::std::option::Option<agentdeck_core::Layout>,
         ///A new sort key.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub position: ::std::option::Option<i64>,
@@ -307,75 +235,22 @@ pub mod types {
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub done_at: ::std::option::Option<::std::string::String>,
         ///The task's id.
-        pub id: ::uuid::Uuid,
+        pub id: agentdeck_core::TaskId,
         ///Plain or PR.
-        pub kind: TaskKind,
+        pub kind: agentdeck_core::TaskKind,
         ///The status.
-        pub status: TaskStatus,
+        pub status: agentdeck_core::TaskStatus,
         ///The title.
         pub title: ::std::string::String,
         ///When the task last changed.
         pub updated_at: ::std::string::String,
         ///The linked workspace; `None` puts the task in the inbox.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub workspace_id: ::std::option::Option<::uuid::Uuid>,
+        pub workspace_id: ::std::option::Option<agentdeck_core::WorkspaceId>,
     }
     impl Task {
         pub fn builder() -> builder::Task {
             Default::default()
-        }
-    }
-    ///Whether a task is plain or backed by a GitHub PR.
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum TaskKind {
-        ///Created by a person or an agent.
-        #[serde(rename = "plain")]
-        Plain,
-        ///Created by PR sync.
-        #[serde(rename = "pr")]
-        Pr,
-    }
-    impl ::std::fmt::Display for TaskKind {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::Plain => f.write_str("plain"),
-                Self::Pr => f.write_str("pr"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for TaskKind {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "plain" => Ok(Self::Plain),
-                "pr" => Ok(Self::Pr),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for TaskKind {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String> for TaskKind {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
         }
     }
     ///`PATCH /v1/tasks/{id}`: the fields to change.
@@ -386,80 +261,17 @@ pub mod types {
         pub body: ::std::option::Option<::std::string::String>,
         ///A new status.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub status: ::std::option::Option<TaskStatus>,
+        pub status: ::std::option::Option<agentdeck_core::TaskStatus>,
         ///A new title.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub title: ::std::option::Option<::std::string::String>,
         ///A workspace to link.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub workspace_id: ::std::option::Option<::uuid::Uuid>,
+        pub workspace_id: ::std::option::Option<agentdeck_core::WorkspaceId>,
     }
     impl TaskPatch {
         pub fn builder() -> builder::TaskPatch {
             Default::default()
-        }
-    }
-    ///A task's place in todo → doing → review → done.
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum TaskStatus {
-        ///Not started.
-        #[serde(rename = "todo")]
-        Todo,
-        ///In progress.
-        #[serde(rename = "doing")]
-        Doing,
-        ///Waiting on review.
-        #[serde(rename = "review")]
-        Review,
-        ///Finished.
-        #[serde(rename = "done")]
-        Done,
-    }
-    impl ::std::fmt::Display for TaskStatus {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::Todo => f.write_str("todo"),
-                Self::Doing => f.write_str("doing"),
-                Self::Review => f.write_str("review"),
-                Self::Done => f.write_str("done"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for TaskStatus {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "todo" => Ok(Self::Todo),
-                "doing" => Ok(Self::Doing),
-                "review" => Ok(Self::Review),
-                "done" => Ok(Self::Done),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for TaskStatus {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String> for TaskStatus {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
         }
     }
     ///A free-form unit of work with its own directory.
@@ -475,7 +287,7 @@ pub mod types {
         ///True when agentdeck created `dir` as a scratch dir, so deleting the workspace removes it.
         pub dir_owned: bool,
         ///The workspace's id.
-        pub id: ::uuid::Uuid,
+        pub id: agentdeck_core::WorkspaceId,
         ///Notifications are muted.
         pub muted: bool,
         ///The display name.
@@ -821,10 +633,14 @@ pub mod types {
         #[derive(Clone, Debug)]
         pub struct NewNote {
             body: ::std::result::Result<::std::string::String, ::std::string::String>,
-            task_id:
-                ::std::result::Result<::std::option::Option<::uuid::Uuid>, ::std::string::String>,
-            workspace_id:
-                ::std::result::Result<::std::option::Option<::uuid::Uuid>, ::std::string::String>,
+            task_id: ::std::result::Result<
+                ::std::option::Option<agentdeck_core::TaskId>,
+                ::std::string::String,
+            >,
+            workspace_id: ::std::result::Result<
+                ::std::option::Option<agentdeck_core::WorkspaceId>,
+                ::std::string::String,
+            >,
         }
         impl ::std::default::Default for NewNote {
             fn default() -> Self {
@@ -848,7 +664,7 @@ pub mod types {
             }
             pub fn task_id<T>(mut self, value: T) -> Self
             where
-                T: ::std::convert::TryInto<::std::option::Option<::uuid::Uuid>>,
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::TaskId>>,
                 T::Error: ::std::fmt::Display,
             {
                 self.task_id = value
@@ -858,7 +674,7 @@ pub mod types {
             }
             pub fn workspace_id<T>(mut self, value: T) -> Self
             where
-                T: ::std::convert::TryInto<::std::option::Option<::uuid::Uuid>>,
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::WorkspaceId>>,
                 T::Error: ::std::fmt::Display,
             {
                 self.workspace_id = value
@@ -890,8 +706,10 @@ pub mod types {
         }
         #[derive(Clone, Debug)]
         pub struct NewTab {
-            layout:
-                ::std::result::Result<::std::option::Option<super::Layout>, ::std::string::String>,
+            layout: ::std::result::Result<
+                ::std::option::Option<agentdeck_core::Layout>,
+                ::std::string::String,
+            >,
             title: ::std::result::Result<::std::string::String, ::std::string::String>,
         }
         impl ::std::default::Default for NewTab {
@@ -905,7 +723,7 @@ pub mod types {
         impl NewTab {
             pub fn layout<T>(mut self, value: T) -> Self
             where
-                T: ::std::convert::TryInto<::std::option::Option<super::Layout>>,
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::Layout>>,
                 T::Error: ::std::fmt::Display,
             {
                 self.layout = value
@@ -950,12 +768,14 @@ pub mod types {
                 ::std::string::String,
             >,
             status: ::std::result::Result<
-                ::std::option::Option<super::TaskStatus>,
+                ::std::option::Option<agentdeck_core::TaskStatus>,
                 ::std::string::String,
             >,
             title: ::std::result::Result<::std::string::String, ::std::string::String>,
-            workspace_id:
-                ::std::result::Result<::std::option::Option<::uuid::Uuid>, ::std::string::String>,
+            workspace_id: ::std::result::Result<
+                ::std::option::Option<agentdeck_core::WorkspaceId>,
+                ::std::string::String,
+            >,
         }
         impl ::std::default::Default for NewTask {
             fn default() -> Self {
@@ -980,7 +800,7 @@ pub mod types {
             }
             pub fn status<T>(mut self, value: T) -> Self
             where
-                T: ::std::convert::TryInto<::std::option::Option<super::TaskStatus>>,
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::TaskStatus>>,
                 T::Error: ::std::fmt::Display,
             {
                 self.status = value
@@ -1000,7 +820,7 @@ pub mod types {
             }
             pub fn workspace_id<T>(mut self, value: T) -> Self
             where
-                T: ::std::convert::TryInto<::std::option::Option<::uuid::Uuid>>,
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::WorkspaceId>>,
                 T::Error: ::std::fmt::Display,
             {
                 self.workspace_id = value
@@ -1093,17 +913,23 @@ pub mod types {
         pub struct Note {
             body: ::std::result::Result<::std::string::String, ::std::string::String>,
             created_at: ::std::result::Result<::std::string::String, ::std::string::String>,
-            id: ::std::result::Result<::uuid::Uuid, ::std::string::String>,
+            id: ::std::result::Result<agentdeck_core::NoteId, ::std::string::String>,
             read_at: ::std::result::Result<
                 ::std::option::Option<::std::string::String>,
                 ::std::string::String,
             >,
-            read_by_pane:
-                ::std::result::Result<::std::option::Option<::uuid::Uuid>, ::std::string::String>,
-            task_id:
-                ::std::result::Result<::std::option::Option<::uuid::Uuid>, ::std::string::String>,
-            workspace_id:
-                ::std::result::Result<::std::option::Option<::uuid::Uuid>, ::std::string::String>,
+            read_by_pane: ::std::result::Result<
+                ::std::option::Option<agentdeck_core::PaneId>,
+                ::std::string::String,
+            >,
+            task_id: ::std::result::Result<
+                ::std::option::Option<agentdeck_core::TaskId>,
+                ::std::string::String,
+            >,
+            workspace_id: ::std::result::Result<
+                ::std::option::Option<agentdeck_core::WorkspaceId>,
+                ::std::string::String,
+            >,
         }
         impl ::std::default::Default for Note {
             fn default() -> Self {
@@ -1141,7 +967,7 @@ pub mod types {
             }
             pub fn id<T>(mut self, value: T) -> Self
             where
-                T: ::std::convert::TryInto<::uuid::Uuid>,
+                T: ::std::convert::TryInto<agentdeck_core::NoteId>,
                 T::Error: ::std::fmt::Display,
             {
                 self.id = value
@@ -1161,7 +987,7 @@ pub mod types {
             }
             pub fn read_by_pane<T>(mut self, value: T) -> Self
             where
-                T: ::std::convert::TryInto<::std::option::Option<::uuid::Uuid>>,
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::PaneId>>,
                 T::Error: ::std::fmt::Display,
             {
                 self.read_by_pane = value
@@ -1171,7 +997,7 @@ pub mod types {
             }
             pub fn task_id<T>(mut self, value: T) -> Self
             where
-                T: ::std::convert::TryInto<::std::option::Option<::uuid::Uuid>>,
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::TaskId>>,
                 T::Error: ::std::fmt::Display,
             {
                 self.task_id = value
@@ -1181,7 +1007,7 @@ pub mod types {
             }
             pub fn workspace_id<T>(mut self, value: T) -> Self
             where
-                T: ::std::convert::TryInto<::std::option::Option<::uuid::Uuid>>,
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::WorkspaceId>>,
                 T::Error: ::std::fmt::Display,
             {
                 self.workspace_id = value
@@ -1224,8 +1050,10 @@ pub mod types {
                 ::std::string::String,
             >,
             read: ::std::result::Result<::std::option::Option<bool>, ::std::string::String>,
-            read_by_pane:
-                ::std::result::Result<::std::option::Option<::uuid::Uuid>, ::std::string::String>,
+            read_by_pane: ::std::result::Result<
+                ::std::option::Option<agentdeck_core::PaneId>,
+                ::std::string::String,
+            >,
         }
         impl ::std::default::Default for NotePatch {
             fn default() -> Self {
@@ -1259,7 +1087,7 @@ pub mod types {
             }
             pub fn read_by_pane<T>(mut self, value: T) -> Self
             where
-                T: ::std::convert::TryInto<::std::option::Option<::uuid::Uuid>>,
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::PaneId>>,
                 T::Error: ::std::fmt::Display,
             {
                 self.read_by_pane = value
@@ -1291,12 +1119,14 @@ pub mod types {
         }
         #[derive(Clone, Debug)]
         pub struct Tab {
-            id: ::std::result::Result<::uuid::Uuid, ::std::string::String>,
-            layout:
-                ::std::result::Result<::std::option::Option<super::Layout>, ::std::string::String>,
+            id: ::std::result::Result<agentdeck_core::TabId, ::std::string::String>,
+            layout: ::std::result::Result<
+                ::std::option::Option<agentdeck_core::Layout>,
+                ::std::string::String,
+            >,
             position: ::std::result::Result<i64, ::std::string::String>,
             title: ::std::result::Result<::std::string::String, ::std::string::String>,
-            workspace_id: ::std::result::Result<::uuid::Uuid, ::std::string::String>,
+            workspace_id: ::std::result::Result<agentdeck_core::WorkspaceId, ::std::string::String>,
         }
         impl ::std::default::Default for Tab {
             fn default() -> Self {
@@ -1312,7 +1142,7 @@ pub mod types {
         impl Tab {
             pub fn id<T>(mut self, value: T) -> Self
             where
-                T: ::std::convert::TryInto<::uuid::Uuid>,
+                T: ::std::convert::TryInto<agentdeck_core::TabId>,
                 T::Error: ::std::fmt::Display,
             {
                 self.id = value
@@ -1322,7 +1152,7 @@ pub mod types {
             }
             pub fn layout<T>(mut self, value: T) -> Self
             where
-                T: ::std::convert::TryInto<::std::option::Option<super::Layout>>,
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::Layout>>,
                 T::Error: ::std::fmt::Display,
             {
                 self.layout = value
@@ -1352,7 +1182,7 @@ pub mod types {
             }
             pub fn workspace_id<T>(mut self, value: T) -> Self
             where
-                T: ::std::convert::TryInto<::uuid::Uuid>,
+                T: ::std::convert::TryInto<agentdeck_core::WorkspaceId>,
                 T::Error: ::std::fmt::Display,
             {
                 self.workspace_id = value
@@ -1386,8 +1216,10 @@ pub mod types {
         }
         #[derive(Clone, Debug)]
         pub struct TabPatch {
-            layout:
-                ::std::result::Result<::std::option::Option<super::Layout>, ::std::string::String>,
+            layout: ::std::result::Result<
+                ::std::option::Option<agentdeck_core::Layout>,
+                ::std::string::String,
+            >,
             position: ::std::result::Result<::std::option::Option<i64>, ::std::string::String>,
             title: ::std::result::Result<
                 ::std::option::Option<::std::string::String>,
@@ -1406,7 +1238,7 @@ pub mod types {
         impl TabPatch {
             pub fn layout<T>(mut self, value: T) -> Self
             where
-                T: ::std::convert::TryInto<::std::option::Option<super::Layout>>,
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::Layout>>,
                 T::Error: ::std::fmt::Display,
             {
                 self.layout = value
@@ -1464,13 +1296,15 @@ pub mod types {
                 ::std::option::Option<::std::string::String>,
                 ::std::string::String,
             >,
-            id: ::std::result::Result<::uuid::Uuid, ::std::string::String>,
-            kind: ::std::result::Result<super::TaskKind, ::std::string::String>,
-            status: ::std::result::Result<super::TaskStatus, ::std::string::String>,
+            id: ::std::result::Result<agentdeck_core::TaskId, ::std::string::String>,
+            kind: ::std::result::Result<agentdeck_core::TaskKind, ::std::string::String>,
+            status: ::std::result::Result<agentdeck_core::TaskStatus, ::std::string::String>,
             title: ::std::result::Result<::std::string::String, ::std::string::String>,
             updated_at: ::std::result::Result<::std::string::String, ::std::string::String>,
-            workspace_id:
-                ::std::result::Result<::std::option::Option<::uuid::Uuid>, ::std::string::String>,
+            workspace_id: ::std::result::Result<
+                ::std::option::Option<agentdeck_core::WorkspaceId>,
+                ::std::string::String,
+            >,
         }
         impl ::std::default::Default for Task {
             fn default() -> Self {
@@ -1520,7 +1354,7 @@ pub mod types {
             }
             pub fn id<T>(mut self, value: T) -> Self
             where
-                T: ::std::convert::TryInto<::uuid::Uuid>,
+                T: ::std::convert::TryInto<agentdeck_core::TaskId>,
                 T::Error: ::std::fmt::Display,
             {
                 self.id = value
@@ -1530,7 +1364,7 @@ pub mod types {
             }
             pub fn kind<T>(mut self, value: T) -> Self
             where
-                T: ::std::convert::TryInto<super::TaskKind>,
+                T: ::std::convert::TryInto<agentdeck_core::TaskKind>,
                 T::Error: ::std::fmt::Display,
             {
                 self.kind = value
@@ -1540,7 +1374,7 @@ pub mod types {
             }
             pub fn status<T>(mut self, value: T) -> Self
             where
-                T: ::std::convert::TryInto<super::TaskStatus>,
+                T: ::std::convert::TryInto<agentdeck_core::TaskStatus>,
                 T::Error: ::std::fmt::Display,
             {
                 self.status = value
@@ -1570,7 +1404,7 @@ pub mod types {
             }
             pub fn workspace_id<T>(mut self, value: T) -> Self
             where
-                T: ::std::convert::TryInto<::std::option::Option<::uuid::Uuid>>,
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::WorkspaceId>>,
                 T::Error: ::std::fmt::Display,
             {
                 self.workspace_id = value
@@ -1617,15 +1451,17 @@ pub mod types {
                 ::std::string::String,
             >,
             status: ::std::result::Result<
-                ::std::option::Option<super::TaskStatus>,
+                ::std::option::Option<agentdeck_core::TaskStatus>,
                 ::std::string::String,
             >,
             title: ::std::result::Result<
                 ::std::option::Option<::std::string::String>,
                 ::std::string::String,
             >,
-            workspace_id:
-                ::std::result::Result<::std::option::Option<::uuid::Uuid>, ::std::string::String>,
+            workspace_id: ::std::result::Result<
+                ::std::option::Option<agentdeck_core::WorkspaceId>,
+                ::std::string::String,
+            >,
         }
         impl ::std::default::Default for TaskPatch {
             fn default() -> Self {
@@ -1650,7 +1486,7 @@ pub mod types {
             }
             pub fn status<T>(mut self, value: T) -> Self
             where
-                T: ::std::convert::TryInto<::std::option::Option<super::TaskStatus>>,
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::TaskStatus>>,
                 T::Error: ::std::fmt::Display,
             {
                 self.status = value
@@ -1670,7 +1506,7 @@ pub mod types {
             }
             pub fn workspace_id<T>(mut self, value: T) -> Self
             where
-                T: ::std::convert::TryInto<::std::option::Option<::uuid::Uuid>>,
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::WorkspaceId>>,
                 T::Error: ::std::fmt::Display,
             {
                 self.workspace_id = value
@@ -1711,7 +1547,7 @@ pub mod types {
             created_at: ::std::result::Result<::std::string::String, ::std::string::String>,
             dir: ::std::result::Result<::std::string::String, ::std::string::String>,
             dir_owned: ::std::result::Result<bool, ::std::string::String>,
-            id: ::std::result::Result<::uuid::Uuid, ::std::string::String>,
+            id: ::std::result::Result<agentdeck_core::WorkspaceId, ::std::string::String>,
             muted: ::std::result::Result<bool, ::std::string::String>,
             name: ::std::result::Result<::std::string::String, ::std::string::String>,
             slug: ::std::result::Result<::std::string::String, ::std::string::String>,
@@ -1773,7 +1609,7 @@ pub mod types {
             }
             pub fn id<T>(mut self, value: T) -> Self
             where
-                T: ::std::convert::TryInto<::uuid::Uuid>,
+                T: ::std::convert::TryInto<agentdeck_core::WorkspaceId>,
                 T::Error: ::std::fmt::Display,
             {
                 self.id = value
@@ -1929,11 +1765,11 @@ pub mod types {
     }
 }
 #[derive(Clone, Debug)]
-/**Client for agentdeck
-
-The agentdeck daemon's HTTP API. Every request carries `Authorization: Bearer <token>`, with the token from daemon.json.
-
-Version: 1.0.0*/
+///Client for agentdeck
+///
+///The agentdeck daemon's HTTP API. Every request carries `Authorization: Bearer <token>`, with the token from daemon.json.
+///
+///Version: 1.0.0
 pub struct Client {
     pub(crate) baseurl: String,
     pub(crate) client: reqwest::Client,
@@ -1985,345 +1821,345 @@ impl ClientInfo<()> for Client {
 }
 impl ClientHooks<()> for &Client {}
 impl Client {
-    /**The daemon's version and uptime
-
-    Sends a `GET` request to `/v1/health`
-
-    ```ignore
-    let response = client.health()
-        .send()
-        .await;
-    ```*/
+    ///The daemon's version and uptime
+    ///
+    ///Sends a `GET` request to `/v1/health`
+    ///
+    ///```ignore
+    ///let response = client.health()
+    ///    .send()
+    ///    .await;
+    ///```
     pub fn health(&self) -> builder::Health<'_> {
         builder::Health::new(self)
     }
-    /**The notes matching every filter given, oldest first
-
-    Sends a `GET` request to `/v1/notes`
-
-    Arguments:
-    - `task`: Only notes on this task.
-    - `unread`: `true`: only unread notes; `false`: only read ones.
-    - `workspace`: Only notes on this workspace.
-    ```ignore
-    let response = client.note_list()
-        .task(task)
-        .unread(unread)
-        .workspace(workspace)
-        .send()
-        .await;
-    ```*/
+    ///The notes matching every filter given, oldest first
+    ///
+    ///Sends a `GET` request to `/v1/notes`
+    ///
+    ///Arguments:
+    ///- `task`: Only notes on this task.
+    ///- `unread`: `true`: only unread notes; `false`: only read ones.
+    ///- `workspace`: Only notes on this workspace.
+    ///```ignore
+    ///let response = client.note_list()
+    ///    .task(task)
+    ///    .unread(unread)
+    ///    .workspace(workspace)
+    ///    .send()
+    ///    .await;
+    ///```
     pub fn note_list(&self) -> builder::NoteList<'_> {
         builder::NoteList::new(self)
     }
-    /**Leaves a note on a workspace or a task
-
-    Sends a `POST` request to `/v1/notes`
-
-    ```ignore
-    let response = client.note_create()
-        .body(body)
-        .send()
-        .await;
-    ```*/
+    ///Leaves a note on a workspace or a task
+    ///
+    ///Sends a `POST` request to `/v1/notes`
+    ///
+    ///```ignore
+    ///let response = client.note_create()
+    ///    .body(body)
+    ///    .send()
+    ///    .await;
+    ///```
     pub fn note_create(&self) -> builder::NoteCreate<'_> {
         builder::NoteCreate::new(self)
     }
-    /**Deletes a note
-
-    Sends a `DELETE` request to `/v1/notes/{id}`
-
-    Arguments:
-    - `id`: The entity's id.
-    ```ignore
-    let response = client.note_delete()
-        .id(id)
-        .send()
-        .await;
-    ```*/
+    ///Deletes a note
+    ///
+    ///Sends a `DELETE` request to `/v1/notes/{id}`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///```ignore
+    ///let response = client.note_delete()
+    ///    .id(id)
+    ///    .send()
+    ///    .await;
+    ///```
     pub fn note_delete(&self) -> builder::NoteDelete<'_> {
         builder::NoteDelete::new(self)
     }
-    /**Edits a note, or marks it read or unread
-
-    Sends a `PATCH` request to `/v1/notes/{id}`
-
-    Arguments:
-    - `id`: The entity's id.
-    - `body`
-    ```ignore
-    let response = client.note_update()
-        .id(id)
-        .body(body)
-        .send()
-        .await;
-    ```*/
+    ///Edits a note, or marks it read or unread
+    ///
+    ///Sends a `PATCH` request to `/v1/notes/{id}`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///- `body`
+    ///```ignore
+    ///let response = client.note_update()
+    ///    .id(id)
+    ///    .body(body)
+    ///    .send()
+    ///    .await;
+    ///```
     pub fn note_update(&self) -> builder::NoteUpdate<'_> {
         builder::NoteUpdate::new(self)
     }
-    /**Deletes a tab and its panes
-
-    Sends a `DELETE` request to `/v1/tabs/{id}`
-
-    Arguments:
-    - `id`: The entity's id.
-    ```ignore
-    let response = client.tab_delete()
-        .id(id)
-        .send()
-        .await;
-    ```*/
+    ///Deletes a tab and its panes
+    ///
+    ///Sends a `DELETE` request to `/v1/tabs/{id}`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///```ignore
+    ///let response = client.tab_delete()
+    ///    .id(id)
+    ///    .send()
+    ///    .await;
+    ///```
     pub fn tab_delete(&self) -> builder::TabDelete<'_> {
         builder::TabDelete::new(self)
     }
-    /**Renames, moves or re-lays-out a tab
-
-    Sends a `PATCH` request to `/v1/tabs/{id}`
-
-    Arguments:
-    - `id`: The entity's id.
-    - `body`
-    ```ignore
-    let response = client.tab_update()
-        .id(id)
-        .body(body)
-        .send()
-        .await;
-    ```*/
+    ///Renames, moves or re-lays-out a tab
+    ///
+    ///Sends a `PATCH` request to `/v1/tabs/{id}`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///- `body`
+    ///```ignore
+    ///let response = client.tab_update()
+    ///    .id(id)
+    ///    .body(body)
+    ///    .send()
+    ///    .await;
+    ///```
     pub fn tab_update(&self) -> builder::TabUpdate<'_> {
         builder::TabUpdate::new(self)
     }
-    /**The tasks matching every filter given, oldest first
-
-    Sends a `GET` request to `/v1/tasks`
-
-    Arguments:
-    - `inbox`: `true`: only tasks with no workspace; `false`: only tasks with one.
-    - `kind`: Only tasks of this kind.
-    - `status`: Only tasks with this status.
-    - `workspace`: Only tasks linked to this workspace.
-    ```ignore
-    let response = client.task_list()
-        .inbox(inbox)
-        .kind(kind)
-        .status(status)
-        .workspace(workspace)
-        .send()
-        .await;
-    ```*/
+    ///The tasks matching every filter given, oldest first
+    ///
+    ///Sends a `GET` request to `/v1/tasks`
+    ///
+    ///Arguments:
+    ///- `inbox`: `true`: only tasks with no workspace; `false`: only tasks with one.
+    ///- `kind`: Only tasks of this kind.
+    ///- `status`: Only tasks with this status.
+    ///- `workspace`: Only tasks linked to this workspace.
+    ///```ignore
+    ///let response = client.task_list()
+    ///    .inbox(inbox)
+    ///    .kind(kind)
+    ///    .status(status)
+    ///    .workspace(workspace)
+    ///    .send()
+    ///    .await;
+    ///```
     pub fn task_list(&self) -> builder::TaskList<'_> {
         builder::TaskList::new(self)
     }
-    /**Creates a plain task
-
-    Sends a `POST` request to `/v1/tasks`
-
-    ```ignore
-    let response = client.task_create()
-        .body(body)
-        .send()
-        .await;
-    ```*/
+    ///Creates a plain task
+    ///
+    ///Sends a `POST` request to `/v1/tasks`
+    ///
+    ///```ignore
+    ///let response = client.task_create()
+    ///    .body(body)
+    ///    .send()
+    ///    .await;
+    ///```
     pub fn task_create(&self) -> builder::TaskCreate<'_> {
         builder::TaskCreate::new(self)
     }
-    /**One task
-
-    Sends a `GET` request to `/v1/tasks/{id}`
-
-    Arguments:
-    - `id`: The entity's id.
-    ```ignore
-    let response = client.task_get()
-        .id(id)
-        .send()
-        .await;
-    ```*/
+    ///One task
+    ///
+    ///Sends a `GET` request to `/v1/tasks/{id}`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///```ignore
+    ///let response = client.task_get()
+    ///    .id(id)
+    ///    .send()
+    ///    .await;
+    ///```
     pub fn task_get(&self) -> builder::TaskGet<'_> {
         builder::TaskGet::new(self)
     }
-    /**Deletes a task and its notes
-
-    Sends a `DELETE` request to `/v1/tasks/{id}`
-
-    Arguments:
-    - `id`: The entity's id.
-    ```ignore
-    let response = client.task_delete()
-        .id(id)
-        .send()
-        .await;
-    ```*/
+    ///Deletes a task and its notes
+    ///
+    ///Sends a `DELETE` request to `/v1/tasks/{id}`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///```ignore
+    ///let response = client.task_delete()
+    ///    .id(id)
+    ///    .send()
+    ///    .await;
+    ///```
     pub fn task_delete(&self) -> builder::TaskDelete<'_> {
         builder::TaskDelete::new(self)
     }
-    /**Changes a task's title, body, status or workspace
-
-    Sends a `PATCH` request to `/v1/tasks/{id}`
-
-    Arguments:
-    - `id`: The entity's id.
-    - `body`
-    ```ignore
-    let response = client.task_update()
-        .id(id)
-        .body(body)
-        .send()
-        .await;
-    ```*/
+    ///Changes a task's title, body, status or workspace
+    ///
+    ///Sends a `PATCH` request to `/v1/tasks/{id}`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///- `body`
+    ///```ignore
+    ///let response = client.task_update()
+    ///    .id(id)
+    ///    .body(body)
+    ///    .send()
+    ///    .await;
+    ///```
     pub fn task_update(&self) -> builder::TaskUpdate<'_> {
         builder::TaskUpdate::new(self)
     }
-    /**Every workspace, archived ones included, oldest first
-
-    Sends a `GET` request to `/v1/workspaces`
-
-    ```ignore
-    let response = client.workspace_list()
-        .send()
-        .await;
-    ```*/
+    ///Every workspace, archived ones included, oldest first
+    ///
+    ///Sends a `GET` request to `/v1/workspaces`
+    ///
+    ///```ignore
+    ///let response = client.workspace_list()
+    ///    .send()
+    ///    .await;
+    ///```
     pub fn workspace_list(&self) -> builder::WorkspaceList<'_> {
         builder::WorkspaceList::new(self)
     }
-    /**Creates a workspace on an existing dir, or on a new scratch dir when `dir` is absent
-
-    Sends a `POST` request to `/v1/workspaces`
-
-    ```ignore
-    let response = client.workspace_create()
-        .body(body)
-        .send()
-        .await;
-    ```*/
+    ///Creates a workspace on an existing dir, or on a new scratch dir when `dir` is absent
+    ///
+    ///Sends a `POST` request to `/v1/workspaces`
+    ///
+    ///```ignore
+    ///let response = client.workspace_create()
+    ///    .body(body)
+    ///    .send()
+    ///    .await;
+    ///```
     pub fn workspace_create(&self) -> builder::WorkspaceCreate<'_> {
         builder::WorkspaceCreate::new(self)
     }
-    /**One workspace
-
-    Sends a `GET` request to `/v1/workspaces/{id}`
-
-    Arguments:
-    - `id`: The entity's id.
-    ```ignore
-    let response = client.workspace_get()
-        .id(id)
-        .send()
-        .await;
-    ```*/
+    ///One workspace
+    ///
+    ///Sends a `GET` request to `/v1/workspaces/{id}`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///```ignore
+    ///let response = client.workspace_get()
+    ///    .id(id)
+    ///    .send()
+    ///    .await;
+    ///```
     pub fn workspace_get(&self) -> builder::WorkspaceGet<'_> {
         builder::WorkspaceGet::new(self)
     }
-    /**Deletes a workspace, and its dir when agentdeck created it. Its tasks move to the inbox
-
-    Without `force`, a dir holding uncommitted or unpushed work is a 409 `dirty` carrying the dirty report.
-
-    Sends a `DELETE` request to `/v1/workspaces/{id}`
-
-    Arguments:
-    - `id`: The entity's id.
-    - `force`: Delete even when the dir holds uncommitted or unpushed work.
-    ```ignore
-    let response = client.workspace_delete()
-        .id(id)
-        .force(force)
-        .send()
-        .await;
-    ```*/
+    ///Deletes a workspace, and its dir when agentdeck created it. Its tasks move to the inbox
+    ///
+    ///Without `force`, a dir holding uncommitted or unpushed work is a 409 `dirty` carrying the dirty report.
+    ///
+    ///Sends a `DELETE` request to `/v1/workspaces/{id}`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///- `force`: Delete even when the dir holds uncommitted or unpushed work.
+    ///```ignore
+    ///let response = client.workspace_delete()
+    ///    .id(id)
+    ///    .force(force)
+    ///    .send()
+    ///    .await;
+    ///```
     pub fn workspace_delete(&self) -> builder::WorkspaceDelete<'_> {
         builder::WorkspaceDelete::new(self)
     }
-    /**Renames, mutes or unmutes a workspace
-
-    Sends a `PATCH` request to `/v1/workspaces/{id}`
-
-    Arguments:
-    - `id`: The entity's id.
-    - `body`
-    ```ignore
-    let response = client.workspace_update()
-        .id(id)
-        .body(body)
-        .send()
-        .await;
-    ```*/
+    ///Renames, mutes or unmutes a workspace
+    ///
+    ///Sends a `PATCH` request to `/v1/workspaces/{id}`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///- `body`
+    ///```ignore
+    ///let response = client.workspace_update()
+    ///    .id(id)
+    ///    .body(body)
+    ///    .send()
+    ///    .await;
+    ///```
     pub fn workspace_update(&self) -> builder::WorkspaceUpdate<'_> {
         builder::WorkspaceUpdate::new(self)
     }
-    /**Archives a workspace; its tasks, notes and dir are kept
-
-    Sends a `POST` request to `/v1/workspaces/{id}/archive`
-
-    Arguments:
-    - `id`: The entity's id.
-    ```ignore
-    let response = client.workspace_archive()
-        .id(id)
-        .send()
-        .await;
-    ```*/
+    ///Archives a workspace; its tasks, notes and dir are kept
+    ///
+    ///Sends a `POST` request to `/v1/workspaces/{id}/archive`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///```ignore
+    ///let response = client.workspace_archive()
+    ///    .id(id)
+    ///    .send()
+    ///    .await;
+    ///```
     pub fn workspace_archive(&self) -> builder::WorkspaceArchive<'_> {
         builder::WorkspaceArchive::new(self)
     }
-    /**Each git repo under the workspace's dir with uncommitted files or unpushed branches
-
-    Sends a `GET` request to `/v1/workspaces/{id}/dirty`
-
-    Arguments:
-    - `id`: The entity's id.
-    ```ignore
-    let response = client.workspace_dirty()
-        .id(id)
-        .send()
-        .await;
-    ```*/
+    ///Each git repo under the workspace's dir with uncommitted files or unpushed branches
+    ///
+    ///Sends a `GET` request to `/v1/workspaces/{id}/dirty`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///```ignore
+    ///let response = client.workspace_dirty()
+    ///    .id(id)
+    ///    .send()
+    ///    .await;
+    ///```
     pub fn workspace_dirty(&self) -> builder::WorkspaceDirty<'_> {
         builder::WorkspaceDirty::new(self)
     }
-    /**A workspace's tabs, in position order
-
-    Sends a `GET` request to `/v1/workspaces/{id}/tabs`
-
-    Arguments:
-    - `id`: The entity's id.
-    ```ignore
-    let response = client.tab_list()
-        .id(id)
-        .send()
-        .await;
-    ```*/
+    ///A workspace's tabs, in position order
+    ///
+    ///Sends a `GET` request to `/v1/workspaces/{id}/tabs`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///```ignore
+    ///let response = client.tab_list()
+    ///    .id(id)
+    ///    .send()
+    ///    .await;
+    ///```
     pub fn tab_list(&self) -> builder::TabList<'_> {
         builder::TabList::new(self)
     }
-    /**Adds a tab after the workspace's last one
-
-    Sends a `POST` request to `/v1/workspaces/{id}/tabs`
-
-    Arguments:
-    - `id`: The entity's id.
-    - `body`
-    ```ignore
-    let response = client.tab_create()
-        .id(id)
-        .body(body)
-        .send()
-        .await;
-    ```*/
+    ///Adds a tab after the workspace's last one
+    ///
+    ///Sends a `POST` request to `/v1/workspaces/{id}/tabs`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///- `body`
+    ///```ignore
+    ///let response = client.tab_create()
+    ///    .id(id)
+    ///    .body(body)
+    ///    .send()
+    ///    .await;
+    ///```
     pub fn tab_create(&self) -> builder::TabCreate<'_> {
         builder::TabCreate::new(self)
     }
-    /**Brings an archived workspace back
-
-    Sends a `POST` request to `/v1/workspaces/{id}/unarchive`
-
-    Arguments:
-    - `id`: The entity's id.
-    ```ignore
-    let response = client.workspace_unarchive()
-        .id(id)
-        .send()
-        .await;
-    ```*/
+    ///Brings an archived workspace back
+    ///
+    ///Sends a `POST` request to `/v1/workspaces/{id}/unarchive`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///```ignore
+    ///let response = client.workspace_unarchive()
+    ///    .id(id)
+    ///    .send()
+    ///    .await;
+    ///```
     pub fn workspace_unarchive(&self) -> builder::WorkspaceUnarchive<'_> {
         builder::WorkspaceUnarchive::new(self)
     }
@@ -2337,9 +2173,9 @@ pub mod builder {
         ByteStream, ClientHooks, ClientInfo, Error, OperationInfo, RequestBuilderExt,
         ResponseValue, encode_path,
     };
-    /**Builder for [`Client::health`]
-
-    [`Client::health`]: super::Client::health*/
+    ///Builder for [`Client::health`]
+    ///
+    ///[`Client::health`]: super::Client::health
     #[derive(Debug, Clone)]
     pub struct Health<'a> {
         client: &'a super::Client,
@@ -2386,15 +2222,15 @@ pub mod builder {
             }
         }
     }
-    /**Builder for [`Client::note_list`]
-
-    [`Client::note_list`]: super::Client::note_list*/
+    ///Builder for [`Client::note_list`]
+    ///
+    ///[`Client::note_list`]: super::Client::note_list
     #[derive(Debug, Clone)]
     pub struct NoteList<'a> {
         client: &'a super::Client,
-        task: Result<Option<::uuid::Uuid>, String>,
+        task: Result<Option<agentdeck_core::TaskId>, String>,
         unread: Result<Option<bool>, String>,
-        workspace: Result<Option<::uuid::Uuid>, String>,
+        workspace: Result<Option<agentdeck_core::WorkspaceId>, String>,
     }
     impl<'a> NoteList<'a> {
         pub fn new(client: &'a super::Client) -> Self {
@@ -2407,12 +2243,11 @@ pub mod builder {
         }
         pub fn task<V>(mut self, value: V) -> Self
         where
-            V: std::convert::TryInto<::uuid::Uuid>,
+            V: std::convert::TryInto<agentdeck_core::TaskId>,
         {
-            self.task = value
-                .try_into()
-                .map(Some)
-                .map_err(|_| "conversion to `:: uuid :: Uuid` for task failed".to_string());
+            self.task = value.try_into().map(Some).map_err(|_| {
+                "conversion to `agentdeck_core :: TaskId` for task failed".to_string()
+            });
             self
         }
         pub fn unread<V>(mut self, value: V) -> Self
@@ -2427,12 +2262,11 @@ pub mod builder {
         }
         pub fn workspace<V>(mut self, value: V) -> Self
         where
-            V: std::convert::TryInto<::uuid::Uuid>,
+            V: std::convert::TryInto<agentdeck_core::WorkspaceId>,
         {
-            self.workspace = value
-                .try_into()
-                .map(Some)
-                .map_err(|_| "conversion to `:: uuid :: Uuid` for workspace failed".to_string());
+            self.workspace = value.try_into().map(Some).map_err(|_| {
+                "conversion to `agentdeck_core :: WorkspaceId` for workspace failed".to_string()
+            });
             self
         }
         ///Sends a `GET` request to `/v1/notes`
@@ -2486,9 +2320,9 @@ pub mod builder {
             }
         }
     }
-    /**Builder for [`Client::note_create`]
-
-    [`Client::note_create`]: super::Client::note_create*/
+    ///Builder for [`Client::note_create`]
+    ///
+    ///[`Client::note_create`]: super::Client::note_create
     #[derive(Debug, Clone)]
     pub struct NoteCreate<'a> {
         client: &'a super::Client,
@@ -2561,13 +2395,13 @@ pub mod builder {
             }
         }
     }
-    /**Builder for [`Client::note_delete`]
-
-    [`Client::note_delete`]: super::Client::note_delete*/
+    ///Builder for [`Client::note_delete`]
+    ///
+    ///[`Client::note_delete`]: super::Client::note_delete
     #[derive(Debug, Clone)]
     pub struct NoteDelete<'a> {
         client: &'a super::Client,
-        id: Result<::uuid::Uuid, String>,
+        id: Result<agentdeck_core::NoteId, String>,
     }
     impl<'a> NoteDelete<'a> {
         pub fn new(client: &'a super::Client) -> Self {
@@ -2578,11 +2412,11 @@ pub mod builder {
         }
         pub fn id<V>(mut self, value: V) -> Self
         where
-            V: std::convert::TryInto<::uuid::Uuid>,
+            V: std::convert::TryInto<agentdeck_core::NoteId>,
         {
             self.id = value
                 .try_into()
-                .map_err(|_| "conversion to `:: uuid :: Uuid` for id failed".to_string());
+                .map_err(|_| "conversion to `agentdeck_core :: NoteId` for id failed".to_string());
             self
         }
         ///Sends a `DELETE` request to `/v1/notes/{id}`
@@ -2628,13 +2462,13 @@ pub mod builder {
             }
         }
     }
-    /**Builder for [`Client::note_update`]
-
-    [`Client::note_update`]: super::Client::note_update*/
+    ///Builder for [`Client::note_update`]
+    ///
+    ///[`Client::note_update`]: super::Client::note_update
     #[derive(Debug, Clone)]
     pub struct NoteUpdate<'a> {
         client: &'a super::Client,
-        id: Result<::uuid::Uuid, String>,
+        id: Result<agentdeck_core::NoteId, String>,
         body: Result<types::builder::NotePatch, String>,
     }
     impl<'a> NoteUpdate<'a> {
@@ -2647,11 +2481,11 @@ pub mod builder {
         }
         pub fn id<V>(mut self, value: V) -> Self
         where
-            V: std::convert::TryInto<::uuid::Uuid>,
+            V: std::convert::TryInto<agentdeck_core::NoteId>,
         {
             self.id = value
                 .try_into()
-                .map_err(|_| "conversion to `:: uuid :: Uuid` for id failed".to_string());
+                .map_err(|_| "conversion to `agentdeck_core :: NoteId` for id failed".to_string());
             self
         }
         pub fn body<V>(mut self, value: V) -> Self
@@ -2719,13 +2553,13 @@ pub mod builder {
             }
         }
     }
-    /**Builder for [`Client::tab_delete`]
-
-    [`Client::tab_delete`]: super::Client::tab_delete*/
+    ///Builder for [`Client::tab_delete`]
+    ///
+    ///[`Client::tab_delete`]: super::Client::tab_delete
     #[derive(Debug, Clone)]
     pub struct TabDelete<'a> {
         client: &'a super::Client,
-        id: Result<::uuid::Uuid, String>,
+        id: Result<agentdeck_core::TabId, String>,
     }
     impl<'a> TabDelete<'a> {
         pub fn new(client: &'a super::Client) -> Self {
@@ -2736,11 +2570,11 @@ pub mod builder {
         }
         pub fn id<V>(mut self, value: V) -> Self
         where
-            V: std::convert::TryInto<::uuid::Uuid>,
+            V: std::convert::TryInto<agentdeck_core::TabId>,
         {
             self.id = value
                 .try_into()
-                .map_err(|_| "conversion to `:: uuid :: Uuid` for id failed".to_string());
+                .map_err(|_| "conversion to `agentdeck_core :: TabId` for id failed".to_string());
             self
         }
         ///Sends a `DELETE` request to `/v1/tabs/{id}`
@@ -2786,13 +2620,13 @@ pub mod builder {
             }
         }
     }
-    /**Builder for [`Client::tab_update`]
-
-    [`Client::tab_update`]: super::Client::tab_update*/
+    ///Builder for [`Client::tab_update`]
+    ///
+    ///[`Client::tab_update`]: super::Client::tab_update
     #[derive(Debug, Clone)]
     pub struct TabUpdate<'a> {
         client: &'a super::Client,
-        id: Result<::uuid::Uuid, String>,
+        id: Result<agentdeck_core::TabId, String>,
         body: Result<types::builder::TabPatch, String>,
     }
     impl<'a> TabUpdate<'a> {
@@ -2805,11 +2639,11 @@ pub mod builder {
         }
         pub fn id<V>(mut self, value: V) -> Self
         where
-            V: std::convert::TryInto<::uuid::Uuid>,
+            V: std::convert::TryInto<agentdeck_core::TabId>,
         {
             self.id = value
                 .try_into()
-                .map_err(|_| "conversion to `:: uuid :: Uuid` for id failed".to_string());
+                .map_err(|_| "conversion to `agentdeck_core :: TabId` for id failed".to_string());
             self
         }
         pub fn body<V>(mut self, value: V) -> Self
@@ -2877,16 +2711,16 @@ pub mod builder {
             }
         }
     }
-    /**Builder for [`Client::task_list`]
-
-    [`Client::task_list`]: super::Client::task_list*/
+    ///Builder for [`Client::task_list`]
+    ///
+    ///[`Client::task_list`]: super::Client::task_list
     #[derive(Debug, Clone)]
     pub struct TaskList<'a> {
         client: &'a super::Client,
         inbox: Result<Option<bool>, String>,
-        kind: Result<Option<types::TaskKind>, String>,
-        status: Result<Option<types::TaskStatus>, String>,
-        workspace: Result<Option<::uuid::Uuid>, String>,
+        kind: Result<Option<agentdeck_core::TaskKind>, String>,
+        status: Result<Option<agentdeck_core::TaskStatus>, String>,
+        workspace: Result<Option<agentdeck_core::WorkspaceId>, String>,
     }
     impl<'a> TaskList<'a> {
         pub fn new(client: &'a super::Client) -> Self {
@@ -2910,32 +2744,29 @@ pub mod builder {
         }
         pub fn kind<V>(mut self, value: V) -> Self
         where
-            V: std::convert::TryInto<types::TaskKind>,
+            V: std::convert::TryInto<agentdeck_core::TaskKind>,
         {
-            self.kind = value
-                .try_into()
-                .map(Some)
-                .map_err(|_| "conversion to `TaskKind` for kind failed".to_string());
+            self.kind = value.try_into().map(Some).map_err(|_| {
+                "conversion to `agentdeck_core :: TaskKind` for kind failed".to_string()
+            });
             self
         }
         pub fn status<V>(mut self, value: V) -> Self
         where
-            V: std::convert::TryInto<types::TaskStatus>,
+            V: std::convert::TryInto<agentdeck_core::TaskStatus>,
         {
-            self.status = value
-                .try_into()
-                .map(Some)
-                .map_err(|_| "conversion to `TaskStatus` for status failed".to_string());
+            self.status = value.try_into().map(Some).map_err(|_| {
+                "conversion to `agentdeck_core :: TaskStatus` for status failed".to_string()
+            });
             self
         }
         pub fn workspace<V>(mut self, value: V) -> Self
         where
-            V: std::convert::TryInto<::uuid::Uuid>,
+            V: std::convert::TryInto<agentdeck_core::WorkspaceId>,
         {
-            self.workspace = value
-                .try_into()
-                .map(Some)
-                .map_err(|_| "conversion to `:: uuid :: Uuid` for workspace failed".to_string());
+            self.workspace = value.try_into().map(Some).map_err(|_| {
+                "conversion to `agentdeck_core :: WorkspaceId` for workspace failed".to_string()
+            });
             self
         }
         ///Sends a `GET` request to `/v1/tasks`
@@ -2992,9 +2823,9 @@ pub mod builder {
             }
         }
     }
-    /**Builder for [`Client::task_create`]
-
-    [`Client::task_create`]: super::Client::task_create*/
+    ///Builder for [`Client::task_create`]
+    ///
+    ///[`Client::task_create`]: super::Client::task_create
     #[derive(Debug, Clone)]
     pub struct TaskCreate<'a> {
         client: &'a super::Client,
@@ -3067,13 +2898,13 @@ pub mod builder {
             }
         }
     }
-    /**Builder for [`Client::task_get`]
-
-    [`Client::task_get`]: super::Client::task_get*/
+    ///Builder for [`Client::task_get`]
+    ///
+    ///[`Client::task_get`]: super::Client::task_get
     #[derive(Debug, Clone)]
     pub struct TaskGet<'a> {
         client: &'a super::Client,
-        id: Result<::uuid::Uuid, String>,
+        id: Result<agentdeck_core::TaskId, String>,
     }
     impl<'a> TaskGet<'a> {
         pub fn new(client: &'a super::Client) -> Self {
@@ -3084,11 +2915,11 @@ pub mod builder {
         }
         pub fn id<V>(mut self, value: V) -> Self
         where
-            V: std::convert::TryInto<::uuid::Uuid>,
+            V: std::convert::TryInto<agentdeck_core::TaskId>,
         {
             self.id = value
                 .try_into()
-                .map_err(|_| "conversion to `:: uuid :: Uuid` for id failed".to_string());
+                .map_err(|_| "conversion to `agentdeck_core :: TaskId` for id failed".to_string());
             self
         }
         ///Sends a `GET` request to `/v1/tasks/{id}`
@@ -3134,13 +2965,13 @@ pub mod builder {
             }
         }
     }
-    /**Builder for [`Client::task_delete`]
-
-    [`Client::task_delete`]: super::Client::task_delete*/
+    ///Builder for [`Client::task_delete`]
+    ///
+    ///[`Client::task_delete`]: super::Client::task_delete
     #[derive(Debug, Clone)]
     pub struct TaskDelete<'a> {
         client: &'a super::Client,
-        id: Result<::uuid::Uuid, String>,
+        id: Result<agentdeck_core::TaskId, String>,
     }
     impl<'a> TaskDelete<'a> {
         pub fn new(client: &'a super::Client) -> Self {
@@ -3151,11 +2982,11 @@ pub mod builder {
         }
         pub fn id<V>(mut self, value: V) -> Self
         where
-            V: std::convert::TryInto<::uuid::Uuid>,
+            V: std::convert::TryInto<agentdeck_core::TaskId>,
         {
             self.id = value
                 .try_into()
-                .map_err(|_| "conversion to `:: uuid :: Uuid` for id failed".to_string());
+                .map_err(|_| "conversion to `agentdeck_core :: TaskId` for id failed".to_string());
             self
         }
         ///Sends a `DELETE` request to `/v1/tasks/{id}`
@@ -3201,13 +3032,13 @@ pub mod builder {
             }
         }
     }
-    /**Builder for [`Client::task_update`]
-
-    [`Client::task_update`]: super::Client::task_update*/
+    ///Builder for [`Client::task_update`]
+    ///
+    ///[`Client::task_update`]: super::Client::task_update
     #[derive(Debug, Clone)]
     pub struct TaskUpdate<'a> {
         client: &'a super::Client,
-        id: Result<::uuid::Uuid, String>,
+        id: Result<agentdeck_core::TaskId, String>,
         body: Result<types::builder::TaskPatch, String>,
     }
     impl<'a> TaskUpdate<'a> {
@@ -3220,11 +3051,11 @@ pub mod builder {
         }
         pub fn id<V>(mut self, value: V) -> Self
         where
-            V: std::convert::TryInto<::uuid::Uuid>,
+            V: std::convert::TryInto<agentdeck_core::TaskId>,
         {
             self.id = value
                 .try_into()
-                .map_err(|_| "conversion to `:: uuid :: Uuid` for id failed".to_string());
+                .map_err(|_| "conversion to `agentdeck_core :: TaskId` for id failed".to_string());
             self
         }
         pub fn body<V>(mut self, value: V) -> Self
@@ -3292,9 +3123,9 @@ pub mod builder {
             }
         }
     }
-    /**Builder for [`Client::workspace_list`]
-
-    [`Client::workspace_list`]: super::Client::workspace_list*/
+    ///Builder for [`Client::workspace_list`]
+    ///
+    ///[`Client::workspace_list`]: super::Client::workspace_list
     #[derive(Debug, Clone)]
     pub struct WorkspaceList<'a> {
         client: &'a super::Client,
@@ -3343,9 +3174,9 @@ pub mod builder {
             }
         }
     }
-    /**Builder for [`Client::workspace_create`]
-
-    [`Client::workspace_create`]: super::Client::workspace_create*/
+    ///Builder for [`Client::workspace_create`]
+    ///
+    ///[`Client::workspace_create`]: super::Client::workspace_create
     #[derive(Debug, Clone)]
     pub struct WorkspaceCreate<'a> {
         client: &'a super::Client,
@@ -3418,13 +3249,13 @@ pub mod builder {
             }
         }
     }
-    /**Builder for [`Client::workspace_get`]
-
-    [`Client::workspace_get`]: super::Client::workspace_get*/
+    ///Builder for [`Client::workspace_get`]
+    ///
+    ///[`Client::workspace_get`]: super::Client::workspace_get
     #[derive(Debug, Clone)]
     pub struct WorkspaceGet<'a> {
         client: &'a super::Client,
-        id: Result<::uuid::Uuid, String>,
+        id: Result<agentdeck_core::WorkspaceId, String>,
     }
     impl<'a> WorkspaceGet<'a> {
         pub fn new(client: &'a super::Client) -> Self {
@@ -3435,11 +3266,11 @@ pub mod builder {
         }
         pub fn id<V>(mut self, value: V) -> Self
         where
-            V: std::convert::TryInto<::uuid::Uuid>,
+            V: std::convert::TryInto<agentdeck_core::WorkspaceId>,
         {
-            self.id = value
-                .try_into()
-                .map_err(|_| "conversion to `:: uuid :: Uuid` for id failed".to_string());
+            self.id = value.try_into().map_err(|_| {
+                "conversion to `agentdeck_core :: WorkspaceId` for id failed".to_string()
+            });
             self
         }
         ///Sends a `GET` request to `/v1/workspaces/{id}`
@@ -3485,13 +3316,13 @@ pub mod builder {
             }
         }
     }
-    /**Builder for [`Client::workspace_delete`]
-
-    [`Client::workspace_delete`]: super::Client::workspace_delete*/
+    ///Builder for [`Client::workspace_delete`]
+    ///
+    ///[`Client::workspace_delete`]: super::Client::workspace_delete
     #[derive(Debug, Clone)]
     pub struct WorkspaceDelete<'a> {
         client: &'a super::Client,
-        id: Result<::uuid::Uuid, String>,
+        id: Result<agentdeck_core::WorkspaceId, String>,
         force: Result<Option<bool>, String>,
     }
     impl<'a> WorkspaceDelete<'a> {
@@ -3504,11 +3335,11 @@ pub mod builder {
         }
         pub fn id<V>(mut self, value: V) -> Self
         where
-            V: std::convert::TryInto<::uuid::Uuid>,
+            V: std::convert::TryInto<agentdeck_core::WorkspaceId>,
         {
-            self.id = value
-                .try_into()
-                .map_err(|_| "conversion to `:: uuid :: Uuid` for id failed".to_string());
+            self.id = value.try_into().map_err(|_| {
+                "conversion to `agentdeck_core :: WorkspaceId` for id failed".to_string()
+            });
             self
         }
         pub fn force<V>(mut self, value: V) -> Self
@@ -3566,13 +3397,13 @@ pub mod builder {
             }
         }
     }
-    /**Builder for [`Client::workspace_update`]
-
-    [`Client::workspace_update`]: super::Client::workspace_update*/
+    ///Builder for [`Client::workspace_update`]
+    ///
+    ///[`Client::workspace_update`]: super::Client::workspace_update
     #[derive(Debug, Clone)]
     pub struct WorkspaceUpdate<'a> {
         client: &'a super::Client,
-        id: Result<::uuid::Uuid, String>,
+        id: Result<agentdeck_core::WorkspaceId, String>,
         body: Result<types::builder::WorkspacePatch, String>,
     }
     impl<'a> WorkspaceUpdate<'a> {
@@ -3585,11 +3416,11 @@ pub mod builder {
         }
         pub fn id<V>(mut self, value: V) -> Self
         where
-            V: std::convert::TryInto<::uuid::Uuid>,
+            V: std::convert::TryInto<agentdeck_core::WorkspaceId>,
         {
-            self.id = value
-                .try_into()
-                .map_err(|_| "conversion to `:: uuid :: Uuid` for id failed".to_string());
+            self.id = value.try_into().map_err(|_| {
+                "conversion to `agentdeck_core :: WorkspaceId` for id failed".to_string()
+            });
             self
         }
         pub fn body<V>(mut self, value: V) -> Self
@@ -3657,13 +3488,13 @@ pub mod builder {
             }
         }
     }
-    /**Builder for [`Client::workspace_archive`]
-
-    [`Client::workspace_archive`]: super::Client::workspace_archive*/
+    ///Builder for [`Client::workspace_archive`]
+    ///
+    ///[`Client::workspace_archive`]: super::Client::workspace_archive
     #[derive(Debug, Clone)]
     pub struct WorkspaceArchive<'a> {
         client: &'a super::Client,
-        id: Result<::uuid::Uuid, String>,
+        id: Result<agentdeck_core::WorkspaceId, String>,
     }
     impl<'a> WorkspaceArchive<'a> {
         pub fn new(client: &'a super::Client) -> Self {
@@ -3674,11 +3505,11 @@ pub mod builder {
         }
         pub fn id<V>(mut self, value: V) -> Self
         where
-            V: std::convert::TryInto<::uuid::Uuid>,
+            V: std::convert::TryInto<agentdeck_core::WorkspaceId>,
         {
-            self.id = value
-                .try_into()
-                .map_err(|_| "conversion to `:: uuid :: Uuid` for id failed".to_string());
+            self.id = value.try_into().map_err(|_| {
+                "conversion to `agentdeck_core :: WorkspaceId` for id failed".to_string()
+            });
             self
         }
         ///Sends a `POST` request to `/v1/workspaces/{id}/archive`
@@ -3724,13 +3555,13 @@ pub mod builder {
             }
         }
     }
-    /**Builder for [`Client::workspace_dirty`]
-
-    [`Client::workspace_dirty`]: super::Client::workspace_dirty*/
+    ///Builder for [`Client::workspace_dirty`]
+    ///
+    ///[`Client::workspace_dirty`]: super::Client::workspace_dirty
     #[derive(Debug, Clone)]
     pub struct WorkspaceDirty<'a> {
         client: &'a super::Client,
-        id: Result<::uuid::Uuid, String>,
+        id: Result<agentdeck_core::WorkspaceId, String>,
     }
     impl<'a> WorkspaceDirty<'a> {
         pub fn new(client: &'a super::Client) -> Self {
@@ -3741,11 +3572,11 @@ pub mod builder {
         }
         pub fn id<V>(mut self, value: V) -> Self
         where
-            V: std::convert::TryInto<::uuid::Uuid>,
+            V: std::convert::TryInto<agentdeck_core::WorkspaceId>,
         {
-            self.id = value
-                .try_into()
-                .map_err(|_| "conversion to `:: uuid :: Uuid` for id failed".to_string());
+            self.id = value.try_into().map_err(|_| {
+                "conversion to `agentdeck_core :: WorkspaceId` for id failed".to_string()
+            });
             self
         }
         ///Sends a `GET` request to `/v1/workspaces/{id}/dirty`
@@ -3791,13 +3622,13 @@ pub mod builder {
             }
         }
     }
-    /**Builder for [`Client::tab_list`]
-
-    [`Client::tab_list`]: super::Client::tab_list*/
+    ///Builder for [`Client::tab_list`]
+    ///
+    ///[`Client::tab_list`]: super::Client::tab_list
     #[derive(Debug, Clone)]
     pub struct TabList<'a> {
         client: &'a super::Client,
-        id: Result<::uuid::Uuid, String>,
+        id: Result<agentdeck_core::WorkspaceId, String>,
     }
     impl<'a> TabList<'a> {
         pub fn new(client: &'a super::Client) -> Self {
@@ -3808,11 +3639,11 @@ pub mod builder {
         }
         pub fn id<V>(mut self, value: V) -> Self
         where
-            V: std::convert::TryInto<::uuid::Uuid>,
+            V: std::convert::TryInto<agentdeck_core::WorkspaceId>,
         {
-            self.id = value
-                .try_into()
-                .map_err(|_| "conversion to `:: uuid :: Uuid` for id failed".to_string());
+            self.id = value.try_into().map_err(|_| {
+                "conversion to `agentdeck_core :: WorkspaceId` for id failed".to_string()
+            });
             self
         }
         ///Sends a `GET` request to `/v1/workspaces/{id}/tabs`
@@ -3860,13 +3691,13 @@ pub mod builder {
             }
         }
     }
-    /**Builder for [`Client::tab_create`]
-
-    [`Client::tab_create`]: super::Client::tab_create*/
+    ///Builder for [`Client::tab_create`]
+    ///
+    ///[`Client::tab_create`]: super::Client::tab_create
     #[derive(Debug, Clone)]
     pub struct TabCreate<'a> {
         client: &'a super::Client,
-        id: Result<::uuid::Uuid, String>,
+        id: Result<agentdeck_core::WorkspaceId, String>,
         body: Result<types::builder::NewTab, String>,
     }
     impl<'a> TabCreate<'a> {
@@ -3879,11 +3710,11 @@ pub mod builder {
         }
         pub fn id<V>(mut self, value: V) -> Self
         where
-            V: std::convert::TryInto<::uuid::Uuid>,
+            V: std::convert::TryInto<agentdeck_core::WorkspaceId>,
         {
-            self.id = value
-                .try_into()
-                .map_err(|_| "conversion to `:: uuid :: Uuid` for id failed".to_string());
+            self.id = value.try_into().map_err(|_| {
+                "conversion to `agentdeck_core :: WorkspaceId` for id failed".to_string()
+            });
             self
         }
         pub fn body<V>(mut self, value: V) -> Self
@@ -3951,13 +3782,13 @@ pub mod builder {
             }
         }
     }
-    /**Builder for [`Client::workspace_unarchive`]
-
-    [`Client::workspace_unarchive`]: super::Client::workspace_unarchive*/
+    ///Builder for [`Client::workspace_unarchive`]
+    ///
+    ///[`Client::workspace_unarchive`]: super::Client::workspace_unarchive
     #[derive(Debug, Clone)]
     pub struct WorkspaceUnarchive<'a> {
         client: &'a super::Client,
-        id: Result<::uuid::Uuid, String>,
+        id: Result<agentdeck_core::WorkspaceId, String>,
     }
     impl<'a> WorkspaceUnarchive<'a> {
         pub fn new(client: &'a super::Client) -> Self {
@@ -3968,11 +3799,11 @@ pub mod builder {
         }
         pub fn id<V>(mut self, value: V) -> Self
         where
-            V: std::convert::TryInto<::uuid::Uuid>,
+            V: std::convert::TryInto<agentdeck_core::WorkspaceId>,
         {
-            self.id = value
-                .try_into()
-                .map_err(|_| "conversion to `:: uuid :: Uuid` for id failed".to_string());
+            self.id = value.try_into().map_err(|_| {
+                "conversion to `agentdeck_core :: WorkspaceId` for id failed".to_string()
+            });
             self
         }
         ///Sends a `POST` request to `/v1/workspaces/{id}/unarchive`

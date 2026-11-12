@@ -1,23 +1,23 @@
 //! `notes` queries.
 
+use agentdeck_core::NoteId;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
-use uuid::Uuid;
 
-use super::{DbError, exists, id, new_id, now, opt_id};
+use super::{DbError, exists, new_id, now, opt_text, text};
 use crate::model::{NewNote, Note, NoteFilter, NotePatch};
 
 const COLUMNS: &str = "id, body, workspace_id, task_id, created_at, read_at, read_by_pane";
 
 fn from_row(row: &Row<'_>) -> rusqlite::Result<Note> {
     Ok(Note {
-        id: id(row, "id")?,
+        id: text(row, "id")?,
         body: row.get("body")?,
-        workspace_id: opt_id(row, "workspace_id")?,
-        task_id: opt_id(row, "task_id")?,
+        workspace_id: opt_text(row, "workspace_id")?,
+        task_id: opt_text(row, "task_id")?,
         created_at: row.get("created_at")?,
         read_at: row.get("read_at")?,
-        read_by_pane: opt_id(row, "read_by_pane")?,
+        read_by_pane: opt_text(row, "read_by_pane")?,
     })
 }
 
@@ -45,7 +45,7 @@ pub fn list(conn: &Connection, filter: &NoteFilter) -> Result<Vec<Note>, DbError
 }
 
 /// One note.
-pub fn get(conn: &Connection, id: Uuid) -> Result<Note, DbError> {
+pub fn get(conn: &Connection, id: NoteId) -> Result<Note, DbError> {
     conn.query_row(
         &format!("SELECT {COLUMNS} FROM notes WHERE id = ?1"),
         [id.to_string()],
@@ -75,7 +75,7 @@ pub fn create(conn: &Connection, new: &NewNote) -> Result<Note, DbError> {
             });
         }
     }
-    let id = new_id();
+    let id: NoteId = new_id();
     conn.execute(
         "INSERT INTO notes (id, body, workspace_id, task_id, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -92,7 +92,7 @@ pub fn create(conn: &Connection, new: &NewNote) -> Result<Note, DbError> {
 
 /// Applies the fields `patch` sets. `read: true` stamps `read_at` (keeping an earlier
 /// stamp) and records `read_by_pane`; `read: false` clears both.
-pub fn update(conn: &Connection, id: Uuid, patch: &NotePatch) -> Result<Note, DbError> {
+pub fn update(conn: &Connection, id: NoteId, patch: &NotePatch) -> Result<Note, DbError> {
     get(conn, id)?;
     if let Some(body) = &patch.body {
         conn.execute(
@@ -125,7 +125,7 @@ pub fn update(conn: &Connection, id: Uuid, patch: &NotePatch) -> Result<Note, Db
 }
 
 /// Deletes a note.
-pub fn delete(conn: &Connection, id: Uuid) -> Result<(), DbError> {
+pub fn delete(conn: &Connection, id: NoteId) -> Result<(), DbError> {
     match conn.execute("DELETE FROM notes WHERE id = ?1", [id.to_string()])? {
         0 => Err(DbError::NotFound("note")),
         _ => Ok(()),

@@ -158,7 +158,7 @@ mod post_v1_notes {
 mod get_v1_notes {
     use super::*;
 
-    async fn list(request: agentdeck_client::builder::NoteList<'_>) -> Vec<uuid::Uuid> {
+    async fn list(request: agentdeck_client::builder::NoteList<'_>) -> Vec<agentdeck_core::NoteId> {
         request
             .send()
             .await

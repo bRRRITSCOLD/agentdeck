@@ -2,17 +2,17 @@
 
 use std::path::{Path, PathBuf};
 
+use agentdeck_core::WorkspaceId;
 use rusqlite::{Connection, OptionalExtension, Row, params};
-use uuid::Uuid;
 
-use super::{DbError, id, new_id, now};
+use super::{DbError, new_id, now, text};
 use crate::model::{Workspace, WorkspacePatch};
 
 const COLUMNS: &str = "id, slug, name, dir, dir_owned, muted, archived_at, created_at";
 
 fn from_row(row: &Row<'_>) -> rusqlite::Result<Workspace> {
     Ok(Workspace {
-        id: id(row, "id")?,
+        id: text(row, "id")?,
         slug: row.get("slug")?,
         name: row.get("name")?,
         dir: row.get("dir")?,
@@ -33,7 +33,7 @@ pub fn list(conn: &Connection) -> Result<Vec<Workspace>, DbError> {
 }
 
 /// One workspace.
-pub fn get(conn: &Connection, id: Uuid) -> Result<Workspace, DbError> {
+pub fn get(conn: &Connection, id: WorkspaceId) -> Result<Workspace, DbError> {
     conn.query_row(
         &format!("SELECT {COLUMNS} FROM workspaces WHERE id = ?1"),
         [id.to_string()],
@@ -79,7 +79,7 @@ pub fn create(
             (dir, true)
         }
     };
-    let id = new_id();
+    let id: WorkspaceId = new_id();
     conn.execute(
         "INSERT INTO workspaces (id, slug, name, dir, dir_owned, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -96,7 +96,11 @@ pub fn create(
 }
 
 /// Applies the fields `patch` sets.
-pub fn update(conn: &Connection, id: Uuid, patch: &WorkspacePatch) -> Result<Workspace, DbError> {
+pub fn update(
+    conn: &Connection,
+    id: WorkspaceId,
+    patch: &WorkspacePatch,
+) -> Result<Workspace, DbError> {
     get(conn, id)?;
     if let Some(name) = &patch.name {
         conn.execute(
@@ -114,7 +118,11 @@ pub fn update(conn: &Connection, id: Uuid, patch: &WorkspacePatch) -> Result<Wor
 }
 
 /// Archives (stamping now) or unarchives. Archiving an archived workspace keeps its stamp.
-pub fn set_archived(conn: &Connection, id: Uuid, archived: bool) -> Result<Workspace, DbError> {
+pub fn set_archived(
+    conn: &Connection,
+    id: WorkspaceId,
+    archived: bool,
+) -> Result<Workspace, DbError> {
     get(conn, id)?;
     if archived {
         conn.execute(
@@ -131,7 +139,7 @@ pub fn set_archived(conn: &Connection, id: Uuid, archived: bool) -> Result<Works
 }
 
 /// Deletes the row. Its tabs, panes and notes go with it; its tasks move to the inbox.
-pub fn delete(conn: &Connection, id: Uuid) -> Result<(), DbError> {
+pub fn delete(conn: &Connection, id: WorkspaceId) -> Result<(), DbError> {
     match conn.execute("DELETE FROM workspaces WHERE id = ?1", [id.to_string()])? {
         0 => Err(DbError::NotFound("workspace")),
         _ => Ok(()),
