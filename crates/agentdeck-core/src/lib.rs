@@ -12,6 +12,7 @@ pub mod id;
 pub mod layout;
 pub mod pane;
 pub mod pr;
+pub mod state;
 pub mod task;
 
 pub use id::{NoteId, PaneId, TabId, TaskId, WorkspaceId};
