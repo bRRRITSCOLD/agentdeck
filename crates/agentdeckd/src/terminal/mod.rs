@@ -7,7 +7,7 @@
 //!   terminal queries.
 //! - [`fanout`]: a pane's attached WebSocket clients: output, `lagged`, the primary rule.
 //! - [`snapshot`]: the `Term` re-encoded for an attaching client.
-//! - [`env`]: a pane's environment, from an allowlist.
+//! - [`env`](mod@env): a pane's environment, from an allowlist.
 //! - [`rules`]: which state rules a pane runs.
 //! - [`tail`], [`palette`]: the raw output tail and the colours queries are answered with.
 
