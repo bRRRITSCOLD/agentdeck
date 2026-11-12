@@ -219,6 +219,8 @@ agentdeck mcp            # MCP server over stdio
 
 Built on `brrritscold-core-gpui` (`init`, `Root`, theme preference, toasts). Screens follow the Penpot page design. The design is made before GUI work starts; until then, this list is the outline.
 
+**Dark mode is first class.** Every screen is designed, built and checked in Dark first, then Light, to the same standard. Every GUI capture set includes both modes. The terminal palette follows the active mode.
+
 - **Sidebar:** workspaces, each with a rolled-up state (any blocked → blocked, else any working → working, else any done → done) and its unread-note and PR counts. Inbox and Tasks entries sit at the top.
 - **Workspace view:** tabs, with split panes inside each. Each pane has a header showing its title, state and linked task.
 - **Right panel**, which can be toggled: the workspace's tasks and PRs, as a list grouped by status, plus its notes.
