@@ -5,23 +5,10 @@ use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::PathBuf;
 
+use agentdeck_core::DaemonInfo;
 use anyhow::{Context, bail};
-use serde::{Deserialize, Serialize};
 
 use crate::paths::Paths;
-
-/// What `daemon.json` holds.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct DaemonInfo {
-    /// The port on 127.0.0.1.
-    pub port: u16,
-    /// The bearer token every request carries.
-    pub token: String,
-    /// The daemon's process id.
-    pub pid: u32,
-    /// The daemon's version.
-    pub version: String,
-}
 
 /// Holds the single-instance lock until dropped, and removes `daemon.json` then.
 pub struct Instance {

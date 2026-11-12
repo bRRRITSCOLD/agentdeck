@@ -42,6 +42,8 @@ vte = { version = "0.15", default-features = false, features = ["std"] }
 # Exact pins, each at least two weeks old when added. dropshot 0.17 is on schemars 0.8 and slog;
 # rusqlite follows the line rusqlite_migration 2.6 supports; reqwest follows progenitor-client.
 async-trait = "=0.1.92"
+# The CLI's argument parser (MIT OR Apache-2.0).
+clap = { version = "=4.6.7", features = ["derive", "env"] }
 chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
 dropshot = "=0.17.1"
 # Integration tests only: GitHub's GraphQL API, intercepted (MIT). Default features off (cookies).
@@ -57,6 +59,9 @@ prettyplease = "=0.3.0"
 progenitor = { version = "=0.15.1", default-features = false }
 progenitor-client = "=0.15.1"
 reqwest = { version = "=0.13.5", default-features = false, features = ["json", "query"] }
+# `agentdeck mcp`'s MCP server over stdio (Apache-2.0). Its tool parameters derive `JsonSchema`
+# through `rmcp::schemars` (schemars 1), not the daemon's schemars 0.8.
+rmcp = { version = "=3.7.0", default-features = false, features = ["server", "macros", "schemars", "transport-io"] }
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 rusqlite_migration = "=2.6.0"
 schemars = { version = "=0.8.22", features = ["uuid1"] }

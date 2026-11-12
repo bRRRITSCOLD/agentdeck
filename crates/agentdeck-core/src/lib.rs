@@ -1,6 +1,7 @@
 //! GPUI-free domain types for agentdeck: ids, states and the state rules engine.
 //! No IO, no GPUI, no tokio.
 //!
+//! - [`daemon`]: `daemon.json`, where clients find the daemon.
 //! - [`id`]: one id newtype per entity.
 //! - [`pane`], [`task`], [`pr`]: the text-valued columns of spec §3 as enums.
 //! - [`layout`]: a tab's split tree.
@@ -14,6 +15,7 @@
 mod schema;
 mod text_enum;
 
+pub mod daemon;
 pub mod id;
 pub mod layout;
 pub mod pane;
@@ -22,6 +24,7 @@ pub mod state;
 pub mod task;
 pub mod ws;
 
+pub use daemon::DaemonInfo;
 pub use id::{NoteId, PaneId, TabId, TaskId, WorkspaceId};
 pub use layout::{Layout, LayoutError, Ratio, SplitDirection};
 pub use pane::{Agent, PaneKind};

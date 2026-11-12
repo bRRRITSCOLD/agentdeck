@@ -1,0 +1,300 @@
+//! Running each CLI command against the daemon.
+
+use std::path::Path;
+
+use agentdeck_client::Client;
+use agentdeck_client::types::{
+    InputWhen, NewNote, NewTask, NewWorkspace, NotePatch, PaneInput, TaskPatch,
+};
+use agentdeck_core::{PaneId, WorkspaceId};
+use anyhow::Context;
+use futures_util::TryStreamExt;
+use serde::Serialize;
+use serde_json::{Value, json};
+
+use crate::api::ApiError;
+use crate::cli::{AgentCommand, Command, NoteCommand, PrCommand, TaskCommand, WsCommand};
+use crate::{render, resolve};
+
+/// Names the pane an agent runs in; `note read` records it as the reader.
+pub const PANE_VAR: &str = "AGENTDECK_PANE";
+
+/// What a command prints: `json` with `--json`, else `human`.
+pub struct Output {
+    /// The machine-readable form, usually the API's own object.
+    pub json: Value,
+    /// The human-readable form; raw bytes for `tail`.
+    pub human: Vec<u8>,
+}
+
+impl Output {
+    fn new(json: &impl Serialize, human: String) -> anyhow::Result<Output> {
+        Ok(Output {
+            json: serde_json::to_value(json)?,
+            human: human.into_bytes(),
+        })
+    }
+}
+
+/// Runs `command`, except `mcp`, which `main` serves itself.
+pub async fn run(client: &Client, command: Command) -> anyhow::Result<Output> {
+    match command {
+        Command::Ws(command) => ws(client, command).await,
+        Command::Task(command) => task(client, command).await,
+        Command::Note(command) => note(client, command).await,
+        Command::Agent(command) => agent(client, command).await,
+        Command::Pr(command) => pr(client, command).await,
+        Command::Tail { pane, bytes } => tail(client, pane, bytes).await,
+        Command::Mcp => unreachable!("main serves mcp"),
+    }
+}
+
+/// The workspace `reference` names: an id, a slug or a name.
+pub async fn workspace_id(client: &Client, reference: &str) -> anyhow::Result<WorkspaceId> {
+    if let Ok(id) = reference.parse() {
+        return Ok(id);
+    }
+    let workspaces = client
+        .workspace_list()
+        .send()
+        .await
+        .map_err(ApiError::from)?
+        .into_inner();
+    resolve::workspace(&workspaces, reference)
+}
+
+async fn optional_workspace(
+    client: &Client,
+    reference: Option<&str>,
+) -> anyhow::Result<Option<WorkspaceId>> {
+    match reference {
+        Some(reference) => Ok(Some(workspace_id(client, reference).await?)),
+        None => Ok(None),
+    }
+}
+
+/// An absolute form of `dir`, since the daemon takes only absolute dirs.
+fn absolute(dir: &Path) -> anyhow::Result<String> {
+    let dir = std::path::absolute(dir).with_context(|| format!("resolving {}", dir.display()))?;
+    dir.into_os_string()
+        .into_string()
+        .map_err(|dir| anyhow::anyhow!("{} isn't UTF-8", Path::new(&dir).display()))
+}
+
+async fn ws(client: &Client, command: WsCommand) -> anyhow::Result<Output> {
+    match command {
+        WsCommand::Ls => {
+            let list = client
+                .workspace_list()
+                .send()
+                .await
+                .map_err(ApiError::from)?;
+            Output::new(&*list, render::workspaces(&list))
+        }
+        WsCommand::New { name, dir } => {
+            let dir = dir.as_deref().map(absolute).transpose()?;
+            let ws = client
+                .workspace_create()
+                .body(NewWorkspace { dir, name })
+                .send()
+                .await
+                .map_err(ApiError::from)?;
+            Output::new(&*ws, render::workspace(&ws))
+        }
+        WsCommand::Archive { ws } => {
+            let id = workspace_id(client, &ws).await?;
+            let ws = client
+                .workspace_archive()
+                .id(id)
+                .send()
+                .await
+                .map_err(ApiError::from)?;
+            Output::new(&*ws, format!("archived {}\n", ws.slug))
+        }
+        WsCommand::Rm { ws, force } => {
+            let id = workspace_id(client, &ws).await?;
+            match client.workspace_delete().id(id).force(force).send().await {
+                Ok(_) => Output::new(
+                    &json!({ "id": id, "deleted": true }),
+                    format!("deleted {ws}\n"),
+                ),
+                Err(agentdeck_client::Error::ErrorResponse(response))
+                    if response.error_code.as_deref() == Some("dirty") =>
+                {
+                    let report = response.into_inner().dirty;
+                    anyhow::bail!(
+                        "{ws} holds work that isn't pushed; `--force` deletes it anyway:\n{}",
+                        report
+                            .as_ref()
+                            .map(render::dirty)
+                            .unwrap_or_default()
+                            .trim_end()
+                    )
+                }
+                Err(err) => Err(ApiError::from(err).into()),
+            }
+        }
+    }
+}
+
+async fn task(client: &Client, command: TaskCommand) -> anyhow::Result<Output> {
+    match command {
+        TaskCommand::Ls { status, ws, inbox } => {
+            let mut request = client.task_list();
+            if let Some(status) = status {
+                request = request.status(status);
+            }
+            if let Some(ws) = optional_workspace(client, ws.as_deref()).await? {
+                request = request.workspace(ws);
+            }
+            if inbox {
+                request = request.inbox(true);
+            }
+            let tasks = request.send().await.map_err(ApiError::from)?;
+            Output::new(&*tasks, render::tasks(&tasks))
+        }
+        TaskCommand::Add { title, ws, body } => {
+            let workspace_id = optional_workspace(client, ws.as_deref()).await?;
+            let task = client
+                .task_create()
+                .body(NewTask {
+                    body,
+                    status: None,
+                    title,
+                    workspace_id,
+                })
+                .send()
+                .await
+                .map_err(ApiError::from)?;
+            Output::new(&*task, render::task(&task))
+        }
+        TaskCommand::Set { id, status } => {
+            let task = client
+                .task_update()
+                .id(id)
+                .body(TaskPatch {
+                    status: Some(status),
+                    ..TaskPatch::default()
+                })
+                .send()
+                .await
+                .map_err(ApiError::from)?;
+            Output::new(&*task, render::task(&task))
+        }
+        TaskCommand::Show { id } => {
+            let task = client
+                .task_get()
+                .id(id)
+                .send()
+                .await
+                .map_err(ApiError::from)?;
+            Output::new(&*task, render::task(&task))
+        }
+    }
+}
+
+async fn note(client: &Client, command: NoteCommand) -> anyhow::Result<Output> {
+    match command {
+        NoteCommand::Ls { ws, task, unread } => {
+            let mut request = client.note_list();
+            if let Some(ws) = optional_workspace(client, ws.as_deref()).await? {
+                request = request.workspace(ws);
+            }
+            if let Some(task) = task {
+                request = request.task(task);
+            }
+            if unread {
+                request = request.unread(true);
+            }
+            let notes = request.send().await.map_err(ApiError::from)?;
+            Output::new(&*notes, render::notes(&notes))
+        }
+        NoteCommand::Add { body, on } => {
+            let workspace_id = optional_workspace(client, on.ws.as_deref()).await?;
+            let note = client
+                .note_create()
+                .body(NewNote {
+                    body,
+                    task_id: on.task,
+                    workspace_id,
+                })
+                .send()
+                .await
+                .map_err(ApiError::from)?;
+            Output::new(&*note, render::note_created(&note))
+        }
+        NoteCommand::Read { id } => {
+            let note = client
+                .note_update()
+                .id(id)
+                .body(NotePatch {
+                    read: Some(true),
+                    read_by_pane: caller_pane(),
+                    ..NotePatch::default()
+                })
+                .send()
+                .await
+                .map_err(ApiError::from)?;
+            Output::new(&*note, render::note_body(&note))
+        }
+    }
+}
+
+/// `$AGENTDECK_PANE`, when it holds a pane id.
+pub fn caller_pane() -> Option<PaneId> {
+    std::env::var(PANE_VAR).ok()?.parse().ok()
+}
+
+async fn agent(client: &Client, command: AgentCommand) -> anyhow::Result<Output> {
+    match command {
+        AgentCommand::New { .. } => anyhow::bail!(
+            "`agentdeck agent new` isn't available yet: launching agents lands with \
+             https://github.com/bRRRITSCOLD/agentdeck/issues/16"
+        ),
+        AgentCommand::Send { pane, text, now } => {
+            let accepted = client
+                .pane_input()
+                .id(pane)
+                .body(PaneInput {
+                    text: format!("{text}\r"),
+                    when: if now { InputWhen::Now } else { InputWhen::Idle },
+                })
+                .send()
+                .await
+                .map_err(ApiError::from)?;
+            let human = if accepted.queued {
+                format!("queued until {pane} is idle\n")
+            } else {
+                format!("sent to {pane}\n")
+            };
+            Output::new(&*accepted, human)
+        }
+    }
+}
+
+async fn pr(client: &Client, command: PrCommand) -> anyhow::Result<Output> {
+    let status = match command {
+        PrCommand::Sync => client.prs_sync().send().await,
+        PrCommand::Status => client.prs_status().send().await,
+    }
+    .map_err(ApiError::from)?;
+    Output::new(&*status, render::pr_status(&status))
+}
+
+async fn tail(client: &Client, pane: PaneId, bytes: Option<u64>) -> anyhow::Result<Output> {
+    let mut request = client.pane_tail().id(pane);
+    if let Some(bytes) = bytes {
+        request = request.bytes(bytes);
+    }
+    let stream = request.send().await.map_err(ApiError::from)?.into_inner();
+    let chunks: Vec<_> = stream
+        .into_inner()
+        .try_collect()
+        .await
+        .context("reading the pane's output")?;
+    let output = chunks.concat();
+    Ok(Output {
+        json: json!({ "pane": pane, "output": String::from_utf8_lossy(&output) }),
+        human: output,
+    })
+}
