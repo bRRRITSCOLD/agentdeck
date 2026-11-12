@@ -4,6 +4,7 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
+use agentdeck_core::DaemonInfo;
 use anyhow::Context;
 use dropshot::{ConfigDropshot, ServerBuilder};
 use tokio::signal::unix::{SignalKind, signal};
@@ -11,7 +12,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use crate::api::{ApiContext, api};
 use crate::db::Db;
 use crate::events::Events;
-use crate::instance::{DaemonInfo, Instance};
+use crate::instance::Instance;
 use crate::paths::Paths;
 use crate::prsync::{self, PrSync};
 use crate::terminal::Terminals;

@@ -11,7 +11,7 @@ One Cargo virtual workspace, pinned like rust-packages: GPUI pin, toolchain 1.99
 | `agentdeck-core` | lib | — | Domain types, ids, state rules engine, no IO, no GPUI, no tokio |
 | `agentdeckd` | bin | core | tokio, dropshot, rusqlite, portable-pty, alacritty_terminal |
 | `agentdeck-client` | lib | core | progenitor output from `openapi.json`, checked in, built by `cargo xtask client` |
-| `agentdeck` | bin | core, client | CLI and `agentdeck mcp`; no GPUI, no tokio |
+| `agentdeck` | bin | core, client | CLI and `agentdeck mcp` (rmcp); no GPUI. A current-thread tokio runtime drives the async client and the MCP server |
 | `agentdeck-gui` | bin | core, client, `brrritscold-core-gpui` | GPUI app |
 | `xtask` | bin | — | `openapi` (regenerate spec), `client` (regenerate client), `ci` |
 
@@ -225,7 +225,7 @@ min_ms = 400                   # a new state must hold this long before it is pu
 
 ## 10. CLI and MCP
 
-`agentdeck` (clap) reads `daemon.json` and starts the daemon when it isn't running. Output is human-readable, or JSON with `--json`.
+`agentdeck` (clap) reads `daemon.json` and starts the daemon when it isn't running: no file, a pid that isn't running, or a port that refuses the connection. It starts `$AGENTDECK_DAEMON` if set, else the `agentdeckd` beside its own executable, else `agentdeckd` from `PATH`, in its own process group with no terminal, and waits up to 10 s for a `daemon.json` that answers `/v1/health`. Output is human-readable, or with `--json` the API's own objects (`ws rm` prints `{id, deleted}`, `tail` prints `{pane, output}`). A failure prints `agentdeck: <message> (<error_code>)` to stderr and exits 1.
 
 ```
 agentdeck ws ls | new <name> [--dir PATH] | archive <ws> | rm <ws> [--force]
@@ -237,9 +237,21 @@ agentdeck tail <pane> [--bytes N]
 agentdeck mcp            # MCP server over stdio
 ```
 
+- A `WS` or `<ws>` is a workspace's id, slug or name, tried in that order; a name two workspaces share is an error that lists their slugs.
+- `ws new --dir` takes a path relative to the current directory too; the CLI sends it absolute.
+- `ws rm` without `--force` on a dirty dir prints the dirty report and exits 1.
+- `agent new` launches the agent with `POST /v1/panes` (no `argv`: the daemon builds it and the launch prompt) in `--cwd`, made absolute, or the workspace's dir. The pane goes in the workspace's first tab with no panes, else in a new tab titled after the agent, and becomes that tab's layout. A tab made for a launch that fails is deleted.
+- `agent send` types the text followed by `\r` (Enter), with `when: "idle"`, or `"now"` with `--now`.
+- `note read` prints the note and marks it read, recording `$AGENTDECK_PANE` as the reader when it is set.
+
 **MCP tools** (rmcp): `tasks_list`, `task_get`, `task_create`, `task_update`, `notes_list`, `note_create`, `note_mark_read`, `workspaces_list`, `prs_status`.
 - `AGENTDECK_PANE` and `AGENTDECK_WORKSPACE` are set in every pane's environment. They are added on top of the allowlist.
-- Tools default to the caller's workspace and pane.
+- Tools default to the caller's workspace and pane:
+  - `tasks_list` and `notes_list` list the caller's workspace unless given a `workspace` (or, for notes, a `task`); `tasks_list` takes `inbox: true` for the inbox, and both take `all_workspaces: true` for everything. Outside a workspace they list everything.
+  - `task_create` and `note_create` (without a `task`) go to the caller's workspace unless given one; a note with neither is an error.
+  - `note_mark_read` records the caller's pane as the reader.
+- Each tool answers with the API's JSON object as text. A failure (a bad argument, or the daemon's error with its `error_code`) is a tool result with `isError: true`, not a protocol error.
+- Each call reaches the daemon the way the CLI does, so a daemon restarted under a long-lived `agentdeck mcp` is found again.
 
 ## 11. GUI
 
@@ -272,6 +284,7 @@ Built on `brrritscold-core-gpui` (`init`, `Root`, theme preference, toasts). Scr
 |---|---|---|
 | unit | `agentdeck-core`, GUI views (`#[gpui::test]`), daemon pure parts | rules with recorded output, layout tree, snapshot encode/decode round-trip, env allowlist, `openapi.json` staleness |
 | integration | `agentdeckd/tests/integration` | temp `$XDG_*` dirs, a real daemon on a random port, a real client; PTYs run `sh`; GitHub is httpmock; `gh` is a stub script on `PATH` |
+| integration | `agentdeck/tests/integration` | the real `agentdeck` binary in temp `$XDG_*` dirs, starting the real daemon itself; `agentdeck mcp` driven over stdio with hand-written JSON-RPC; panes run `sh`, never a real agent CLI |
 
 There is no e2e tier. GPUI's headless context doesn't advance real sockets, so anything touching sockets is an integration test. CI is Linux only: fmt, clippy, unit, integration and doc, with warnings denied.
 
