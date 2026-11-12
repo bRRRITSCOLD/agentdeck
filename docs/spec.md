@@ -259,6 +259,7 @@ Built on `brrritscold-core-gpui` (`init`, `Root`, theme preference, toasts). Scr
 
 **Dark mode is first class.** Every screen is designed, built and checked in Dark first, then Light, to the same standard. Every GUI capture set includes both modes. The terminal palette follows the active mode. The theme preference defaults to `System` (follows the OS appearance); Settings and the command palette offer System / Dark / Light, saved in `config.toml`.
 
+- **Title bar:** the window asks for the compositor's frame. Where the compositor draws none (GNOME's Mutter on Wayland), the app draws a 32px title bar across the top: drag to move, double-click to maximize, right-click for the window menu, minimize / maximize / close at the right. 4px resize strips run along the window's inside edges, except on a tiled side. Everything else sits under it.
 - **Sidebar:** workspaces, each with a rolled-up state (any blocked → blocked, else any working → working, else any done → done) and its unread-note and PR counts. Inbox and Tasks entries sit at the top.
 - **Workspace view:** tabs, with split panes inside each. Each pane has a header showing its title, state and linked task.
 - **Right panel**, which can be toggled: the workspace's tasks and PRs, as a list grouped by status, plus its notes.
