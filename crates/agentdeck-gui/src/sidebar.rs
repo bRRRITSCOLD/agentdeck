@@ -319,7 +319,8 @@ impl Render for SidebarView {
             )
             .child(inbox)
             .child(tasks)
-            .child(Separator::new())
+            // Penpot gives the separator 8px above and below, on top of the 4px row gap.
+            .child(Separator::new().my(space::S2))
             // Penpot `Section`.
             .child(small().font_weight(font_weight::MEDIUM).child("Workspaces"))
             // Penpot's `Spacer` pushes the footer down; the list takes that room and scrolls.
