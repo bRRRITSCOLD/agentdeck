@@ -270,7 +270,8 @@ Built on `brrritscold-core-gpui` (`init`, `Root`, theme preference, toasts). Scr
   - **Zed's GPL-3.0 terminal crates are never copied.**
   - The font is Inter for the UI. The terminal gets a monospace font with a symbols fallback for agent glyphs (`⎿`, `✻`, `◐`).
 - **Colours** use semantic tokens only.
-  - Agent state: working `info`, blocked `warning`, done `success`, idle/unknown/exited-0 `muted-foreground`, exited ≠ 0 `destructive`.
+  - Agent state: working `info`, blocked `destructive`, done `success`, idle/unknown/exited-0 `muted-foreground`, exited ≠ 0 `destructive`.
+  - Blocked and a failed exit share red, as in herdr: the label (`blocked` vs `exited 1`) and the StateDot shape (a filled dot vs a red `OctagonX`) tell them apart, so colour is never the only signal.
   - Checks: passing `success`, pending `info`, failing `destructive`.
   - Review: approved `success`, changes requested `warning`, required `muted-foreground`.
   - Task statuses aren't coloured.
