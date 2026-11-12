@@ -20,6 +20,9 @@ const CORE_TYPES: &[&str] = &[
     "NoteId",
     "TaskStatus",
     "TaskKind",
+    "PrState",
+    "ChecksState",
+    "ReviewState",
     "SplitDirection",
     "Layout",
 ];

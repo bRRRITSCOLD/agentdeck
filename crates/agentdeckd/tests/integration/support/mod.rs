@@ -2,6 +2,7 @@
 //! `agentdeck-client` (spec §12).
 
 pub mod git;
+pub mod github;
 
 use std::fmt::Debug;
 use std::fs::File;
@@ -36,7 +37,8 @@ pub struct TestDaemon {
 }
 
 impl TestDaemon {
-    /// Starts a daemon on fresh temp dirs and waits until it serves.
+    /// Starts a daemon on fresh temp dirs and waits until it serves. Its `gh` is logged out
+    /// and its GitHub is unreachable, so it never calls the real one.
     pub async fn start() -> TestDaemon {
         let dirs = tempfile::tempdir().expect("a temp dir");
         TestDaemon::start_in(dirs).await
@@ -44,7 +46,13 @@ impl TestDaemon {
 
     /// Starts a daemon on `dirs`, which may hold an earlier daemon's data.
     pub async fn start_in(dirs: TempDir) -> TestDaemon {
-        let mut child = spawn(dirs.path());
+        TestDaemon::start_with_github(dirs, github::UNREACHABLE).await
+    }
+
+    /// Starts a daemon on `dirs` whose PR sync calls the GraphQL API at `github_api`. Its
+    /// `gh` prints the token [`github::set_gh_token`] wrote under `dirs`, if any.
+    pub async fn start_with_github(dirs: TempDir, github_api: &str) -> TestDaemon {
+        let mut child = spawn(dirs.path(), github_api);
         let daemon_json = daemon_json(dirs.path());
         let deadline = Instant::now() + TIMEOUT;
         let info = loop {
@@ -115,7 +123,7 @@ impl TestDaemon {
     /// Starts another daemon on the same dirs and waits for it to exit.
     pub fn run_another(&self) -> (ExitStatus, String) {
         let stderr_path = self.root().join("another.stderr");
-        let status = command(self.root(), &stderr_path)
+        let status = command(self.root(), &stderr_path, github::UNREACHABLE)
             .status()
             .expect("running agentdeckd");
         (
@@ -163,21 +171,23 @@ fn stderr(root: &Path) -> String {
     std::fs::read_to_string(root.join("agentdeckd.stderr")).unwrap_or_default()
 }
 
-fn spawn(root: &Path) -> Child {
-    command(root, &root.join("agentdeckd.stderr"))
+fn spawn(root: &Path, github_api: &str) -> Child {
+    command(root, &root.join("agentdeckd.stderr"), github_api)
         .spawn()
         .expect("starting agentdeckd")
 }
 
-/// `agentdeckd` with only `PATH` from the test's environment, `$HOME` and every `$XDG_*`
-/// dir under `root`, and stderr to a file (a pipe nobody reads would fill and block it).
-fn command(root: &Path, stderr: &Path) -> Command {
+/// `agentdeckd` with only `PATH` from the test's environment, behind a stub `gh`; `$HOME`
+/// and every `$XDG_*` dir under `root`; GitHub at `github_api`; and stderr to a file (a pipe
+/// nobody reads would fill and block it).
+fn command(root: &Path, stderr: &Path, github_api: &str) -> Command {
     let home = root.join("home");
     std::fs::create_dir_all(&home).expect("creating $HOME");
     let mut command = Command::new(env!("CARGO_BIN_EXE_agentdeckd"));
     command
         .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("PATH", github::path_with_stub_gh(root))
+        .env("AGENTDECK_GITHUB_API", github_api)
         .env("HOME", &home)
         .env("XDG_RUNTIME_DIR", root.join("run"))
         .env("XDG_DATA_HOME", root.join("data"))

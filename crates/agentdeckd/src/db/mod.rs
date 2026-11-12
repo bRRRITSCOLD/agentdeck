@@ -4,6 +4,7 @@
 //! run them on the actor with [`Db::call`].
 
 pub mod notes;
+pub mod pull_requests;
 pub mod tabs;
 pub mod tasks;
 pub mod workspaces;

@@ -23,6 +23,14 @@
       }
     },
     "schemas": {
+      "ChecksState": {
+        "enum": [
+          "pending",
+          "success",
+          "failure"
+        ],
+        "type": "string"
+      },
       "DeleteWorkspaceError": {
         "description": "`DELETE /v1/workspaces/{id}`'s error: dropshot's error body, plus the dirty report when `error_code` is `dirty` (409).",
         "properties": {
@@ -113,6 +121,25 @@
           "request_id"
         ],
         "type": "object"
+      },
+      "GhLogin": {
+        "description": "Whether `gh auth token` gives the daemon a GitHub token.",
+        "oneOf": [
+          {
+            "description": "`gh` printed a token GitHub accepted, or one not yet tried.",
+            "enum": [
+              "logged_in"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "No `gh`, `gh` not logged in, or GitHub rejected its token. The GUI shows a banner.",
+            "enum": [
+              "logged_out"
+            ],
+            "type": "string"
+          }
+        ]
       },
       "Health": {
         "description": "`GET /v1/health`.",
@@ -404,6 +431,120 @@
         "format": "uuid",
         "type": "string"
       },
+      "PrState": {
+        "enum": [
+          "open",
+          "merged",
+          "closed"
+        ],
+        "type": "string"
+      },
+      "PrSyncStatus": {
+        "description": "`GET /v1/prs/status` and `POST /v1/prs/sync`: the `gh` login and the last sync.",
+        "properties": {
+          "last_error": {
+            "description": "Why the most recent sync failed; `None` when it succeeded or none has run.",
+            "nullable": true,
+            "type": "string"
+          },
+          "last_synced_at": {
+            "description": "When the last successful sync finished; `None` until one has.",
+            "nullable": true,
+            "type": "string"
+          },
+          "login": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/GhLogin"
+              }
+            ],
+            "description": "The `gh` login state."
+          }
+        },
+        "required": [
+          "login"
+        ],
+        "type": "object"
+      },
+      "PullRequest": {
+        "description": "The GitHub pull request behind a PR task, as PR sync last saw it (spec §8).",
+        "properties": {
+          "checks": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChecksState"
+              }
+            ],
+            "description": "The head commit's rolled-up checks; `None` when it has none.",
+            "nullable": true
+          },
+          "draft": {
+            "description": "A draft PR.",
+            "type": "boolean"
+          },
+          "head_ref": {
+            "description": "The branch the PR merges from.",
+            "type": "string"
+          },
+          "number": {
+            "description": "The PR's number in that repo.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "repo": {
+            "description": "`owner/name` of the repo the PR targets.",
+            "type": "string"
+          },
+          "review": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ReviewState"
+              }
+            ],
+            "description": "The review decision; `None` when the repo requires no review.",
+            "nullable": true
+          },
+          "state": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PrState"
+              }
+            ],
+            "description": "Open, merged or closed."
+          },
+          "synced_at": {
+            "description": "When PR sync last saw the PR.",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "When the PR last changed on GitHub.",
+            "type": "string"
+          },
+          "url": {
+            "description": "The PR's web URL.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "draft",
+          "head_ref",
+          "number",
+          "repo",
+          "state",
+          "synced_at",
+          "updated_at",
+          "url"
+        ],
+        "type": "object"
+      },
+      "ReviewState": {
+        "enum": [
+          "approved",
+          "changes_requested",
+          "review_required"
+        ],
+        "type": "string"
+      },
       "SplitDirection": {
         "enum": [
           "h",
@@ -518,6 +659,15 @@
               }
             ],
             "description": "Plain or PR."
+          },
+          "pr": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PullRequest"
+              }
+            ],
+            "description": "The pull request behind a PR task; `None` for a plain task.",
+            "nullable": true
           },
           "status": {
             "allOf": [
@@ -871,6 +1021,55 @@
           }
         },
         "summary": "Edits a note, or marks it read or unread."
+      }
+    },
+    "/v1/prs/status": {
+      "get": {
+        "operationId": "prs_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrSyncStatus"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "The `gh` login state and the last sync."
+      }
+    },
+    "/v1/prs/sync": {
+      "post": {
+        "description": "when a task is opened. A sync that fails still answers 200: `last_error` says why, and `login` is `logged_out` when there's no usable `gh` token.",
+        "operationId": "prs_sync",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrSyncStatus"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Syncs PR tasks with GitHub now and answers with the status the sync left. Clients call it"
       }
     },
     "/v1/tabs/{id}": {

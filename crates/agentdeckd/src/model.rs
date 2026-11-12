@@ -1,7 +1,10 @@
 //! The API's request and response bodies (spec §3, §4). Ids, column enums and the layout
 //! tree are `agentdeck-core`'s, so the client shares them.
 
-use agentdeck_core::{Layout, NoteId, PaneId, TabId, TaskId, TaskKind, TaskStatus, WorkspaceId};
+use agentdeck_core::{
+    ChecksState, Layout, NoteId, PaneId, PrState, ReviewState, TabId, TaskId, TaskKind, TaskStatus,
+    WorkspaceId,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -127,6 +130,33 @@ pub struct Task {
     pub updated_at: String,
     /// When the task last moved to done; `None` while it isn't done.
     pub done_at: Option<String>,
+    /// The pull request behind a PR task; `None` for a plain task.
+    pub pr: Option<PullRequest>,
+}
+
+/// The GitHub pull request behind a PR task, as PR sync last saw it (spec §8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PullRequest {
+    /// `owner/name` of the repo the PR targets.
+    pub repo: String,
+    /// The PR's number in that repo.
+    pub number: i64,
+    /// The PR's web URL.
+    pub url: String,
+    /// Open, merged or closed.
+    pub state: PrState,
+    /// A draft PR.
+    pub draft: bool,
+    /// The branch the PR merges from.
+    pub head_ref: String,
+    /// The head commit's rolled-up checks; `None` when it has none.
+    pub checks: Option<ChecksState>,
+    /// The review decision; `None` when the repo requires no review.
+    pub review: Option<ReviewState>,
+    /// When the PR last changed on GitHub.
+    pub updated_at: String,
+    /// When PR sync last saw the PR.
+    pub synced_at: String,
 }
 
 /// `POST /v1/tasks`.
@@ -218,4 +248,25 @@ pub struct NoteFilter {
     pub task: Option<TaskId>,
     /// `true`: only unread notes; `false`: only read ones.
     pub unread: Option<bool>,
+}
+
+/// Whether `gh auth token` gives the daemon a GitHub token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GhLogin {
+    /// `gh` printed a token GitHub accepted, or one not yet tried.
+    LoggedIn,
+    /// No `gh`, `gh` not logged in, or GitHub rejected its token. The GUI shows a banner.
+    LoggedOut,
+}
+
+/// `GET /v1/prs/status` and `POST /v1/prs/sync`: the `gh` login and the last sync.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PrSyncStatus {
+    /// The `gh` login state.
+    pub login: GhLogin,
+    /// When the last successful sync finished; `None` until one has.
+    pub last_synced_at: Option<String>,
+    /// Why the most recent sync failed; `None` when it succeeded or none has run.
+    pub last_error: Option<String>,
 }

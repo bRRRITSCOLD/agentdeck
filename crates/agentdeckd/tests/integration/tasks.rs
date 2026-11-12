@@ -71,6 +71,7 @@ mod post_v1_tasks {
         assert_eq!(task.body, "");
         assert_eq!(task.status, TaskStatus::Todo);
         assert_eq!(task.kind, TaskKind::Plain);
+        assert_eq!(task.pr, None);
         assert_eq!(task.workspace_id, None);
         assert_eq!(task.done_at, None);
         assert_eq!(task.created_at, task.updated_at);

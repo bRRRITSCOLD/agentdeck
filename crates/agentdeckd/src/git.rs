@@ -42,7 +42,7 @@ pub fn dirty_report(dir: &Path) -> io::Result<DirtyReport> {
 
 /// The dirs at or under `dir`, `depth` levels down at most, that hold a `.git`. Symlinks are
 /// not followed and a repo's subdirs are not searched. A missing `dir` has no repos.
-fn find_repos(dir: &Path, depth: usize) -> io::Result<Vec<PathBuf>> {
+pub(crate) fn find_repos(dir: &Path, depth: usize) -> io::Result<Vec<PathBuf>> {
     if dir.join(".git").exists() {
         return Ok(vec![dir.to_path_buf()]);
     }

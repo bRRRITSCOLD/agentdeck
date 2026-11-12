@@ -6,6 +6,7 @@ mod auth;
 mod daemon;
 mod health;
 mod notes;
+mod prs;
 mod support;
 mod tabs;
 mod tasks;

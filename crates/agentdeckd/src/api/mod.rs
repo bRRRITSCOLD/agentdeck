@@ -6,6 +6,7 @@
 
 mod health;
 mod notes;
+mod prs;
 mod tabs;
 mod tasks;
 mod workspaces;
@@ -24,6 +25,7 @@ use serde::Deserialize;
 
 use crate::auth::bearer_matches;
 use crate::db::{Db, DbError};
+use crate::prsync::PrSync;
 
 /// The version `openapi.json` declares: the API is `/v1`.
 const API_VERSION: semver::Version = semver::Version::new(1, 0, 0);
@@ -38,6 +40,8 @@ pub struct ApiContext {
     pub started: Instant,
     /// Where scratch workspace dirs are created.
     pub scratch_root: PathBuf,
+    /// PR sync, for `/v1/prs`.
+    pub prs: PrSync,
 }
 
 /// Every endpoint.
@@ -66,6 +70,8 @@ pub fn api() -> ApiDescription<ApiContext> {
         api.register(notes::note_create),
         api.register(notes::note_update),
         api.register(notes::note_delete),
+        api.register(prs::prs_sync),
+        api.register(prs::prs_status),
     ];
     for result in registered {
         result.expect("every endpoint registers");

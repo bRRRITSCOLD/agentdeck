@@ -189,12 +189,15 @@ min_ms = 400                   # a new state must hold this long before it is pu
 
 ## 8. PR sync
 
-- The token comes from `gh auth token` at start and again after a 401. No `gh` means `GET /v1/prs/status` reports `logged_out`, and the GUI shows a banner.
-- One GitHub GraphQL search `is:pr is:open author:@me` every 120 s, and on `POST /v1/prs/sync`. Each result becomes a PR task:
-  - Its **workspace** is the workspace whose dir holds a clone of the PR's repo with `head_ref` checked out or present locally. If no workspace matches, it goes to the inbox (`workspace_id` NULL).
+- The token comes from `gh auth token` at start and again after a 401; while there is none, every sync asks `gh` again. No `gh`, a `gh` that isn't logged in, or a token GitHub still rejects after that retry means `GET /v1/prs/status` reports `logged_out`, and the GUI shows a banner.
+- One GitHub GraphQL search `is:pr is:open author:@me` every 120 s (the first at start), and on `POST /v1/prs/sync`, which clients call when a task is opened. One sync runs at a time. `AGENTDECK_GITHUB_API` replaces the GraphQL URL (`https://api.github.com/graphql`); tests point it at httpmock.
+- `POST /v1/prs/sync` answers once its sync finishes, with the same body as `GET /v1/prs/status`: `{ login: "logged_in"|"logged_out", last_synced_at, last_error }`. A failed sync is still 200, with `last_error` set.
+- Each result becomes a PR task, titled with the PR's title:
+  - Its **workspace** is the oldest unarchived workspace whose dir holds a clone of the PR's repo with `head_ref` present as a local branch. A clone is a git repo up to 3 levels under the dir (as the dirty report searches) with any `github.com` remote (https, ssh or scp-like URL) naming the repo, compared case-insensitively. If no workspace matches, it goes to the inbox (`workspace_id` NULL). Only an inbox task is matched again on later syncs; a PR task never leaves its workspace.
   - **New PR:** a PR task created with status `review`.
-  - **Merged or closed:** the task goes to `done`. PRs that left the search are fetched by number, once.
-- `checks` and `review` come from `statusCheckRollup` and `reviewDecision`.
+  - **Merged or closed:** the task goes to `done`; reopened, back to `review`. While the PR's state holds, the task keeps whatever status it has. PRs that left the search are fetched by number, once; one GitHub no longer shows is stored as closed.
+- `checks` and `review` come from `statusCheckRollup` (`ERROR` counts as failure, `EXPECTED` as pending) and `reviewDecision`. Every task in the API carries its PR as `pr` (null for a plain task).
+- Each task a sync creates or changes gets a `changed` event (§5).
 
 ## 9. Notes
 

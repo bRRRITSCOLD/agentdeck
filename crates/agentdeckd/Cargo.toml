@@ -14,6 +14,9 @@ anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 dropshot.workspace = true
+# PR sync calls GitHub over HTTPS: rustls with the platform verifier (aws-lc-rs, already in the
+# lock through GPUI).
+reqwest = { workspace = true, features = ["rustls"] }
 rusqlite.workspace = true
 rusqlite_migration.workspace = true
 schemars.workspace = true
@@ -21,6 +24,7 @@ semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 slog.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -28,7 +32,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 agentdeck-client.workspace = true
-reqwest.workspace = true
+httpmock.workspace = true
 tempfile.workspace = true
 
 [lints]
