@@ -1,0 +1,59 @@
+# Claude Code's state rules (spec §7). First match wins; every condition a rule names must hold.
+#
+# Sources: the terminal spike (agentdeck#2), which ran Claude Code v2.1.322, and the state
+# research (agentdeck#3), which read herdr's claude.toml. What the spike saw:
+# - The OSC 0 title is `✳ Claude Code` when idle and a spinner glyph while working.
+# - No OSC 9;4. OSC 7501 only as a startup probe (`ESC ] 7501 ; ? BEL`).
+# - Dialogs show only in the grid, so `blocked` comes from screen text.
+
+agent = "claude"
+# The native install runs as `claude`; an npm install runs as `node`.
+process = ["claude", "node"]
+
+# A select dialog: the folder trust dialog, and most other choices Claude Code asks for.
+[[rule]]
+state = "blocked"
+rows = "bottom:6"
+contains = ["Enter to confirm", "Esc to cancel"]
+
+# A tool permission prompt. The title can still show a spinner here, so this sits above it.
+[[rule]]
+state = "blocked"
+rows = "bottom:12"
+contains = ["Do you want to proceed?", "1. Yes"]
+
+# OSC 7501 program status, should Claude Code start sending it.
+[[rule]]
+state = "blocked"
+program_status = ["blocked"]
+
+[[rule]]
+state = "working"
+program_status = ["working"]
+
+[[rule]]
+state = "idle"
+program_status = ["idle", "done", "error"]
+
+# OSC 9;4 progress, should Claude Code start sending it.
+[[rule]]
+state = "working"
+progress = ["normal", "indeterminate"]
+
+# The title spinner: half circles since v2.1.228, Braille before.
+[[rule]]
+state = "working"
+title_regex = '^[◐◓◑◒\x{2800}-\x{28FF}]'
+
+# The activity line, for when the title is missing or stale.
+[[rule]]
+state = "working"
+rows = "bottom:12"
+contains = ["esc to interrupt"]
+
+[[rule]]
+state = "idle"
+title_regex = '^✳'
+
+[settle]
+min_ms = 400

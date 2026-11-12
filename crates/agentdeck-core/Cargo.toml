@@ -8,5 +8,24 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# `state::screen`: reads an `alacritty_terminal::Term`'s screen into rows for the rules. Off by
+# default so core's own dependencies stay free of IO crates (alacritty_terminal ships a PTY
+# layer); the daemon turns it on. Core's unit tests always build it, through the dev-dependency.
+screen = ["dep:alacritty_terminal"]
+
+[dependencies]
+alacritty_terminal = { workspace = true, optional = true }
+regex.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+uuid.workspace = true
+vte.workspace = true
+
+[dev-dependencies]
+alacritty_terminal.workspace = true
+serde_json.workspace = true
+
 [lints]
 workspace = true

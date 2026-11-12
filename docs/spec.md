@@ -175,6 +175,12 @@ title_regex = '^✳'
 min_ms = 400                   # a new state must hold this long before it is published
 ```
 
+- **Rule keys:** a rule names a `state` (`working`, `blocked` or `idle`) and one or more conditions, all of which must hold:
+  - `title_regex`, matched against the title;
+  - `contains`, strings that must each appear in `rows`, which is `screen` (the default) or `bottom:N`, the last N non-blank rows of the live screen;
+  - `progress`, OSC 9;4 states (`removed`, `normal`, `error`, `indeterminate`, `paused`);
+  - `program_status`, OSC 7501 states (`idle`, `working`, `done`, `blocked`, `error`).
+  The rules apply only while a `process` entry is in the foreground, or when the foreground process can't be read. `done`, `unknown` and `exited` come from the evaluator, never from a rule.
 - **done vs idle:** `done` is published when a pane goes working → idle. It turns back to `idle` once the pane is focused, or after a new prompt.
 - **Exit:** a dead process is `exited`, whatever the rules say.
 - **No match:** the state is `unknown`, unless the pane has produced output in the last 2 s, in which case it is `working`.
