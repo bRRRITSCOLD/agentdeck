@@ -231,6 +231,12 @@ Built on `brrritscold-core-gpui` (`init`, `Root`, theme preference, toasts). Scr
   - `alacritty_terminal` per attached pane, drawn by our own renderer.
   - **Zed's GPL-3.0 terminal crates are never copied.**
   - The font is Inter for the UI. The terminal gets a monospace font with a symbols fallback for agent glyphs (`⎿`, `✻`, `◐`).
+- **Colours** use semantic tokens only.
+  - Agent state: working `info`, blocked `warning`, done `success`, idle/unknown/exited-0 `muted-foreground`, exited ≠ 0 `destructive`.
+  - Checks: passing `success`, pending `info`, failing `destructive`.
+  - Review: approved `success`, changes requested `warning`, required `muted-foreground`.
+  - Task statuses aren't coloured.
+  - The terminal palette follows the theme. Terminal text is JetBrains Mono (`font-family.mono`).
 - **Notifications:** an OS notification when a pane turns `blocked` or `done` while its tab isn't visible, and when a PR task's checks fail or a review arrives. They can be muted per workspace.
 - **Keymap:** `keymap.rs`, normal app shortcuts, `secondary-` bindings loaded with `KeyBinding::load`.
 
