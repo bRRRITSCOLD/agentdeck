@@ -5,11 +5,16 @@
 //! - [`tracker`]: [`StateTracker`] settles those states over time and adds `done` and
 //!   `exited`.
 //! - [`osc`]: reads OSC 9;4 and OSC 7501 out of raw output for the observation.
+//! - `screen` (feature `screen`): reads an `alacritty_terminal` screen into the observation's
+//!   rows.
 
 use crate::text_enum::text_enum;
 
+mod embedded;
 pub mod osc;
 pub mod rules;
+#[cfg(any(test, feature = "screen"))]
+pub mod screen;
 pub mod tracker;
 
 pub use osc::{OscScanner, ProgramState, Progress};

@@ -1,0 +1,12 @@
+[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[G● [1mBash[0m(rm -rf build)
+
+[38;2;153;153;153m────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+ [1mBash command[0m
+
+   rm -rf build
+   [38;2;153;153;153mRemove the old build output[0m
+
+ Do you want to proceed?
+ [38;2;215;119;87m❯ 1. Yes[0m
+   2. Yes, and don't ask again for rm commands in /home/dev/code/demo
+   3. No, and tell Claude what to do differently (esc)
