@@ -45,7 +45,9 @@ pub fn pane_env(
         .filter(|(name, _)| allowed(name))
         .collect();
     let fixed = FIXED.iter().map(|(name, value)| (*name, *value));
-    let extra = extra.iter().map(|(name, value)| (name.as_str(), value.as_str()));
+    let extra = extra
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()));
     for (name, value) in fixed.chain(extra) {
         env.insert(name.into(), value.into());
     }

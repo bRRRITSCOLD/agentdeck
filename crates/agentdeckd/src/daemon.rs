@@ -10,9 +10,11 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use crate::api::{ApiContext, api};
 use crate::db::Db;
+use crate::events::Events;
 use crate::instance::{DaemonInfo, Instance};
 use crate::paths::Paths;
 use crate::prsync::{self, PrSync};
+use crate::terminal::Terminals;
 use crate::{auth, logging};
 
 /// Starts the daemon and serves until SIGINT or SIGTERM.
@@ -30,7 +32,10 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
     let db = Db::open(&paths.database())?;
     let github_api = std::env::var(prsync::ENDPOINT_VAR)
         .unwrap_or_else(|_| prsync::github::DEFAULT_ENDPOINT.into());
-    let prs = PrSync::start(db.clone(), github_api)?;
+    let events = Events::new();
+    let prs = PrSync::start(db.clone(), events.clone(), github_api)?;
+    let terminals = Terminals::new(db.clone(), events.clone(), paths.rules_dir());
+    terminals.run_state_timer();
     let token = auth::new_token();
     let context = ApiContext {
         db,
@@ -38,6 +43,8 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
         started: Instant::now(),
         scratch_root: paths.scratch_workspaces(),
         prs,
+        terminals: terminals.clone(),
+        events,
     };
     let config = ConfigDropshot {
         bind_address: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
@@ -63,6 +70,7 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
         _ = terminate.recv() => {}
     }
     tracing::info!("agentdeckd shutting down");
+    terminals.close();
     server
         .close()
         .await

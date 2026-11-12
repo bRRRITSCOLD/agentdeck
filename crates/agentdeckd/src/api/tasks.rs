@@ -1,5 +1,6 @@
 //! The global task list: `/v1/tasks`.
 
+use agentdeck_core::ws::Entity;
 use dropshot::{
     ClientErrorStatusCode, HttpError, HttpResponseCreated, HttpResponseDeleted, HttpResponseOk,
     Path, Query, RequestContext, TypedBody, endpoint,
@@ -52,6 +53,7 @@ pub(crate) async fn task_create(
         .db
         .call(move |c| db::tasks::create(c, &new))
         .await?;
+    rqctx.context().events.changed(Entity::Task, task.id);
     Ok(HttpResponseCreated(task))
 }
 
@@ -87,6 +89,7 @@ pub(crate) async fn task_update(
         .db
         .call(move |c| db::tasks::update(c, id, &patch))
         .await?;
+    rqctx.context().events.changed(Entity::Task, task.id);
     Ok(HttpResponseOk(task))
 }
 
@@ -103,5 +106,6 @@ pub(crate) async fn task_delete(
         .db
         .call(move |c| db::tasks::delete(c, id))
         .await?;
+    rqctx.context().events.changed(Entity::Task, id);
     Ok(HttpResponseDeleted())
 }

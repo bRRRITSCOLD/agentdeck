@@ -192,7 +192,11 @@ impl Pane {
         thread("write")
             .spawn(move || {
                 for bytes in typed {
-                    if writer.write_all(&bytes).and_then(|()| writer.flush()).is_err() {
+                    if writer
+                        .write_all(&bytes)
+                        .and_then(|()| writer.flush())
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -208,7 +212,10 @@ impl Pane {
                         Ok(n) => reading.output(&buf[..n]),
                     }
                 }
-                let code = child.wait().ok().map(|status| i64::from(status.exit_code()));
+                let code = child
+                    .wait()
+                    .ok()
+                    .map(|status| i64::from(status.exit_code()));
                 if let Some(title) = reading.exit(code) {
                     on_exit(reading.id, code, title);
                 }
@@ -224,7 +231,9 @@ impl Pane {
 
     fn live(&self) -> MutexGuard<'_, Live> {
         // A panic under the lock leaves nothing half-done that matters more than the pane.
-        self.live.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.live
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Reads one chunk of output: into the tail, the OSC scanner and the `Term`, then out to

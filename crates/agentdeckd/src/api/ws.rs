@@ -24,7 +24,11 @@ use crate::terminal::pane::Pane;
 
 /// The terminal and events WebSocket. Binary frames are `[u32 channel][bytes]`; text frames
 /// are JSON tagged with `t`. See spec §5 for the messages.
-#[channel { protocol = WEBSOCKETS, path = "/v1/ws" }]
+///
+/// Unpublished: OpenAPI can't describe the messages, and progenitor's generated upgrade
+/// needs tokio, which the GUI and the CLI don't run. Clients speak the protocol through
+/// `agentdeck_core::ws` over their own WebSocket client.
+#[channel { protocol = WEBSOCKETS, path = "/v1/ws", unpublished = true }]
 pub(crate) async fn ws(
     rqctx: RequestContext<ApiContext>,
     _auth: Authorized,
@@ -32,7 +36,9 @@ pub(crate) async fn ws(
 ) -> WebsocketChannelResult {
     let socket = WebSocketStream::from_raw_socket(upgraded.into_inner(), Role::Server, None).await;
     let context = rqctx.context();
-    Session::new(context.terminals.clone()).run(socket, context.events.subscribe()).await;
+    Session::new(context.terminals.clone())
+        .run(socket, context.events.subscribe())
+        .await;
     Ok(())
 }
 
@@ -110,7 +116,11 @@ impl Session {
             Err(err) => {
                 return send(
                     outbox,
-                    error(None, "invalid_message", format!("not a client message: {err}")),
+                    error(
+                        None,
+                        "invalid_message",
+                        format!("not a client message: {err}"),
+                    ),
                 );
             }
         };
@@ -154,7 +164,11 @@ impl Session {
         let Some((channel, bytes)) = parse_frame(bytes) else {
             return send(
                 outbox,
-                error(None, "invalid_message", "a binary frame needs a channel".into()),
+                error(
+                    None,
+                    "invalid_message",
+                    "a binary frame needs a channel".into(),
+                ),
             );
         };
         match self.attached.get(&channel) {

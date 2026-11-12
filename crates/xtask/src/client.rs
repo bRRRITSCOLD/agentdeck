@@ -23,6 +23,9 @@ const CORE_TYPES: &[&str] = &[
     "PrState",
     "ChecksState",
     "ReviewState",
+    "PaneKind",
+    "Agent",
+    "AgentState",
     "SplitDirection",
     "Layout",
 ];

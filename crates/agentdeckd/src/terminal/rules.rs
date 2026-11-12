@@ -79,7 +79,10 @@ mod tests {
         fn should_prefer_the_override_file() {
             let file = "agent = \"claude\"\n[[rule]]\nstate = \"blocked\"\ntitle_regex = '^✳'\n";
             let rules = resolve("claude", Some(file));
-            assert_eq!(rules.evaluate(&titled("✳ Claude Code")), AgentState::Blocked);
+            assert_eq!(
+                rules.evaluate(&titled("✳ Claude Code")),
+                AgentState::Blocked
+            );
         }
 
         #[test]

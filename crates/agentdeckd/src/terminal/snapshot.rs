@@ -305,7 +305,9 @@ mod tests {
         (top..grid.screen_lines() as i32)
             .map(|line| {
                 let row = &grid[Line(line)];
-                (0..grid.columns()).map(|c| row[Column(c)].clone()).collect()
+                (0..grid.columns())
+                    .map(|c| row[Column(c)].clone())
+                    .collect()
             })
             .collect()
     }

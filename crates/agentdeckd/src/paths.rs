@@ -187,10 +187,7 @@ mod tests {
                 paths.log_file(),
                 PathBuf::from("/state/agentdeck/agentdeckd.log")
             );
-            assert_eq!(
-                paths.rules_dir(),
-                PathBuf::from("/config/agentdeck/rules")
-            );
+            assert_eq!(paths.rules_dir(), PathBuf::from("/config/agentdeck/rules"));
         }
     }
 }

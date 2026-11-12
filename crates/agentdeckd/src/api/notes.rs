@@ -1,5 +1,6 @@
 //! Notes on workspaces and tasks: `/v1/notes`.
 
+use agentdeck_core::ws::Entity;
 use dropshot::{
     HttpError, HttpResponseCreated, HttpResponseDeleted, HttpResponseOk, Path, Query,
     RequestContext, TypedBody, endpoint,
@@ -40,6 +41,7 @@ pub(crate) async fn note_create(
         .db
         .call(move |c| db::notes::create(c, &new))
         .await?;
+    rqctx.context().events.changed(Entity::Note, note.id);
     Ok(HttpResponseCreated(note))
 }
 
@@ -58,6 +60,7 @@ pub(crate) async fn note_update(
         .db
         .call(move |c| db::notes::update(c, id, &patch))
         .await?;
+    rqctx.context().events.changed(Entity::Note, note.id);
     Ok(HttpResponseOk(note))
 }
 
@@ -74,5 +77,6 @@ pub(crate) async fn note_delete(
         .db
         .call(move |c| db::notes::delete(c, id))
         .await?;
+    rqctx.context().events.changed(Entity::Note, id);
     Ok(HttpResponseDeleted())
 }

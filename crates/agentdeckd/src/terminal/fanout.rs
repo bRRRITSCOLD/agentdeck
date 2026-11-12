@@ -191,7 +191,9 @@ impl Fanout {
     }
 
     fn find(&self, id: SubscriberId) -> Option<&Subscriber> {
-        self.subscribers.iter().find(|subscriber| subscriber.id == id)
+        self.subscribers
+            .iter()
+            .find(|subscriber| subscriber.id == id)
     }
 
     /// Keeps the subscribers `send` returns true for; a primary that is dropped is forgotten.
@@ -374,10 +376,7 @@ mod tests {
             fn should_apply_any_clients_size_while_none_is_primary() {
                 let mut fanout = Fanout::default();
                 let a = attach(&mut fanout, 1, 3);
-                assert_eq!(
-                    fanout.request_resize(a.id, BIG),
-                    ResizeDecision::Apply(BIG)
-                );
+                assert_eq!(fanout.request_resize(a.id, BIG), ResizeDecision::Apply(BIG));
             }
 
             #[test]
@@ -387,10 +386,7 @@ mod tests {
                 let b = attach(&mut fanout, 2, 3);
                 fanout.make_primary(a.id);
                 assert_eq!(fanout.request_resize(b.id, SMALL), ResizeDecision::Refuse);
-                assert_eq!(
-                    fanout.request_resize(a.id, BIG),
-                    ResizeDecision::Apply(BIG)
-                );
+                assert_eq!(fanout.request_resize(a.id, BIG), ResizeDecision::Apply(BIG));
             }
 
             #[test]

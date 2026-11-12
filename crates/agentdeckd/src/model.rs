@@ -3,8 +3,7 @@
 
 use agentdeck_core::{
     Agent, AgentState, ChecksState, Layout, NoteId, PaneId, PaneKind, PrState, ReviewState, TabId,
-    TaskId, TaskKind, TaskStatus,
-    WorkspaceId,
+    TaskId, TaskKind, TaskStatus, WorkspaceId,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

@@ -15,10 +15,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use agentdeck_core::ws::Entity;
 use agentdeck_core::{TaskId, WorkspaceId};
 use tokio::time::MissedTickBehavior;
 
 use crate::db::{self, Db};
+use crate::events::Events;
 use crate::model::{GhLogin, PrSyncStatus};
 use github::{Github, GithubError, RemotePr};
 use matching::Clones;
@@ -37,6 +39,8 @@ pub struct PrSync {
 
 struct Inner {
     db: Db,
+    /// Gets a `changed` event for each task a sync creates or changes.
+    events: Events,
     github: Github,
     state: Mutex<State>,
     /// Held for the length of a sync, so syncs never overlap.
@@ -72,10 +76,11 @@ impl PrSync {
     /// Starts the timer, whose first sync runs now and reads the token with `gh auth token`
     /// (on the timer's task, so a slow `gh` never holds up the daemon's start). `endpoint` is
     /// the GraphQL URL. Must be called inside a tokio runtime.
-    pub fn start(db: Db, endpoint: String) -> anyhow::Result<PrSync> {
+    pub fn start(db: Db, events: Events, endpoint: String) -> anyhow::Result<PrSync> {
         let sync = PrSync {
             inner: Arc::new(Inner {
                 db,
+                events,
                 github: Github::new(endpoint)?,
                 state: Mutex::new(State {
                     token: None,
@@ -124,7 +129,9 @@ impl PrSync {
                 }
             }
         };
-        publish_changed(&changed);
+        for task in changed {
+            self.inner.events.changed(Entity::Task, task);
+        }
         self.status()
     }
 
@@ -238,13 +245,5 @@ impl PrSync {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-}
-
-/// The hook for `changed` events (spec §5): each task PR sync created or changed. The event
-/// bus arrives with the WebSocket (#8); until then the changes are only logged.
-fn publish_changed(tasks: &[TaskId]) {
-    for task in tasks {
-        tracing::debug!(entity = "task", id = %task, "changed");
     }
 }

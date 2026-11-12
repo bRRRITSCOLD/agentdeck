@@ -23,6 +23,25 @@
       }
     },
     "schemas": {
+      "Agent": {
+        "enum": [
+          "claude",
+          "codex",
+          "other"
+        ],
+        "type": "string"
+      },
+      "AgentState": {
+        "enum": [
+          "working",
+          "blocked",
+          "done",
+          "idle",
+          "unknown",
+          "exited"
+        ],
+        "type": "string"
+      },
       "ChecksState": {
         "enum": [
           "pending",
@@ -161,6 +180,38 @@
         ],
         "type": "object"
       },
+      "InputAccepted": {
+        "description": "What became of `POST /v1/panes/{id}/input`.",
+        "properties": {
+          "queued": {
+            "description": "True when it waits for the pane to be idle; false when it was typed.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "queued"
+        ],
+        "type": "object"
+      },
+      "InputWhen": {
+        "description": "When `POST /v1/panes/{id}/input` reaches the terminal.",
+        "oneOf": [
+          {
+            "description": "At once.",
+            "enum": [
+              "now"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "Once the pane is idle, done or blocked; at once if it already is.",
+            "enum": [
+              "idle"
+            ],
+            "type": "string"
+          }
+        ]
+      },
       "Layout": {
         "anyOf": [
           {
@@ -260,6 +311,63 @@
         },
         "required": [
           "body"
+        ],
+        "type": "object"
+      },
+      "NewPane": {
+        "description": "`POST /v1/panes`.",
+        "properties": {
+          "agent": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Agent"
+              }
+            ],
+            "description": "Which agent, for agent panes.",
+            "nullable": true
+          },
+          "argv": {
+            "description": "The command; a shell pane without one runs `$SHELL`, else `/bin/sh`.",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "cwd": {
+            "description": "The absolute working directory, which must exist.",
+            "type": "string"
+          },
+          "kind": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PaneKind"
+              }
+            ],
+            "description": "An agent or a shell. Only `shell` is launched so far."
+          },
+          "tab_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TabId"
+              }
+            ],
+            "description": "The tab to add it to. The caller places it in the tab's layout."
+          },
+          "task_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TaskId"
+              }
+            ],
+            "description": "A task to link.",
+            "nullable": true
+          }
+        },
+        "required": [
+          "cwd",
+          "kind",
+          "tab_id"
         ],
         "type": "object"
       },
@@ -427,8 +535,133 @@
         },
         "type": "object"
       },
+      "Pane": {
+        "description": "A terminal in a tab, running an agent CLI or a shell.",
+        "properties": {
+          "agent": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Agent"
+              }
+            ],
+            "description": "Which agent, for agent panes.",
+            "nullable": true
+          },
+          "argv": {
+            "description": "The command as launched.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "created_at": {
+            "description": "When the pane was created.",
+            "type": "string"
+          },
+          "cwd": {
+            "description": "The working directory it was launched in.",
+            "type": "string"
+          },
+          "exit_code": {
+            "description": "The exit code, once the process has exited.",
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          },
+          "id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PaneId"
+              }
+            ],
+            "description": "The pane's id."
+          },
+          "kind": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PaneKind"
+              }
+            ],
+            "description": "An agent or a shell."
+          },
+          "session_id": {
+            "description": "The agent's session id, when it has one.",
+            "nullable": true,
+            "type": "string"
+          },
+          "state": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AgentState"
+              }
+            ],
+            "description": "The agent state; a shell is `working` while it prints and `unknown` otherwise."
+          },
+          "tab_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TabId"
+              }
+            ],
+            "description": "The tab it belongs to."
+          },
+          "task_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TaskId"
+              }
+            ],
+            "description": "The linked task, if any.",
+            "nullable": true
+          },
+          "title": {
+            "description": "The title the program set, or empty.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "argv",
+          "created_at",
+          "cwd",
+          "id",
+          "kind",
+          "state",
+          "tab_id",
+          "title"
+        ],
+        "type": "object"
+      },
       "PaneId": {
         "format": "uuid",
+        "type": "string"
+      },
+      "PaneInput": {
+        "description": "`POST /v1/panes/{id}/input`.",
+        "properties": {
+          "text": {
+            "description": "Typed into the terminal as is; end it with `\\r` to press Enter.",
+            "type": "string"
+          },
+          "when": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/InputWhen"
+              }
+            ],
+            "default": "now",
+            "description": "`now` when absent."
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "PaneKind": {
+        "enum": [
+          "agent",
+          "shell"
+        ],
         "type": "string"
       },
       "PrState": {
@@ -1021,6 +1254,193 @@
           }
         },
         "summary": "Edits a note, or marks it read or unread."
+      }
+    },
+    "/v1/panes": {
+      "post": {
+        "description": "layout. Agent panes are not launched yet: only `kind: \"shell\"`.",
+        "operationId": "pane_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewPane"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Pane"
+                }
+              }
+            },
+            "description": "successful creation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Spawns a pane in a tab and starts its process. The caller places the pane in the tab's"
+      }
+    },
+    "/v1/panes/{id}": {
+      "delete": {
+        "description": "takes it out of the tab's layout.",
+        "operationId": "pane_delete",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/PaneId"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "successful deletion"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Kills a pane's process (SIGHUP, then SIGKILL after 3 s) and deletes the pane. The caller"
+      },
+      "get": {
+        "operationId": "pane_get",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/PaneId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Pane"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "One pane, with its live title and state."
+      }
+    },
+    "/v1/panes/{id}/input": {
+      "post": {
+        "operationId": "pane_input",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/PaneId"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PaneInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InputAccepted"
+                }
+              }
+            },
+            "description": "successfully enqueued operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Types text into the pane: now, or once it is idle, done or blocked (`when: \"idle\"`)."
+      }
+    },
+    "/v1/panes/{id}/tail": {
+      "get": {
+        "description": "whose process isn't running in this daemon.",
+        "operationId": "pane_tail",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/PaneId"
+            }
+          },
+          {
+            "description": "At most this many of the last bytes; all that is kept (256 KiB) when absent.",
+            "in": "query",
+            "name": "bytes",
+            "schema": {
+              "format": "uint64",
+              "minimum": 0,
+              "nullable": true,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {}
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "The pane's raw output: the last `bytes` bytes of the 256 KiB it keeps. Empty for a pane"
       }
     },
     "/v1/prs/status": {

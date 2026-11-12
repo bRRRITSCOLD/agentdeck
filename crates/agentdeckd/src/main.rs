@@ -8,8 +8,8 @@
 mod api;
 mod auth;
 mod daemon;
-mod events;
 mod db;
+mod events;
 mod git;
 mod instance;
 mod logging;

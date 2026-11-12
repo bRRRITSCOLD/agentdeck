@@ -98,7 +98,10 @@ mod tests {
         fn should_prefer_a_colour_the_program_set() {
             let mut colors = Colors::default();
             colors[NamedColor::Background] = Some(rgb(1, 2, 3));
-            assert_eq!(color(&colors, NamedColor::Background as usize), rgb(1, 2, 3));
+            assert_eq!(
+                color(&colors, NamedColor::Background as usize),
+                rgb(1, 2, 3)
+            );
         }
     }
 }
