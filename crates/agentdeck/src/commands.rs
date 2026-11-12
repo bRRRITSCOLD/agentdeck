@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use crate::api::ApiError;
 use crate::cli::{AgentCommand, Command, NoteCommand, PrCommand, TaskCommand, WsCommand};
-use crate::{render, resolve};
+use crate::{launch, render, resolve};
 
 /// Names the pane an agent runs in; `note read` records it as the reader.
 pub const PANE_VAR: &str = "AGENTDECK_PANE";
@@ -74,7 +74,7 @@ async fn optional_workspace(
 }
 
 /// An absolute form of `dir`, since the daemon takes only absolute dirs.
-fn absolute(dir: &Path) -> anyhow::Result<String> {
+pub fn absolute(dir: &Path) -> anyhow::Result<String> {
     let dir = std::path::absolute(dir).with_context(|| format!("resolving {}", dir.display()))?;
     dir.into_os_string()
         .into_string()
@@ -247,10 +247,24 @@ pub fn caller_pane() -> Option<PaneId> {
 
 async fn agent(client: &Client, command: AgentCommand) -> anyhow::Result<Output> {
     match command {
-        AgentCommand::New { .. } => anyhow::bail!(
-            "`agentdeck agent new` isn't available yet: launching agents lands with \
-             https://github.com/bRRRITSCOLD/agentdeck/issues/16"
-        ),
+        AgentCommand::New {
+            ws,
+            agent,
+            cwd,
+            task,
+        } => {
+            let pane = launch::agent_new(
+                client,
+                launch::Launch {
+                    ws: &ws,
+                    agent,
+                    cwd: cwd.as_deref(),
+                    task,
+                },
+            )
+            .await?;
+            Output::new(&pane, render::pane(&pane))
+        }
         AgentCommand::Send { pane, text, now } => {
             let accepted = client
                 .pane_input()

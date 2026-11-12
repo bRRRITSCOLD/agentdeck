@@ -8,6 +8,7 @@ mod api;
 mod cli;
 mod commands;
 mod daemon;
+mod launch;
 mod mcp;
 mod render;
 mod resolve;

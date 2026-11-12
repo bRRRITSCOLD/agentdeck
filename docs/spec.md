@@ -240,6 +240,7 @@ agentdeck mcp            # MCP server over stdio
 - A `WS` or `<ws>` is a workspace's id, slug or name, tried in that order; a name two workspaces share is an error that lists their slugs.
 - `ws new --dir` takes a path relative to the current directory too; the CLI sends it absolute.
 - `ws rm` without `--force` on a dirty dir prints the dirty report and exits 1.
+- `agent new` launches the agent with `POST /v1/panes` (no `argv`: the daemon builds it and the launch prompt) in `--cwd`, made absolute, or the workspace's dir. The pane goes in the workspace's first tab with no panes, else in a new tab titled after the agent, and becomes that tab's layout. A tab made for a launch that fails is deleted.
 - `agent send` types the text followed by `\r` (Enter), with `when: "idle"`, or `"now"` with `--now`.
 - `note read` prints the note and marks it read, recording `$AGENTDECK_PANE` as the reader when it is set.
 

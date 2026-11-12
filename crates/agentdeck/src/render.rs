@@ -1,6 +1,6 @@
 //! Human-readable output. `--json` prints the API's own objects instead.
 
-use agentdeck_client::types::{DirtyReport, Note, PrSyncStatus, Task, Workspace};
+use agentdeck_client::types::{DirtyReport, Note, Pane, PrSyncStatus, Task, Workspace};
 
 /// Left-aligned columns two spaces apart, under a header row; `empty` when there are no rows.
 fn table<const N: usize>(headers: [&str; N], rows: &[[String; N]], empty: &str) -> String {
@@ -109,6 +109,17 @@ pub fn task(task: &Task) -> String {
         out.push('\n');
         out.push_str(&task.body);
         out.push('\n');
+    }
+    out
+}
+
+/// A pane after `agent new`: its id, agent and dir, and its session once it has one. The
+/// argv, launch prompt included, is in `--json`.
+pub fn pane(pane: &Pane) -> String {
+    let agent = pane.agent.map_or("shell", |agent| agent.as_str());
+    let mut out = format!("{}\n  agent:   {agent}\n  cwd:     {}\n", pane.id, pane.cwd);
+    if let Some(session) = &pane.session_id {
+        out.push_str(&format!("  session: {session}\n"));
     }
     out
 }

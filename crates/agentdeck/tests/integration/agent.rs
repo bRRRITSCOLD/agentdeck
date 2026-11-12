@@ -1,6 +1,9 @@
-//! `agentdeck agent new | send` and `agentdeck tail`, against `sh` panes; never a real agent.
+//! `agentdeck agent new | send` and `agentdeck tail`, against `sh` panes and the stub
+//! `claude` and `codex`; never a real agent.
 
-use crate::support::{TestEnv, eventually, shell_pane};
+use agentdeck_core::Layout;
+
+use crate::support::{TestEnv, agent_argv, agent_typed, eventually, shell_pane, tabs, text};
 
 mod agent_send {
     use super::*;
@@ -52,13 +55,147 @@ mod tail {
 mod agent_new {
     use super::*;
 
+    /// The stub agent's argv, once it has started.
+    fn started(env: &TestEnv, pane: &str) -> Vec<String> {
+        eventually("the stub agent to start", || agent_argv(env, pane))
+    }
+
     #[test]
-    fn should_say_it_isnt_available_yet() {
+    fn should_launch_claude_in_a_new_tab_in_the_workspace_dir() {
+        let env = TestEnv::new();
+        let ws = env.workspace("web");
+
+        let pane = env.json(&["agent", "new", "--ws", "web"]);
+
+        assert_eq!(pane["kind"], "agent");
+        assert_eq!(pane["agent"], "claude");
+        assert_eq!(pane["cwd"], ws["dir"]);
+        let session = text(&pane, "session_id");
+        assert_eq!(pane["argv"][0], "claude");
+        assert_eq!(started(&env, text(&pane, "id")), ["--session-id", session]);
+        let tabs = tabs(&env, &ws);
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs[0].id.to_string(), text(&pane, "tab_id"));
+        assert_eq!(
+            tabs[0].layout,
+            Some(Layout::single(text(&pane, "id").parse().unwrap()))
+        );
+    }
+
+    #[test]
+    fn should_fill_an_empty_tab_before_making_another() {
+        let env = TestEnv::new();
+        let ws = env.workspace("web");
+        let first = env.json(&["agent", "new", "--ws", "web"]);
+
+        let second = env.json(&["agent", "new", "--ws", "web", "--agent", "codex"]);
+
+        assert_ne!(first["tab_id"], second["tab_id"]);
+        assert_eq!(tabs(&env, &ws).len(), 2);
+    }
+
+    #[test]
+    fn should_launch_codex_without_a_session_id_at_first() {
         let env = TestEnv::new();
         env.workspace("web");
 
-        let stderr = env.fails(&["agent", "new", "--ws", "web"]);
+        let pane = env.json(&["agent", "new", "--ws", "web", "--agent", "codex"]);
 
-        assert!(stderr.contains("isn't available yet"), "{stderr}");
+        assert_eq!(pane["agent"], "codex");
+        assert_eq!(pane["argv"][0], "codex");
+        assert!(pane.get("session_id").is_none(), "{pane}");
+        assert_eq!(started(&env, text(&pane, "id")), Vec::<String>::new());
+    }
+
+    #[test]
+    fn should_prompt_with_the_task_and_mark_its_notes_read_by_the_pane() {
+        let env = TestEnv::new();
+        env.workspace("web");
+        let task = env.json(&["task", "add", "Fix the flaky test", "--ws", "web"]);
+        let task_id = text(&task, "id");
+        env.ok(&["note", "add", "it fails on CI only", "--task", task_id]);
+
+        let pane = env.json(&["agent", "new", "--ws", "web", "--task", task_id]);
+
+        assert_eq!(pane["task_id"], task["id"]);
+        let prompt = started(&env, text(&pane, "id")).join(" ");
+        assert!(prompt.contains("Fix the flaky test"), "{prompt}");
+        assert!(prompt.contains("it fails on CI only"), "{prompt}");
+        let notes = env.json(&["note", "ls", "--task", task_id]);
+        assert_eq!(notes[0]["read_by_pane"], pane["id"]);
+    }
+
+    #[test]
+    fn should_run_in_a_cwd_given_relative_to_the_shell() {
+        let env = TestEnv::new();
+        let ws = env.workspace("web");
+        let sub = std::path::Path::new(text(&ws, "dir")).join("app");
+        std::fs::create_dir(&sub).unwrap();
+
+        let output = env
+            .command()
+            .current_dir(text(&ws, "dir"))
+            .args(["agent", "new", "--ws", "web", "--cwd", "app", "--json"])
+            .output()
+            .expect("running agentdeck");
+
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let pane: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(std::path::Path::new(text(&pane, "cwd")), sub);
+    }
+
+    #[test]
+    fn should_refuse_a_missing_cwd_and_leave_no_empty_tab() {
+        let env = TestEnv::new();
+        let ws = env.workspace("web");
+
+        let stderr = env.fails(&["agent", "new", "--ws", "web", "--cwd", "/no/such/dir"]);
+
+        assert!(stderr.contains("invalid_dir"), "{stderr}");
+        assert!(tabs(&env, &ws).is_empty());
+    }
+
+    #[test]
+    fn should_name_an_unknown_task() {
+        let env = TestEnv::new();
+        env.workspace("web");
+        let task = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
+
+        let stderr = env.fails(&["agent", "new", "--ws", "web", "--task", task]);
+
+        assert!(stderr.contains(&format!("no task {task}")), "{stderr}");
+    }
+
+    #[test]
+    fn should_print_the_pane_agent_and_session() {
+        let env = TestEnv::new();
+        env.workspace("web");
+
+        let stdout = env.ok(&["agent", "new", "--ws", "web"]);
+
+        assert!(stdout.contains("  agent:   claude\n"), "{stdout}");
+        assert!(stdout.contains("  session: "), "{stdout}");
+    }
+}
+
+mod agent_send_to_an_agent {
+    use super::*;
+
+    #[test]
+    fn should_type_the_message_into_the_agent_once_it_is_idle() {
+        let env = TestEnv::new();
+        env.workspace("web");
+        let pane = env.json(&["agent", "new", "--ws", "web"]);
+        let id = text(&pane, "id");
+
+        env.ok(&["agent", "send", id, "hello agent"]);
+
+        eventually("the agent to receive the message", || {
+            agent_typed(&env, id).contains("hello agent").then_some(())
+        });
     }
 }
