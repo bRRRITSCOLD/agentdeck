@@ -30,7 +30,7 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
     let db = Db::open(&paths.database())?;
     let github_api = std::env::var(prsync::ENDPOINT_VAR)
         .unwrap_or_else(|_| prsync::github::DEFAULT_ENDPOINT.into());
-    let prs = PrSync::start(db.clone(), github_api).await?;
+    let prs = PrSync::start(db.clone(), github_api)?;
     let token = auth::new_token();
     let context = ApiContext {
         db,

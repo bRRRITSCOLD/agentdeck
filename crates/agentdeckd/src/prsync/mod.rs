@@ -69,9 +69,10 @@ impl From<db::DbError> for SyncError {
 }
 
 impl PrSync {
-    /// Reads the token with `gh auth token` and starts the timer, whose first sync runs now.
-    /// `endpoint` is the GraphQL URL.
-    pub async fn start(db: Db, endpoint: String) -> anyhow::Result<PrSync> {
+    /// Starts the timer, whose first sync runs now and reads the token with `gh auth token`
+    /// (on the timer's task, so a slow `gh` never holds up the daemon's start). `endpoint` is
+    /// the GraphQL URL. Must be called inside a tokio runtime.
+    pub fn start(db: Db, endpoint: String) -> anyhow::Result<PrSync> {
         let sync = PrSync {
             inner: Arc::new(Inner {
                 db,
@@ -87,7 +88,6 @@ impl PrSync {
                 running: tokio::sync::Mutex::new(()),
             }),
         };
-        sync.refresh_token().await.ok();
         let timer = sync.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(INTERVAL);
