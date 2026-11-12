@@ -3,6 +3,8 @@
 
 pub mod git;
 pub mod github;
+pub mod terminal;
+pub mod ws;
 
 use std::fmt::Debug;
 use std::fs::File;
@@ -194,10 +196,34 @@ fn command(root: &Path, stderr: &Path, github_api: &str) -> Command {
         .env("XDG_STATE_HOME", root.join("state"))
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
+        .envs(extra_env(root))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(File::create(stderr).expect("creating the stderr file"));
     command
+}
+
+/// Where [`set_daemon_env`] keeps the extra variables, one `NAME=value` per line.
+fn extra_env_file(root: &Path) -> PathBuf {
+    root.join("daemon.env")
+}
+
+/// Starts every daemon on `root` with these variables on top of the harness's own, as if it
+/// had been launched from a shell that has them (from inside an agent, say).
+pub fn set_daemon_env(root: &Path, vars: &[(&str, &str)]) {
+    let lines: String = vars
+        .iter()
+        .map(|(name, value)| format!("{name}={value}\n"))
+        .collect();
+    std::fs::write(extra_env_file(root), lines).expect("writing daemon.env");
+}
+
+fn extra_env(root: &Path) -> Vec<(String, String)> {
+    let text = std::fs::read_to_string(extra_env_file(root)).unwrap_or_default();
+    text.lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .collect()
 }
 
 /// The status and body of a documented error response; panics on success or on any other

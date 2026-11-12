@@ -229,7 +229,10 @@ mod tests {
                 ),
             ];
             for (json, message) in cases {
-                assert_eq!(serde_json::from_value::<ClientMessage>(json).unwrap(), message);
+                assert_eq!(
+                    serde_json::from_value::<ClientMessage>(json).unwrap(),
+                    message
+                );
             }
         }
 

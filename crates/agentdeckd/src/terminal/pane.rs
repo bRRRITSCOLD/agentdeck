@@ -92,6 +92,8 @@ pub struct Status {
     pub title: String,
     /// The published state.
     pub state: AgentState,
+    /// The exit code, once the process has exited and it could be read.
+    pub exit_code: Option<i64>,
 }
 
 /// Called once when the pane's process exits, with its exit code and last title.
@@ -121,6 +123,7 @@ struct Live {
     tracker: StateTracker,
     /// `input` waiting for an idle state.
     queued: Vec<u8>,
+    exit_code: Option<i64>,
     fanout: Fanout,
 }
 
@@ -180,6 +183,7 @@ impl Pane {
                 last_output: None,
                 tracker: StateTracker::new(rules),
                 queued: Vec::new(),
+                exit_code: None,
                 fanout: Fanout::default(),
             }),
             master: Mutex::new(pair.master),
@@ -277,6 +281,7 @@ impl Pane {
         let mut live = self.live();
         live.queued.clear();
         let state = live.tracker.exit()?;
+        live.exit_code = code;
         self.events.publish(ServerMessage::State {
             pane: self.id,
             state,
@@ -411,6 +416,7 @@ impl Pane {
         Status {
             title: live.title.clone(),
             state: live.tracker.state(),
+            exit_code: live.exit_code,
         }
     }
 

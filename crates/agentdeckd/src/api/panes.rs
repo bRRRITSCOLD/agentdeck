@@ -63,12 +63,14 @@ fn exited(id: PaneId) -> HttpError {
     )
 }
 
-/// The stored pane, with the live title and state when its process is running.
+/// The stored pane, with the live title, state and exit code while this daemon holds it
+/// (they reach the database a little later).
 fn with_live_status(context: &ApiContext, mut pane: Pane) -> Pane {
     if let Some(live) = context.terminals.get(pane.id) {
         let status = live.status();
         pane.title = status.title;
         pane.state = status.state;
+        pane.exit_code = status.exit_code;
     }
     pane
 }
