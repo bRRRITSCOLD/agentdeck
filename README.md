@@ -9,3 +9,24 @@ It is three programs in one Cargo workspace:
 - `agentdeck`, a CLI (and MCP server) that agents and scripts use.
 
 Status: being specified. The decisions are in [the v1 map](https://github.com/bRRRITSCOLD/agentdeck/issues/1), and the spec is in [`docs/spec.md`](docs/spec.md) once it lands.
+
+## Develop
+
+Linux only. Install GPUI's system packages once with `script/install-linux-deps.sh` (Ubuntu 24.04), and [cargo-nextest](https://nexte.st) at the version `.config/nextest.toml` requires.
+
+```sh
+cargo ci                    # what CI runs: fmt, clippy, unit, integration and doc, warnings denied
+cargo test-unit             # one tier; `cargo test-integration` for the other
+cargo run -p agentdeck-gui  # the GUI
+```
+
+| Crate | Kind | |
+|---|---|---|
+| `agentdeck` | bin | the CLI and `agentdeck mcp` |
+| `agentdeckd` | bin | the daemon |
+| `agentdeck-gui` | bin | the GPUI app, on `brrritscold-core-gpui` |
+| `agentdeck-client` | lib | the generated HTTP client |
+| `agentdeck-core` | lib | GPUI-free domain types |
+| `xtask` | bin | workspace tasks |
+
+Licensed under either of [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your option.

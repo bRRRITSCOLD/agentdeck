@@ -1,0 +1,10 @@
+# Watch mode, one job per tier: `bacon unit`, `bacon integration`.
+default_job = "unit"
+
+[jobs.unit]
+command = ["cargo", "nextest", "run", "--profile", "unit", "--workspace", "--color", "always"]
+need_stdout = true
+
+[jobs.integration]
+command = ["cargo", "nextest", "run", "--profile", "integration", "--workspace", "--color", "always"]
+need_stdout = true
