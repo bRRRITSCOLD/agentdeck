@@ -19,6 +19,7 @@ pub use id::{NoteId, PaneId, TabId, TaskId, WorkspaceId};
 pub use layout::{Layout, LayoutError, Ratio, SplitDirection};
 pub use pane::{Agent, PaneKind};
 pub use pr::{ChecksState, PrState, ReviewState};
+pub use state::AgentState;
 pub use task::{TaskKind, TaskStatus};
 pub use text_enum::UnknownValue;
 
