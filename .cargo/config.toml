@@ -1,0 +1,9 @@
+[alias]
+xtask = "run --quiet --package xtask --"
+# The chain CI runs: fmt, clippy, unit, integration and doc, with warnings denied.
+ci = "xtask ci"
+# One command per tier; `-ci` runs setup -> tests -> teardown (always) and exits with the tests' code.
+test-unit = "xtask test unit"
+test-unit-ci = "xtask test unit --ci"
+test-integration = "xtask test integration"
+test-integration-ci = "xtask test integration --ci"

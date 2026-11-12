@@ -1,0 +1,15 @@
+[package]
+name = "agentdeckd"
+description = "The agentdeck daemon: owns the terminals and the data, serves the HTTP API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+agentdeck-core.workspace = true
+
+[lints]
+workspace = true

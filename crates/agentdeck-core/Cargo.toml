@@ -1,0 +1,12 @@
+[package]
+name = "agentdeck-core"
+description = "GPUI-free domain types for agentdeck: ids, states and the state rules engine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
