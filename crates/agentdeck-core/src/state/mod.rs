@@ -1,3 +1,31 @@
 //! Agent state from the screen (spec §7).
+//!
+//! - [`rules`]: the rule file format, and [`RuleSet::evaluate`], a pure function from one
+//!   [`Observation`] to a state.
+//! - [`osc`]: reads OSC 9;4 and OSC 7501 out of raw output for the observation.
+
+use crate::text_enum::text_enum;
 
 pub mod osc;
+pub mod rules;
+
+pub use osc::{OscScanner, ProgramState, Progress};
+pub use rules::{Observation, RuleSet, RuleState, RulesError};
+
+text_enum! {
+    /// A pane's agent state (spec §3 `panes.state`, §7).
+    pub enum AgentState ("agent state") {
+        /// The agent is busy.
+        Working => "working",
+        /// The agent is waiting on the user: a dialog, a permission prompt.
+        Blocked => "blocked",
+        /// The agent finished a turn that nobody has looked at yet.
+        Done => "done",
+        /// The agent is waiting for a prompt.
+        Idle => "idle",
+        /// No rule matched and there is no recent output.
+        Unknown => "unknown",
+        /// The process is dead.
+        Exited => "exited",
+    }
+}
