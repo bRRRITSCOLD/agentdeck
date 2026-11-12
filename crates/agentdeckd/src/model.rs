@@ -282,11 +282,13 @@ pub struct Pane {
     pub kind: PaneKind,
     /// Which agent, for agent panes.
     pub agent: Option<Agent>,
-    /// The command as launched.
+    /// The command as first launched, launch prompt included. A resumed pane runs its
+    /// agent's resume command, or a fresh shell, instead.
     pub argv: Vec<String>,
     /// The working directory it was launched in.
     pub cwd: String,
-    /// The agent's session id, when it has one.
+    /// The agent's session id: chosen at launch for `claude`, found after launch for `codex`
+    /// (null until Codex has written its session file).
     pub session_id: Option<String>,
     /// The linked task, if any.
     pub task_id: Option<TaskId>,
@@ -305,15 +307,16 @@ pub struct Pane {
 pub struct NewPane {
     /// The tab to add it to. The caller places it in the tab's layout.
     pub tab_id: TabId,
-    /// An agent or a shell. Only `shell` is launched so far.
+    /// An agent or a shell.
     pub kind: PaneKind,
-    /// Which agent, for agent panes.
+    /// Which agent: required for agent panes, absent for shells.
     pub agent: Option<Agent>,
-    /// The command; a shell pane without one runs `$SHELL`, else `/bin/sh`.
+    /// The command. A shell pane without one runs `$SHELL`, else `/bin/sh`; an `other` agent
+    /// pane needs one; `claude` and `codex` panes take none, since agentdeck builds theirs.
     pub argv: Option<Vec<String>>,
     /// The absolute working directory, which must exist.
     pub cwd: String,
-    /// A task to link.
+    /// A task to link. A `claude` or `codex` pane's launch prompt carries its title and body.
     pub task_id: Option<TaskId>,
 }
 

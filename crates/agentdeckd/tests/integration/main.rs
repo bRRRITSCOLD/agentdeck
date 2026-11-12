@@ -2,6 +2,7 @@
 //! driven through a real `agentdeck-client` (spec §12). Start one with
 //! [`support::TestDaemon::start`].
 
+mod agents;
 mod auth;
 mod daemon;
 mod health;

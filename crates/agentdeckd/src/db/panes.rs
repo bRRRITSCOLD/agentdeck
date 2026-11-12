@@ -1,6 +1,8 @@
 //! `panes` queries.
 
-use agentdeck_core::{AgentState, PaneId, WorkspaceId};
+use std::collections::HashSet;
+
+use agentdeck_core::{AgentState, PaneId, TaskId, WorkspaceId};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::{DbError, exists, new_id, now, opt_text, text};
@@ -30,13 +32,9 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Pane> {
     })
 }
 
-/// Adds a pane to its tab, before its process starts: `argv` is what will be launched.
-/// Returns it with the workspace its tab is in.
-pub fn create(
-    conn: &Connection,
-    new: &NewPane,
-    argv: &[String],
-) -> Result<(Pane, WorkspaceId), DbError> {
+/// The workspace a new pane in `new`'s tab belongs to; `unknown_tab` or `unknown_task` when
+/// the pane refers to an entity that doesn't exist.
+pub fn workspace_for(conn: &Connection, new: &NewPane) -> Result<WorkspaceId, DbError> {
     let workspace: Option<WorkspaceId> = conn
         .query_row(
             "SELECT workspace_id FROM tabs WHERE id = ?1",
@@ -50,10 +48,22 @@ pub fn create(
     {
         return Err(DbError::UnknownReference("task"));
     }
+    Ok(workspace)
+}
+
+/// Adds a pane to its tab, before its process starts: `argv` is what will be launched and
+/// `session_id` the agent session it starts on. Returns it with the workspace its tab is in.
+pub fn create(
+    conn: &Connection,
+    new: &NewPane,
+    argv: &[String],
+    session_id: Option<&str>,
+) -> Result<(Pane, WorkspaceId), DbError> {
+    let workspace = workspace_for(conn, new)?;
     let id: PaneId = new_id();
     conn.execute(
-        "INSERT INTO panes (id, tab_id, kind, agent, argv, cwd, task_id, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO panes (id, tab_id, kind, agent, argv, cwd, session_id, task_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             id.to_string(),
             new.tab_id.to_string(),
@@ -61,6 +71,7 @@ pub fn create(
             new.agent.map(|agent| agent.as_str()),
             serde_json::to_string(argv).expect("a string list always serializes"),
             new.cwd,
+            session_id,
             new.task_id.map(|task| task.to_string()),
             now(),
         ],
@@ -84,6 +95,43 @@ pub fn ids(conn: &Connection) -> Result<Vec<PaneId>, DbError> {
     let mut stmt = conn.prepare("SELECT id FROM panes")?;
     let rows = stmt.query_map([], |row| text(row, "id"))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Every pane whose process hadn't exited when the daemon last stopped, with its
+/// workspace, oldest first: the panes to resume (spec §6).
+pub fn resumable(conn: &Connection) -> Result<Vec<(Pane, WorkspaceId)>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT p.*, t.workspace_id FROM panes p JOIN tabs t ON t.id = p.tab_id
+         WHERE p.state <> 'exited' ORDER BY p.created_at, p.id",
+    )?;
+    let rows = stmt.query_map([], |row| Ok((from_row(row)?, text(row, "workspace_id")?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// The agent panes linked to `task`, newest first.
+pub fn agents_on_task(conn: &Connection, task: TaskId) -> Result<Vec<PaneId>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM panes WHERE task_id = ?1 AND kind = 'agent'
+         ORDER BY created_at DESC, id DESC",
+    )?;
+    let rows = stmt.query_map([task.to_string()], |row| text(row, "id"))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Every session id a pane has.
+pub fn session_ids(conn: &Connection) -> Result<HashSet<String>, DbError> {
+    let mut stmt = conn.prepare("SELECT session_id FROM panes WHERE session_id IS NOT NULL")?;
+    let rows = stmt.query_map([], |row| row.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Records the agent session a pane runs.
+pub fn set_session_id(conn: &Connection, id: PaneId, session_id: &str) -> Result<(), DbError> {
+    conn.execute(
+        "UPDATE panes SET session_id = ?2 WHERE id = ?1",
+        params![id.to_string(), session_id],
+    )?;
+    Ok(())
 }
 
 /// Records a published state and the title it was seen under. An exited pane stays exited.

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use agentdeck_client::Client;
 use agentdeck_client::types::{NewPane, NewTab, NewWorkspace, Pane, Tab, Workspace};
-use agentdeck_core::{AgentState, PaneId, PaneKind};
+use agentdeck_core::{Agent, AgentState, PaneId, PaneKind, TaskId};
 use futures_util::TryStreamExt;
 
 use super::TestDaemon;
@@ -60,6 +60,29 @@ impl Place {
             cwd: self.workspace.dir.clone(),
             task_id: None,
         }
+    }
+
+    /// An agent pane of `agent` in the workspace's dir, linked to `task`.
+    pub fn new_agent(&self, agent: Agent, task: Option<TaskId>) -> NewPane {
+        NewPane {
+            tab_id: self.tab.id,
+            kind: PaneKind::Agent,
+            agent: Some(agent),
+            argv: None,
+            cwd: self.workspace.dir.clone(),
+            task_id: task,
+        }
+    }
+
+    /// Launches an agent pane of `agent`, linked to `task`.
+    pub async fn launch(&self, client: &Client, agent: Agent, task: Option<TaskId>) -> Pane {
+        client
+            .pane_create()
+            .body(self.new_agent(agent, task))
+            .send()
+            .await
+            .expect("launch an agent")
+            .into_inner()
     }
 
     /// Spawns a shell pane running `argv`.

@@ -323,11 +323,11 @@
                 "$ref": "#/components/schemas/Agent"
               }
             ],
-            "description": "Which agent, for agent panes.",
+            "description": "Which agent: required for agent panes, absent for shells.",
             "nullable": true
           },
           "argv": {
-            "description": "The command; a shell pane without one runs `$SHELL`, else `/bin/sh`.",
+            "description": "The command. A shell pane without one runs `$SHELL`, else `/bin/sh`; an `other` agent pane needs one; `claude` and `codex` panes take none, since agentdeck builds theirs.",
             "items": {
               "type": "string"
             },
@@ -344,7 +344,7 @@
                 "$ref": "#/components/schemas/PaneKind"
               }
             ],
-            "description": "An agent or a shell. Only `shell` is launched so far."
+            "description": "An agent or a shell."
           },
           "tab_id": {
             "allOf": [
@@ -360,7 +360,7 @@
                 "$ref": "#/components/schemas/TaskId"
               }
             ],
-            "description": "A task to link.",
+            "description": "A task to link. A `claude` or `codex` pane's launch prompt carries its title and body.",
             "nullable": true
           }
         },
@@ -548,7 +548,7 @@
             "nullable": true
           },
           "argv": {
-            "description": "The command as launched.",
+            "description": "The command as first launched, launch prompt included. A resumed pane runs its agent's resume command, or a fresh shell, instead.",
             "items": {
               "type": "string"
             },
@@ -585,7 +585,7 @@
             "description": "An agent or a shell."
           },
           "session_id": {
-            "description": "The agent's session id, when it has one.",
+            "description": "The agent's session id: chosen at launch for `claude`, found after launch for `codex` (null until Codex has written its session file).",
             "nullable": true,
             "type": "string"
           },
@@ -1153,6 +1153,7 @@
         "summary": "The notes matching every filter given, oldest first."
       },
       "post": {
+        "description": "into the newest such pane once it is idle or done, and marked read then (spec §9).",
         "operationId": "note_create",
         "requestBody": {
           "content": {
@@ -1182,7 +1183,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Leaves a note on a workspace or a task."
+        "summary": "Leaves a note on a workspace or a task. A note on a task with a live agent pane is typed"
       }
     },
     "/v1/notes/{id}": {
@@ -1258,7 +1259,7 @@
     },
     "/v1/panes": {
       "post": {
-        "description": "layout. Agent panes are not launched yet: only `kind: \"shell\"`.",
+        "description": "the tab's layout.\n\n`claude` and `codex` panes start with a launch prompt: the linked task's title and body, then the unread notes on the task and on the pane's workspace, which are then marked read by the pane. Claude Code starts on a session id agentdeck chooses; a Codex pane's is found once Codex writes its session file, and `session_id` is set then.",
         "operationId": "pane_create",
         "requestBody": {
           "content": {
@@ -1288,7 +1289,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Spawns a pane in a tab and starts its process. The caller places the pane in the tab's"
+        "summary": "Spawns a pane in a tab and starts its process (spec §6). The caller places the pane in"
       }
     },
     "/v1/panes/{id}": {

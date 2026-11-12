@@ -213,19 +213,19 @@ pub mod types {
     ///`POST /v1/panes`.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct NewPane {
-        ///Which agent, for agent panes.
+        ///Which agent: required for agent panes, absent for shells.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub agent: ::std::option::Option<agentdeck_core::Agent>,
-        ///The command; a shell pane without one runs `$SHELL`, else `/bin/sh`.
+        ///The command. A shell pane without one runs `$SHELL`, else `/bin/sh`; an `other` agent pane needs one; `claude` and `codex` panes take none, since agentdeck builds theirs.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub argv: ::std::option::Option<::std::vec::Vec<::std::string::String>>,
         ///The absolute working directory, which must exist.
         pub cwd: ::std::string::String,
-        ///An agent or a shell. Only `shell` is launched so far.
+        ///An agent or a shell.
         pub kind: agentdeck_core::PaneKind,
         ///The tab to add it to. The caller places it in the tab's layout.
         pub tab_id: agentdeck_core::TabId,
-        ///A task to link.
+        ///A task to link. A `claude` or `codex` pane's launch prompt carries its title and body.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub task_id: ::std::option::Option<agentdeck_core::TaskId>,
     }
@@ -333,7 +333,7 @@ pub mod types {
         ///Which agent, for agent panes.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub agent: ::std::option::Option<agentdeck_core::Agent>,
-        ///The command as launched.
+        ///The command as first launched, launch prompt included. A resumed pane runs its agent's resume command, or a fresh shell, instead.
         pub argv: ::std::vec::Vec<::std::string::String>,
         ///When the pane was created.
         pub created_at: ::std::string::String,
@@ -346,7 +346,7 @@ pub mod types {
         pub id: agentdeck_core::PaneId,
         ///An agent or a shell.
         pub kind: agentdeck_core::PaneKind,
-        ///The agent's session id, when it has one.
+        ///The agent's session id: chosen at launch for `claude`, found after launch for `codex` (null until Codex has written its session file).
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub session_id: ::std::option::Option<::std::string::String>,
         ///The agent state; a shell is `working` while it prints and `unknown` otherwise.
@@ -2783,7 +2783,9 @@ impl Client {
     pub fn note_list(&self) -> builder::NoteList<'_> {
         builder::NoteList::new(self)
     }
-    ///Leaves a note on a workspace or a task
+    ///Leaves a note on a workspace or a task. A note on a task with a live agent pane is typed
+    ///
+    ///into the newest such pane once it is idle or done, and marked read then (spec §9).
     ///
     ///Sends a `POST` request to `/v1/notes`
     ///
@@ -2828,9 +2830,11 @@ impl Client {
     pub fn note_update(&self) -> builder::NoteUpdate<'_> {
         builder::NoteUpdate::new(self)
     }
-    ///Spawns a pane in a tab and starts its process. The caller places the pane in the tab's
+    ///Spawns a pane in a tab and starts its process (spec §6). The caller places the pane in
     ///
-    ///layout. Agent panes are not launched yet: only `kind: "shell"`.
+    ///the tab's layout.
+    ///
+    ///`claude` and `codex` panes start with a launch prompt: the linked task's title and body, then the unread notes on the task and on the pane's workspace, which are then marked read by the pane. Claude Code starts on a session id agentdeck chooses; a Codex pane's is found once Codex writes its session file, and `session_id` is set then.
     ///
     ///Sends a `POST` request to `/v1/panes`
     ///

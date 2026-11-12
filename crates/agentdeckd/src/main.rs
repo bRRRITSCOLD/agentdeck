@@ -5,6 +5,7 @@
 //! - `agentdeckd openapi` prints the API's OpenAPI document; `cargo xtask openapi` writes it
 //!   to `openapi.json`.
 
+mod agents;
 mod api;
 mod auth;
 mod daemon;

@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use agentdeck_core::state::{Observation, OscScanner, RuleSet, StateTracker, screen};
 use agentdeck_core::ws::{Channel, ServerMessage};
-use agentdeck_core::{AgentState, PaneId};
+use agentdeck_core::{AgentState, PaneId, WorkspaceId};
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::term::Config;
@@ -34,7 +34,9 @@ use alacritty_terminal::vte::ansi::Processor;
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use tokio::sync::oneshot;
 
+use super::env::pane_env;
 use super::fanout::{Fanout, Outbox, Outgoing, ResizeDecision, Size, SubscriberId};
 use super::tail::{TAIL_CAPACITY, Tail};
 use super::{palette, snapshot};
@@ -48,10 +50,30 @@ pub struct Launch {
     /// The working directory; it must exist.
     pub cwd: PathBuf,
     /// The whole environment: nothing else is inherited. Build it with
-    /// [`pane_env`](super::env::pane_env).
+    /// [`pane_env`].
     pub env: BTreeMap<OsString, OsString>,
     /// The PTY's size until a client resizes it.
     pub size: Size,
+}
+
+/// A new pane's size until a client resizes it (spec §4).
+const INITIAL_SIZE: Size = Size { cols: 80, rows: 24 };
+
+impl Launch {
+    /// Pane `id`, in `workspace`, running `argv` in `cwd` at 80×24. Its environment is the
+    /// allowlisted part of the daemon's, plus `AGENTDECK_PANE` and `AGENTDECK_WORKSPACE`.
+    pub fn pane(id: PaneId, workspace: WorkspaceId, argv: Vec<String>, cwd: PathBuf) -> Launch {
+        let extra = [
+            ("AGENTDECK_PANE".to_owned(), id.to_string()),
+            ("AGENTDECK_WORKSPACE".to_owned(), workspace.to_string()),
+        ];
+        Launch {
+            argv,
+            cwd,
+            env: pane_env(std::env::vars_os(), &extra),
+            size: INITIAL_SIZE,
+        }
+    }
 }
 
 /// When `input` reaches the PTY.
@@ -61,6 +83,31 @@ pub enum When {
     Now,
     /// Once the pane's state is idle, done or blocked; at once if it already is.
     Idle,
+    /// Once the agent waits at its prompt: idle or done, never blocked, so the text can't
+    /// answer a dialog such as Claude Code's folder trust dialog (spec §6, §9).
+    Prompt,
+}
+
+impl When {
+    /// Whether input waiting for `self` goes in while the pane is in `state`.
+    fn accepts(self, state: AgentState) -> bool {
+        match self {
+            When::Now => true,
+            When::Idle => matches!(
+                state,
+                AgentState::Idle | AgentState::Done | AgentState::Blocked
+            ),
+            When::Prompt => matches!(state, AgentState::Idle | AgentState::Done),
+        }
+    }
+}
+
+/// Input waiting for its [`When`].
+struct Queued {
+    when: When,
+    bytes: Vec<u8>,
+    /// Told once the bytes are typed; dropped untold if the process exits first.
+    typed: Option<oneshot::Sender<()>>,
 }
 
 /// Why a pane couldn't start.
@@ -121,8 +168,8 @@ struct Live {
     size: Size,
     last_output: Option<Instant>,
     tracker: StateTracker,
-    /// `input` waiting for an idle state.
-    queued: Vec<u8>,
+    /// `input` waiting for its state, in the order it came.
+    queued: Vec<Queued>,
     exit_code: Option<i64>,
     fanout: Fanout,
 }
@@ -312,26 +359,57 @@ impl Pane {
             pane: self.id,
             state,
         });
-        if accepts_queued_input(state) && !live.queued.is_empty() {
-            self.write(std::mem::take(&mut live.queued));
+        let (ready, waiting) = std::mem::take(&mut live.queued)
+            .into_iter()
+            .partition(|queued| queued.when.accepts(state));
+        live.queued = waiting;
+        for queued in ready {
+            self.typed(queued);
         }
         Some((state, live.title.clone()))
     }
 
-    /// Types `bytes` into the PTY, now or once the pane is idle. Returns whether it was
-    /// queued.
+    /// Types `bytes` into the PTY, now or once the pane's state accepts `when`. Returns
+    /// whether it was queued.
     pub fn input(&self, bytes: &[u8], when: When) -> Result<bool, Exited> {
+        self.enqueue(Queued {
+            when,
+            bytes: bytes.to_vec(),
+            typed: None,
+        })
+    }
+
+    /// Types `bytes` into the PTY once the agent waits at its prompt ([`When::Prompt`]). The
+    /// receiver is told when they are typed; it errs if the process exits first.
+    pub fn deliver(&self, bytes: &[u8]) -> Result<oneshot::Receiver<()>, Exited> {
+        let (typed, delivered) = oneshot::channel();
+        self.enqueue(Queued {
+            when: When::Prompt,
+            bytes: bytes.to_vec(),
+            typed: Some(typed),
+        })?;
+        Ok(delivered)
+    }
+
+    fn enqueue(&self, queued: Queued) -> Result<bool, Exited> {
         let mut live = self.live();
         let state = live.tracker.state();
         if state == AgentState::Exited {
             return Err(Exited);
         }
-        if when == When::Idle && !accepts_queued_input(state) {
-            live.queued.extend_from_slice(bytes);
+        if !queued.when.accepts(state) {
+            live.queued.push(queued);
             return Ok(true);
         }
-        self.write(bytes.to_vec());
+        self.typed(queued);
         Ok(false)
+    }
+
+    fn typed(&self, queued: Queued) {
+        self.write(queued.bytes);
+        if let Some(typed) = queued.typed {
+            let _ = typed.send(());
+        }
     }
 
     /// Bytes a client typed: straight to the PTY.
@@ -445,20 +523,41 @@ impl Pane {
     }
 }
 
-/// Queued input goes in once the agent waits on the user (spec §4, `when: "idle"`): idle,
-/// done (idle after a turn nobody has looked at yet), or blocked.
-fn accepts_queued_input(state: AgentState) -> bool {
-    matches!(
-        state,
-        AgentState::Idle | AgentState::Done | AgentState::Blocked
-    )
-}
-
 fn pty_size(size: Size) -> PtySize {
     PtySize {
         rows: size.rows,
         cols: size.cols,
         pixel_width: 0,
         pixel_height: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod when {
+        use super::*;
+
+        fn accepted(when: When) -> Vec<AgentState> {
+            AgentState::ALL
+                .iter()
+                .copied()
+                .filter(|state| when.accepts(*state))
+                .collect()
+        }
+
+        #[test]
+        fn should_type_idle_input_while_idle_done_or_blocked() {
+            assert_eq!(
+                accepted(When::Idle),
+                [AgentState::Blocked, AgentState::Done, AgentState::Idle]
+            );
+        }
+
+        #[test]
+        fn should_never_type_prompt_input_into_a_blocked_pane() {
+            assert_eq!(accepted(When::Prompt), [AgentState::Done, AgentState::Idle]);
+        }
     }
 }

@@ -17,6 +17,8 @@ const NAMES: &[&str] = &[
     "COLORTERM",
     "SSH_AUTH_SOCK",
     "EDITOR",
+    // Where Codex keeps its sessions: the daemon reads them from the same place (spec §6).
+    "CODEX_HOME",
 ];
 
 /// Variables passed on by prefix.
@@ -24,6 +26,15 @@ const PREFIXES: &[&str] = &["LC_", "XDG_", "GH_"];
 
 /// What every pane gets whatever the daemon has.
 const FIXED: &[(&str, &str)] = &[("TERM", "xterm-256color"), ("COLORTERM", "truecolor")];
+
+/// The shell a shell pane runs when it names no command: the daemon's `$SHELL` when it is
+/// an absolute path, else `/bin/sh`.
+pub fn default_shell() -> String {
+    std::env::var("SHELL")
+        .ok()
+        .filter(|shell| shell.starts_with('/'))
+        .unwrap_or_else(|| "/bin/sh".to_owned())
+}
 
 /// Whether a variable of the daemon's may reach a pane.
 fn allowed(name: &OsStr) -> bool {
@@ -85,6 +96,7 @@ mod tests {
                 ("SSH_AUTH_SOCK", "/run/ssh"),
                 ("GH_TOKEN", "t"),
                 ("EDITOR", "vi"),
+                ("CODEX_HOME", "/codex"),
             ]);
             let env = pane_env(daemon.clone(), &[]);
             for (name, value) in daemon {
