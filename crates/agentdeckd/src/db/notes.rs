@@ -1,6 +1,6 @@
 //! `notes` queries.
 
-use agentdeck_core::NoteId;
+use agentdeck_core::{NoteId, PaneId, TaskId, WorkspaceId};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 
@@ -42,6 +42,34 @@ pub fn list(conn: &Connection, filter: &NoteFilter) -> Result<Vec<Note>, DbError
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(values), from_row)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// The unread notes a new agent pane's launch prompt carries: those on its workspace and on
+/// its task, oldest first.
+pub fn unread_for_launch(
+    conn: &Connection,
+    workspace: WorkspaceId,
+    task: Option<TaskId>,
+) -> Result<Vec<Note>, DbError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLUMNS} FROM notes
+         WHERE read_at IS NULL AND (workspace_id = ?1 OR task_id = ?2)
+         ORDER BY created_at, id"
+    ))?;
+    let rows = stmt.query_map(
+        params![workspace.to_string(), task.map(|task| task.to_string())],
+        from_row,
+    )?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Marks `id` read by `pane`, unless it was read already. Returns whether it changed.
+pub fn mark_read(conn: &Connection, id: NoteId, pane: PaneId) -> Result<bool, DbError> {
+    let changed = conn.execute(
+        "UPDATE notes SET read_at = ?2, read_by_pane = ?3 WHERE id = ?1 AND read_at IS NULL",
+        params![id.to_string(), now(), pane.to_string()],
+    )?;
+    Ok(changed > 0)
 }
 
 /// One note.

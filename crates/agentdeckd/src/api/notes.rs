@@ -9,6 +9,7 @@ use dropshot::{
 use agentdeck_core::NoteId;
 
 use super::{ApiContext, Authorized, IdPath};
+use crate::agents::delivery;
 use crate::db;
 use crate::model::{NewNote, Note, NoteFilter, NotePatch};
 
@@ -28,7 +29,8 @@ pub(crate) async fn note_list(
     Ok(HttpResponseOk(notes))
 }
 
-/// Leaves a note on a workspace or a task.
+/// Leaves a note on a workspace or a task. A note on a task with a live agent pane is typed
+/// into the newest such pane once it is idle or done, and marked read then (spec §9).
 #[endpoint { method = POST, path = "/v1/notes" }]
 pub(crate) async fn note_create(
     rqctx: RequestContext<ApiContext>,
@@ -41,7 +43,9 @@ pub(crate) async fn note_create(
         .db
         .call(move |c| db::notes::create(c, &new))
         .await?;
-    rqctx.context().events.changed(Entity::Note, note.id);
+    let context = rqctx.context();
+    context.events.changed(Entity::Note, note.id);
+    delivery::deliver_to_task_pane(&context.db, &context.terminals, &context.events, &note).await;
     Ok(HttpResponseCreated(note))
 }
 

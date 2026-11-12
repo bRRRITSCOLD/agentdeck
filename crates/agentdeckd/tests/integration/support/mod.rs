@@ -1,6 +1,7 @@
 //! The integration harness: a real `agentdeckd` in temp `$XDG_*` dirs, driven through a real
 //! `agentdeck-client` (spec §12).
 
+pub mod agents;
 pub mod git;
 pub mod github;
 pub mod terminal;
@@ -179,7 +180,8 @@ fn spawn(root: &Path, github_api: &str) -> Child {
         .expect("starting agentdeckd")
 }
 
-/// `agentdeckd` with only `PATH` from the test's environment, behind a stub `gh`; `$HOME`
+/// `agentdeckd` with only `PATH` from the test's environment, behind a stub `gh`, `claude`
+/// and `codex`; `$HOME`
 /// and every `$XDG_*` dir under `root`; GitHub at `github_api`; and stderr to a file (a pipe
 /// nobody reads would fill and block it).
 fn command(root: &Path, stderr: &Path, github_api: &str) -> Command {
@@ -188,7 +190,7 @@ fn command(root: &Path, stderr: &Path, github_api: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_agentdeckd"));
     command
         .env_clear()
-        .env("PATH", github::path_with_stub_gh(root))
+        .env("PATH", stub_path(root))
         .env("AGENTDECK_GITHUB_API", github_api)
         .env("HOME", &home)
         .env("XDG_RUNTIME_DIR", root.join("run"))
@@ -201,6 +203,13 @@ fn command(root: &Path, stderr: &Path, github_api: &str) -> Command {
         .stdout(Stdio::null())
         .stderr(File::create(stderr).expect("creating the stderr file"));
     command
+}
+
+/// A `PATH` that finds the stub `gh`, `claude` and `codex` first.
+fn stub_path(root: &Path) -> std::ffi::OsString {
+    let path = github::path_with_stub_gh(root);
+    agents::install(&root.join("bin"));
+    path
 }
 
 /// Where [`set_daemon_env`] keeps the extra variables, one `NAME=value` per line.

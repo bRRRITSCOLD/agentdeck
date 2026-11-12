@@ -95,7 +95,7 @@ v1.1 adds `channels`, `channel_members` and `messages` in their own migration.
 | `GET /v1/workspaces/{id}/dirty` | each git repo under `dir` with its uncommitted files and unpushed branches |
 | `DELETE /v1/workspaces/{id}?force=` | without `force`: `409 dirty` with the dirty report. Removes the dir only if `dir_owned` |
 | `GET/POST /v1/workspaces/{id}/tabs`, `PATCH/DELETE /v1/tabs/{id}` | tabs and their layout tree, listed in `position` order |
-| `POST /v1/panes` | spawn: `{tab_id, kind, agent?, argv?, cwd, task_id?}`; see §6. `cwd` must be an existing absolute dir (`invalid_dir`); a shell without `argv` runs `$SHELL`, else `/bin/sh`; a program that can't start is `invalid_argv`. The PTY starts at 80×24. The client places the pane in the tab's `layout` |
+| `POST /v1/panes` | spawn: `{tab_id, kind, agent?, argv?, cwd, task_id?}`; see §6. `cwd` must be an existing absolute dir (`invalid_dir`); a shell without `argv` runs `$SHELL`, else `/bin/sh`; a program that can't start is `invalid_argv`. An agent pane names its `agent` and a shell names none (`unsupported_kind`); `other` needs `argv`, `claude` and `codex` take none (`invalid_argv`). The PTY starts at 80×24. The client places the pane in the tab's `layout` |
 | `GET /v1/panes/{id}`, `DELETE /v1/panes/{id}` | read (live title, state and exit code while the process runs in this daemon); kill (SIGHUP to its process group and the foreground one, then SIGKILL after 3 s) and delete. Deleting a tab or workspace kills its panes too |
 | `POST /v1/panes/{id}/input` | `{text, when: "now"|"idle"}` (`now` by default): typed into the PTY as is (end it with `\r` for Enter); `idle` queues until the pane is idle, done or blocked, and is typed at once if it already is. 202 `{queued}`. Queued text is dropped if the process exits |
 | `GET /v1/panes/{id}/tail?bytes=` | raw output tail (256 KiB ring) for `agentdeck tail`, as `application/octet-stream`; all of it without `bytes` |
@@ -142,17 +142,29 @@ The message types are `agentdeck_core::ws::{ClientMessage, ServerMessage}`.
 
 ## 6. Launching agents
 
-- **Environment:** built from an allowlist: `PATH HOME USER SHELL LANG LC_* TERM COLORTERM XDG_* SSH_AUTH_SOCK GH_* EDITOR`, plus `TERM=xterm-256color` and `COLORTERM=truecolor`. Nothing else from the daemon's own environment is passed on, and that rule is tested.
-- **Argv by agent:**
-  - `claude`: `claude --session-id <uuid> [<launch prompt>]`
-  - `codex`: `codex [<launch prompt>]`. The session id is then read from the newest file in `$CODEX_HOME/sessions` (default `~/.codex/sessions`) created after launch.
+- **Environment:** built from an allowlist: `PATH HOME USER SHELL LANG LC_* TERM COLORTERM XDG_* SSH_AUTH_SOCK GH_* EDITOR CODEX_HOME`, plus `TERM=xterm-256color` and `COLORTERM=truecolor`. Nothing else from the daemon's own environment is passed on, and that rule is tested.
+- **Argv by agent:** `claude` and `codex` are looked up on the pane's `PATH`, so tests put stubs first.
+  - `claude`: `claude --session-id <uuid> [<launch prompt>]`, with a UUIDv4 agentdeck chooses.
+  - `codex`: `codex [<launch prompt>]`. Codex has no flag to start on a chosen session id (checked against `openai/codex` on 2026-11-11: `codex resume <id>` and `codex fork <id>` only). It writes each session to `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl` (`CODEX_HOME` from the pane's environment, default `$HOME/.codex`). The daemon lists those files just before launch, then polls every 250 ms for up to 2 min, while the pane runs, for the newest new one whose id no other pane holds, and stores its id as `session_id` (a `changed` pane event follows).
   - `other` and `shell`: argv as given.
-- **Launch prompt** for agent panes: the linked task's title and body, followed by every unread note on the task or its workspace. Those notes are then marked read by this pane.
-- **Trust dialog:** never answered automatically. The GUI focuses the new pane so you can answer it.
-- **Resume after a restart:** the daemon re-spawns each pane that was alive.
+  - `panes.argv` holds the argv as first launched, launch prompt included.
+- **Launch prompt** for `claude` and `codex` panes: the linked task's title and body, followed by every unread note on the task or on the pane's workspace, oldest first. With neither, there is no prompt argument. Those notes are then marked read by this pane. `other` panes get no prompt.
+
+  ```
+  Task: <title>
+
+  <body>
+
+  Notes left for you:
+  - <note>
+  - <note, continuation lines indented two spaces>
+  ```
+- **Trust dialog:** never answered automatically. The launch prompt goes in as an argument, and input agentdeck types on its own (note delivery, §9) waits until the pane is `idle` or `done`, never `blocked`, so it can't answer any dialog. The GUI focuses the new pane so you can answer it.
+- **Resume after a restart:** at start, before it serves, the daemon re-spawns each pane whose state isn't `exited`. Exits aren't recorded while the daemon shuts down, so those are the panes that were alive. Their rows, and so the layout, are unchanged.
   - `claude` panes as `claude --resume <session_id>`.
-  - `codex` panes as `codex resume <session_id>`.
-  - All other panes as `$SHELL` in their `cwd`.
+  - `codex` panes as `codex resume <session_id>`; one whose session was never found comes back as a shell.
+  - All other panes as `$SHELL` (else `/bin/sh`) in their `cwd`, with the `shell` rules.
+  - A pane that can't be re-spawned (its `cwd` is gone, say) is marked exited.
   - A pane that had exited stays exited.
 
 ## 7. Agent state
@@ -206,10 +218,10 @@ min_ms = 400                   # a new state must hold this long before it is pu
 
 ## 9. Notes
 
-- **On a task**, when a live agent pane is linked to the task: delivered automatically to that pane through `input` `when: "idle"`.
+- **On a task**, when a live agent pane is linked to the task: delivered automatically to the newest such pane, typed with Enter (`<body>\r`) once the pane is `idle` or `done`. Unlike `input` `when: "idle"`, it never goes into a `blocked` pane, so it can't answer a dialog. It is marked read when typed, and stays unread if the process exits first.
 - **On a workspace**, or on a task with no live pane: delivered in the next launch prompt there (§6).
 - **Any note** can be sent to a chosen pane at once with the GUI's "Send to agent" action or `agentdeck agent send`.
-- **Read:** delivery marks the note read and records the pane. Agents can also pull notes through the CLI or MCP.
+- **Read:** delivery marks the note read and records the pane. A workspace note is not typed into live panes. Agents can also pull notes through the CLI or MCP.
 
 ## 10. CLI and MCP
 

@@ -1,9 +1,10 @@
 //! Panes: `/v1/panes` and `/v1/panes/{id}` (spec §4, §6).
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use agentdeck_core::ws::Entity;
-use agentdeck_core::{PaneId, PaneKind};
+use agentdeck_core::{Agent, PaneId, PaneKind};
 use dropshot::{
     Body, ClientErrorStatusCode, FreeformBody, HttpError, HttpResponseAccepted,
     HttpResponseCreated, HttpResponseDeleted, HttpResponseOk, Path, Query, RequestContext,
@@ -11,33 +12,62 @@ use dropshot::{
 };
 
 use super::{ApiContext, Authorized, IdPath, client_error};
+use crate::agents::{self, codex, delivery};
 use crate::db;
 use crate::model::{InputAccepted, InputWhen, NewPane, Pane, PaneInput, TailQuery};
-use crate::terminal::env::pane_env;
-use crate::terminal::fanout::Size;
+use crate::terminal::env::default_shell;
 use crate::terminal::pane::{Launch, SpawnError, When};
 use crate::terminal::tail::TAIL_CAPACITY;
 
-/// A new pane's size until a client resizes it.
-const INITIAL_SIZE: Size = Size { cols: 80, rows: 24 };
+/// What a new pane runs, from its request (spec §4, §6).
+#[derive(Debug, PartialEq, Eq)]
+enum Command {
+    /// A shell, or an `other` agent: this argv.
+    Given(Vec<String>),
+    /// Claude Code or Codex, which agentdeck launches with a session and a launch prompt.
+    Agent(Agent),
+}
 
-/// The command a shell pane runs: `argv` as given, else the daemon's `$SHELL`, else
-/// `/bin/sh`.
-fn shell_argv(argv: Option<Vec<String>>) -> Result<Vec<String>, HttpError> {
-    match argv {
-        Some(argv) if argv.first().is_none_or(|program| program.is_empty()) => Err(client_error(
+/// Checks a new pane's kind, agent and argv against each other:
+/// - a shell names no agent, and runs `argv`, else the daemon's `$SHELL`, else `/bin/sh`;
+/// - an agent pane names its agent;
+/// - an `other` agent runs `argv`, which it must have;
+/// - `claude` and `codex` take no `argv`: agentdeck builds it.
+fn command(new: &NewPane) -> Result<Command, HttpError> {
+    let unsupported = |message: &str| {
+        client_error(
+            ClientErrorStatusCode::BAD_REQUEST,
+            "unsupported_kind",
+            message.into(),
+        )
+    };
+    let invalid_argv = |message: &str| {
+        client_error(
             ClientErrorStatusCode::BAD_REQUEST,
             "invalid_argv",
-            "argv must name a program".into(),
-        )),
-        Some(argv) => Ok(argv),
-        None => {
-            let shell = std::env::var("SHELL")
-                .ok()
-                .filter(|shell| shell.starts_with('/'))
-                .unwrap_or_else(|| "/bin/sh".to_owned());
-            Ok(vec![shell])
+            message.into(),
+        )
+    };
+    let given = |argv: &Vec<String>| {
+        if argv.first().is_none_or(|program| program.is_empty()) {
+            Err(invalid_argv("argv must name a program"))
+        } else {
+            Ok(Command::Given(argv.clone()))
         }
+    };
+    match (new.kind, new.agent, &new.argv) {
+        (PaneKind::Shell, Some(_), _) => Err(unsupported("a shell pane has no agent")),
+        (PaneKind::Shell, None, Some(argv)) => given(argv),
+        (PaneKind::Shell, None, None) => Ok(Command::Given(vec![default_shell()])),
+        (PaneKind::Agent, None, _) => Err(unsupported("an agent pane names its agent")),
+        (PaneKind::Agent, Some(Agent::Other), Some(argv)) => given(argv),
+        (PaneKind::Agent, Some(Agent::Other), None) => {
+            Err(invalid_argv("an `other` agent pane needs its argv"))
+        }
+        (PaneKind::Agent, Some(_), Some(_)) => Err(invalid_argv(
+            "claude and codex panes are launched by agentdeck: leave argv out",
+        )),
+        (PaneKind::Agent, Some(agent), None) => Ok(Command::Agent(agent)),
     }
 }
 
@@ -75,8 +105,13 @@ fn with_live_status(context: &ApiContext, mut pane: Pane) -> Pane {
     pane
 }
 
-/// Spawns a pane in a tab and starts its process. The caller places the pane in the tab's
-/// layout. Agent panes are not launched yet: only `kind: "shell"`.
+/// Spawns a pane in a tab and starts its process (spec §6). The caller places the pane in
+/// the tab's layout.
+///
+/// `claude` and `codex` panes start with a launch prompt: the linked task's title and body,
+/// then the unread notes on the task and on the pane's workspace, which are then marked read
+/// by the pane. Claude Code starts on a session id agentdeck chooses; a Codex pane's is
+/// found once Codex writes its session file, and `session_id` is set then.
 #[endpoint { method = POST, path = "/v1/panes" }]
 pub(crate) async fn pane_create(
     rqctx: RequestContext<ApiContext>,
@@ -85,32 +120,40 @@ pub(crate) async fn pane_create(
 ) -> Result<HttpResponseCreated<Pane>, HttpError> {
     let context = rqctx.context();
     let new = body.into_inner();
-    if new.kind != PaneKind::Shell {
-        return Err(client_error(
-            ClientErrorStatusCode::BAD_REQUEST,
-            "unsupported_kind",
-            "only shell panes can be launched so far".into(),
-        ));
-    }
-    let argv = shell_argv(new.argv.clone())?;
+    let command = command(&new)?;
     let cwd = check_cwd(&new.cwd)?;
-    let stored = argv.clone();
-    let (pane, workspace) = context
+    let rules = new.agent.map_or("shell", Agent::as_str);
+    let (pane, workspace, prompted) = context
         .db
-        .call(move |c| db::panes::create(c, &new, &stored))
+        .call(move |c| {
+            let (argv, session_id, notes) = match command {
+                Command::Given(argv) => (argv, None, Vec::new()),
+                Command::Agent(agent) => {
+                    let workspace = db::panes::workspace_for(c, &new)?;
+                    let task = new.task_id.map(|id| db::tasks::get(c, id)).transpose()?;
+                    let notes = db::notes::unread_for_launch(c, workspace, new.task_id)?;
+                    let prompt = agents::launch_prompt(task.as_ref(), &notes);
+                    let launch = agents::launch(agent, prompt).expect("claude and codex launch");
+                    (launch.argv, launch.session_id, notes)
+                }
+            };
+            let (pane, workspace) = db::panes::create(c, &new, &argv, session_id.as_deref())?;
+            Ok((pane, workspace, notes))
+        })
         .await?;
 
-    let extra = [
-        ("AGENTDECK_PANE".to_owned(), pane.id.to_string()),
-        ("AGENTDECK_WORKSPACE".to_owned(), workspace.to_string()),
-    ];
-    let launch = Launch {
-        argv,
-        cwd,
-        env: pane_env(std::env::vars_os(), &extra),
-        size: INITIAL_SIZE,
-    };
-    if let Err(err) = context.terminals.spawn(pane.id, launch, "shell") {
+    let launch = Launch::pane(pane.id, workspace, pane.argv.clone(), cwd);
+    let codex_sessions = (pane.agent == Some(Agent::Codex))
+        .then(|| codex::sessions_dir(&launch.env))
+        .flatten()
+        .map(|dir| {
+            let before: HashSet<PathBuf> = codex::session_files(&dir)
+                .into_iter()
+                .map(|(path, _)| path)
+                .collect();
+            (dir, before)
+        });
+    if let Err(err) = context.terminals.spawn(pane.id, launch, rules) {
         let id = pane.id;
         context.db.call(move |c| db::panes::delete(c, id)).await?;
         return Err(match err {
@@ -123,6 +166,18 @@ pub(crate) async fn pane_create(
         });
     }
     context.events.changed(Entity::Pane, pane.id);
+    let delivered = prompted.iter().map(|note| note.id).collect();
+    delivery::mark_read(&context.db, &context.events, delivered, pane.id).await;
+    if let Some((dir, before)) = codex_sessions {
+        codex::watch(
+            context.db.clone(),
+            context.terminals.clone(),
+            context.events.clone(),
+            pane.id,
+            dir,
+            before,
+        );
+    }
     Ok(HttpResponseCreated(with_live_status(context, pane)))
 }
 
@@ -209,19 +264,86 @@ pub(crate) async fn pane_tail(
 mod tests {
     use super::*;
 
-    mod shell_argv {
+    mod command {
         use super::*;
 
+        fn new(kind: PaneKind, agent: Option<Agent>, argv: Option<&[&str]>) -> NewPane {
+            NewPane {
+                tab_id: uuid::Uuid::now_v7().into(),
+                kind,
+                agent,
+                argv: argv.map(|argv| argv.iter().map(|arg| (*arg).to_owned()).collect()),
+                cwd: "/".into(),
+                task_id: None,
+            }
+        }
+
+        fn code(result: Result<Command, HttpError>) -> String {
+            result
+                .expect_err("a rejected pane")
+                .error_code
+                .expect("an error code")
+        }
+
         #[test]
-        fn should_keep_the_argv_given() {
-            let argv = vec!["sh".to_owned(), "-c".to_owned(), "env".to_owned()];
-            assert_eq!(shell_argv(Some(argv.clone())).unwrap(), argv);
+        fn should_keep_a_shells_argv() {
+            let new = new(PaneKind::Shell, None, Some(&["sh", "-c", "env"]));
+            assert_eq!(
+                command(&new).unwrap(),
+                Command::Given(vec!["sh".into(), "-c".into(), "env".into()])
+            );
         }
 
         #[test]
         fn should_reject_an_argv_without_a_program() {
-            assert!(shell_argv(Some(vec![])).is_err());
-            assert!(shell_argv(Some(vec![String::new()])).is_err());
+            assert_eq!(
+                code(command(&new(PaneKind::Shell, None, Some(&[])))),
+                "invalid_argv"
+            );
+            assert_eq!(
+                code(command(&new(PaneKind::Shell, None, Some(&[""])))),
+                "invalid_argv"
+            );
+        }
+
+        #[test]
+        fn should_reject_a_shell_with_an_agent() {
+            let new = new(PaneKind::Shell, Some(Agent::Claude), None);
+            assert_eq!(code(command(&new)), "unsupported_kind");
+        }
+
+        #[test]
+        fn should_reject_an_agent_pane_without_its_agent() {
+            let new = new(PaneKind::Agent, None, None);
+            assert_eq!(code(command(&new)), "unsupported_kind");
+        }
+
+        #[test]
+        fn should_run_an_other_agents_argv() {
+            let new = new(PaneKind::Agent, Some(Agent::Other), Some(&["aider"]));
+            assert_eq!(command(&new).unwrap(), Command::Given(vec!["aider".into()]));
+        }
+
+        #[test]
+        fn should_reject_an_other_agent_without_argv() {
+            let new = new(PaneKind::Agent, Some(Agent::Other), None);
+            assert_eq!(code(command(&new)), "invalid_argv");
+        }
+
+        #[test]
+        fn should_launch_claude_and_codex_itself() {
+            for agent in [Agent::Claude, Agent::Codex] {
+                let new = new(PaneKind::Agent, Some(agent), None);
+                assert_eq!(command(&new).unwrap(), Command::Agent(agent));
+            }
+        }
+
+        #[test]
+        fn should_reject_an_argv_for_claude_or_codex() {
+            for agent in [Agent::Claude, Agent::Codex] {
+                let new = new(PaneKind::Agent, Some(agent), Some(&["claude", "--yolo"]));
+                assert_eq!(code(command(&new)), "invalid_argv");
+            }
         }
     }
 }

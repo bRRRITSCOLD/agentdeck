@@ -113,17 +113,25 @@ mod post_v1_panes {
     }
 
     #[tokio::test]
-    async fn should_not_launch_agent_panes_yet_400() {
+    async fn should_run_an_other_agents_argv_201() {
         let daemon = TestDaemon::start().await;
         let place = Place::new(&daemon).await;
-        let mut new = place.new_pane(&["sh"]);
+        let mut new = place.new_pane(&sh("echo other-$((2+2)); sleep 60"));
         new.kind = PaneKind::Agent;
         new.agent = Some(Agent::Other);
 
-        let (status, body) = error_response(daemon.client.pane_create().body(new).send().await);
+        let pane = daemon
+            .client
+            .pane_create()
+            .body(new)
+            .send()
+            .await
+            .expect("spawn")
+            .into_inner();
 
-        assert_eq!(status, 400);
-        assert_eq!(body.error_code.as_deref(), Some("unsupported_kind"));
+        assert_eq!(pane.agent, Some(Agent::Other));
+        assert_eq!(pane.session_id, None);
+        printed(&daemon.client, pane.id, "other-4").await;
     }
 
     mod environment {
@@ -143,6 +151,7 @@ mod post_v1_panes {
                 "COLORTERM",
                 "SSH_AUTH_SOCK",
                 "EDITOR",
+                "CODEX_HOME",
                 "AGENTDECK_PANE",
                 "AGENTDECK_WORKSPACE",
             ]

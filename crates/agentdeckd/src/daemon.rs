@@ -2,7 +2,7 @@
 //! signal (spec §2).
 
 use std::net::{Ipv4Addr, SocketAddr};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use dropshot::{ConfigDropshot, ServerBuilder};
@@ -15,7 +15,7 @@ use crate::instance::{DaemonInfo, Instance};
 use crate::paths::Paths;
 use crate::prsync::{self, PrSync};
 use crate::terminal::Terminals;
-use crate::{auth, logging};
+use crate::{agents, auth, logging};
 
 /// Starts the daemon and serves until SIGINT or SIGTERM.
 pub fn run() -> anyhow::Result<()> {
@@ -23,8 +23,16 @@ pub fn run() -> anyhow::Result<()> {
     logging::init(&paths)?;
     let instance = Instance::acquire(&paths)?;
     let runtime = tokio::runtime::Runtime::new().context("starting tokio")?;
-    runtime.block_on(serve(&paths, &instance))
+    let served = runtime.block_on(serve(&paths, &instance));
+    // Dropping the runtime would wait for the database actor, which outlives every live pane:
+    // their reader threads hold it until their processes exit, and those exit only once this
+    // process does and their PTYs hang up. A grace period lets queries in flight finish.
+    runtime.shutdown_timeout(SHUTDOWN_GRACE);
+    served
 }
+
+/// How long queries in flight get to finish at shutdown.
+const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 
 async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
     std::fs::create_dir_all(&paths.data)
@@ -36,6 +44,9 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
     let prs = PrSync::start(db.clone(), events.clone(), github_api)?;
     let terminals = Terminals::new(db.clone(), events.clone(), paths.rules_dir());
     terminals.run_state_timer();
+    agents::resume::resume_panes(&db, &terminals)
+        .await
+        .map_err(|err| anyhow::anyhow!("resuming panes: {err}"))?;
     let token = auth::new_token();
     let context = ApiContext {
         db,
