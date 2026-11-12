@@ -5,6 +5,7 @@
 
 pub mod notes;
 pub mod pull_requests;
+pub mod panes;
 pub mod tabs;
 pub mod tasks;
 pub mod workspaces;
