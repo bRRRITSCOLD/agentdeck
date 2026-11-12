@@ -853,8 +853,8 @@ dependencies = [
 
 [[package]]
 name = "brrritscold-core-gpui"
-version = "0.1.1"
-source = "git+https://github.com/bRRRITSCOLD/rust-packages?tag=v0.1.1#f2c309089d7df2f15097f0f03a9225a6310a0bb1"
+version = "0.1.2"
+source = "git+https://github.com/bRRRITSCOLD/rust-packages?tag=v0.1.2#946f4a938120f1e3dfb58c0059c234779ec41206"
 dependencies = [
  "brrritscold-core-gpui-tokens",
  "chrono",
@@ -865,8 +865,8 @@ dependencies = [
 
 [[package]]
 name = "brrritscold-core-gpui-tokens"
-version = "0.1.1"
-source = "git+https://github.com/bRRRITSCOLD/rust-packages?tag=v0.1.1#f2c309089d7df2f15097f0f03a9225a6310a0bb1"
+version = "0.1.2"
+source = "git+https://github.com/bRRRITSCOLD/rust-packages?tag=v0.1.2#946f4a938120f1e3dfb58c0059c234779ec41206"
 dependencies = [
  "gpui-pre",
 ]
