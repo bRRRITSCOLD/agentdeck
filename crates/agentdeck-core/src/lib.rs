@@ -1,5 +1,25 @@
 //! GPUI-free domain types for agentdeck: ids, states and the state rules engine.
 //! No IO, no GPUI, no tokio.
+//!
+//! - [`id`]: one id newtype per entity.
+//! - [`pane`], [`task`], [`pr`]: the text-valued columns of spec §3 as enums.
+//! - [`layout`]: a tab's split tree.
+//! - [`state`]: agent state from the screen, by data-driven rules (spec §7).
+
+mod text_enum;
+
+pub mod id;
+pub mod layout;
+pub mod pane;
+pub mod pr;
+pub mod task;
+
+pub use id::{NoteId, PaneId, TabId, TaskId, WorkspaceId};
+pub use layout::{Layout, LayoutError, Ratio, SplitDirection};
+pub use pane::{Agent, PaneKind};
+pub use pr::{ChecksState, PrState, ReviewState};
+pub use task::{TaskKind, TaskStatus};
+pub use text_enum::UnknownValue;
 
 /// What `<program> --version` prints: the program's name, then the workspace version, which
 /// every agentdeck program shares.
