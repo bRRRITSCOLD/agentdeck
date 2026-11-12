@@ -2,7 +2,11 @@
 //! checked in. `cargo xtask client` regenerates it.
 //!
 //! Every daemon request carries a bearer token; [`authenticated`] builds a [`Client`] that
-//! sends it.
+//! sends it. [`daemon::connect`] finds the running daemon, starting it if need be, and
+//! [`ws::open`] opens its WebSocket.
+
+pub mod daemon;
+pub mod ws;
 
 #[allow(missing_docs, clippy::all, rustdoc::all)]
 mod generated;

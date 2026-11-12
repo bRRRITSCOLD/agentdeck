@@ -10,9 +10,9 @@ One Cargo virtual workspace, pinned like rust-packages: GPUI pin, toolchain 1.99
 |---|---|---|---|
 | `agentdeck-core` | lib | — | Domain types, ids, state rules engine, no IO, no GPUI, no tokio |
 | `agentdeckd` | bin | core | tokio, dropshot, rusqlite, portable-pty, alacritty_terminal |
-| `agentdeck-client` | lib | core | progenitor output from `openapi.json`, checked in, built by `cargo xtask client` |
+| `agentdeck-client` | lib | core | progenitor output from `openapi.json`, checked in, built by `cargo xtask client`; plus `daemon` (find or start the daemon, §2) and `ws` (the `/v1/ws` client, §5), shared by the CLI and the GUI |
 | `agentdeck` | bin | core, client | CLI and `agentdeck mcp` (rmcp); no GPUI. A current-thread tokio runtime drives the async client and the MCP server |
-| `agentdeck-gui` | bin | core, client, `brrritscold-core-gpui` | GPUI app |
+| `agentdeck-gui` | bin | core, client, `brrritscold-core-gpui` | GPUI app. A small multi-thread tokio runtime, kept as a GPUI global, drives the client and the socket |
 | `xtask` | bin | — | `openapi` (regenerate spec), `client` (regenerate client), `ci` |
 
 Licence `MIT OR Apache-2.0`.

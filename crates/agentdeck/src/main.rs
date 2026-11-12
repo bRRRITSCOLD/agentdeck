@@ -7,7 +7,6 @@
 mod api;
 mod cli;
 mod commands;
-mod daemon;
 mod launch;
 mod mcp;
 mod render;
@@ -16,6 +15,7 @@ mod resolve;
 use std::io::Write;
 use std::process::ExitCode;
 
+use agentdeck_client::daemon;
 use clap::Parser;
 
 use crate::cli::{Cli, Command};
@@ -39,7 +39,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     if let Command::Mcp = cli.command {
         return mcp::serve().await;
     }
-    let client = daemon::connect().await?;
+    let client = daemon::connect().await?.client;
     let output = commands::run(&client, cli.command).await?;
     let mut stdout = std::io::stdout().lock();
     if cli.json {

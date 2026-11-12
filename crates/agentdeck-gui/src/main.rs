@@ -1,12 +1,19 @@
-//! `agentdeck-gui`: the GPUI app, built on `brrritscold-core-gpui`.
+//! `agentdeck-gui`: the GPUI app, built on `brrritscold-core-gpui` (spec §11).
 //!
-//! A stub until the spec's later tickets fill it: `--version`, or an empty themed window.
+//! `--version` prints the version. Otherwise it opens the main window, which connects to the
+//! daemon, starting `agentdeckd` when nothing answers (spec §2).
+
+mod connection;
+mod runtime;
+mod shell;
+
+use std::rc::Rc;
 
 use brrritscold_core_gpui::Root;
-use gpui::{
-    App, AppContext as _, Bounds, Context, IntoElement, Render, Window, WindowBounds,
-    WindowOptions, div, px, size,
-};
+use gpui::{App, AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
+
+use crate::connection::{Connection, DaemonConnector};
+use crate::shell::Shell;
 
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--version") {
@@ -15,6 +22,8 @@ fn main() {
     }
     gpui_platform::application().run(|cx: &mut App| {
         brrritscold_core_gpui::init(cx);
+        runtime::init(cx);
+        let connection = cx.new(|cx| Connection::new(Rc::new(DaemonConnector), cx));
         let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
         cx.open_window(
             WindowOptions {
@@ -22,21 +31,12 @@ fn main() {
                 ..Default::default()
             },
             |window, cx| {
-                let view = cx.new(|_| Empty);
-                cx.new(|cx| Root::new(view, window, cx))
+                let shell = cx.new(|cx| Shell::new(connection, cx));
+                cx.new(|cx| Root::new(shell, window, cx))
             },
         )
         .expect("the main window opens");
         cx.on_window_closed(|cx, _| cx.quit()).detach();
         cx.activate(true);
     });
-}
-
-/// The main window's placeholder content.
-struct Empty;
-
-impl Render for Empty {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-    }
 }
