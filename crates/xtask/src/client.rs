@@ -29,7 +29,9 @@ pub fn run() -> anyhow::Result<()> {
 pub fn generate(spec: &str) -> anyhow::Result<String> {
     let spec: openapiv3::OpenAPI = serde_json::from_str(spec).context("parsing openapi.json")?;
     let mut settings = progenitor::GenerationSettings::new();
-    settings.with_interface(progenitor::InterfaceStyle::Builder);
+    settings
+        .with_interface(progenitor::InterfaceStyle::Builder)
+        .with_derive("PartialEq");
     let tokens = progenitor::Generator::new(&settings)
         .generate_tokens(&spec)
         .context("generating the client")?;

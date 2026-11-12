@@ -8,7 +8,7 @@ use progenitor_client::{ClientHooks, OperationInfo, RequestBuilderExt, encode_pa
 #[allow(clippy::all)]
 pub mod types {
     ///`DELETE /v1/workspaces/{id}`'s error: dropshot's error body, plus the dirty report when `error_code` is `dirty` (409).
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct DeleteWorkspaceError {
         ///What deleting would lose; set only with `error_code` `dirty`.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -25,7 +25,7 @@ pub mod types {
         }
     }
     ///One dirty git repo.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct DirtyRepo {
         ///The repo's absolute path.
         pub path: ::std::string::String,
@@ -40,7 +40,7 @@ pub mod types {
         }
     }
     ///The git repos under a workspace's dir that hold work not on any remote.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct DirtyReport {
         ///Only the dirty repos; an empty list means deleting loses nothing git knows about.
         pub repos: ::std::vec::Vec<DirtyRepo>,
@@ -51,7 +51,7 @@ pub mod types {
         }
     }
     ///Error information from a response.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct Error {
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub error_code: ::std::option::Option<::std::string::String>,
@@ -64,7 +64,7 @@ pub mod types {
         }
     }
     ///`GET /v1/health`.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct Health {
         ///Seconds since the daemon started.
         pub uptime_secs: u64,
@@ -77,7 +77,7 @@ pub mod types {
         }
     }
     ///A tab's split tree: `{"pane":id}` or `{"split":"h"|"v","ratio":f,"a":…,"b":…}`.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     #[serde(untagged)]
     pub enum Layout {
         Pane {
@@ -96,7 +96,7 @@ pub mod types {
         },
     }
     ///`POST /v1/notes`: exactly one of `workspace_id` and `task_id`.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct NewNote {
         ///The message.
         pub body: ::std::string::String,
@@ -113,7 +113,7 @@ pub mod types {
         }
     }
     ///`POST /v1/workspaces/{id}/tabs`.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct NewTab {
         ///The initial split tree, if any.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -127,7 +127,7 @@ pub mod types {
         }
     }
     ///`POST /v1/tasks`.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct NewTask {
         ///The body; empty when absent.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -147,7 +147,7 @@ pub mod types {
         }
     }
     ///`POST /v1/workspaces`.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct NewWorkspace {
         ///An existing absolute directory to attach. Without it, agentdeck creates a scratch dir.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -161,7 +161,7 @@ pub mod types {
         }
     }
     ///A message left on a workspace or a task for agents.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct Note {
         ///The message.
         pub body: ::std::string::String,
@@ -188,7 +188,7 @@ pub mod types {
         }
     }
     ///`PATCH /v1/notes/{id}`: the fields to change.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default)]
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
     pub struct NotePatch {
         ///A new message.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -259,7 +259,7 @@ pub mod types {
         }
     }
     ///A tab in a workspace, holding a split tree of panes.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct Tab {
         ///The tab's id.
         pub id: ::uuid::Uuid,
@@ -279,7 +279,7 @@ pub mod types {
         }
     }
     ///`PATCH /v1/tabs/{id}`: the fields to change.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default)]
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
     pub struct TabPatch {
         ///A new split tree.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -297,7 +297,7 @@ pub mod types {
         }
     }
     ///An item in the one global task list.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct Task {
         ///The body, possibly empty.
         pub body: ::std::string::String,
@@ -379,7 +379,7 @@ pub mod types {
         }
     }
     ///`PATCH /v1/tasks/{id}`: the fields to change.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default)]
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
     pub struct TaskPatch {
         ///A new body.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -463,7 +463,7 @@ pub mod types {
         }
     }
     ///A free-form unit of work with its own directory.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct Workspace {
         ///When the workspace was archived; archived workspaces keep their data.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -489,7 +489,7 @@ pub mod types {
         }
     }
     ///`PATCH /v1/workspaces/{id}`: the fields to change.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default)]
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
     pub struct WorkspacePatch {
         ///Mute or unmute notifications.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
