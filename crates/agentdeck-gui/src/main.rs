@@ -4,13 +4,18 @@
 //! daemon, starting `agentdeckd` when nothing answers (spec §2).
 
 mod connection;
+mod frame;
 mod runtime;
 mod shell;
+mod title_bar;
 
 use std::rc::Rc;
 
 use brrritscold_core_gpui::Root;
-use gpui::{App, AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
+use gpui::{
+    App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions,
+    px, size,
+};
 
 use crate::connection::{Connection, DaemonConnector};
 use crate::shell::Shell;
@@ -28,10 +33,21 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("agentdeck".into()),
+                    ..Default::default()
+                }),
+                // The compositor's frame where it draws one; where it doesn't (GNOME's
+                // Mutter), GPUI falls back to client decorations and the shell draws the
+                // title bar and resize edges.
+                window_decorations: Some(WindowDecorations::Server),
+                // Names the window to the desktop, so Alt+Tab and the dock can find it
+                // again once it is minimized.
+                app_id: Some("agentdeck".into()),
                 ..Default::default()
             },
             |window, cx| {
-                let shell = cx.new(|cx| Shell::new(connection, cx));
+                let shell = cx.new(|cx| Shell::new(connection, window, cx));
                 cx.new(|cx| Root::new(shell, window, cx))
             },
         )

@@ -13,6 +13,7 @@ agentdeck-client.workspace = true
 agentdeck-core.workspace = true
 anyhow.workspace = true
 brrritscold-core-gpui.workspace = true
+brrritscold-core-gpui-tokens.workspace = true
 gpui.workspace = true
 gpui-platform = { workspace = true, features = ["x11", "wayland"] }
 # The daemon's client and WebSocket need tokio's reactor; the GUI keeps a small runtime.

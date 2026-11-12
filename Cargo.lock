@@ -165,6 +165,7 @@ dependencies = [
  "agentdeck-core",
  "anyhow",
  "brrritscold-core-gpui",
+ "brrritscold-core-gpui-tokens",
  "gpui-pre",
  "gpui-pre-platform",
  "tokio",

@@ -1,39 +1,53 @@
 //! The main window's content: what the daemon connection allows. Until it connects, a
 //! centred status; once it does, the workspace shell (the sidebar and panes arrive with the
-//! following #12 PRs).
+//! following #12 PRs). When the compositor leaves decorations to the app, a title bar and
+//! resize edges frame it.
 
 use brrritscold_core_gpui::{
     ActiveTheme as _, Alert, AlertAction, AlertDescription, AlertTitle, AlertVariant, Button,
-    ButtonSize, ButtonVariant, IconName,
+    ButtonSize, ButtonVariant, IconName, Separator,
 };
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, Window, div, px,
+    AnyElement, Context, Decorations, Entity, FocusHandle, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, Styled as _, Window, div, px,
 };
 
 use crate::connection::{Connection, Status};
+use crate::frame;
+use crate::title_bar::{Close, Minimize, TitleBar, ToggleMaximize};
 
 /// The main window's root view, inside core-gpui's `Root`.
 pub struct Shell {
     connection: Entity<Connection>,
+    /// Held by the shell so the title bar's actions reach its handlers while nothing inside
+    /// has focus.
+    focus: FocusHandle,
 }
 
 impl Shell {
-    /// A shell that follows `connection`.
-    pub fn new(connection: Entity<Connection>, cx: &mut Context<Self>) -> Self {
+    /// A shell that follows `connection`, focused in `window`.
+    pub fn new(
+        connection: Entity<Connection>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         cx.observe(&connection, |_, _, cx| cx.notify()).detach();
-        Shell { connection }
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        Shell { connection, focus }
     }
-}
 
-impl Render for Shell {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// What the connection allows, filling the space under the title bar.
+    fn content(&self, cx: &mut Context<Self>) -> AnyElement {
         let s = cx.theme().semantic();
-        let centred = div().size_full().flex().items_center().justify_center();
+        let centred = div().flex_1().flex().items_center().justify_center();
         match self.connection.read(cx).status() {
             Status::Connecting => centred
                 .text_sm()
                 .text_color(s.muted_foreground)
-                .child("Connecting to agentdeckd…"),
+                .child("Connecting to agentdeckd…")
+                .into_any_element(),
             Status::Failed(reason) => {
                 let connection = self.connection.clone();
                 let retry = Button::new("retry")
@@ -43,18 +57,48 @@ impl Render for Shell {
                     .on_click(move |_, _, cx| {
                         connection.update(cx, |connection, cx| connection.connect(cx));
                     });
-                centred.child(
-                    Alert::new()
-                        .variant(AlertVariant::Destructive)
-                        .icon(IconName::Unplug)
-                        .title(AlertTitle::new("agentdeck can't reach its daemon"))
-                        .description(AlertDescription::new(reason.clone()))
-                        .action(AlertAction::new().child(retry))
-                        .w(px(480.)),
-                )
+                centred
+                    .child(
+                        Alert::new()
+                            .variant(AlertVariant::Destructive)
+                            .icon(IconName::Unplug)
+                            .title(AlertTitle::new("agentdeck can't reach its daemon"))
+                            .description(AlertDescription::new(reason.clone()))
+                            .action(AlertAction::new().child(retry))
+                            .w(px(480.)),
+                    )
+                    .into_any_element()
             }
-            Status::Connected(_) => centred,
+            Status::Connected(_) => centred.into_any_element(),
         }
+    }
+}
+
+impl Render for Shell {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let client_tiling = match window.window_decorations() {
+            Decorations::Client { tiling } => Some(tiling),
+            Decorations::Server => None,
+        };
+        div()
+            .relative()
+            .size_full()
+            .flex()
+            .flex_col()
+            .track_focus(&self.focus)
+            .on_action(|_: &Minimize, window, _| window.minimize_window())
+            .on_action(|_: &ToggleMaximize, window, _| window.zoom_window())
+            .on_action(|_: &Close, window, _| window.remove_window())
+            // Penpot "Main window": TitleBar / Separator / Body.
+            .when(client_tiling.is_some(), |shell| {
+                shell
+                    .child(TitleBar::new("agentdeck"))
+                    .child(Separator::new())
+            })
+            .child(self.content(cx))
+            .when_some(client_tiling, |shell, tiling| {
+                shell.children(frame::resize_edges(tiling))
+            })
     }
 }
 
@@ -86,7 +130,7 @@ mod tests {
         cx.update(brrritscold_core_gpui::init);
         let window = cx.add_window(|window, cx| {
             let connection = cx.new(|cx| Connection::new(connector, cx));
-            let shell = cx.new(|cx| Shell::new(connection, cx));
+            let shell = cx.new(|cx| Shell::new(connection, window, cx));
             Root::new(shell, window, cx)
         });
         let cx = &mut VisualTestContext::from_window(*window, cx);
@@ -116,6 +160,29 @@ mod tests {
             let _remote = connector.then_connect();
 
             draw_in_both_themes(connector, cx);
+        }
+    }
+
+    mod window_actions {
+        use super::*;
+        use crate::title_bar::Close;
+
+        #[gpui::test]
+        fn should_remove_the_window_on_close(cx: &mut TestAppContext) {
+            cx.update(brrritscold_core_gpui::init);
+            let window = cx.add_window(|window, cx| {
+                let connection = cx.new(|cx| Connection::new(Rc::new(Pending), cx));
+                let shell = cx.new(|cx| Shell::new(connection, window, cx));
+                Root::new(shell, window, cx)
+            });
+            let handle = window.into();
+            let cx = &mut VisualTestContext::from_window(handle, cx);
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+
+            cx.dispatch_action(Close);
+            cx.run_until_parked();
+
+            assert!(!cx.windows().contains(&handle));
         }
     }
 }
