@@ -5,6 +5,7 @@
 //! - [`pane`], [`task`], [`pr`]: the text-valued columns of spec §3 as enums.
 //! - [`layout`]: a tab's split tree.
 //! - [`state`]: agent state from the screen, by data-driven rules (spec §7).
+//! - [`ws`]: the `/v1/ws` WebSocket protocol (spec §5).
 //!
 //! The `schemars` feature adds `JsonSchema` to the ids, the column enums and the layout tree,
 //! for the daemon's OpenAPI document.
@@ -19,6 +20,7 @@ pub mod pane;
 pub mod pr;
 pub mod state;
 pub mod task;
+pub mod ws;
 
 pub use id::{NoteId, PaneId, TabId, TaskId, WorkspaceId};
 pub use layout::{Layout, LayoutError, Ratio, SplitDirection};

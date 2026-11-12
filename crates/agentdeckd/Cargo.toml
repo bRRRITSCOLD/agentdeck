@@ -9,7 +9,8 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-agentdeck-core = { workspace = true, features = ["schemars"] }
+agentdeck-core = { workspace = true, features = ["schemars", "screen"] }
+alacritty_terminal.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
@@ -17,6 +18,9 @@ dropshot.workspace = true
 # PR sync calls GitHub over HTTPS: rustls with the platform verifier (aws-lc-rs, already in the
 # lock through GPUI).
 reqwest = { workspace = true, features = ["rustls"] }
+futures-util.workspace = true
+nix.workspace = true
+portable-pty.workspace = true
 rusqlite.workspace = true
 rusqlite_migration.workspace = true
 schemars.workspace = true
@@ -26,6 +30,7 @@ serde_json.workspace = true
 slog.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-tungstenite.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
@@ -34,6 +39,7 @@ uuid.workspace = true
 agentdeck-client.workspace = true
 httpmock.workspace = true
 tempfile.workspace = true
+tokio-tungstenite = { workspace = true, features = ["connect"] }
 
 [lints]
 workspace = true
