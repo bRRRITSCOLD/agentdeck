@@ -245,4 +245,14 @@ There is no e2e tier. GPUI's headless context doesn't advance real sockets, so a
 
 ## 13. Milestones
 
-v1: §1–§12. v1.1 is channels: the `channels`, `channel_members` and `messages` tables, `agentdeck send <channel>`, MCP `channel_post`/`channel_read`, and delivery through `input` `when: "idle"`.
+v1: §1–§12, the tabs and split-pane layout (Penpot page "Screens").
+
+v1.1: the **canvas and channels together** (Penpot page "Canvas", #17).
+- Each workspace's home view is a canvas of agent nodes that zoom in stages.
+- Channel hubs, with member and listener edges.
+- Orchestrator nodes.
+- Focus into v1's split view.
+- The `channels`, `channel_members`, `messages` and `canvas_nodes` tables.
+- `agentdeck send <channel>`, MCP `channel_post` / `channel_read`, and delivery through `input` `when: "idle"`.
+
+v1's split view stays: v1.1's Focus mode opens it.
