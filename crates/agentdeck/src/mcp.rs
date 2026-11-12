@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::ApiError;
 use crate::commands::{self, caller_pane};
-use crate::daemon;
+use agentdeck_client::daemon;
 
 /// Names the workspace an agent runs in; the tools' default workspace.
 pub const WORKSPACE_VAR: &str = "AGENTDECK_WORKSPACE";
@@ -241,7 +241,7 @@ impl Server {
     )]
     async fn tasks_list(&self, Parameters(args): Parameters<TasksList>) -> ToolResult {
         respond(async {
-            let client = daemon::connect().await?;
+            let client = daemon::connect().await?.client;
             let mut request = client.task_list();
             if let Some(status) = parse_opt::<TaskStatus>("status", args.status.as_deref())? {
                 request = request.status(status);
@@ -266,7 +266,7 @@ impl Server {
     #[tool(description = "Get one task, with its pull request when it has one.")]
     async fn task_get(&self, Parameters(args): Parameters<TaskRef>) -> ToolResult {
         respond(async {
-            let client = daemon::connect().await?;
+            let client = daemon::connect().await?.client;
             let id: TaskId = parse("task id", &args.id)?;
             Ok(client
                 .task_get()
@@ -282,7 +282,7 @@ impl Server {
     #[tool(description = "Create a task. It goes in your workspace unless you name another.")]
     async fn task_create(&self, Parameters(args): Parameters<TaskCreate>) -> ToolResult {
         respond(async {
-            let client = daemon::connect().await?;
+            let client = daemon::connect().await?.client;
             let reference = args
                 .workspace
                 .as_deref()
@@ -310,7 +310,7 @@ impl Server {
     )]
     async fn task_update(&self, Parameters(args): Parameters<TaskUpdate>) -> ToolResult {
         respond(async {
-            let client = daemon::connect().await?;
+            let client = daemon::connect().await?.client;
             let id: TaskId = parse("task id", &args.id)?;
             let patch = TaskPatch {
                 body: args.body,
@@ -336,7 +336,7 @@ impl Server {
     )]
     async fn notes_list(&self, Parameters(args): Parameters<NotesList>) -> ToolResult {
         respond(async {
-            let client = daemon::connect().await?;
+            let client = daemon::connect().await?.client;
             let mut request = client.note_list();
             if let Some(task) = parse_opt::<TaskId>("task id", args.task.as_deref())? {
                 request = request.task(task);
@@ -359,7 +359,7 @@ impl Server {
     #[tool(description = "Leave a note on a task, or on a workspace (yours by default).")]
     async fn note_create(&self, Parameters(args): Parameters<NoteCreate>) -> ToolResult {
         respond(async {
-            let client = daemon::connect().await?;
+            let client = daemon::connect().await?.client;
             let task_id = parse_opt::<TaskId>("task id", args.task.as_deref())?;
             let workspace_id = match task_id {
                 Some(_) => Server::workspace(&client, args.workspace.as_deref()).await?,
@@ -393,7 +393,7 @@ impl Server {
     #[tool(description = "Mark a note read, by your pane.")]
     async fn note_mark_read(&self, Parameters(args): Parameters<NoteRef>) -> ToolResult {
         respond(async {
-            let client = daemon::connect().await?;
+            let client = daemon::connect().await?.client;
             let id: NoteId = parse("note id", &args.id)?;
             let patch = NotePatch {
                 read: Some(true),
@@ -415,7 +415,7 @@ impl Server {
     #[tool(description = "List every workspace, archived ones included.")]
     async fn workspaces_list(&self) -> ToolResult {
         respond(async {
-            let client = daemon::connect().await?;
+            let client = daemon::connect().await?.client;
             Ok(client
                 .workspace_list()
                 .send()
@@ -429,7 +429,7 @@ impl Server {
     #[tool(description = "The GitHub login state of PR sync and when it last synced.")]
     async fn prs_status(&self) -> ToolResult {
         respond(async {
-            let client = daemon::connect().await?;
+            let client = daemon::connect().await?.client;
             Ok(client
                 .prs_status()
                 .send()

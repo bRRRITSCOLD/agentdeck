@@ -21,6 +21,11 @@ impl DaemonInfo {
     pub fn base_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
     }
+
+    /// `ws://127.0.0.1:<port>/v1/ws`, the daemon's WebSocket (spec §5).
+    pub fn ws_url(&self) -> String {
+        format!("ws://127.0.0.1:{}/v1/ws", self.port)
+    }
 }
 
 #[cfg(test)]

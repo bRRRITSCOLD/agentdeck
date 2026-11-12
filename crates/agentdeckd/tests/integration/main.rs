@@ -15,3 +15,4 @@ mod tasks;
 mod version;
 mod workspaces;
 mod ws;
+mod ws_client;
