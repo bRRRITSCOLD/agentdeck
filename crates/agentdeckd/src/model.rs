@@ -2,8 +2,8 @@
 //! tree are `agentdeck-core`'s, so the client shares them.
 
 use agentdeck_core::{
-    ChecksState, Layout, NoteId, PaneId, PrState, ReviewState, TabId, TaskId, TaskKind, TaskStatus,
-    WorkspaceId,
+    Agent, AgentState, ChecksState, Layout, NoteId, PaneId, PaneKind, PrState, ReviewState, TabId,
+    TaskId, TaskKind, TaskStatus, WorkspaceId,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -269,4 +269,85 @@ pub struct PrSyncStatus {
     pub last_synced_at: Option<String>,
     /// Why the most recent sync failed; `None` when it succeeded or none has run.
     pub last_error: Option<String>,
+}
+
+/// A terminal in a tab, running an agent CLI or a shell.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct Pane {
+    /// The pane's id.
+    pub id: PaneId,
+    /// The tab it belongs to.
+    pub tab_id: TabId,
+    /// An agent or a shell.
+    pub kind: PaneKind,
+    /// Which agent, for agent panes.
+    pub agent: Option<Agent>,
+    /// The command as launched.
+    pub argv: Vec<String>,
+    /// The working directory it was launched in.
+    pub cwd: String,
+    /// The agent's session id, when it has one.
+    pub session_id: Option<String>,
+    /// The linked task, if any.
+    pub task_id: Option<TaskId>,
+    /// The agent state; a shell is `working` while it prints and `unknown` otherwise.
+    pub state: AgentState,
+    /// The title the program set, or empty.
+    pub title: String,
+    /// The exit code, once the process has exited.
+    pub exit_code: Option<i64>,
+    /// When the pane was created.
+    pub created_at: String,
+}
+
+/// `POST /v1/panes`.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct NewPane {
+    /// The tab to add it to. The caller places it in the tab's layout.
+    pub tab_id: TabId,
+    /// An agent or a shell. Only `shell` is launched so far.
+    pub kind: PaneKind,
+    /// Which agent, for agent panes.
+    pub agent: Option<Agent>,
+    /// The command; a shell pane without one runs `$SHELL`, else `/bin/sh`.
+    pub argv: Option<Vec<String>>,
+    /// The absolute working directory, which must exist.
+    pub cwd: String,
+    /// A task to link.
+    pub task_id: Option<TaskId>,
+}
+
+/// When `POST /v1/panes/{id}/input` reaches the terminal.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InputWhen {
+    /// At once.
+    #[default]
+    Now,
+    /// Once the pane is idle, done or blocked; at once if it already is.
+    Idle,
+}
+
+/// `POST /v1/panes/{id}/input`.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct PaneInput {
+    /// Typed into the terminal as is; end it with `\r` to press Enter.
+    pub text: String,
+    /// `now` when absent.
+    #[serde(default)]
+    pub when: InputWhen,
+}
+
+/// What became of `POST /v1/panes/{id}/input`.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct InputAccepted {
+    /// True when it waits for the pane to be idle; false when it was typed.
+    pub queued: bool,
+}
+
+/// `GET /v1/panes/{id}/tail` query.
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct TailQuery {
+    /// At most this many of the last bytes; all that is kept (256 KiB) when absent.
+    pub bytes: Option<u64>,
 }

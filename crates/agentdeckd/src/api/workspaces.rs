@@ -11,6 +11,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use agentdeck_core::WorkspaceId;
+use agentdeck_core::ws::Entity;
 
 use super::{ApiContext, Authorized, IdPath, client_error};
 use crate::model::{DirtyReport, NewWorkspace, Workspace, WorkspacePatch};
@@ -75,6 +76,10 @@ pub(crate) async fn workspace_create(
         .db
         .call(move |c| db::workspaces::create(c, &new.name, dir.as_deref(), &scratch_root))
         .await?;
+    rqctx
+        .context()
+        .events
+        .changed(Entity::Workspace, workspace.id);
     Ok(HttpResponseCreated(workspace))
 }
 
@@ -110,6 +115,10 @@ pub(crate) async fn workspace_update(
         .db
         .call(move |c| db::workspaces::update(c, id, &patch))
         .await?;
+    rqctx
+        .context()
+        .events
+        .changed(Entity::Workspace, workspace.id);
     Ok(HttpResponseOk(workspace))
 }
 
@@ -126,6 +135,10 @@ pub(crate) async fn workspace_archive(
         .db
         .call(move |c| db::workspaces::set_archived(c, id, true))
         .await?;
+    rqctx
+        .context()
+        .events
+        .changed(Entity::Workspace, workspace.id);
     Ok(HttpResponseOk(workspace))
 }
 
@@ -142,6 +155,10 @@ pub(crate) async fn workspace_unarchive(
         .db
         .call(move |c| db::workspaces::set_archived(c, id, false))
         .await?;
+    rqctx
+        .context()
+        .events
+        .changed(Entity::Workspace, workspace.id);
     Ok(HttpResponseOk(workspace))
 }
 
@@ -257,5 +274,8 @@ pub(crate) async fn workspace_delete(
         .map_err(|err| HttpError::for_internal_error(format!("removing the dir: {err}")))?;
     }
     db.call(move |c| db::workspaces::delete(c, id)).await?;
+    // Its panes went with it: stop their processes.
+    rqctx.context().terminals.reap().await?;
+    rqctx.context().events.changed(Entity::Workspace, id);
     Ok(HttpResponseDeleted())
 }

@@ -9,9 +9,12 @@ use agentdeck_client::types::{GhLogin, NewWorkspace, PrSyncStatus, Task, Workspa
 use agentdeck_core::{ChecksState, PrState, ReviewState, TaskKind, TaskStatus};
 use httpmock::MockServer;
 
+use agentdeck_core::ws::{Entity, ServerMessage};
+
 use crate::support::TestDaemon;
 use crate::support::git::git;
 use crate::support::github::{Pr, mock_fetch, mock_search, mock_unauthorized, set_gh_token};
+use crate::support::ws::{Frame, Ws};
 
 const TOKEN: &str = "gho_test";
 
@@ -102,6 +105,29 @@ mod post_v1_prs_sync {
         assert_eq!(stored.head_ref, "feat/sync");
         assert_eq!(stored.checks, Some(ChecksState::Failure));
         assert_eq!(stored.review, Some(ReviewState::ChangesRequested));
+    }
+
+    #[tokio::test]
+    async fn should_tell_websocket_clients_which_tasks_changed_200() {
+        let github = MockServer::start_async().await;
+        let daemon = daemon(&github, Some(TOKEN)).await;
+        // Connected before GitHub shows the PR, so whichever sync finds it, this client hears.
+        let mut ws = Ws::connect(&daemon).await;
+        mock_search(&github, TOKEN, &[Pr::open(7)]);
+
+        sync(&daemon.client).await;
+
+        let changed = ws
+            .until(|frame| match frame {
+                Frame::Message(ServerMessage::Changed {
+                    entity: Entity::Task,
+                    id,
+                }) => Some(id),
+                _ => None,
+            })
+            .await;
+        let tasks = pr_tasks(&daemon.client).await;
+        assert_eq!(changed, tasks[0].id.to_string());
     }
 
     #[tokio::test]

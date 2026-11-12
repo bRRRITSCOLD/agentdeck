@@ -9,12 +9,14 @@ mod api;
 mod auth;
 mod daemon;
 mod db;
+mod events;
 mod git;
 mod instance;
 mod logging;
 mod model;
 mod paths;
 mod prsync;
+mod terminal;
 
 use std::process::ExitCode;
 

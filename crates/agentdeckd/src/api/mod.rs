@@ -6,10 +6,12 @@
 
 mod health;
 mod notes;
+mod panes;
 mod prs;
 mod tabs;
 mod tasks;
 mod workspaces;
+mod ws;
 
 use std::any::Any;
 use std::path::PathBuf;
@@ -25,7 +27,9 @@ use serde::Deserialize;
 
 use crate::auth::bearer_matches;
 use crate::db::{Db, DbError};
+use crate::events::Events;
 use crate::prsync::PrSync;
+use crate::terminal::Terminals;
 
 /// The version `openapi.json` declares: the API is `/v1`.
 const API_VERSION: semver::Version = semver::Version::new(1, 0, 0);
@@ -42,6 +46,10 @@ pub struct ApiContext {
     pub scratch_root: PathBuf,
     /// PR sync, for `/v1/prs`.
     pub prs: PrSync,
+    /// The live panes.
+    pub terminals: Terminals,
+    /// The events every WebSocket client gets.
+    pub events: Events,
 }
 
 /// Every endpoint.
@@ -72,6 +80,12 @@ pub fn api() -> ApiDescription<ApiContext> {
         api.register(notes::note_delete),
         api.register(prs::prs_sync),
         api.register(prs::prs_status),
+        api.register(panes::pane_create),
+        api.register(panes::pane_get),
+        api.register(panes::pane_delete),
+        api.register(panes::pane_input),
+        api.register(panes::pane_tail),
+        api.register(ws::ws),
     ];
     for result in registered {
         result.expect("every endpoint registers");

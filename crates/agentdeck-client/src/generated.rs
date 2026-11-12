@@ -129,6 +129,70 @@ pub mod types {
             Default::default()
         }
     }
+    ///What became of `POST /v1/panes/{id}/input`.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct InputAccepted {
+        ///True when it waits for the pane to be idle; false when it was typed.
+        pub queued: bool,
+    }
+    impl InputAccepted {
+        pub fn builder() -> builder::InputAccepted {
+            Default::default()
+        }
+    }
+    ///When `POST /v1/panes/{id}/input` reaches the terminal.
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum InputWhen {
+        ///At once.
+        #[serde(rename = "now")]
+        Now,
+        ///Once the pane is idle, done or blocked; at once if it already is.
+        #[serde(rename = "idle")]
+        Idle,
+    }
+    impl ::std::fmt::Display for InputWhen {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Now => f.write_str("now"),
+                Self::Idle => f.write_str("idle"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for InputWhen {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "now" => Ok(Self::Now),
+                "idle" => Ok(Self::Idle),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for InputWhen {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for InputWhen {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
     ///`POST /v1/notes`: exactly one of `workspace_id` and `task_id`.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct NewNote {
@@ -143,6 +207,30 @@ pub mod types {
     }
     impl NewNote {
         pub fn builder() -> builder::NewNote {
+            Default::default()
+        }
+    }
+    ///`POST /v1/panes`.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct NewPane {
+        ///Which agent, for agent panes.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub agent: ::std::option::Option<agentdeck_core::Agent>,
+        ///The command; a shell pane without one runs `$SHELL`, else `/bin/sh`.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub argv: ::std::option::Option<::std::vec::Vec<::std::string::String>>,
+        ///The absolute working directory, which must exist.
+        pub cwd: ::std::string::String,
+        ///An agent or a shell. Only `shell` is launched so far.
+        pub kind: agentdeck_core::PaneKind,
+        ///The tab to add it to. The caller places it in the tab's layout.
+        pub tab_id: agentdeck_core::TabId,
+        ///A task to link.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub task_id: ::std::option::Option<agentdeck_core::TaskId>,
+    }
+    impl NewPane {
+        pub fn builder() -> builder::NewPane {
             Default::default()
         }
     }
@@ -236,6 +324,57 @@ pub mod types {
     }
     impl NotePatch {
         pub fn builder() -> builder::NotePatch {
+            Default::default()
+        }
+    }
+    ///A terminal in a tab, running an agent CLI or a shell.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct Pane {
+        ///Which agent, for agent panes.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub agent: ::std::option::Option<agentdeck_core::Agent>,
+        ///The command as launched.
+        pub argv: ::std::vec::Vec<::std::string::String>,
+        ///When the pane was created.
+        pub created_at: ::std::string::String,
+        ///The working directory it was launched in.
+        pub cwd: ::std::string::String,
+        ///The exit code, once the process has exited.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub exit_code: ::std::option::Option<i64>,
+        ///The pane's id.
+        pub id: agentdeck_core::PaneId,
+        ///An agent or a shell.
+        pub kind: agentdeck_core::PaneKind,
+        ///The agent's session id, when it has one.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub session_id: ::std::option::Option<::std::string::String>,
+        ///The agent state; a shell is `working` while it prints and `unknown` otherwise.
+        pub state: agentdeck_core::AgentState,
+        ///The tab it belongs to.
+        pub tab_id: agentdeck_core::TabId,
+        ///The linked task, if any.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub task_id: ::std::option::Option<agentdeck_core::TaskId>,
+        ///The title the program set, or empty.
+        pub title: ::std::string::String,
+    }
+    impl Pane {
+        pub fn builder() -> builder::Pane {
+            Default::default()
+        }
+    }
+    ///`POST /v1/panes/{id}/input`.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct PaneInput {
+        ///Typed into the terminal as is; end it with `\r` to press Enter.
+        pub text: ::std::string::String,
+        ///`now` when absent.
+        #[serde(default = "defaults::pane_input_when")]
+        pub when: InputWhen,
+    }
+    impl PaneInput {
+        pub fn builder() -> builder::PaneInput {
             Default::default()
         }
     }
@@ -735,6 +874,46 @@ pub mod types {
             }
         }
         #[derive(Clone, Debug)]
+        pub struct InputAccepted {
+            queued: ::std::result::Result<bool, ::std::string::String>,
+        }
+        impl ::std::default::Default for InputAccepted {
+            fn default() -> Self {
+                Self {
+                    queued: Err("no value supplied for queued".to_string()),
+                }
+            }
+        }
+        impl InputAccepted {
+            pub fn queued<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<bool>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.queued = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for queued: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<InputAccepted> for super::InputAccepted {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: InputAccepted,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    queued: value.queued?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::InputAccepted> for InputAccepted {
+            fn from(value: super::InputAccepted) -> Self {
+                Self {
+                    queued: Ok(value.queued),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
         pub struct NewNote {
             body: ::std::result::Result<::std::string::String, ::std::string::String>,
             task_id: ::std::result::Result<
@@ -805,6 +984,127 @@ pub mod types {
                     body: Ok(value.body),
                     task_id: Ok(value.task_id),
                     workspace_id: Ok(value.workspace_id),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
+        pub struct NewPane {
+            agent: ::std::result::Result<
+                ::std::option::Option<agentdeck_core::Agent>,
+                ::std::string::String,
+            >,
+            argv: ::std::result::Result<
+                ::std::option::Option<::std::vec::Vec<::std::string::String>>,
+                ::std::string::String,
+            >,
+            cwd: ::std::result::Result<::std::string::String, ::std::string::String>,
+            kind: ::std::result::Result<agentdeck_core::PaneKind, ::std::string::String>,
+            tab_id: ::std::result::Result<agentdeck_core::TabId, ::std::string::String>,
+            task_id: ::std::result::Result<
+                ::std::option::Option<agentdeck_core::TaskId>,
+                ::std::string::String,
+            >,
+        }
+        impl ::std::default::Default for NewPane {
+            fn default() -> Self {
+                Self {
+                    agent: Ok(Default::default()),
+                    argv: Ok(Default::default()),
+                    cwd: Err("no value supplied for cwd".to_string()),
+                    kind: Err("no value supplied for kind".to_string()),
+                    tab_id: Err("no value supplied for tab_id".to_string()),
+                    task_id: Ok(Default::default()),
+                }
+            }
+        }
+        impl NewPane {
+            pub fn agent<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::Agent>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.agent = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for agent: {e}"));
+                self
+            }
+            pub fn argv<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<
+                        ::std::option::Option<::std::vec::Vec<::std::string::String>>,
+                    >,
+                T::Error: ::std::fmt::Display,
+            {
+                self.argv = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for argv: {e}"));
+                self
+            }
+            pub fn cwd<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::string::String>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.cwd = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for cwd: {e}"));
+                self
+            }
+            pub fn kind<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<agentdeck_core::PaneKind>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.kind = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for kind: {e}"));
+                self
+            }
+            pub fn tab_id<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<agentdeck_core::TabId>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.tab_id = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for tab_id: {e}"));
+                self
+            }
+            pub fn task_id<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::TaskId>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.task_id = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for task_id: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<NewPane> for super::NewPane {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: NewPane,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    agent: value.agent?,
+                    argv: value.argv?,
+                    cwd: value.cwd?,
+                    kind: value.kind?,
+                    tab_id: value.tab_id?,
+                    task_id: value.task_id?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::NewPane> for NewPane {
+            fn from(value: super::NewPane) -> Self {
+                Self {
+                    agent: Ok(value.agent),
+                    argv: Ok(value.argv),
+                    cwd: Ok(value.cwd),
+                    kind: Ok(value.kind),
+                    tab_id: Ok(value.tab_id),
+                    task_id: Ok(value.task_id),
                 }
             }
         }
@@ -1218,6 +1518,264 @@ pub mod types {
                     body: Ok(value.body),
                     read: Ok(value.read),
                     read_by_pane: Ok(value.read_by_pane),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
+        pub struct Pane {
+            agent: ::std::result::Result<
+                ::std::option::Option<agentdeck_core::Agent>,
+                ::std::string::String,
+            >,
+            argv: ::std::result::Result<
+                ::std::vec::Vec<::std::string::String>,
+                ::std::string::String,
+            >,
+            created_at: ::std::result::Result<::std::string::String, ::std::string::String>,
+            cwd: ::std::result::Result<::std::string::String, ::std::string::String>,
+            exit_code: ::std::result::Result<::std::option::Option<i64>, ::std::string::String>,
+            id: ::std::result::Result<agentdeck_core::PaneId, ::std::string::String>,
+            kind: ::std::result::Result<agentdeck_core::PaneKind, ::std::string::String>,
+            session_id: ::std::result::Result<
+                ::std::option::Option<::std::string::String>,
+                ::std::string::String,
+            >,
+            state: ::std::result::Result<agentdeck_core::AgentState, ::std::string::String>,
+            tab_id: ::std::result::Result<agentdeck_core::TabId, ::std::string::String>,
+            task_id: ::std::result::Result<
+                ::std::option::Option<agentdeck_core::TaskId>,
+                ::std::string::String,
+            >,
+            title: ::std::result::Result<::std::string::String, ::std::string::String>,
+        }
+        impl ::std::default::Default for Pane {
+            fn default() -> Self {
+                Self {
+                    agent: Ok(Default::default()),
+                    argv: Err("no value supplied for argv".to_string()),
+                    created_at: Err("no value supplied for created_at".to_string()),
+                    cwd: Err("no value supplied for cwd".to_string()),
+                    exit_code: Ok(Default::default()),
+                    id: Err("no value supplied for id".to_string()),
+                    kind: Err("no value supplied for kind".to_string()),
+                    session_id: Ok(Default::default()),
+                    state: Err("no value supplied for state".to_string()),
+                    tab_id: Err("no value supplied for tab_id".to_string()),
+                    task_id: Ok(Default::default()),
+                    title: Err("no value supplied for title".to_string()),
+                }
+            }
+        }
+        impl Pane {
+            pub fn agent<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::Agent>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.agent = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for agent: {e}"));
+                self
+            }
+            pub fn argv<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::vec::Vec<::std::string::String>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.argv = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for argv: {e}"));
+                self
+            }
+            pub fn created_at<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::string::String>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.created_at = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for created_at: {e}"));
+                self
+            }
+            pub fn cwd<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::string::String>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.cwd = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for cwd: {e}"));
+                self
+            }
+            pub fn exit_code<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<i64>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.exit_code = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for exit_code: {e}"));
+                self
+            }
+            pub fn id<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<agentdeck_core::PaneId>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.id = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for id: {e}"));
+                self
+            }
+            pub fn kind<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<agentdeck_core::PaneKind>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.kind = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for kind: {e}"));
+                self
+            }
+            pub fn session_id<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<::std::string::String>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.session_id = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for session_id: {e}"));
+                self
+            }
+            pub fn state<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<agentdeck_core::AgentState>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.state = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for state: {e}"));
+                self
+            }
+            pub fn tab_id<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<agentdeck_core::TabId>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.tab_id = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for tab_id: {e}"));
+                self
+            }
+            pub fn task_id<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::TaskId>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.task_id = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for task_id: {e}"));
+                self
+            }
+            pub fn title<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::string::String>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.title = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for title: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<Pane> for super::Pane {
+            type Error = super::error::ConversionError;
+            fn try_from(value: Pane) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    agent: value.agent?,
+                    argv: value.argv?,
+                    created_at: value.created_at?,
+                    cwd: value.cwd?,
+                    exit_code: value.exit_code?,
+                    id: value.id?,
+                    kind: value.kind?,
+                    session_id: value.session_id?,
+                    state: value.state?,
+                    tab_id: value.tab_id?,
+                    task_id: value.task_id?,
+                    title: value.title?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::Pane> for Pane {
+            fn from(value: super::Pane) -> Self {
+                Self {
+                    agent: Ok(value.agent),
+                    argv: Ok(value.argv),
+                    created_at: Ok(value.created_at),
+                    cwd: Ok(value.cwd),
+                    exit_code: Ok(value.exit_code),
+                    id: Ok(value.id),
+                    kind: Ok(value.kind),
+                    session_id: Ok(value.session_id),
+                    state: Ok(value.state),
+                    tab_id: Ok(value.tab_id),
+                    task_id: Ok(value.task_id),
+                    title: Ok(value.title),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
+        pub struct PaneInput {
+            text: ::std::result::Result<::std::string::String, ::std::string::String>,
+            when: ::std::result::Result<super::InputWhen, ::std::string::String>,
+        }
+        impl ::std::default::Default for PaneInput {
+            fn default() -> Self {
+                Self {
+                    text: Err("no value supplied for text".to_string()),
+                    when: Ok(super::defaults::pane_input_when()),
+                }
+            }
+        }
+        impl PaneInput {
+            pub fn text<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::string::String>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.text = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for text: {e}"));
+                self
+            }
+            pub fn when<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<super::InputWhen>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.when = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for when: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<PaneInput> for super::PaneInput {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: PaneInput,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    text: value.text?,
+                    when: value.when?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::PaneInput> for PaneInput {
+            fn from(value: super::PaneInput) -> Self {
+                Self {
+                    text: Ok(value.text),
+                    when: Ok(value.when),
                 }
             }
         }
@@ -2104,6 +2662,12 @@ pub mod types {
             }
         }
     }
+    /// Generation of default values for serde.
+    pub mod defaults {
+        pub(super) fn pane_input_when() -> super::InputWhen {
+            super::InputWhen::Now
+        }
+    }
     /// Error types.
     pub mod error {
         /// Error from a `TryFrom` or `FromStr` implementation.
@@ -2263,6 +2827,89 @@ impl Client {
     ///```
     pub fn note_update(&self) -> builder::NoteUpdate<'_> {
         builder::NoteUpdate::new(self)
+    }
+    ///Spawns a pane in a tab and starts its process. The caller places the pane in the tab's
+    ///
+    ///layout. Agent panes are not launched yet: only `kind: "shell"`.
+    ///
+    ///Sends a `POST` request to `/v1/panes`
+    ///
+    ///```ignore
+    ///let response = client.pane_create()
+    ///    .body(body)
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn pane_create(&self) -> builder::PaneCreate<'_> {
+        builder::PaneCreate::new(self)
+    }
+    ///One pane, with its live title and state
+    ///
+    ///Sends a `GET` request to `/v1/panes/{id}`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///```ignore
+    ///let response = client.pane_get()
+    ///    .id(id)
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn pane_get(&self) -> builder::PaneGet<'_> {
+        builder::PaneGet::new(self)
+    }
+    ///Kills a pane's process (SIGHUP, then SIGKILL after 3 s) and deletes the pane. The caller
+    ///
+    ///takes it out of the tab's layout.
+    ///
+    ///Sends a `DELETE` request to `/v1/panes/{id}`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///```ignore
+    ///let response = client.pane_delete()
+    ///    .id(id)
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn pane_delete(&self) -> builder::PaneDelete<'_> {
+        builder::PaneDelete::new(self)
+    }
+    ///Types text into the pane: now, or once it is idle, done or blocked (`when: "idle"`)
+    ///
+    ///Sends a `POST` request to `/v1/panes/{id}/input`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///- `body`
+    ///```ignore
+    ///let response = client.pane_input()
+    ///    .id(id)
+    ///    .body(body)
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn pane_input(&self) -> builder::PaneInput<'_> {
+        builder::PaneInput::new(self)
+    }
+    ///The pane's raw output: the last `bytes` bytes of the 256 KiB it keeps. Empty for a pane
+    ///
+    ///whose process isn't running in this daemon.
+    ///
+    ///Sends a `GET` request to `/v1/panes/{id}/tail`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///- `bytes`: At most this many of the last bytes; all that is kept (256 KiB) when absent.
+    ///```ignore
+    ///let response = client.pane_tail()
+    ///    .id(id)
+    ///    .bytes(bytes)
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn pane_tail(&self) -> builder::PaneTail<'_> {
+        builder::PaneTail::new(self)
     }
     ///The `gh` login state and the last sync
     ///
@@ -2936,6 +3583,385 @@ pub mod builder {
             let response = result?;
             match response.status().as_u16() {
                 200u16 => ResponseValue::from_response(response).await,
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::pane_create`]
+    ///
+    ///[`Client::pane_create`]: super::Client::pane_create
+    #[derive(Debug, Clone)]
+    pub struct PaneCreate<'a> {
+        client: &'a super::Client,
+        body: Result<types::builder::NewPane, String>,
+    }
+    impl<'a> PaneCreate<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self {
+                client: client,
+                body: Ok(::std::default::Default::default()),
+            }
+        }
+        pub fn body<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<types::NewPane>,
+            <V as std::convert::TryInto<types::NewPane>>::Error: std::fmt::Display,
+        {
+            self.body = value
+                .try_into()
+                .map(From::from)
+                .map_err(|s| format!("conversion to `NewPane` for body failed: {}", s));
+            self
+        }
+        pub fn body_map<F>(mut self, f: F) -> Self
+        where
+            F: std::ops::FnOnce(types::builder::NewPane) -> types::builder::NewPane,
+        {
+            self.body = self.body.map(f);
+            self
+        }
+        ///Sends a `POST` request to `/v1/panes`
+        pub async fn send(self) -> Result<ResponseValue<types::Pane>, Error<types::Error>> {
+            let Self { client, body } = self;
+            let body = body
+                .and_then(|v| types::NewPane::try_from(v).map_err(|e| e.to_string()))
+                .map_err(Error::InvalidRequest)?;
+            let url = format!("{}/v1/panes", client.baseurl,);
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .post(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .json(&body)
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "pane_create",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                201u16 => ResponseValue::from_response(response).await,
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::pane_get`]
+    ///
+    ///[`Client::pane_get`]: super::Client::pane_get
+    #[derive(Debug, Clone)]
+    pub struct PaneGet<'a> {
+        client: &'a super::Client,
+        id: Result<agentdeck_core::PaneId, String>,
+    }
+    impl<'a> PaneGet<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self {
+                client: client,
+                id: Err("id was not initialized".to_string()),
+            }
+        }
+        pub fn id<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<agentdeck_core::PaneId>,
+        {
+            self.id = value
+                .try_into()
+                .map_err(|_| "conversion to `agentdeck_core :: PaneId` for id failed".to_string());
+            self
+        }
+        ///Sends a `GET` request to `/v1/panes/{id}`
+        pub async fn send(self) -> Result<ResponseValue<types::Pane>, Error<types::Error>> {
+            let Self { client, id } = self;
+            let id = id.map_err(Error::InvalidRequest)?;
+            let url = format!(
+                "{}/v1/panes/{}",
+                client.baseurl,
+                encode_path(&id.to_string()),
+            );
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .get(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "pane_get",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                200u16 => ResponseValue::from_response(response).await,
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::pane_delete`]
+    ///
+    ///[`Client::pane_delete`]: super::Client::pane_delete
+    #[derive(Debug, Clone)]
+    pub struct PaneDelete<'a> {
+        client: &'a super::Client,
+        id: Result<agentdeck_core::PaneId, String>,
+    }
+    impl<'a> PaneDelete<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self {
+                client: client,
+                id: Err("id was not initialized".to_string()),
+            }
+        }
+        pub fn id<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<agentdeck_core::PaneId>,
+        {
+            self.id = value
+                .try_into()
+                .map_err(|_| "conversion to `agentdeck_core :: PaneId` for id failed".to_string());
+            self
+        }
+        ///Sends a `DELETE` request to `/v1/panes/{id}`
+        pub async fn send(self) -> Result<ResponseValue<()>, Error<types::Error>> {
+            let Self { client, id } = self;
+            let id = id.map_err(Error::InvalidRequest)?;
+            let url = format!(
+                "{}/v1/panes/{}",
+                client.baseurl,
+                encode_path(&id.to_string()),
+            );
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .delete(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "pane_delete",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                204u16 => Ok(ResponseValue::empty(response)),
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::pane_input`]
+    ///
+    ///[`Client::pane_input`]: super::Client::pane_input
+    #[derive(Debug, Clone)]
+    pub struct PaneInput<'a> {
+        client: &'a super::Client,
+        id: Result<agentdeck_core::PaneId, String>,
+        body: Result<types::builder::PaneInput, String>,
+    }
+    impl<'a> PaneInput<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self {
+                client: client,
+                id: Err("id was not initialized".to_string()),
+                body: Ok(::std::default::Default::default()),
+            }
+        }
+        pub fn id<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<agentdeck_core::PaneId>,
+        {
+            self.id = value
+                .try_into()
+                .map_err(|_| "conversion to `agentdeck_core :: PaneId` for id failed".to_string());
+            self
+        }
+        pub fn body<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<types::PaneInput>,
+            <V as std::convert::TryInto<types::PaneInput>>::Error: std::fmt::Display,
+        {
+            self.body = value
+                .try_into()
+                .map(From::from)
+                .map_err(|s| format!("conversion to `PaneInput` for body failed: {}", s));
+            self
+        }
+        pub fn body_map<F>(mut self, f: F) -> Self
+        where
+            F: std::ops::FnOnce(types::builder::PaneInput) -> types::builder::PaneInput,
+        {
+            self.body = self.body.map(f);
+            self
+        }
+        ///Sends a `POST` request to `/v1/panes/{id}/input`
+        pub async fn send(
+            self,
+        ) -> Result<ResponseValue<types::InputAccepted>, Error<types::Error>> {
+            let Self { client, id, body } = self;
+            let id = id.map_err(Error::InvalidRequest)?;
+            let body = body
+                .and_then(|v| types::PaneInput::try_from(v).map_err(|e| e.to_string()))
+                .map_err(Error::InvalidRequest)?;
+            let url = format!(
+                "{}/v1/panes/{}/input",
+                client.baseurl,
+                encode_path(&id.to_string()),
+            );
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .post(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .json(&body)
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "pane_input",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                202u16 => ResponseValue::from_response(response).await,
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::pane_tail`]
+    ///
+    ///[`Client::pane_tail`]: super::Client::pane_tail
+    #[derive(Debug, Clone)]
+    pub struct PaneTail<'a> {
+        client: &'a super::Client,
+        id: Result<agentdeck_core::PaneId, String>,
+        bytes: Result<Option<u64>, String>,
+    }
+    impl<'a> PaneTail<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self {
+                client: client,
+                id: Err("id was not initialized".to_string()),
+                bytes: Ok(None),
+            }
+        }
+        pub fn id<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<agentdeck_core::PaneId>,
+        {
+            self.id = value
+                .try_into()
+                .map_err(|_| "conversion to `agentdeck_core :: PaneId` for id failed".to_string());
+            self
+        }
+        pub fn bytes<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<u64>,
+        {
+            self.bytes = value
+                .try_into()
+                .map(Some)
+                .map_err(|_| "conversion to `u64` for bytes failed".to_string());
+            self
+        }
+        ///Sends a `GET` request to `/v1/panes/{id}/tail`
+        pub async fn send(self) -> Result<ResponseValue<ByteStream>, Error<types::Error>> {
+            let Self { client, id, bytes } = self;
+            let id = id.map_err(Error::InvalidRequest)?;
+            let bytes = bytes.map_err(Error::InvalidRequest)?;
+            let url = format!(
+                "{}/v1/panes/{}/tail",
+                client.baseurl,
+                encode_path(&id.to_string()),
+            );
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .get(url)
+                .query(&progenitor_client::QueryParam::new("bytes", &bytes))
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "pane_tail",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                200u16 => Ok(ResponseValue::stream(response)),
                 400u16..=499u16 => Err(Error::ErrorResponse(
                     ResponseValue::from_response(response).await?,
                 )),

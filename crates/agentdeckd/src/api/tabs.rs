@@ -1,5 +1,6 @@
 //! Tabs and their layout trees: `/v1/workspaces/{id}/tabs` and `/v1/tabs/{id}`.
 
+use agentdeck_core::ws::Entity;
 use dropshot::{
     ClientErrorStatusCode, HttpError, HttpResponseCreated, HttpResponseDeleted, HttpResponseOk,
     Path, RequestContext, TypedBody, endpoint,
@@ -63,6 +64,7 @@ pub(crate) async fn tab_create(
         .db
         .call(move |c| db::tabs::create(c, id, &new.title, new.layout.as_ref()))
         .await?;
+    rqctx.context().events.changed(Entity::Tab, tab.id);
     Ok(HttpResponseCreated(tab))
 }
 
@@ -82,6 +84,7 @@ pub(crate) async fn tab_update(
         .db
         .call(move |c| db::tabs::update(c, id, &patch))
         .await?;
+    rqctx.context().events.changed(Entity::Tab, tab.id);
     Ok(HttpResponseOk(tab))
 }
 
@@ -98,6 +101,9 @@ pub(crate) async fn tab_delete(
         .db
         .call(move |c| db::tabs::delete(c, id))
         .await?;
+    // Its panes went with it: stop their processes.
+    rqctx.context().terminals.reap().await?;
+    rqctx.context().events.changed(Entity::Tab, id);
     Ok(HttpResponseDeleted())
 }
 

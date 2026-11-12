@@ -46,7 +46,13 @@ chrono = { version = "=0.4.45", default-features = false, features = ["clock", "
 dropshot = "=0.17.1"
 # Integration tests only: GitHub's GraphQL API, intercepted (MIT). Default features off (cookies).
 httpmock = { version = "=0.9.0", default-features = false }
+# For `StreamExt` / `SinkExt` on the WebSocket; already in the lockfile through dropshot.
+futures-util = { version = "=0.3.34", default-features = false, features = ["sink", "std"] }
+# SIGHUP / SIGKILL to a pane's process group without `unsafe`; portable-pty's own nix line.
+nix = { version = "=0.28.0", default-features = false, features = ["signal"] }
 openapiv3 = "=2.2.0"
+# The daemon's PTYs (MIT).
+portable-pty = "=0.9.0"
 prettyplease = "=0.3.0"
 progenitor = { version = "=0.15.1", default-features = false }
 progenitor-client = "=0.15.1"
@@ -62,6 +68,9 @@ syn = { version = "=3.0.9", features = ["full"] }
 tempfile = "=3.27.0"
 thiserror = "=2.0.21"
 tokio = { version = "=1.54.1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+# The WebSocket protocol over dropshot's upgraded connection (MIT). The integration tests'
+# client turns on `connect`.
+tokio-tungstenite = { version = "=0.30.0", default-features = false }
 tracing = "=0.1.44"
 tracing-subscriber = "=0.3.23"
 uuid = { version = "=1.28.0", features = ["serde", "v4", "v7"] }

@@ -14,6 +14,8 @@ pub struct Paths {
     pub data: PathBuf,
     /// `$XDG_STATE_HOME/agentdeck`: the log.
     pub state: PathBuf,
+    /// `$XDG_CONFIG_HOME/agentdeck`: `config.toml` and the state rule overrides.
+    pub config: PathBuf,
 }
 
 impl Paths {
@@ -43,10 +45,15 @@ impl Paths {
             Some(dir) => dir,
             None => home()?.join(".local/state"),
         };
+        let config = match absolute("XDG_CONFIG_HOME") {
+            Some(dir) => dir,
+            None => home()?.join(".config"),
+        };
         Ok(Paths {
             runtime: runtime.join("agentdeck"),
             data: data.join("agentdeck"),
             state: state.join("agentdeck"),
+            config: config.join("agentdeck"),
         })
     }
 
@@ -68,6 +75,11 @@ impl Paths {
     /// The parent of every scratch workspace dir.
     pub fn scratch_workspaces(&self) -> PathBuf {
         self.data.join("workspaces")
+    }
+
+    /// Where `<agent>.toml` state rule files override the embedded ones (spec §7).
+    pub fn rules_dir(&self) -> PathBuf {
+        self.config.join("rules")
     }
 
     /// The daemon's log file.
@@ -99,6 +111,7 @@ mod tests {
                 ("XDG_RUNTIME_DIR", "/run/user/1000"),
                 ("XDG_DATA_HOME", "/data"),
                 ("XDG_STATE_HOME", "/state"),
+                ("XDG_CONFIG_HOME", "/config"),
             ])
             .unwrap();
 
@@ -108,6 +121,7 @@ mod tests {
                     runtime: "/run/user/1000/agentdeck".into(),
                     data: "/data/agentdeck".into(),
                     state: "/state/agentdeck".into(),
+                    config: "/config/agentdeck".into(),
                 }
             );
         }
@@ -122,6 +136,7 @@ mod tests {
                 paths.state,
                 PathBuf::from("/home/me/.local/state/agentdeck")
             );
+            assert_eq!(paths.config, PathBuf::from("/home/me/.config/agentdeck"));
         }
 
         #[test]
@@ -151,6 +166,7 @@ mod tests {
                 ("XDG_RUNTIME_DIR", "/run"),
                 ("XDG_DATA_HOME", "/data"),
                 ("XDG_STATE_HOME", "/state"),
+                ("XDG_CONFIG_HOME", "/config"),
             ])
             .unwrap();
 
@@ -171,6 +187,7 @@ mod tests {
                 paths.log_file(),
                 PathBuf::from("/state/agentdeck/agentdeckd.log")
             );
+            assert_eq!(paths.rules_dir(), PathBuf::from("/config/agentdeck/rules"));
         }
     }
 }
