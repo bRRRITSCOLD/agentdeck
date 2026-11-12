@@ -1,0 +1,17 @@
+[package]
+name = "spike-daemon"
+description = "PROTOTYPE: tokio daemon owning PTYs, streaming them over a WebSocket."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+portable-pty = "0.9"
+rand = "0.9"
