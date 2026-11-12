@@ -63,6 +63,59 @@ pub mod types {
             Default::default()
         }
     }
+    ///Whether `gh auth token` gives the daemon a GitHub token.
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum GhLogin {
+        ///`gh` printed a token GitHub accepted, or one not yet tried.
+        #[serde(rename = "logged_in")]
+        LoggedIn,
+        ///No `gh`, `gh` not logged in, or GitHub rejected its token. The GUI shows a banner.
+        #[serde(rename = "logged_out")]
+        LoggedOut,
+    }
+    impl ::std::fmt::Display for GhLogin {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::LoggedIn => f.write_str("logged_in"),
+                Self::LoggedOut => f.write_str("logged_out"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for GhLogin {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "logged_in" => Ok(Self::LoggedIn),
+                "logged_out" => Ok(Self::LoggedOut),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for GhLogin {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for GhLogin {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
     ///`GET /v1/health`.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct Health {
@@ -186,6 +239,54 @@ pub mod types {
             Default::default()
         }
     }
+    ///`GET /v1/prs/status` and `POST /v1/prs/sync`: the `gh` login and the last sync.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct PrSyncStatus {
+        ///Why the most recent sync failed; `None` when it succeeded or none has run.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub last_error: ::std::option::Option<::std::string::String>,
+        ///When the last successful sync finished; `None` until one has.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub last_synced_at: ::std::option::Option<::std::string::String>,
+        ///The `gh` login state.
+        pub login: GhLogin,
+    }
+    impl PrSyncStatus {
+        pub fn builder() -> builder::PrSyncStatus {
+            Default::default()
+        }
+    }
+    ///The GitHub pull request behind a PR task, as PR sync last saw it (spec §8).
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct PullRequest {
+        ///The head commit's rolled-up checks; `None` when it has none.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub checks: ::std::option::Option<agentdeck_core::ChecksState>,
+        ///A draft PR.
+        pub draft: bool,
+        ///The branch the PR merges from.
+        pub head_ref: ::std::string::String,
+        ///The PR's number in that repo.
+        pub number: i64,
+        ///`owner/name` of the repo the PR targets.
+        pub repo: ::std::string::String,
+        ///The review decision; `None` when the repo requires no review.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub review: ::std::option::Option<agentdeck_core::ReviewState>,
+        ///Open, merged or closed.
+        pub state: agentdeck_core::PrState,
+        ///When PR sync last saw the PR.
+        pub synced_at: ::std::string::String,
+        ///When the PR last changed on GitHub.
+        pub updated_at: ::std::string::String,
+        ///The PR's web URL.
+        pub url: ::std::string::String,
+    }
+    impl PullRequest {
+        pub fn builder() -> builder::PullRequest {
+            Default::default()
+        }
+    }
     ///A tab in a workspace, holding a split tree of panes.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct Tab {
@@ -238,6 +339,9 @@ pub mod types {
         pub id: agentdeck_core::TaskId,
         ///Plain or PR.
         pub kind: agentdeck_core::TaskKind,
+        ///The pull request behind a PR task; `None` for a plain task.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub pr: ::std::option::Option<PullRequest>,
         ///The status.
         pub status: agentdeck_core::TaskStatus,
         ///The title.
@@ -1118,6 +1222,252 @@ pub mod types {
             }
         }
         #[derive(Clone, Debug)]
+        pub struct PrSyncStatus {
+            last_error: ::std::result::Result<
+                ::std::option::Option<::std::string::String>,
+                ::std::string::String,
+            >,
+            last_synced_at: ::std::result::Result<
+                ::std::option::Option<::std::string::String>,
+                ::std::string::String,
+            >,
+            login: ::std::result::Result<super::GhLogin, ::std::string::String>,
+        }
+        impl ::std::default::Default for PrSyncStatus {
+            fn default() -> Self {
+                Self {
+                    last_error: Ok(Default::default()),
+                    last_synced_at: Ok(Default::default()),
+                    login: Err("no value supplied for login".to_string()),
+                }
+            }
+        }
+        impl PrSyncStatus {
+            pub fn last_error<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<::std::string::String>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.last_error = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for last_error: {e}"));
+                self
+            }
+            pub fn last_synced_at<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<::std::string::String>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.last_synced_at = value.try_into().map_err(|e| {
+                    format!("error converting supplied value for last_synced_at: {e}")
+                });
+                self
+            }
+            pub fn login<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<super::GhLogin>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.login = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for login: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<PrSyncStatus> for super::PrSyncStatus {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: PrSyncStatus,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    last_error: value.last_error?,
+                    last_synced_at: value.last_synced_at?,
+                    login: value.login?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::PrSyncStatus> for PrSyncStatus {
+            fn from(value: super::PrSyncStatus) -> Self {
+                Self {
+                    last_error: Ok(value.last_error),
+                    last_synced_at: Ok(value.last_synced_at),
+                    login: Ok(value.login),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
+        pub struct PullRequest {
+            checks: ::std::result::Result<
+                ::std::option::Option<agentdeck_core::ChecksState>,
+                ::std::string::String,
+            >,
+            draft: ::std::result::Result<bool, ::std::string::String>,
+            head_ref: ::std::result::Result<::std::string::String, ::std::string::String>,
+            number: ::std::result::Result<i64, ::std::string::String>,
+            repo: ::std::result::Result<::std::string::String, ::std::string::String>,
+            review: ::std::result::Result<
+                ::std::option::Option<agentdeck_core::ReviewState>,
+                ::std::string::String,
+            >,
+            state: ::std::result::Result<agentdeck_core::PrState, ::std::string::String>,
+            synced_at: ::std::result::Result<::std::string::String, ::std::string::String>,
+            updated_at: ::std::result::Result<::std::string::String, ::std::string::String>,
+            url: ::std::result::Result<::std::string::String, ::std::string::String>,
+        }
+        impl ::std::default::Default for PullRequest {
+            fn default() -> Self {
+                Self {
+                    checks: Ok(Default::default()),
+                    draft: Err("no value supplied for draft".to_string()),
+                    head_ref: Err("no value supplied for head_ref".to_string()),
+                    number: Err("no value supplied for number".to_string()),
+                    repo: Err("no value supplied for repo".to_string()),
+                    review: Ok(Default::default()),
+                    state: Err("no value supplied for state".to_string()),
+                    synced_at: Err("no value supplied for synced_at".to_string()),
+                    updated_at: Err("no value supplied for updated_at".to_string()),
+                    url: Err("no value supplied for url".to_string()),
+                }
+            }
+        }
+        impl PullRequest {
+            pub fn checks<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::ChecksState>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.checks = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for checks: {e}"));
+                self
+            }
+            pub fn draft<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<bool>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.draft = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for draft: {e}"));
+                self
+            }
+            pub fn head_ref<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::string::String>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.head_ref = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for head_ref: {e}"));
+                self
+            }
+            pub fn number<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<i64>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.number = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for number: {e}"));
+                self
+            }
+            pub fn repo<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::string::String>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.repo = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for repo: {e}"));
+                self
+            }
+            pub fn review<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::ReviewState>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.review = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for review: {e}"));
+                self
+            }
+            pub fn state<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<agentdeck_core::PrState>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.state = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for state: {e}"));
+                self
+            }
+            pub fn synced_at<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::string::String>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.synced_at = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for synced_at: {e}"));
+                self
+            }
+            pub fn updated_at<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::string::String>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.updated_at = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for updated_at: {e}"));
+                self
+            }
+            pub fn url<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::string::String>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.url = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for url: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<PullRequest> for super::PullRequest {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: PullRequest,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    checks: value.checks?,
+                    draft: value.draft?,
+                    head_ref: value.head_ref?,
+                    number: value.number?,
+                    repo: value.repo?,
+                    review: value.review?,
+                    state: value.state?,
+                    synced_at: value.synced_at?,
+                    updated_at: value.updated_at?,
+                    url: value.url?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::PullRequest> for PullRequest {
+            fn from(value: super::PullRequest) -> Self {
+                Self {
+                    checks: Ok(value.checks),
+                    draft: Ok(value.draft),
+                    head_ref: Ok(value.head_ref),
+                    number: Ok(value.number),
+                    repo: Ok(value.repo),
+                    review: Ok(value.review),
+                    state: Ok(value.state),
+                    synced_at: Ok(value.synced_at),
+                    updated_at: Ok(value.updated_at),
+                    url: Ok(value.url),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
         pub struct Tab {
             id: ::std::result::Result<agentdeck_core::TabId, ::std::string::String>,
             layout: ::std::result::Result<
@@ -1298,6 +1648,10 @@ pub mod types {
             >,
             id: ::std::result::Result<agentdeck_core::TaskId, ::std::string::String>,
             kind: ::std::result::Result<agentdeck_core::TaskKind, ::std::string::String>,
+            pr: ::std::result::Result<
+                ::std::option::Option<super::PullRequest>,
+                ::std::string::String,
+            >,
             status: ::std::result::Result<agentdeck_core::TaskStatus, ::std::string::String>,
             title: ::std::result::Result<::std::string::String, ::std::string::String>,
             updated_at: ::std::result::Result<::std::string::String, ::std::string::String>,
@@ -1314,6 +1668,7 @@ pub mod types {
                     done_at: Ok(Default::default()),
                     id: Err("no value supplied for id".to_string()),
                     kind: Err("no value supplied for kind".to_string()),
+                    pr: Ok(Default::default()),
                     status: Err("no value supplied for status".to_string()),
                     title: Err("no value supplied for title".to_string()),
                     updated_at: Err("no value supplied for updated_at".to_string()),
@@ -1372,6 +1727,16 @@ pub mod types {
                     .map_err(|e| format!("error converting supplied value for kind: {e}"));
                 self
             }
+            pub fn pr<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<super::PullRequest>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.pr = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for pr: {e}"));
+                self
+            }
             pub fn status<T>(mut self, value: T) -> Self
             where
                 T: ::std::convert::TryInto<agentdeck_core::TaskStatus>,
@@ -1422,6 +1787,7 @@ pub mod types {
                     done_at: value.done_at?,
                     id: value.id?,
                     kind: value.kind?,
+                    pr: value.pr?,
                     status: value.status?,
                     title: value.title?,
                     updated_at: value.updated_at?,
@@ -1437,6 +1803,7 @@ pub mod types {
                     done_at: Ok(value.done_at),
                     id: Ok(value.id),
                     kind: Ok(value.kind),
+                    pr: Ok(value.pr),
                     status: Ok(value.status),
                     title: Ok(value.title),
                     updated_at: Ok(value.updated_at),
@@ -1896,6 +2263,32 @@ impl Client {
     ///```
     pub fn note_update(&self) -> builder::NoteUpdate<'_> {
         builder::NoteUpdate::new(self)
+    }
+    ///The `gh` login state and the last sync
+    ///
+    ///Sends a `GET` request to `/v1/prs/status`
+    ///
+    ///```ignore
+    ///let response = client.prs_status()
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn prs_status(&self) -> builder::PrsStatus<'_> {
+        builder::PrsStatus::new(self)
+    }
+    ///Syncs PR tasks with GitHub now and answers with the status the sync left. Clients call it
+    ///
+    ///when a task is opened. A sync that fails still answers 200: `last_error` says why, and `login` is `logged_out` when there's no usable `gh` token.
+    ///
+    ///Sends a `POST` request to `/v1/prs/sync`
+    ///
+    ///```ignore
+    ///let response = client.prs_sync()
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn prs_sync(&self) -> builder::PrsSync<'_> {
+        builder::PrsSync::new(self)
     }
     ///Deletes a tab and its panes
     ///
@@ -2536,6 +2929,104 @@ pub mod builder {
                 .build()?;
             let info = OperationInfo {
                 operation_id: "note_update",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                200u16 => ResponseValue::from_response(response).await,
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::prs_status`]
+    ///
+    ///[`Client::prs_status`]: super::Client::prs_status
+    #[derive(Debug, Clone)]
+    pub struct PrsStatus<'a> {
+        client: &'a super::Client,
+    }
+    impl<'a> PrsStatus<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self { client: client }
+        }
+        ///Sends a `GET` request to `/v1/prs/status`
+        pub async fn send(self) -> Result<ResponseValue<types::PrSyncStatus>, Error<types::Error>> {
+            let Self { client } = self;
+            let url = format!("{}/v1/prs/status", client.baseurl,);
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .get(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "prs_status",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                200u16 => ResponseValue::from_response(response).await,
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::prs_sync`]
+    ///
+    ///[`Client::prs_sync`]: super::Client::prs_sync
+    #[derive(Debug, Clone)]
+    pub struct PrsSync<'a> {
+        client: &'a super::Client,
+    }
+    impl<'a> PrsSync<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self { client: client }
+        }
+        ///Sends a `POST` request to `/v1/prs/sync`
+        pub async fn send(self) -> Result<ResponseValue<types::PrSyncStatus>, Error<types::Error>> {
+            let Self { client } = self;
+            let url = format!("{}/v1/prs/sync", client.baseurl,);
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .post(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "prs_sync",
             };
             client.pre(&mut request, &info).await?;
             let result = client.exec(request, &info).await;

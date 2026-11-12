@@ -1,0 +1,553 @@
+//! GitHub's GraphQL API: the viewer's open PRs, and one PR by number (spec §8).
+
+use std::time::Duration;
+
+use agentdeck_core::{ChecksState, PrState, ReviewState};
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+/// Where the GraphQL API lives unless `AGENTDECK_GITHUB_API` says otherwise.
+pub const DEFAULT_ENDPOINT: &str = "https://api.github.com/graphql";
+
+/// The search spec §8 names.
+const SEARCH: &str = "is:pr is:open author:@me";
+
+/// Search results per page, and how many pages one sync reads at most.
+const PAGE_SIZE: u32 = 50;
+const MAX_PAGES: usize = 10;
+
+const PR_FIELDS: &str = "fragment pr on PullRequest {
+  number title url state isDraft headRefName updatedAt
+  repository { nameWithOwner }
+  reviewDecision
+  commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+}";
+
+/// A pull request as GitHub reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemotePr {
+    /// `owner/name` of the repo the PR targets.
+    pub repo: String,
+    /// The PR's number in that repo.
+    pub number: i64,
+    /// The PR's title.
+    pub title: String,
+    /// The PR's web URL.
+    pub url: String,
+    /// Open, merged or closed.
+    pub state: PrState,
+    /// A draft PR.
+    pub draft: bool,
+    /// The branch the PR merges from.
+    pub head_ref: String,
+    /// The head commit's rolled-up checks; `None` when it has none.
+    pub checks: Option<ChecksState>,
+    /// The review decision; `None` when the repo requires no review.
+    pub review: Option<ReviewState>,
+    /// When the PR last changed on GitHub.
+    pub updated_at: String,
+}
+
+/// Why a GitHub call failed.
+#[derive(Debug, thiserror::Error)]
+pub enum GithubError {
+    /// GitHub refused the token (401).
+    #[error("GitHub rejected the token")]
+    Unauthorized,
+    /// Any other non-success HTTP status.
+    #[error("GitHub answered {status}: {body}")]
+    Status {
+        /// The status code.
+        status: u16,
+        /// The start of the response body.
+        body: String,
+    },
+    /// The response held GraphQL errors and no data.
+    #[error("GitHub GraphQL errors: {0}")]
+    GraphQl(String),
+    /// The request failed, or the response wasn't the JSON asked for.
+    #[error("calling GitHub: {0}")]
+    Http(#[from] reqwest::Error),
+    /// The response's data didn't have the expected shape.
+    #[error("unexpected GitHub response: {0}")]
+    Shape(#[from] serde_json::Error),
+}
+
+/// A GraphQL client for one endpoint.
+#[derive(Clone)]
+pub struct Github {
+    http: reqwest::Client,
+    endpoint: String,
+}
+
+impl Github {
+    /// A client for the GraphQL API at `endpoint`.
+    pub fn new(endpoint: String) -> anyhow::Result<Github> {
+        let http = reqwest::Client::builder()
+            .user_agent(concat!("agentdeck/", env!("CARGO_PKG_VERSION")))
+            .timeout(Duration::from_secs(30))
+            .build()?;
+        Ok(Github { http, endpoint })
+    }
+
+    /// Every open PR the token's user authored (`is:pr is:open author:@me`).
+    pub async fn open_prs(&self, token: &str) -> Result<Vec<RemotePr>, GithubError> {
+        let query = format!(
+            "query($q: String!, $first: Int!, $after: String) {{
+  search(query: $q, type: ISSUE, first: $first, after: $after) {{
+    pageInfo {{ hasNextPage endCursor }}
+    nodes {{ ...pr }}
+  }}
+}}
+{PR_FIELDS}"
+        );
+        let mut prs = Vec::new();
+        let mut after: Option<String> = None;
+        for _ in 0..MAX_PAGES {
+            let variables = json!({ "q": SEARCH, "first": PAGE_SIZE, "after": after });
+            let data = self.query(token, &query, variables).await?;
+            let page = parse_search(data)?;
+            prs.extend(page.prs);
+            match page.next {
+                Some(cursor) => after = Some(cursor),
+                None => break,
+            }
+        }
+        Ok(prs)
+    }
+
+    /// One PR by repo and number; `None` when GitHub no longer shows it to the token's user.
+    pub async fn pr(
+        &self,
+        token: &str,
+        repo: &str,
+        number: i64,
+    ) -> Result<Option<RemotePr>, GithubError> {
+        let Some((owner, name)) = repo.split_once('/') else {
+            return Ok(None);
+        };
+        let query = format!(
+            "query($owner: String!, $name: String!, $number: Int!) {{
+  repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ ...pr }} }}
+}}
+{PR_FIELDS}"
+        );
+        let variables = json!({ "owner": owner, "name": name, "number": number });
+        let data = self.query(token, &query, variables).await?;
+        parse_pr(data)
+    }
+
+    /// Posts one GraphQL query and returns its `data`.
+    async fn query(
+        &self,
+        token: &str,
+        query: &str,
+        variables: Value,
+    ) -> Result<Value, GithubError> {
+        let response = self
+            .http
+            .post(&self.endpoint)
+            .bearer_auth(token)
+            .json(&json!({ "query": query, "variables": variables }))
+            .send()
+            .await?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(GithubError::Unauthorized);
+        }
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(GithubError::Status {
+                status: status.as_u16(),
+                body: body.chars().take(200).collect(),
+            });
+        }
+        data(response.json().await?)
+    }
+}
+
+/// A GraphQL response body's `data`. Partial errors next to data are GitHub's way of saying
+/// "not found", so only errors without data fail.
+fn data(body: Value) -> Result<Value, GithubError> {
+    match body.get("data") {
+        Some(data) if !data.is_null() => Ok(data.clone()),
+        _ => {
+            let messages: Vec<&str> = body
+                .get("errors")
+                .and_then(Value::as_array)
+                .map(|errors| {
+                    errors
+                        .iter()
+                        .filter_map(|error| error.get("message").and_then(Value::as_str))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Err(GithubError::GraphQl(if messages.is_empty() {
+                "no data".into()
+            } else {
+                messages.join("; ")
+            }))
+        }
+    }
+}
+
+/// One page of search results.
+#[derive(Debug, PartialEq, Eq)]
+struct SearchPage {
+    prs: Vec<RemotePr>,
+    /// The cursor of the next page, if there is one.
+    next: Option<String>,
+}
+
+fn parse_search(data: Value) -> Result<SearchPage, GithubError> {
+    #[derive(Deserialize)]
+    struct Data {
+        search: Search,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Search {
+        page_info: PageInfo,
+        nodes: Vec<SearchNode>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PageInfo {
+        has_next_page: bool,
+        end_cursor: Option<String>,
+    }
+    /// The search is typed ISSUE, so a node that isn't a PR comes back as `{}`.
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum SearchNode {
+        Pr(PrNode),
+        Other(serde::de::IgnoredAny),
+    }
+
+    let data: Data = serde_json::from_value(data)?;
+    let prs = data
+        .search
+        .nodes
+        .into_iter()
+        .filter_map(|node| match node {
+            SearchNode::Pr(pr) => Some(pr.into()),
+            SearchNode::Other(_) => None,
+        })
+        .collect();
+    let info = data.search.page_info;
+    Ok(SearchPage {
+        prs,
+        next: info.end_cursor.filter(|_| info.has_next_page),
+    })
+}
+
+fn parse_pr(data: Value) -> Result<Option<RemotePr>, GithubError> {
+    #[derive(Deserialize)]
+    struct Data {
+        repository: Option<Repository>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Repository {
+        pull_request: Option<PrNode>,
+    }
+
+    let data: Data = serde_json::from_value(data)?;
+    Ok(data
+        .repository
+        .and_then(|repo| repo.pull_request)
+        .map(RemotePr::from))
+}
+
+/// The `pr` fragment.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrNode {
+    number: i64,
+    title: String,
+    url: String,
+    state: GqlPrState,
+    is_draft: bool,
+    head_ref_name: String,
+    updated_at: String,
+    repository: NameWithOwner,
+    review_decision: Option<GqlReview>,
+    commits: Commits,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NameWithOwner {
+    name_with_owner: String,
+}
+
+#[derive(Deserialize)]
+struct Commits {
+    nodes: Vec<CommitNode>,
+}
+
+#[derive(Deserialize)]
+struct CommitNode {
+    commit: Commit,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Commit {
+    status_check_rollup: Option<Rollup>,
+}
+
+#[derive(Deserialize)]
+struct Rollup {
+    state: GqlRollup,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum GqlPrState {
+    Open,
+    Merged,
+    Closed,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum GqlReview {
+    Approved,
+    ChangesRequested,
+    ReviewRequired,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum GqlRollup {
+    Success,
+    Failure,
+    Error,
+    Pending,
+    Expected,
+}
+
+impl From<PrNode> for RemotePr {
+    fn from(node: PrNode) -> RemotePr {
+        let checks = node
+            .commits
+            .nodes
+            .into_iter()
+            .last()
+            .and_then(|node| node.commit.status_check_rollup)
+            .map(|rollup| match rollup.state {
+                GqlRollup::Success => ChecksState::Success,
+                GqlRollup::Failure | GqlRollup::Error => ChecksState::Failure,
+                GqlRollup::Pending | GqlRollup::Expected => ChecksState::Pending,
+            });
+        RemotePr {
+            repo: node.repository.name_with_owner,
+            number: node.number,
+            title: node.title,
+            url: node.url,
+            state: match node.state {
+                GqlPrState::Open => PrState::Open,
+                GqlPrState::Merged => PrState::Merged,
+                GqlPrState::Closed => PrState::Closed,
+            },
+            draft: node.is_draft,
+            head_ref: node.head_ref_name,
+            checks,
+            review: node.review_decision.map(|review| match review {
+                GqlReview::Approved => ReviewState::Approved,
+                GqlReview::ChangesRequested => ReviewState::ChangesRequested,
+                GqlReview::ReviewRequired => ReviewState::ReviewRequired,
+            }),
+            updated_at: node.updated_at,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(state: &str, review: Value, rollup: Value) -> Value {
+        json!({
+            "number": 7,
+            "title": "Add PR sync",
+            "url": "https://github.com/acme/widgets/pull/7",
+            "state": state,
+            "isDraft": false,
+            "headRefName": "feat/sync",
+            "updatedAt": "2026-11-01T10:00:00Z",
+            "repository": { "nameWithOwner": "acme/widgets" },
+            "reviewDecision": review,
+            "commits": { "nodes": [ { "commit": { "statusCheckRollup": rollup } } ] }
+        })
+    }
+
+    fn search(nodes: Vec<Value>, next: Option<&str>) -> Value {
+        json!({
+            "search": {
+                "pageInfo": { "hasNextPage": next.is_some(), "endCursor": next.unwrap_or("end") },
+                "nodes": nodes
+            }
+        })
+    }
+
+    mod parse_search {
+        use super::*;
+
+        #[test]
+        fn should_read_every_field_of_a_pr() {
+            let page = parse_search(search(
+                vec![node(
+                    "OPEN",
+                    json!("APPROVED"),
+                    json!({ "state": "SUCCESS" }),
+                )],
+                None,
+            ))
+            .unwrap();
+
+            assert_eq!(
+                page.prs,
+                vec![RemotePr {
+                    repo: "acme/widgets".into(),
+                    number: 7,
+                    title: "Add PR sync".into(),
+                    url: "https://github.com/acme/widgets/pull/7".into(),
+                    state: PrState::Open,
+                    draft: false,
+                    head_ref: "feat/sync".into(),
+                    checks: Some(ChecksState::Success),
+                    review: Some(ReviewState::Approved),
+                    updated_at: "2026-11-01T10:00:00Z".into(),
+                }]
+            );
+        }
+
+        #[test]
+        fn should_skip_a_node_that_is_not_a_pr() {
+            let page = parse_search(search(vec![json!({})], None)).unwrap();
+            assert!(page.prs.is_empty());
+        }
+
+        #[test]
+        fn should_give_the_next_cursor_only_when_there_is_a_next_page() {
+            let more = parse_search(search(vec![], Some("abc"))).unwrap();
+            let last = parse_search(search(vec![], None)).unwrap();
+
+            assert_eq!(more.next.as_deref(), Some("abc"));
+            assert_eq!(last.next, None);
+        }
+    }
+
+    mod checks {
+        use super::*;
+
+        fn checks(rollup: Value) -> Option<ChecksState> {
+            let page = parse_search(search(vec![node("OPEN", Value::Null, rollup)], None));
+            page.unwrap().prs[0].checks
+        }
+
+        #[test]
+        fn should_fold_error_into_failure() {
+            assert_eq!(
+                checks(json!({ "state": "ERROR" })),
+                Some(ChecksState::Failure)
+            );
+            assert_eq!(
+                checks(json!({ "state": "FAILURE" })),
+                Some(ChecksState::Failure)
+            );
+        }
+
+        #[test]
+        fn should_fold_expected_into_pending() {
+            assert_eq!(
+                checks(json!({ "state": "EXPECTED" })),
+                Some(ChecksState::Pending)
+            );
+            assert_eq!(
+                checks(json!({ "state": "PENDING" })),
+                Some(ChecksState::Pending)
+            );
+        }
+
+        #[test]
+        fn should_be_none_for_a_commit_without_checks() {
+            assert_eq!(checks(Value::Null), None);
+        }
+    }
+
+    mod review {
+        use super::*;
+
+        #[test]
+        fn should_map_each_review_decision() {
+            let review = |decision: Value| {
+                parse_search(search(vec![node("OPEN", decision, Value::Null)], None))
+                    .unwrap()
+                    .prs[0]
+                    .review
+            };
+
+            assert_eq!(
+                review(json!("CHANGES_REQUESTED")),
+                Some(ReviewState::ChangesRequested)
+            );
+            assert_eq!(
+                review(json!("REVIEW_REQUIRED")),
+                Some(ReviewState::ReviewRequired)
+            );
+            assert_eq!(review(Value::Null), None);
+        }
+    }
+
+    mod parse_pr {
+        use super::*;
+
+        #[test]
+        fn should_read_a_merged_pr() {
+            let data = json!({
+                "repository": { "pullRequest": node("MERGED", Value::Null, Value::Null) }
+            });
+
+            let pr = parse_pr(data).unwrap().expect("a PR");
+
+            assert_eq!(pr.state, PrState::Merged);
+        }
+
+        #[test]
+        fn should_be_none_when_the_repo_is_gone() {
+            assert_eq!(parse_pr(json!({ "repository": null })).unwrap(), None);
+        }
+    }
+
+    mod data {
+        use super::*;
+
+        #[test]
+        fn should_fail_with_the_messages_when_there_is_no_data() {
+            let err = data(json!({
+                "data": null,
+                "errors": [ { "message": "Bad credentials" }, { "message": "Try again" } ]
+            }))
+            .unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                "GitHub GraphQL errors: Bad credentials; Try again"
+            );
+        }
+
+        #[test]
+        fn should_keep_data_next_to_partial_errors() {
+            let data = data(json!({
+                "data": { "repository": null },
+                "errors": [ { "message": "Could not resolve to a Repository" } ]
+            }))
+            .unwrap();
+
+            assert_eq!(data, json!({ "repository": null }));
+        }
+    }
+}

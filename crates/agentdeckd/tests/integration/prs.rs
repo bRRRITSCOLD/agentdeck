@@ -1,0 +1,388 @@
+//! PR sync: `/v1/prs` and the PR tasks it keeps (spec §8), against httpmock as GitHub and a
+//! stub `gh` on `PATH`.
+
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use agentdeck_client::Client;
+use agentdeck_client::types::{GhLogin, NewWorkspace, PrSyncStatus, Task, Workspace};
+use agentdeck_core::{ChecksState, PrState, ReviewState, TaskKind, TaskStatus};
+use httpmock::MockServer;
+
+use crate::support::TestDaemon;
+use crate::support::git::git;
+use crate::support::github::{Pr, mock_fetch, mock_search, mock_unauthorized, set_gh_token};
+
+const TOKEN: &str = "gho_test";
+
+/// A daemon whose `gh` prints `token` (or is logged out) and whose GitHub is `server`.
+async fn daemon(server: &MockServer, token: Option<&str>) -> TestDaemon {
+    let dirs = tempfile::tempdir().expect("a temp dir");
+    set_gh_token(dirs.path(), token);
+    TestDaemon::start_with_github(dirs, &server.url("/graphql")).await
+}
+
+async fn sync(client: &Client) -> PrSyncStatus {
+    let response = client.prs_sync().send().await.expect("sync");
+    assert_eq!(response.status().as_u16(), 200);
+    response.into_inner()
+}
+
+async fn pr_tasks(client: &Client) -> Vec<Task> {
+    client
+        .task_list()
+        .kind(TaskKind::Pr)
+        .send()
+        .await
+        .expect("list PR tasks")
+        .into_inner()
+}
+
+async fn attach(client: &Client, dir: &Path) -> Workspace {
+    client
+        .workspace_create()
+        .body(NewWorkspace {
+            name: "ws".into(),
+            dir: Some(dir.to_str().expect("a UTF-8 path").into()),
+        })
+        .send()
+        .await
+        .expect("attach a workspace")
+        .into_inner()
+}
+
+/// A repo at `dir` with `origin` on GitHub's `repo` and a commit on `branch`. Nothing is
+/// fetched: a remote URL is all matching reads.
+fn clone_of(dir: &Path, repo: &str, branch: &str) {
+    crate::support::git::init_with_commit(dir);
+    git(
+        dir,
+        &[
+            "remote",
+            "add",
+            "origin",
+            &format!("git@github.com:{repo}.git"),
+        ],
+    );
+    git(dir, &["branch", branch]);
+}
+
+mod post_v1_prs_sync {
+    use super::*;
+
+    #[tokio::test]
+    async fn should_put_a_new_pr_in_the_inbox_in_review_200() {
+        let github = MockServer::start_async().await;
+        let pr = Pr {
+            checks: Some("FAILURE"),
+            review: Some("CHANGES_REQUESTED"),
+            draft: true,
+            ..Pr::open(7)
+        };
+        mock_search(&github, TOKEN, std::slice::from_ref(&pr));
+        let daemon = daemon(&github, Some(TOKEN)).await;
+
+        let status = sync(&daemon.client).await;
+
+        assert_eq!(status.login, GhLogin::LoggedIn);
+        assert_eq!(status.last_error, None);
+        assert!(status.last_synced_at.is_some());
+        let tasks = pr_tasks(&daemon.client).await;
+        assert_eq!(tasks.len(), 1);
+        let task = &tasks[0];
+        assert_eq!(task.title, "Add PR sync");
+        assert_eq!(task.status, TaskStatus::Review);
+        assert_eq!(task.workspace_id, None);
+        let stored = task.pr.as_ref().expect("the task's PR");
+        assert_eq!(stored.repo, "acme/widgets");
+        assert_eq!(stored.number, 7);
+        assert_eq!(stored.url, pr.url());
+        assert_eq!(stored.state, PrState::Open);
+        assert!(stored.draft);
+        assert_eq!(stored.head_ref, "feat/sync");
+        assert_eq!(stored.checks, Some(ChecksState::Failure));
+        assert_eq!(stored.review, Some(ReviewState::ChangesRequested));
+    }
+
+    #[tokio::test]
+    async fn should_put_a_pr_in_the_workspace_whose_clone_has_its_branch_200() {
+        let github = MockServer::start_async().await;
+        mock_search(&github, TOKEN, &[Pr::open(7)]);
+        let daemon = daemon(&github, Some(TOKEN)).await;
+        let other = daemon.new_dir("other");
+        clone_of(&other.join("widgets"), "acme/widgets", "main-only");
+        let home = daemon.new_dir("home");
+        clone_of(&home.join("src/widgets"), "Acme/Widgets", "feat/sync");
+        let _other = attach(&daemon.client, &other).await;
+        let home = attach(&daemon.client, &home).await;
+
+        sync(&daemon.client).await;
+
+        let tasks = pr_tasks(&daemon.client).await;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].workspace_id, Some(home.id));
+    }
+
+    #[tokio::test]
+    async fn should_leave_a_pr_in_the_inbox_when_no_clone_is_of_its_repo_200() {
+        let github = MockServer::start_async().await;
+        mock_search(&github, TOKEN, &[Pr::open(7)]);
+        let daemon = daemon(&github, Some(TOKEN)).await;
+        let dir = daemon.new_dir("ws");
+        clone_of(&dir.join("gadgets"), "acme/gadgets", "feat/sync");
+        attach(&daemon.client, &dir).await;
+
+        sync(&daemon.client).await;
+
+        assert_eq!(pr_tasks(&daemon.client).await[0].workspace_id, None);
+    }
+
+    #[tokio::test]
+    async fn should_move_an_inbox_pr_into_a_workspace_once_a_clone_appears_200() {
+        let github = MockServer::start_async().await;
+        mock_search(&github, TOKEN, &[Pr::open(7)]);
+        let daemon = daemon(&github, Some(TOKEN)).await;
+        let dir = daemon.new_dir("ws");
+        let workspace = attach(&daemon.client, &dir).await;
+        sync(&daemon.client).await;
+
+        clone_of(&dir.join("widgets"), "acme/widgets", "feat/sync");
+        sync(&daemon.client).await;
+
+        assert_eq!(
+            pr_tasks(&daemon.client).await[0].workspace_id,
+            Some(workspace.id)
+        );
+    }
+
+    #[tokio::test]
+    async fn should_update_checks_and_review_on_the_same_task_200() {
+        let github = MockServer::start_async().await;
+        let mut search = mock_search(&github, TOKEN, &[Pr::open(7)]);
+        let daemon = daemon(&github, Some(TOKEN)).await;
+        sync(&daemon.client).await;
+        let before = pr_tasks(&daemon.client).await.remove(0);
+
+        search.delete();
+        mock_search(
+            &github,
+            TOKEN,
+            &[Pr {
+                checks: Some("SUCCESS"),
+                review: Some("APPROVED"),
+                ..Pr::open(7)
+            }],
+        );
+        sync(&daemon.client).await;
+
+        let tasks = pr_tasks(&daemon.client).await;
+        assert_eq!(tasks.len(), 1);
+        let after = &tasks[0];
+        assert_eq!(after.id, before.id);
+        assert_eq!(after.status, TaskStatus::Review);
+        let pr = after.pr.as_ref().expect("the task's PR");
+        assert_eq!(pr.checks, Some(ChecksState::Success));
+        assert_eq!(pr.review, Some(ReviewState::Approved));
+        assert!(after.updated_at > before.updated_at);
+    }
+
+    #[tokio::test]
+    async fn should_keep_the_status_the_user_picked_while_the_pr_stays_open_200() {
+        let github = MockServer::start_async().await;
+        mock_search(&github, TOKEN, &[Pr::open(7)]);
+        let daemon = daemon(&github, Some(TOKEN)).await;
+        sync(&daemon.client).await;
+        let task = pr_tasks(&daemon.client).await.remove(0);
+        daemon
+            .client
+            .task_update()
+            .id(task.id)
+            .body_map(|patch| patch.status(Some(TaskStatus::Doing)))
+            .send()
+            .await
+            .expect("update");
+
+        sync(&daemon.client).await;
+
+        assert_eq!(pr_tasks(&daemon.client).await[0].status, TaskStatus::Doing);
+    }
+
+    #[tokio::test]
+    async fn should_move_a_pr_that_merged_out_of_the_search_to_done_200() {
+        let github = MockServer::start_async().await;
+        let mut search = mock_search(&github, TOKEN, &[Pr::open(7)]);
+        let daemon = daemon(&github, Some(TOKEN)).await;
+        sync(&daemon.client).await;
+
+        search.delete();
+        mock_search(&github, TOKEN, &[]);
+        let fetch = mock_fetch(
+            &github,
+            &Pr {
+                state: "MERGED",
+                ..Pr::open(7)
+            },
+        );
+        sync(&daemon.client).await;
+        sync(&daemon.client).await;
+
+        let task = pr_tasks(&daemon.client).await.remove(0);
+        assert_eq!(task.status, TaskStatus::Done);
+        assert!(task.done_at.is_some());
+        assert_eq!(task.pr.expect("the task's PR").state, PrState::Merged);
+        // Fetched by number once; a merged PR isn't fetched again.
+        fetch.assert_calls(1);
+    }
+
+    #[tokio::test]
+    async fn should_close_a_pr_github_no_longer_shows_200() {
+        let github = MockServer::start_async().await;
+        let mut search = mock_search(&github, TOKEN, &[Pr::open(7)]);
+        let daemon = daemon(&github, Some(TOKEN)).await;
+        sync(&daemon.client).await;
+
+        search.delete();
+        mock_search(&github, TOKEN, &[]);
+        github.mock(|when, then| {
+            when.body_includes("pullRequest(");
+            then.status(200).json_body(serde_json::json!({
+                "data": { "repository": null },
+                "errors": [ { "message": "Could not resolve to a Repository" } ]
+            }));
+        });
+        sync(&daemon.client).await;
+
+        let task = pr_tasks(&daemon.client).await.remove(0);
+        assert_eq!(task.status, TaskStatus::Done);
+        assert_eq!(task.pr.expect("the task's PR").state, PrState::Closed);
+    }
+
+    #[tokio::test]
+    async fn should_retry_with_a_fresh_gh_token_after_a_401_200() {
+        let github = MockServer::start_async().await;
+        let mut old = mock_search(&github, "gho_old", &[]);
+        let daemon = daemon(&github, Some("gho_old")).await;
+        sync(&daemon.client).await;
+
+        old.delete();
+        mock_unauthorized(&github, "gho_old");
+        mock_search(&github, "gho_new", &[Pr::open(7)]);
+        set_gh_token(daemon.root(), Some("gho_new"));
+        let status = sync(&daemon.client).await;
+
+        assert_eq!(status.login, GhLogin::LoggedIn);
+        assert_eq!(status.last_error, None);
+        assert_eq!(pr_tasks(&daemon.client).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn should_log_out_when_github_rejects_the_gh_token_200() {
+        let github = MockServer::start_async().await;
+        mock_unauthorized(&github, TOKEN);
+        let daemon = daemon(&github, Some(TOKEN)).await;
+
+        let status = sync(&daemon.client).await;
+
+        assert_eq!(status.login, GhLogin::LoggedOut);
+        assert_eq!(
+            status.last_error.as_deref(),
+            Some("GitHub rejected the token")
+        );
+    }
+
+    #[tokio::test]
+    async fn should_not_call_github_without_a_gh_login_200() {
+        let github = MockServer::start_async().await;
+        let any = github.mock(|_, then| {
+            then.status(500);
+        });
+        let daemon = daemon(&github, None).await;
+
+        let status = sync(&daemon.client).await;
+
+        assert_eq!(status.login, GhLogin::LoggedOut);
+        assert!(
+            status
+                .last_error
+                .as_deref()
+                .is_some_and(|err| err.contains("no oauth token found")),
+            "{status:?}"
+        );
+        assert_eq!(status.last_synced_at, None);
+        any.assert_calls(0);
+    }
+
+    #[tokio::test]
+    async fn should_pick_up_a_gh_login_made_after_start_200() {
+        let github = MockServer::start_async().await;
+        mock_search(&github, TOKEN, &[Pr::open(7)]);
+        let daemon = daemon(&github, None).await;
+
+        set_gh_token(daemon.root(), Some(TOKEN));
+        let status = sync(&daemon.client).await;
+
+        assert_eq!(status.login, GhLogin::LoggedIn);
+        assert_eq!(pr_tasks(&daemon.client).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn should_report_a_github_failure_and_keep_the_tasks_200() {
+        let github = MockServer::start_async().await;
+        let mut search = mock_search(&github, TOKEN, &[Pr::open(7)]);
+        let daemon = daemon(&github, Some(TOKEN)).await;
+        let synced = sync(&daemon.client).await;
+
+        search.delete();
+        github.mock(|_, then| {
+            then.status(502).body("bad gateway");
+        });
+        let status = sync(&daemon.client).await;
+
+        assert_eq!(status.login, GhLogin::LoggedIn);
+        assert_eq!(
+            status.last_error.as_deref(),
+            Some("GitHub answered 502: bad gateway")
+        );
+        assert_eq!(status.last_synced_at, synced.last_synced_at);
+        assert_eq!(pr_tasks(&daemon.client).await.len(), 1);
+    }
+}
+
+mod get_v1_prs_status {
+    use super::*;
+
+    #[tokio::test]
+    async fn should_report_logged_out_when_gh_has_no_login_200() {
+        let daemon = TestDaemon::start().await;
+
+        let response = daemon.client.prs_status().send().await.expect("status");
+
+        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(response.into_inner().login, GhLogin::LoggedOut);
+    }
+}
+
+mod timer {
+    use super::*;
+
+    #[tokio::test]
+    async fn should_sync_once_at_start_without_being_asked() {
+        let github = MockServer::start_async().await;
+        mock_search(&github, TOKEN, &[Pr::open(7)]);
+        let daemon = daemon(&github, Some(TOKEN)).await;
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while pr_tasks(&daemon.client).await.is_empty() {
+            assert!(Instant::now() < deadline, "no PR task 10 s after start");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let status = daemon
+            .client
+            .prs_status()
+            .send()
+            .await
+            .expect("status")
+            .into_inner();
+        assert_eq!(status.login, GhLogin::LoggedIn);
+    }
+}

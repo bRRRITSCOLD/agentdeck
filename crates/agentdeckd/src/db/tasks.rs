@@ -5,10 +5,31 @@ use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 
 use super::{DbError, exists, new_id, now, opt_text, text};
-use crate::model::{NewTask, Task, TaskFilter, TaskPatch};
+use crate::model::{NewTask, PullRequest, Task, TaskFilter, TaskPatch};
 
-const COLUMNS: &str =
-    "id, title, body, status, kind, workspace_id, created_at, updated_at, done_at";
+/// A task with its PR row, if any: `FROM {TABLES}` reads both.
+const COLUMNS: &str = "t.id, t.title, t.body, t.status, t.kind, t.workspace_id, t.created_at,
+    t.updated_at, t.done_at, p.repo, p.number, p.url, p.state AS pr_state, p.draft, p.head_ref,
+    p.checks, p.review, p.updated_at AS pr_updated_at, p.synced_at";
+const TABLES: &str = "tasks t LEFT JOIN pull_requests p ON p.task_id = t.id";
+
+fn pr_from_row(row: &Row<'_>) -> rusqlite::Result<Option<PullRequest>> {
+    let Some(repo) = row.get::<_, Option<String>>("repo")? else {
+        return Ok(None);
+    };
+    Ok(Some(PullRequest {
+        repo,
+        number: row.get("number")?,
+        url: row.get("url")?,
+        state: text(row, "pr_state")?,
+        draft: row.get("draft")?,
+        head_ref: row.get("head_ref")?,
+        checks: opt_text(row, "checks")?,
+        review: opt_text(row, "review")?,
+        updated_at: row.get("pr_updated_at")?,
+        synced_at: row.get("synced_at")?,
+    }))
+}
 
 fn from_row(row: &Row<'_>) -> rusqlite::Result<Task> {
     Ok(Task {
@@ -21,31 +42,32 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Task> {
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         done_at: row.get("done_at")?,
+        pr: pr_from_row(row)?,
     })
 }
 
 /// The tasks matching every filter set, oldest first.
 pub fn list(conn: &Connection, filter: &TaskFilter) -> Result<Vec<Task>, DbError> {
-    let mut sql = format!("SELECT {COLUMNS} FROM tasks WHERE 1 = 1");
+    let mut sql = format!("SELECT {COLUMNS} FROM {TABLES} WHERE 1 = 1");
     let mut values: Vec<Value> = Vec::new();
     if let Some(status) = filter.status {
         values.push(Value::Text(status.as_str().into()));
-        sql.push_str(&format!(" AND status = ?{}", values.len()));
+        sql.push_str(&format!(" AND t.status = ?{}", values.len()));
     }
     if let Some(kind) = filter.kind {
         values.push(Value::Text(kind.as_str().into()));
-        sql.push_str(&format!(" AND kind = ?{}", values.len()));
+        sql.push_str(&format!(" AND t.kind = ?{}", values.len()));
     }
     if let Some(workspace) = filter.workspace {
         values.push(Value::Text(workspace.to_string()));
-        sql.push_str(&format!(" AND workspace_id = ?{}", values.len()));
+        sql.push_str(&format!(" AND t.workspace_id = ?{}", values.len()));
     }
     match filter.inbox {
-        Some(true) => sql.push_str(" AND workspace_id IS NULL"),
-        Some(false) => sql.push_str(" AND workspace_id IS NOT NULL"),
+        Some(true) => sql.push_str(" AND t.workspace_id IS NULL"),
+        Some(false) => sql.push_str(" AND t.workspace_id IS NOT NULL"),
         None => {}
     }
-    sql.push_str(" ORDER BY created_at, id");
+    sql.push_str(" ORDER BY t.created_at, t.id");
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(values), from_row)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -54,7 +76,7 @@ pub fn list(conn: &Connection, filter: &TaskFilter) -> Result<Vec<Task>, DbError
 /// One task.
 pub fn get(conn: &Connection, id: TaskId) -> Result<Task, DbError> {
     conn.query_row(
-        &format!("SELECT {COLUMNS} FROM tasks WHERE id = ?1"),
+        &format!("SELECT {COLUMNS} FROM {TABLES} WHERE t.id = ?1"),
         [id.to_string()],
         from_row,
     )
@@ -62,8 +84,13 @@ pub fn get(conn: &Connection, id: TaskId) -> Result<Task, DbError> {
     .ok_or(DbError::NotFound("task"))
 }
 
-/// Creates a plain task. PR tasks come from PR sync.
+/// Creates a plain task. PR tasks come from PR sync, through [`create_kind`].
 pub fn create(conn: &Connection, new: &NewTask) -> Result<Task, DbError> {
+    create_kind(conn, new, TaskKind::Plain)
+}
+
+/// Creates a task of `kind`.
+pub fn create_kind(conn: &Connection, new: &NewTask, kind: TaskKind) -> Result<Task, DbError> {
     if let Some(workspace_id) = new.workspace_id {
         check_workspace(conn, workspace_id)?;
     }
@@ -79,7 +106,7 @@ pub fn create(conn: &Connection, new: &NewTask) -> Result<Task, DbError> {
             new.title,
             new.body.as_deref().unwrap_or(""),
             status.as_str(),
-            TaskKind::Plain.as_str(),
+            kind.as_str(),
             new.workspace_id.map(|id| id.to_string()),
             now,
             done_at,
