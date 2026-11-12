@@ -22,6 +22,17 @@ macro_rules! id {
             }
         }
 
+        #[cfg(feature = "schemars")]
+        impl schemars::JsonSchema for $name {
+            fn schema_name() -> String {
+                stringify!($name).to_owned()
+            }
+
+            fn json_schema(_: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+                crate::schema::uuid_string()
+            }
+        }
+
         impl From<Uuid> for $name {
             fn from(uuid: Uuid) -> Self {
                 Self(uuid)

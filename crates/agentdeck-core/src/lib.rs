@@ -5,7 +5,12 @@
 //! - [`pane`], [`task`], [`pr`]: the text-valued columns of spec §3 as enums.
 //! - [`layout`]: a tab's split tree.
 //! - [`state`]: agent state from the screen, by data-driven rules (spec §7).
+//!
+//! The `schemars` feature adds `JsonSchema` to the ids, the column enums and the layout tree,
+//! for the daemon's OpenAPI document.
 
+#[cfg(feature = "schemars")]
+mod schema;
 mod text_enum;
 
 pub mod id;

@@ -40,6 +40,19 @@ macro_rules! text_enum {
             }
         }
 
+        #[cfg(feature = "schemars")]
+        impl ::schemars::JsonSchema for $name {
+            fn schema_name() -> ::std::string::String {
+                stringify!($name).to_owned()
+            }
+
+            fn json_schema(
+                _: &mut ::schemars::r#gen::SchemaGenerator,
+            ) -> ::schemars::schema::Schema {
+                $crate::schema::one_of_strings(&[$($text),+])
+            }
+        }
+
         impl ::std::fmt::Display for $name {
             fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
                 f.write_str(self.as_str())

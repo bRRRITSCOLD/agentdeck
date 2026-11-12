@@ -64,6 +64,22 @@ impl TryFrom<f32> for Ratio {
     }
 }
 
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for Ratio {
+    fn schema_name() -> String {
+        "Ratio".to_owned()
+    }
+
+    // Inline: a bare number with its bounds, not a named type of its own.
+    fn is_referenceable() -> bool {
+        false
+    }
+
+    fn json_schema(_: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+        crate::schema::open_unit_interval()
+    }
+}
+
 impl From<Ratio> for f32 {
     fn from(ratio: Ratio) -> Self {
         ratio.0
@@ -72,14 +88,17 @@ impl From<Ratio> for f32 {
 
 /// A tab's split tree. Every pane appears once; [`Layout::split`] keeps it that way.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(untagged, deny_unknown_fields)]
 pub enum Layout {
     /// One pane filling the space.
+    #[cfg_attr(feature = "schemars", schemars(title = "Pane"))]
     Pane {
         /// The pane shown here.
         pane: PaneId,
     },
     /// Two subtrees sharing the space.
+    #[cfg_attr(feature = "schemars", schemars(title = "Split"))]
     Split {
         /// How `a` and `b` are arranged.
         split: SplitDirection,
