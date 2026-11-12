@@ -304,7 +304,7 @@ impl Rows {
 
     /// The rows this region covers. `bottom:N` skips blank rows, so an inline TUI's prompt
     /// counts the same whether or not empty lines sit under it.
-    fn of<'a>(self, screen: &'a [String]) -> Vec<&'a str> {
+    fn of(self, screen: &[String]) -> Vec<&str> {
         match self {
             Rows::Screen => screen.iter().map(String::as_str).collect(),
             Rows::Bottom(count) => {
@@ -386,10 +386,9 @@ min_ms = 400
 
             #[test]
             fn should_reject_a_key_it_does_not_know() {
-                let err = RuleSet::from_toml(
-                    "agent = \"x\"\n[[rule]]\nstate = \"idle\"\ntitle = 'x'\n",
-                )
-                .unwrap_err();
+                let err =
+                    RuleSet::from_toml("agent = \"x\"\n[[rule]]\nstate = \"idle\"\ntitle = 'x'\n")
+                        .unwrap_err();
                 assert!(matches!(err, RulesError::Toml(_)), "{err}");
             }
 
@@ -399,7 +398,10 @@ min_ms = 400
                     "agent = \"x\"\n[[rule]]\nstate = \"done\"\ntitle_regex = 'x'\n",
                 )
                 .unwrap_err();
-                assert!(err.to_string().contains("unknown rule state `done`"), "{err}");
+                assert!(
+                    err.to_string().contains("unknown rule state `done`"),
+                    "{err}"
+                );
             }
 
             #[test]
@@ -408,7 +410,10 @@ min_ms = 400
                     "agent = \"x\"\n[[rule]]\nstate = \"idle\"\ntitle_regex = 'x'\n[[rule]]\nstate = \"idle\"\ntitle_regex = '['\n",
                 )
                 .unwrap_err();
-                assert!(matches!(err, RulesError::TitleRegex { rule: 2, .. }), "{err}");
+                assert!(
+                    matches!(err, RulesError::TitleRegex { rule: 2, .. }),
+                    "{err}"
+                );
             }
 
             #[test]
@@ -418,7 +423,10 @@ min_ms = 400
                         "agent = \"x\"\n[[rule]]\nstate = \"idle\"\nrows = \"{bad}\"\ncontains = [\"a\"]\n"
                     );
                     let err = RuleSet::from_toml(&text).unwrap_err();
-                    assert!(matches!(err, RulesError::Rows { rule: 1, .. }), "{bad}: {err}");
+                    assert!(
+                        matches!(err, RulesError::Rows { rule: 1, .. }),
+                        "{bad}: {err}"
+                    );
                 }
             }
 
@@ -428,7 +436,10 @@ min_ms = 400
                     "agent = \"x\"\n[[rule]]\nstate = \"idle\"\nrows = \"screen\"\n",
                 )
                 .unwrap_err();
-                assert!(matches!(err, RulesError::RowsWithoutContains { rule: 1 }), "{err}");
+                assert!(
+                    matches!(err, RulesError::RowsWithoutContains { rule: 1 }),
+                    "{err}"
+                );
             }
 
             #[test]
@@ -444,18 +455,27 @@ min_ms = 400
 
             #[test]
             fn should_read_working_from_a_spinner_title() {
-                assert_eq!(spec_rules().evaluate(&titled("◐ Claude Code")), AgentState::Working);
+                assert_eq!(
+                    spec_rules().evaluate(&titled("◐ Claude Code")),
+                    AgentState::Working
+                );
             }
 
             #[test]
             fn should_read_idle_from_the_idle_title() {
-                assert_eq!(spec_rules().evaluate(&titled("✳ Claude Code")), AgentState::Idle);
+                assert_eq!(
+                    spec_rules().evaluate(&titled("✳ Claude Code")),
+                    AgentState::Idle
+                );
             }
 
             #[test]
             fn should_take_the_first_matching_rule() {
                 let observation = Observation {
-                    rows: rows(&["Do you trust this folder?", "Enter to confirm · Esc to cancel"]),
+                    rows: rows(&[
+                        "Do you trust this folder?",
+                        "Enter to confirm · Esc to cancel",
+                    ]),
                     ..titled("✳ Claude Code")
                 };
                 assert_eq!(spec_rules().evaluate(&observation), AgentState::Blocked);
@@ -522,7 +542,10 @@ min_ms = 400
                     "agent = \"x\"\n[[rule]]\nstate = \"blocked\"\ntitle_regex = '^✳'\ncontains = [\"proceed?\"]\n",
                 )
                 .expect("parse");
-                assert_eq!(rules.evaluate(&titled("✳ Claude Code")), AgentState::Unknown);
+                assert_eq!(
+                    rules.evaluate(&titled("✳ Claude Code")),
+                    AgentState::Unknown
+                );
                 let both = Observation {
                     rows: rows(&["Do you want to proceed?"]),
                     ..titled("✳ Claude Code")
@@ -553,7 +576,10 @@ min_ms = 400
 
                 #[test]
                 fn should_apply_the_rules_when_the_process_is_unknown() {
-                    assert_eq!(spec_rules().evaluate(&titled("✳ Claude Code")), AgentState::Idle);
+                    assert_eq!(
+                        spec_rules().evaluate(&titled("✳ Claude Code")),
+                        AgentState::Idle
+                    );
                 }
             }
 

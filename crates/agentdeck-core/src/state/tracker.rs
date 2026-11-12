@@ -134,7 +134,11 @@ min_ms = 400
     }
 
     /// Holds `observation` from `at` until the settle time has passed, as the daemon's ticks would.
-    fn settle(tracker: &mut StateTracker, observation: &Observation, at: u64) -> Option<AgentState> {
+    fn settle(
+        tracker: &mut StateTracker,
+        observation: &Observation,
+        at: u64,
+    ) -> Option<AgentState> {
         tracker.observe(observation, ms(at));
         tracker.observe(observation, ms(at + 400))
     }
@@ -162,7 +166,10 @@ min_ms = 400
             fn should_publish_a_state_once_it_has_held_for_settle() {
                 let mut tracker = tracker();
                 tracker.observe(&working(), ms(0));
-                assert_eq!(tracker.observe(&working(), ms(400)), Some(AgentState::Working));
+                assert_eq!(
+                    tracker.observe(&working(), ms(400)),
+                    Some(AgentState::Working)
+                );
                 assert_eq!(tracker.observe(&working(), ms(900)), None);
             }
 
@@ -181,7 +188,10 @@ min_ms = 400
             fn should_publish_at_once_with_a_zero_settle() {
                 let rules = RULES.replace("min_ms = 400", "min_ms = 0");
                 let mut tracker = StateTracker::new(RuleSet::from_toml(&rules).expect("parse"));
-                assert_eq!(tracker.observe(&blocked(), ms(0)), Some(AgentState::Blocked));
+                assert_eq!(
+                    tracker.observe(&blocked(), ms(0)),
+                    Some(AgentState::Blocked)
+                );
             }
         }
 
@@ -221,7 +231,10 @@ min_ms = 400
             fn should_turn_working_on_a_new_prompt() {
                 let mut tracker = done_tracker();
                 settle(&mut tracker, &idle(), 1_000);
-                assert_eq!(settle(&mut tracker, &working(), 2_000), Some(AgentState::Working));
+                assert_eq!(
+                    settle(&mut tracker, &working(), 2_000),
+                    Some(AgentState::Working)
+                );
             }
 
             #[test]

@@ -177,7 +177,8 @@ mod tests {
 
             #[test]
             fn should_read_the_state_field() {
-                let scanner = scanned(&[b"\x1b]7501;state=blocked:kind=permission:app=claude\x1b\\"]);
+                let scanner =
+                    scanned(&[b"\x1b]7501;state=blocked:kind=permission:app=claude\x1b\\"]);
                 assert_eq!(scanner.program_state(), Some(ProgramState::Blocked));
             }
 
@@ -189,10 +190,8 @@ mod tests {
 
             #[test]
             fn should_forget_the_state_on_clear() {
-                let scanner = scanned(&[
-                    b"\x1b]7501;state=working\x07",
-                    b"\x1b]7501;state=clear\x07",
-                ]);
+                let scanner =
+                    scanned(&[b"\x1b]7501;state=working\x07", b"\x1b]7501;state=clear\x07"]);
                 assert_eq!(scanner.program_state(), None);
             }
 

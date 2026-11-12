@@ -90,7 +90,10 @@ mod tests {
             let id: PaneId = TEXT.parse().expect("parse");
             let json = serde_json::to_string(&id).expect("serialize");
             assert_eq!(json, format!("\"{TEXT}\""));
-            assert_eq!(serde_json::from_str::<PaneId>(&json).expect("deserialize"), id);
+            assert_eq!(
+                serde_json::from_str::<PaneId>(&json).expect("deserialize"),
+                id
+            );
         }
     }
 }

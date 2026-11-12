@@ -63,7 +63,10 @@ mod tests {
         #[test]
         fn should_fail_to_deserialize_an_unknown_word() {
             let err = serde_json::from_str::<TaskStatus>(r#""later""#).unwrap_err();
-            assert!(err.to_string().contains("unknown task status `later`"), "{err}");
+            assert!(
+                err.to_string().contains("unknown task status `later`"),
+                "{err}"
+            );
         }
     }
 

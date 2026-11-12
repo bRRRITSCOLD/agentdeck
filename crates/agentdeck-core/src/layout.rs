@@ -170,12 +170,7 @@ impl Layout {
         match self {
             Layout::Pane { pane } if pane == gone => None,
             Layout::Pane { .. } => Some(self),
-            Layout::Split {
-                split,
-                ratio,
-                a,
-                b,
-            } => match (a.without(gone), b.without(gone)) {
+            Layout::Split { split, ratio, a, b } => match (a.without(gone), b.without(gone)) {
                 (Some(a), Some(b)) => Some(Layout::Split {
                     split,
                     ratio,
