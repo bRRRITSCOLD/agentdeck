@@ -5,50 +5,54 @@
 //! [`DaemonEvent`]s. How it connects is a [`Connector`], so tests hand it a fake.
 
 use std::rc::Rc;
+use std::sync::Arc;
 
-use agentdeck_client::daemon::{self, Daemon};
+use agentdeck_client::daemon;
 use agentdeck_client::ws::{self, Socket};
 use agentdeck_core::ws::{Channel, ServerMessage};
 use gpui::{App, Context, EventEmitter, SharedString, Task};
 
+use crate::api::Api;
 use crate::runtime;
 
 /// Reaches the daemon and opens its socket.
 pub trait Connector {
-    /// The daemon and its open socket, or why neither could be had.
-    fn connect(&self, cx: &App) -> Task<anyhow::Result<(Daemon, Socket)>>;
+    /// The daemon's API and its open socket, or why neither could be had.
+    fn connect(&self, cx: &App) -> Task<anyhow::Result<(Arc<dyn Api>, Socket)>>;
 }
 
 /// The real [`Connector`]: `daemon.json`, starting `agentdeckd` when nothing answers.
 pub struct DaemonConnector;
 
 impl Connector for DaemonConnector {
-    fn connect(&self, cx: &App) -> Task<anyhow::Result<(Daemon, Socket)>> {
+    fn connect(&self, cx: &App) -> Task<anyhow::Result<(Arc<dyn Api>, Socket)>> {
         runtime::spawn(cx, async {
             let daemon = daemon::connect().await?;
             let socket = ws::open(&daemon.info).await?;
-            Ok((daemon, socket))
+            Ok((Arc::new(daemon) as Arc<dyn Api>, socket))
         })
     }
 }
 
-/// A connected daemon: its API client and the way to send on its socket.
-#[derive(Debug, Clone)]
-#[expect(dead_code, reason = "the sidebar reads it, in the next #12 PR")]
+/// A connected daemon: its API and the way to send on its socket.
+#[derive(Clone)]
 pub struct Session {
     /// The daemon's API.
-    pub daemon: Daemon,
+    pub api: Arc<dyn Api>,
     /// Sends on its WebSocket.
+    #[expect(
+        dead_code,
+        reason = "the terminal attaches through it, in the next #12 PR"
+    )]
     pub sender: ws::Sender,
 }
 
 /// Where the connection stands.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Status {
     /// Reaching or starting the daemon.
     Connecting,
     /// Connected.
-    #[expect(dead_code, reason = "the sidebar reads it, in the next #12 PR")]
     Connected(Session),
     /// Couldn't connect, or the connection was lost; why, for the user.
     Failed(SharedString),
@@ -95,7 +99,7 @@ impl Connection {
         self.set_status(Status::Connecting, cx);
         let connecting = self.connector.connect(cx);
         self.task = Some(cx.spawn(async move |this, cx| {
-            let (daemon, socket) = match connecting.await {
+            let (api, socket) = match connecting.await {
                 Ok(connected) => connected,
                 Err(err) => {
                     let reason = format!("Couldn't reach agentdeckd: {err:#}");
@@ -106,7 +110,7 @@ impl Connection {
                 }
             };
             let Socket { sender, mut events } = socket;
-            let connected = Status::Connected(Session { daemon, sender });
+            let connected = Status::Connected(Session { api, sender });
             if this
                 .update(cx, |this, cx| this.set_status(connected, cx))
                 .is_err()
@@ -147,14 +151,17 @@ pub(crate) mod fake {
     use std::collections::VecDeque;
 
     use agentdeck_client::ws::{Remote, loopback};
-    use agentdeck_core::DaemonInfo;
 
     use super::*;
+    use crate::api::fake::FakeApi;
+
+    /// What a connect resolves to.
+    type Outcome = anyhow::Result<(Arc<dyn Api>, Socket)>;
 
     /// Answers each connect with the next scripted outcome, and counts the calls.
     #[derive(Default)]
     pub struct FakeConnector {
-        outcomes: RefCell<VecDeque<anyhow::Result<(Daemon, Socket)>>>,
+        outcomes: RefCell<VecDeque<Outcome>>,
         pub calls: RefCell<usize>,
     }
 
@@ -167,32 +174,26 @@ pub(crate) mod fake {
             self
         }
 
-        /// Scripts a success; the returned [`Remote`] plays the daemon's socket.
+        /// Scripts a success to a daemon with nothing in it; the returned [`Remote`] plays
+        /// the daemon's socket.
         pub fn then_connect(&self) -> Remote {
+            self.then_connect_to(Arc::new(FakeApi::default()))
+        }
+
+        /// Scripts a success to `api`; the returned [`Remote`] plays the daemon's socket.
+        pub fn then_connect_to(&self, api: Arc<FakeApi>) -> Remote {
             let (socket, remote) = loopback();
-            self.outcomes.borrow_mut().push_back(Ok((daemon(), socket)));
+            self.outcomes.borrow_mut().push_back(Ok((api, socket)));
             remote
         }
     }
 
     impl Connector for FakeConnector {
-        fn connect(&self, _cx: &App) -> Task<anyhow::Result<(Daemon, Socket)>> {
+        fn connect(&self, _cx: &App) -> Task<Outcome> {
             *self.calls.borrow_mut() += 1;
             let outcome = self.outcomes.borrow_mut().pop_front();
             Task::ready(outcome.expect("a scripted outcome for every connect"))
         }
-    }
-
-    /// A daemon on a port nothing listens on; tests never call its API.
-    fn daemon() -> Daemon {
-        let info = DaemonInfo {
-            port: 9,
-            token: "t0k".into(),
-            pid: 1,
-            version: "0.1.0".into(),
-        };
-        let client = agentdeck_client::authenticated(&info.base_url(), &info.token).unwrap();
-        Daemon { client, info }
     }
 }
 
