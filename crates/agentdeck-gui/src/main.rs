@@ -18,6 +18,8 @@ mod shell;
 mod sidebar;
 mod state_dot;
 mod task_list;
+mod task_row;
+mod tasks;
 mod terminal;
 mod title_bar;
 mod top_bar;

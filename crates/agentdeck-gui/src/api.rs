@@ -6,9 +6,9 @@ use std::collections::BTreeSet;
 
 use agentdeck_client::daemon::Daemon;
 use agentdeck_client::panes::{self, pane_if_any};
-use agentdeck_client::types::{NewWorkspace, Pane, Tab};
+use agentdeck_client::types::{NewWorkspace, Pane, Tab, TaskPatch};
 use agentdeck_client::{ApiError, Client};
-use agentdeck_core::{PaneId, SplitDirection, TabId, TaskId, WorkspaceId};
+use agentdeck_core::{PaneId, SplitDirection, TabId, TaskId, TaskStatus, WorkspaceId};
 use gpui::{App, Task};
 
 use crate::new_workspace::Request;
@@ -43,6 +43,14 @@ pub trait Api: Send + Sync {
     /// Makes a workspace as `request` says; its id. A refusal is an [`ApiError`] whose code
     /// names the field: `invalid_name` or `invalid_dir`.
     fn new_workspace(&self, request: Request, cx: &App) -> Task<anyhow::Result<WorkspaceId>>;
+
+    /// Moves `task` to `status`.
+    fn set_task_status(
+        &self,
+        task: TaskId,
+        status: TaskStatus,
+        cx: &App,
+    ) -> Task<anyhow::Result<()>>;
 }
 
 pub use agentdeck_client::panes::PaneAt;
@@ -117,6 +125,23 @@ impl Api for Daemon {
                 .await
                 .map_err(ApiError::from)?;
             Ok(made.id)
+        })
+    }
+
+    fn set_task_status(
+        &self,
+        task: TaskId,
+        status: TaskStatus,
+        cx: &App,
+    ) -> Task<anyhow::Result<()>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            let patch = TaskPatch {
+                status: Some(status),
+                ..TaskPatch::default()
+            };
+            (client.task_update().id(task).body(patch).send().await).map_err(ApiError::from)?;
+            Ok(())
         })
     }
 }
@@ -420,6 +445,22 @@ pub(crate) mod fake {
             self.snapshot.lock().unwrap().workspaces.push(made);
             self.made_workspaces.lock().unwrap().push(request);
             Task::ready(Ok(id))
+        }
+
+        fn set_task_status(
+            &self,
+            task: TaskId,
+            status: TaskStatus,
+            _cx: &App,
+        ) -> Task<anyhow::Result<()>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            let mut snapshot = self.snapshot.lock().unwrap();
+            if let Some(task) = snapshot.tasks.iter_mut().find(|t| t.id == task) {
+                task.status = status;
+            }
+            Task::ready(Ok(()))
         }
     }
 }
