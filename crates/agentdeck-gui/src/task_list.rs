@@ -1,0 +1,347 @@
+//! The rows the Tasks view, the Inbox and the right panel list (spec §11), from the sidebar's
+//! [`Snapshot`]: a pure function of it, which the views render.
+//!
+//! A row carries what its cells show: the task's status, kind and title, the state of the
+//! agent panes that link it, its PR (repository, number, draft, checks, review) and its
+//! workspace.
+
+use agentdeck_client::types::Task;
+use agentdeck_core::{AgentState, ChecksState, ReviewState, TaskId, TaskKind, TaskStatus};
+use gpui::SharedString;
+
+use crate::overview::Snapshot;
+
+/// The statuses in the order the Tasks view groups them, as Penpot's "Tasks" board does.
+pub const GROUP_ORDER: [TaskStatus; 4] = [
+    TaskStatus::Doing,
+    TaskStatus::Review,
+    TaskStatus::Todo,
+    TaskStatus::Done,
+];
+
+/// The agent panes linking a task, summed up for its row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentCell {
+    /// Their states, rolled up as a workspace's are.
+    pub state: AgentState,
+    /// The agent the first of them runs, as the daemon names it (`claude`).
+    pub name: SharedString,
+}
+
+/// A PR task's PR, for its row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrCell {
+    /// The repository's name without its owner, then the number: `ts-packages #142`.
+    pub reference: SharedString,
+    /// Whether it is a draft.
+    pub draft: bool,
+    /// Its checks, once known.
+    pub checks: Option<ChecksState>,
+    /// Its review, once known.
+    pub review: Option<ReviewState>,
+}
+
+/// One task's row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Row {
+    /// The task.
+    pub id: TaskId,
+    /// Its status, which the row's picker shows.
+    pub status: TaskStatus,
+    /// Plain or PR: the row's icon.
+    pub kind: TaskKind,
+    /// Its title.
+    pub title: SharedString,
+    /// The agents working on it, if any pane links it.
+    pub agent: Option<AgentCell>,
+    /// Its PR, if it is a PR task the sync has filled in.
+    pub pr: Option<PrCell>,
+    /// Its workspace's name; `None` in the inbox.
+    pub workspace: Option<SharedString>,
+}
+
+/// The rows of one status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Group {
+    /// The status.
+    pub status: TaskStatus,
+    /// Its rows, in the daemon's order.
+    pub rows: Vec<Row>,
+}
+
+/// What a list shows of the snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Query<'a> {
+    /// Text a row's title, PR reference or workspace must contain, ignoring case; empty
+    /// matches every row.
+    pub filter: &'a str,
+    /// Whether done tasks show.
+    pub show_done: bool,
+}
+
+/// Each status's rows that `query` picks, in [`GROUP_ORDER`]; a status with none is left out.
+pub fn groups(snapshot: &Snapshot, query: &Query) -> Vec<Group> {
+    let rows = rows(snapshot, query);
+    GROUP_ORDER
+        .into_iter()
+        .map(|status| Group {
+            status,
+            rows: rows
+                .iter()
+                .filter(|r| r.status == status)
+                .cloned()
+                .collect(),
+        })
+        .filter(|group| !group.rows.is_empty())
+        .collect()
+}
+
+/// The rows `query` picks, in the daemon's order, ungrouped.
+fn rows(snapshot: &Snapshot, query: &Query) -> Vec<Row> {
+    let filter = query.filter.trim().to_lowercase();
+    let matches = |row: &Row| {
+        filter.is_empty()
+            || [
+                Some(&row.title),
+                row.pr.as_ref().map(|pr| &pr.reference),
+                row.workspace.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|text| text.to_lowercase().contains(&filter))
+    };
+    snapshot
+        .tasks
+        .iter()
+        .filter(|task| query.show_done || task.status != TaskStatus::Done)
+        .map(|task| row(snapshot, task))
+        .filter(matches)
+        .collect()
+}
+
+/// The row for `task`.
+fn row(snapshot: &Snapshot, task: &Task) -> Row {
+    let linked: Vec<_> = (snapshot.panes.iter())
+        .filter(|pane| pane.task == Some(task.id))
+        .collect();
+    let agent = linked.first().map(|first| AgentCell {
+        state: AgentState::rollup(linked.iter().map(|pane| pane.state)),
+        name: first.agent.map_or("shell", |agent| agent.as_str()).into(),
+    });
+    let pr = task.pr.as_ref().map(|pr| {
+        let repo = pr.repo.rsplit('/').next().unwrap_or(&pr.repo);
+        PrCell {
+            reference: format!("{repo} #{}", pr.number).into(),
+            draft: pr.draft,
+            checks: pr.checks,
+            review: pr.review,
+        }
+    });
+    let workspace = task.workspace_id.and_then(|ws| {
+        (snapshot.workspaces.iter())
+            .find(|w| w.id == ws)
+            .map(|w| SharedString::from(w.name.clone()))
+    });
+    Row {
+        id: task.id,
+        status: task.status,
+        kind: task.kind,
+        title: task.title.clone().into(),
+        agent,
+        pr,
+        workspace,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use agentdeck_client::types::PullRequest;
+    use agentdeck_core::{Agent, PrState, WorkspaceId};
+
+    use super::*;
+    use crate::overview::fixtures::{id, pane, task, workspace};
+
+    fn all() -> Query<'static> {
+        Query {
+            filter: "",
+            show_done: false,
+        }
+    }
+
+    fn with_status(n: u32, status: TaskStatus, ws: Option<WorkspaceId>) -> Task {
+        Task {
+            status,
+            ..task(n, TaskKind::Plain, ws)
+        }
+    }
+
+    fn pr(repo: &str, number: i64) -> PullRequest {
+        PullRequest {
+            checks: Some(ChecksState::Failure),
+            draft: true,
+            head_ref: "feat/x".into(),
+            number,
+            repo: repo.into(),
+            review: Some(ReviewState::ChangesRequested),
+            state: PrState::Open,
+            synced_at: "2026-11-13T00:00:00Z".into(),
+            updated_at: "2026-11-13T00:00:00Z".into(),
+            url: format!("https://github.com/{repo}/pull/{number}"),
+        }
+    }
+
+    fn titles(groups: &[Group]) -> Vec<(TaskStatus, Vec<SharedString>)> {
+        groups
+            .iter()
+            .map(|g| (g.status, g.rows.iter().map(|r| r.title.clone()).collect()))
+            .collect()
+    }
+
+    mod groups {
+        use super::*;
+
+        #[test]
+        fn should_group_doing_then_review_then_todo_leaving_out_empty_ones() {
+            let snapshot = Snapshot {
+                tasks: vec![
+                    with_status(1, TaskStatus::Todo, None),
+                    with_status(2, TaskStatus::Doing, None),
+                    with_status(3, TaskStatus::Todo, None),
+                ],
+                ..Snapshot::default()
+            };
+
+            assert_eq!(
+                titles(&groups(&snapshot, &all())),
+                [
+                    (TaskStatus::Doing, vec!["task 2".into()]),
+                    (TaskStatus::Todo, vec!["task 1".into(), "task 3".into()]),
+                ]
+            );
+        }
+
+        #[test]
+        fn should_hide_done_tasks_unless_asked() {
+            let snapshot = Snapshot {
+                tasks: vec![with_status(1, TaskStatus::Done, None)],
+                ..Snapshot::default()
+            };
+            let show_done = Query {
+                show_done: true,
+                ..all()
+            };
+
+            assert_eq!(groups(&snapshot, &all()), []);
+            assert_eq!(
+                titles(&groups(&snapshot, &show_done)),
+                [(TaskStatus::Done, vec!["task 1".into()])]
+            );
+        }
+
+        #[test]
+        fn should_filter_by_title_pr_or_workspace_ignoring_case() {
+            let ws = workspace(1, "gpui-terminal");
+            let snapshot = Snapshot {
+                tasks: vec![
+                    Task {
+                        title: "Fix flaky Tabs test".into(),
+                        ..task(1, TaskKind::Plain, None)
+                    },
+                    Task {
+                        pr: Some(pr("bRRRITSCOLD/ts-packages", 142)),
+                        ..task(2, TaskKind::Pr, None)
+                    },
+                    task(3, TaskKind::Plain, Some(ws.id)),
+                    task(4, TaskKind::Plain, None),
+                ],
+                workspaces: vec![ws],
+                ..Snapshot::default()
+            };
+            let filtered = |filter| {
+                let query = Query { filter, ..all() };
+                rows(&snapshot, &query)
+                    .into_iter()
+                    .map(|r| r.id)
+                    .collect::<Vec<TaskId>>()
+            };
+
+            assert_eq!(filtered("tabs"), [id(1)]);
+            assert_eq!(filtered("TS-PACKAGES #142"), [id(2)]);
+            assert_eq!(filtered("gpui"), [id(3)]);
+        }
+    }
+
+    mod row {
+        use super::*;
+
+        #[test]
+        fn should_name_the_pr_by_repository_and_number() {
+            let snapshot = Snapshot {
+                tasks: vec![Task {
+                    pr: Some(pr("bRRRITSCOLD/rust-packages", 61)),
+                    ..task(1, TaskKind::Pr, None)
+                }],
+                ..Snapshot::default()
+            };
+
+            let row = &rows(&snapshot, &all())[0];
+            assert_eq!(
+                row.pr,
+                Some(PrCell {
+                    reference: "rust-packages #61".into(),
+                    draft: true,
+                    checks: Some(ChecksState::Failure),
+                    review: Some(ReviewState::ChangesRequested),
+                })
+            );
+        }
+
+        #[test]
+        fn should_name_the_workspace() {
+            let ws = workspace(1, "tabs-a11y");
+            let snapshot = Snapshot {
+                tasks: vec![task(1, TaskKind::Plain, Some(ws.id))],
+                workspaces: vec![ws],
+                ..Snapshot::default()
+            };
+
+            assert_eq!(
+                rows(&snapshot, &all())[0].workspace,
+                Some("tabs-a11y".into())
+            );
+        }
+
+        #[test]
+        fn should_roll_up_the_linked_agent_panes() {
+            let ws = workspace(1, "a");
+            let linked = |n, state| crate::overview::PaneState {
+                agent: Some(Agent::Claude),
+                task: Some(id(1)),
+                ..pane(n, ws.id, state)
+            };
+            let snapshot = Snapshot {
+                tasks: vec![
+                    task(1, TaskKind::Plain, Some(ws.id)),
+                    task(2, TaskKind::Plain, None),
+                ],
+                panes: vec![
+                    linked(10, AgentState::Working),
+                    linked(11, AgentState::Blocked),
+                    pane(12, ws.id, AgentState::Done),
+                ],
+                workspaces: vec![ws],
+                ..Snapshot::default()
+            };
+
+            let rows = rows(&snapshot, &all());
+            assert_eq!(
+                rows[0].agent,
+                Some(AgentCell {
+                    state: AgentState::Blocked,
+                    name: "claude".into()
+                })
+            );
+            assert_eq!(rows[1].agent, None);
+        }
+    }
+}
