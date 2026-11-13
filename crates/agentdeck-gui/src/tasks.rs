@@ -4,6 +4,8 @@
 //!
 //! It shows the sidebar's [`Snapshot`], which the window passes on as it changes, so it reads
 //! nothing itself. A status picked is sent at once; the daemon's `changed` brings it back.
+//!
+//! Its list draws only the headers and rows in view: the inbox's PRs alone can be hundreds.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -13,20 +15,31 @@ use brrritscold_core_gpui::{ActiveTheme as _, Input, InputState, Label, Switch};
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
-    px,
+    AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ListState,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Window, div, list, px,
 };
 use gpui_base::input::InputEvent;
 
 use crate::api::Api;
 use crate::overview::Snapshot;
-use crate::task_list::{self, Group, Query, Scope};
+use crate::task_list::{self, Group, Query, Row, Scope};
 use crate::task_row::{self, Table};
 use crate::workspace::failed;
 
 /// The filter's width. Raw in Penpot too.
 const FILTER_WIDTH: f32 = 240.;
+
+/// One item of the list: a group's header, or a row under it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Item {
+    Header {
+        status: TaskStatus,
+        count: usize,
+        collapsed: bool,
+    },
+    Row(Row),
+}
 
 /// The Tasks view.
 pub struct TasksView {
@@ -36,6 +49,9 @@ pub struct TasksView {
     show_done: bool,
     /// The statuses whose group is folded.
     collapsed: HashSet<TaskStatus>,
+    /// The items the list draws from, as last rendered.
+    shown: Vec<Item>,
+    list: ListState,
     _filter: Subscription,
 }
 
@@ -54,6 +70,8 @@ impl TasksView {
             filter,
             show_done: false,
             collapsed: HashSet::new(),
+            shown: Vec::new(),
+            list: task_row::list_state(),
             _filter,
         }
     }
@@ -126,6 +144,55 @@ impl TasksView {
             .collect()
     }
 
+    /// The list's items: each group's header, then its rows unless folded.
+    fn items(&self, cx: &gpui::App) -> Vec<Item> {
+        let counts = self.counts(cx);
+        let mut items = Vec::new();
+        for group in self.groups(cx) {
+            let status = group.status;
+            let count = (counts.iter())
+                .find(|(s, _)| *s == status)
+                .map_or(0, |(_, n)| *n);
+            items.push(Item::Header {
+                status,
+                count,
+                collapsed: self.collapsed.contains(&status),
+            });
+            items.extend(group.rows.into_iter().map(Item::Row));
+        }
+        items
+    }
+
+    /// The list's `ix`th item: a group header that folds its group, or a row with its status
+    /// picker.
+    fn item(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        match self.shown.get(ix) {
+            Some(&Item::Header {
+                status,
+                count,
+                collapsed,
+            }) => task_row::spaced(task_row::group_header(
+                status,
+                count,
+                collapsed,
+                cx.listener(move |this, _, _, cx| this.toggle(status, cx)),
+                cx,
+            )),
+            Some(Item::Row(row)) => {
+                let task = row.id;
+                let picker = task_row::status_picker(
+                    SharedString::from(format!("status-{task}")),
+                    row.status,
+                    cx.listener(move |this, status: &TaskStatus, window, cx| {
+                        this.set_status(task, *status, window, cx);
+                    }),
+                );
+                task_row::spaced(task_row::wide(row, picker, Table::Tasks, cx))
+            }
+            None => div().into_any_element(),
+        }
+    }
+
     /// Penpot `Header`: heading, spacer, filter, "Show done", `space.3` apart.
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
@@ -180,57 +247,41 @@ impl TasksView {
 impl Render for TasksView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
-        let counts = self.counts(cx);
-        let mut list = div()
-            .id("task-list")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .gap(space::S0_5)
-            .overflow_y_scroll();
-        for group in self.groups(cx) {
-            let status = group.status;
-            let count = (counts.iter())
-                .find(|(s, _)| *s == status)
-                .map_or(0, |(_, n)| *n);
-            list = list.child(task_row::group_header(
-                status,
-                count,
-                self.collapsed.contains(&status),
-                cx.listener(move |this, _, _, cx| this.toggle(status, cx)),
-                cx,
-            ));
-            for row in &group.rows {
-                let task = row.id;
-                let picker = task_row::status_picker(
-                    SharedString::from(format!("status-{task}")),
-                    row.status,
-                    cx.listener(move |this, status: &TaskStatus, window, cx| {
-                        this.set_status(task, *status, window, cx);
-                    }),
-                );
-                list = list.child(task_row::wide(row, picker, Table::Tasks, cx));
-            }
+        let items = self.items(cx);
+        if items != self.shown {
+            task_row::relist(&self.list, items.len());
+            self.shown = items;
         }
+        let rows = list(
+            self.list.clone(),
+            cx.processor(|this, ix, _, cx| this.item(ix, cx)),
+        )
+        .flex_1()
+        .min_h_0();
         // Columns over List, as wide as the window allows and never narrower than the table.
         let table = div()
             .id("task-table")
             .flex_1()
             .min_h_0()
             .overflow_x_scroll()
+            // Only a sideways wheel scrolls it; a vertical one is the list's.
+            .restrict_scroll_to_axis()
+            .flex()
+            .flex_col()
             .child(
                 div()
-                    .size_full()
+                    .flex_1()
+                    .min_h_0()
                     .min_w(Table::Tasks.min_width())
                     .flex()
                     .flex_col()
                     .gap(space::S4)
                     .child(task_row::columns(Table::Tasks, cx))
-                    .child(list),
+                    .child(rows),
             );
         // Penpot `Content`: Header / Columns / List, `space.4` apart, padded `space.6`.
         div()
+            .size_full()
             .flex_1()
             .min_w_0()
             .min_h_0()
@@ -241,7 +292,7 @@ impl Render for TasksView {
             .bg(s.background)
             .child(self.header(cx))
             .child(table)
-            .when(counts.is_empty(), |content| {
+            .when(self.shown.is_empty(), |content| {
                 content.child(
                     div()
                         .text_size(font_size::SM)
@@ -359,6 +410,47 @@ mod tests {
             workspaces: vec![ws],
             ..Snapshot::default()
         }
+    }
+
+    /// `n` todo tasks.
+    fn crowded(n: u32) -> Snapshot {
+        Snapshot {
+            tasks: (1..=n).map(|n| task(n, TaskKind::Plain, None)).collect(),
+            ..Snapshot::default()
+        }
+    }
+
+    fn drawn(task: u32, cx: &mut VisualTestContext) -> bool {
+        (cx.debug_bounds(format!("task {}", id::<TaskId>(task)).leak())).is_some()
+    }
+
+    #[gpui::test]
+    fn should_draw_only_the_rows_in_view(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::open(crowded(300), cx);
+        harness.draw(cx);
+
+        assert!(cx.debug_bounds("group todo").is_some());
+        assert!(drawn(1, cx));
+        assert!(!drawn(300, cx));
+    }
+
+    #[gpui::test]
+    fn should_draw_the_rows_after_a_folded_group(cx: &mut TestAppContext) {
+        let mut snapshot = crowded(300);
+        snapshot
+            .tasks
+            .push(with_status(301, TaskStatus::Done, None));
+        let (harness, cx) = Harness::open(snapshot, cx);
+        harness
+            .view
+            .update(cx, |view, cx| view.set_show_done(true, cx));
+        harness.draw(cx);
+        assert!(!drawn(301, cx));
+
+        harness.click("group todo", cx);
+        harness.draw(cx);
+
+        assert!(drawn(301, cx));
     }
 
     #[gpui::test]
