@@ -279,6 +279,8 @@ Built on `brrritscold-core-gpui` (`init`, `Root`, theme preference, toasts). Scr
   - The terminal palette follows the theme. Terminal text is JetBrains Mono (`font-family.mono`).
 - **Notifications:** an OS notification when a pane turns `blocked` or `done` while its tab isn't visible, and when a PR task's checks fail or a review arrives. They can be muted per workspace.
 - **Keymap:** `keymap.rs`, normal app shortcuts, `secondary-` bindings loaded with `KeyBinding::load`.
+  - A binding wins over the terminal, so every shortcut is one a shell has no use for, after GNOME Terminal. Plain ctrl-letter, alt-letter, the arrows and the paging keys always reach the pane.
+  - Quit `secondary-shift-q`; next / previous tab `ctrl-pagedown` / `ctrl-pageup` (or `ctrl-tab` / `ctrl-shift-tab`); tab 1–9 `alt-1`…`alt-9`; next / previous pane `secondary-shift-down` / `secondary-shift-up`, in layout order.
 
 ## 12. Testing
 

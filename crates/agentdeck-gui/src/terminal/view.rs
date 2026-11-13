@@ -1,6 +1,9 @@
 //! One attached pane (spec §5): attaches on a channel of its own, feeds the snapshot and live
 //! output into a [`Screen`], asks for the size that fits, types into the PTY, and detaches
 //! when dropped.
+//!
+//! While its window is the active one it claims `primary`, so its size wins over other
+//! clients' (spec §5): when it goes live, and again whenever the window is activated.
 
 use agentdeck_client::ws;
 use agentdeck_core::PaneId;
@@ -48,7 +51,7 @@ pub struct TerminalView {
     /// The grid that fits the view, once laid out.
     grid: Option<GridSize>,
     focus: FocusHandle,
-    _events: Subscription,
+    _subscriptions: [Subscription; 2],
 }
 
 impl TerminalView {
@@ -57,10 +60,15 @@ impl TerminalView {
         pane: PaneId,
         connection: &Entity<Connection>,
         sender: ws::Sender,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let channel = connection.update(cx, |connection, _| connection.open_channel());
-        let events = cx.subscribe(connection, |this, _, event, cx| this.on_event(event, cx));
+        let events = cx.subscribe_in(connection, window, |this, _, event, window, cx| {
+            this.on_event(event, window, cx);
+        });
+        let activation =
+            cx.observe_window_activation(window, |this, window, _| this.claim_primary(window));
         let focus = cx.focus_handle();
         let view = TerminalView {
             pane,
@@ -69,7 +77,7 @@ impl TerminalView {
             attachment: Attachment::Attaching,
             grid: None,
             focus,
-            _events: events,
+            _subscriptions: [events, activation],
         };
         view.attach();
         view
@@ -82,7 +90,16 @@ impl TerminalView {
         });
     }
 
-    fn on_event(&mut self, event: &DaemonEvent, cx: &mut Context<Self>) {
+    /// Makes this the pane's primary client, if it is live and its window is the active one.
+    fn claim_primary(&self, window: &Window) {
+        if matches!(self.attachment, Attachment::Live(_)) && window.is_window_active() {
+            let _ = self.sender.send(ClientMessage::Primary {
+                channel: self.channel,
+            });
+        }
+    }
+
+    fn on_event(&mut self, event: &DaemonEvent, window: &mut Window, cx: &mut Context<Self>) {
         let ours = self.channel;
         match event {
             DaemonEvent::Message(ServerMessage::Attached {
@@ -111,6 +128,7 @@ impl TerminalView {
                         screen.feed(bytes);
                         self.attachment = Attachment::Live(screen);
                         self.fit();
+                        self.claim_primary(window);
                     }
                     Attachment::Live(mut screen) => {
                         screen.feed(bytes);
@@ -338,7 +356,8 @@ mod tests {
             };
             let mut host = None;
             let window = cx.add_window(|window, cx| {
-                let terminal = cx.new(|cx| TerminalView::new(id(1), &connection, sender, cx));
+                let terminal =
+                    cx.new(|cx| TerminalView::new(id(1), &connection, sender, window, cx));
                 let view = cx.new(|_| Host(Some(terminal)));
                 host = Some(view.clone());
                 Root::new(view, window, cx)
@@ -375,6 +394,12 @@ mod tests {
         fn focus(&self, cx: &mut VisualTestContext) {
             let view = self.view(cx);
             cx.update(|window, cx| window.focus(&view.focus_handle(cx), cx));
+        }
+
+        /// Brings the window to the front, as the user focusing it does.
+        fn activate(&self, cx: &mut VisualTestContext) {
+            cx.update(|window, _| window.activate_window());
+            cx.run_until_parked();
         }
 
         fn draw(&self, cx: &mut VisualTestContext) {
@@ -588,6 +613,66 @@ mod tests {
             );
 
             assert_eq!(harness.text(usize::MAX, cx).unwrap().len(), 3);
+        }
+    }
+
+    mod primary {
+        use super::*;
+
+        const PRIMARY: Outgoing = Outgoing::Message(ClientMessage::Primary { channel: 1 });
+
+        #[gpui::test]
+        fn should_claim_primary_after_fitting_once_live_in_the_active_window(
+            cx: &mut TestAppContext,
+        ) {
+            let (mut harness, cx) = Harness::open(cx);
+            harness.activate(cx);
+            harness.draw(cx);
+            harness.sent();
+
+            harness.attached(10, 2, b"", cx);
+
+            let [resize, primary] = harness.sent().try_into().expect("a resize, then primary");
+            assert!(matches!(
+                resize,
+                Outgoing::Message(ClientMessage::Resize { .. })
+            ));
+            assert_eq!(primary, PRIMARY);
+        }
+
+        #[gpui::test]
+        fn should_claim_primary_again_when_the_window_is_activated(cx: &mut TestAppContext) {
+            let (mut harness, cx) = Harness::open(cx);
+            harness.activate(cx);
+            harness.attached(10, 2, b"", cx);
+            cx.deactivate_window();
+            harness.sent();
+
+            harness.activate(cx);
+
+            assert_eq!(harness.sent(), [PRIMARY]);
+        }
+
+        #[gpui::test]
+        fn should_not_claim_primary_in_an_inactive_window(cx: &mut TestAppContext) {
+            let (mut harness, cx) = Harness::open(cx);
+            harness.activate(cx);
+            cx.deactivate_window();
+
+            harness.attached(10, 2, b"", cx);
+
+            assert!(!harness.sent().contains(&PRIMARY));
+        }
+
+        #[gpui::test]
+        fn should_not_claim_primary_before_it_is_live(cx: &mut TestAppContext) {
+            let (mut harness, cx) = Harness::open(cx);
+            harness.activate(cx);
+            cx.deactivate_window();
+
+            harness.activate(cx);
+
+            assert!(!harness.sent().contains(&PRIMARY));
         }
     }
 
