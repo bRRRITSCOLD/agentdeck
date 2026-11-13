@@ -18,6 +18,7 @@ use crate::connection::{Connection, Status};
 use crate::frame;
 use crate::sidebar::{Selection, SidebarView};
 use crate::title_bar::{Close, Minimize, TitleBar, ToggleMaximize};
+use crate::top_bar::TopBar;
 use crate::workspace::WorkspaceView;
 
 /// The main window's root view, inside core-gpui's `Root`.
@@ -91,22 +92,31 @@ impl Shell {
         else {
             return;
         };
-        let Selection::Workspace(selected) = sidebar.read(cx).selection() else {
+        let sidebar = sidebar.read(cx);
+        let row = match sidebar.selection() {
+            Selection::Workspace(selected) => {
+                (sidebar.overview().workspaces.iter()).find(|row| row.id == selected)
+            }
+            Selection::Inbox | Selection::Tasks => None,
+        };
+        let Some(row) = row else {
             self.workspace = None;
             cx.notify();
             return;
         };
-        if self
-            .workspace
-            .as_ref()
-            .is_some_and(|view| view.read(cx).workspace() == selected)
+        let (selected, top_bar) = (row.id, TopBar::new(row.name.clone(), row.dir.clone()));
+        if let Some(view) = &self.workspace
+            && view.read(cx).workspace() == selected
         {
+            view.update(cx, |view, cx| view.set_top_bar(top_bar, cx));
             return;
         }
         let (api, sender) = (session.api.clone(), session.sender.clone());
         let connection = self.connection.clone();
         self.workspace =
-            Some(cx.new(|cx| WorkspaceView::new(selected, api, connection, sender, window, cx)));
+            Some(cx.new(|cx| {
+                WorkspaceView::new(selected, top_bar, api, connection, sender, window, cx)
+            }));
         cx.notify();
     }
 
@@ -317,6 +327,59 @@ mod tests {
             cx.run_until_parked();
 
             assert_eq!(shown_workspace(&shell, cx), None);
+        }
+
+        mod top_bar {
+            use agentdeck_client::ws::Event;
+            use agentdeck_core::ws::{Entity as Changed, ServerMessage};
+
+            use super::*;
+            use crate::top_bar::TopBar;
+
+            fn shown_top_bar(shell: &Entity<Shell>, cx: &TestAppContext) -> Option<TopBar> {
+                shell.read_with(cx, |shell, cx| {
+                    (shell.workspace.as_ref()).map(|view| view.read(cx).top_bar().clone())
+                })
+            }
+
+            #[gpui::test]
+            fn should_head_the_workspace_with_its_name_and_dir(cx: &mut TestAppContext) {
+                let connector = Rc::new(FakeConnector::default());
+                let _remote = connector.then_connect_to(workspace_with_a_pane());
+
+                let shell = open(connector, cx);
+
+                assert_eq!(
+                    shown_top_bar(&shell, cx),
+                    Some(TopBar::new("agentdeck", "/w/agentdeck"))
+                );
+            }
+
+            #[gpui::test]
+            fn should_follow_a_rename(cx: &mut TestAppContext) {
+                let connector = Rc::new(FakeConnector::default());
+                let api = workspace_with_a_pane();
+                let remote = connector.then_connect_to(api.clone());
+                let shell = open(connector, cx);
+                api.set(Snapshot {
+                    workspaces: vec![workspace(1, "renamed")],
+                    ..Snapshot::default()
+                });
+
+                remote
+                    .events
+                    .try_send(Event::Message(ServerMessage::Changed {
+                        entity: Changed::Workspace,
+                        id: id::<WorkspaceId>(1).to_string(),
+                    }))
+                    .unwrap();
+                cx.run_until_parked();
+
+                assert_eq!(
+                    shown_top_bar(&shell, cx),
+                    Some(TopBar::new("renamed", "/w/renamed"))
+                );
+            }
         }
     }
 

@@ -68,6 +68,8 @@ pub struct WorkspaceRow {
     pub id: WorkspaceId,
     /// Its name.
     pub name: SharedString,
+    /// Its directory's absolute path.
+    pub dir: SharedString,
     /// Its panes' states, rolled up.
     pub state: AgentState,
     /// Its counts.
@@ -161,6 +163,7 @@ impl Snapshot {
             .map(|workspace| WorkspaceRow {
                 id: workspace.id,
                 name: workspace.name.clone().into(),
+                dir: workspace.dir.clone().into(),
                 state: AgentState::rollup(
                     self.panes
                         .iter()
