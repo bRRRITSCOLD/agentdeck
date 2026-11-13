@@ -191,8 +191,9 @@ pub fn group_header(
         .into_any_element()
 }
 
-/// Penpot `Checks`: an icon and a word in the checks colour (spec §11).
-fn checks(state: ChecksState, cx: &App) -> Div {
+/// Penpot `Checks`: an icon and, unless `icon_only` (the panel's), a word, in the checks
+/// colour (spec §11).
+fn checks(state: ChecksState, icon_only: bool, cx: &App) -> Div {
     let s = cx.theme().semantic();
     let (icon, label, color): (IconName, &str, Hsla) = match state {
         ChecksState::Success => (IconName::CircleCheck, "passing", s.success),
@@ -206,7 +207,7 @@ fn checks(state: ChecksState, cx: &App) -> Div {
         .text_size(font_size::XS)
         .text_color(color)
         .child(Icon::new(icon).size(px(14.)).text_color(color))
-        .child(label)
+        .when(!icon_only, |c| c.child(label))
 }
 
 /// The review cell: a badge in the review colour (spec §11), or muted text while one is
@@ -311,7 +312,7 @@ pub fn wide(row: &Row, picker: Select, table: Table, cx: &App) -> AnyElement {
         )
         .child(
             cell(Columns::CHECKS).when_some(pr.and_then(|pr| pr.checks), |c, state| {
-                c.child(checks(state, cx))
+                c.child(checks(state, false, cx))
             }),
         )
         .child(
@@ -338,6 +339,82 @@ pub fn wide(row: &Row, picker: Select, table: Table, cx: &App) -> AnyElement {
                 None => cell(Columns::WORKSPACE).child(none(cx)),
             })
         })
+        .into_any_element()
+}
+
+/// Penpot `TaskRow` (`panel`), for the right panel's narrow column: the kind icon, the title
+/// over the PR reference and the agents' `StateDot` on top; the status picker, then the
+/// checks icon and the review badge below. Padded `space.2`, the two lines `space.1-5` apart.
+pub fn panel(row: &Row, picker: Select, cx: &App) -> AnyElement {
+    let s = cx.theme().semantic();
+    let kind_icon = match row.kind {
+        TaskKind::Plain => IconName::ListTodo,
+        TaskKind::Pr => IconName::GitPullRequest,
+    };
+    let pr = row.pr.as_ref();
+    let id = row.id;
+    div()
+        .debug_selector(move || format!("panel task {id}"))
+        .flex()
+        .flex_col()
+        .flex_none()
+        .gap(space::S1_5)
+        .p(space::S2)
+        .rounded(s.radius_md)
+        // Penpot `Top`: icon, Text, agent, `space.2` apart.
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .gap(space::S2)
+                .child(
+                    div()
+                        .flex_none()
+                        .pt(px(1.5))
+                        .child(Icon::new(kind_icon).size(px(14.)).text_color(s.foreground)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(space::S0_5)
+                        .child(
+                            div()
+                                .text_size(font_size::SM)
+                                .text_color(s.foreground)
+                                .child(row.title.clone()),
+                        )
+                        .when_some(pr, |text, pr| {
+                            text.child(
+                                div()
+                                    .truncate()
+                                    .text_size(font_size::XS)
+                                    .text_color(s.muted_foreground)
+                                    .child(pr.reference.clone()),
+                            )
+                        }),
+                )
+                .when_some(row.agent.as_ref(), |top, agent| {
+                    top.child(StateDot::new().state(StateDotState::of(agent.state, None)))
+                }),
+        )
+        // Penpot `Meta`: picker, spacer, checks, review, `space.2` apart.
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(space::S2)
+                .child(picker)
+                .child(div().flex_1())
+                .when_some(pr.and_then(|pr| pr.checks), |meta, state| {
+                    meta.child(checks(state, true, cx))
+                })
+                .when_some(pr.and_then(|pr| pr.review), |meta, state| {
+                    meta.child(review(state, cx))
+                }),
+        )
         .into_any_element()
 }
 
