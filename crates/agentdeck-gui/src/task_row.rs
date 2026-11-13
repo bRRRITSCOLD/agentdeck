@@ -11,8 +11,8 @@ use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Div, ElementId, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Window, div, px,
+    ParentElement as _, Pixels, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
+    div, px,
 };
 
 use crate::state_dot::{StateDot, StateDotState};
@@ -189,9 +189,11 @@ pub fn status_picker(
     status: TaskStatus,
     on_change: impl Fn(&TaskStatus, &mut Window, &mut App) + 'static,
 ) -> Select {
-    let content = TaskStatus::ALL.iter().fold(SelectContent::new(), |content, s| {
-        content.item(SelectItem::new(s.as_str(), status_label(*s)))
-    });
+    let content = TaskStatus::ALL
+        .iter()
+        .fold(SelectContent::new(), |content, s| {
+            content.item(SelectItem::new(s.as_str(), status_label(*s)))
+        });
     Select::new(id)
         .trigger(SelectTrigger::new().size(SelectTriggerSize::Sm))
         .content(content)
@@ -253,20 +255,28 @@ pub fn wide(row: &Row, picker: Select, cx: &App) -> AnyElement {
         .child(cell(Columns::PR).when_some(pr, |c, pr| {
             c.child(muted(pr.reference.clone(), font_size::SM))
         }))
-        .child(cell(Columns::DRAFT).when(pr.is_some_and(|pr| pr.draft), |c| {
-            c.child(Badge::new().variant(BadgeVariant::Outline).label("draft"))
-        }))
         .child(
-            cell(Columns::CHECKS)
-                .when_some(pr.and_then(|pr| pr.checks), |c, state| c.child(checks(state, cx))),
+            cell(Columns::DRAFT).when(pr.is_some_and(|pr| pr.draft), |c| {
+                c.child(Badge::new().variant(BadgeVariant::Outline).label("draft"))
+            }),
         )
         .child(
-            cell(Columns::REVIEW)
-                .when_some(pr.and_then(|pr| pr.review), |c, state| c.child(review(state, cx))),
+            cell(Columns::CHECKS).when_some(pr.and_then(|pr| pr.checks), |c, state| {
+                c.child(checks(state, cx))
+            }),
+        )
+        .child(
+            cell(Columns::REVIEW).when_some(pr.and_then(|pr| pr.review), |c, state| {
+                c.child(review(state, cx))
+            }),
         )
         .child(match &row.workspace {
             Some(name) => cell(Columns::WORKSPACE)
-                .child(Icon::new(IconName::Folder).size(px(14.)).text_color(s.foreground))
+                .child(
+                    Icon::new(IconName::Folder)
+                        .size(px(14.))
+                        .text_color(s.foreground),
+                )
                 .child(
                     div()
                         .min_w_0()

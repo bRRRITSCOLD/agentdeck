@@ -113,6 +113,11 @@ impl SidebarView {
         })
     }
 
+    /// The daemon's data as last read, with live pane states.
+    pub fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
+    }
+
     /// The sidebar's content.
     pub fn overview(&self) -> &Overview {
         &self.overview

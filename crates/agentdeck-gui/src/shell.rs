@@ -1,6 +1,6 @@
 //! The main window's content: what the daemon connection allows. Until it connects, a
 //! centred status; once it does, the sidebar beside the selected view: a workspace's pane
-//! (the Inbox and Tasks views arrive with later PRs), and the new workspace dialog the
+//! or the Tasks view (the Inbox arrives with a later PR), and the new workspace dialog the
 //! sidebar's `+` opens. When the compositor leaves decorations to the app, a title bar and
 //! resize edges frame it.
 
@@ -19,6 +19,7 @@ use crate::connection::{Connection, Status};
 use crate::frame;
 use crate::new_workspace::{Created, NewWorkspaceDialog};
 use crate::sidebar::{Selection, SidebarEvent, SidebarView};
+use crate::tasks::TasksView;
 use crate::title_bar::{Close, Minimize, TitleBar, ToggleMaximize};
 use crate::top_bar::TopBar;
 use crate::workspace::WorkspaceView;
@@ -35,6 +36,10 @@ pub struct Shell {
     _new_workspace: Vec<Subscription>,
     /// The selected workspace.
     workspace: Option<Entity<WorkspaceView>>,
+    /// The Tasks view, while connected; shown while the sidebar selects Tasks.
+    tasks: Option<Entity<TasksView>>,
+    /// What the sidebar selects.
+    selection: Option<Selection>,
     /// Held by the shell so the title bar's actions reach its handlers while nothing inside
     /// has focus.
     focus: FocusHandle,
@@ -61,6 +66,8 @@ impl Shell {
             new_workspace: None,
             _new_workspace: Vec::new(),
             workspace: None,
+            tasks: None,
+            selection: None,
             focus,
         };
         shell.follow_connection(window, cx);
@@ -76,6 +83,7 @@ impl Shell {
                     let api = session.api.clone();
                     let connection = self.connection.clone();
                     let dialog = cx.new(|cx| NewWorkspaceDialog::new(api.clone(), window, cx));
+                    self.tasks = Some(cx.new(|cx| TasksView::new(api.clone(), window, cx)));
                     let sidebar = cx.new(|cx| SidebarView::new(api, &connection, cx));
                     self._selection =
                         Some(cx.observe_in(&sidebar, window, |shell, _, window, cx| {
@@ -106,19 +114,30 @@ impl Shell {
                 self.new_workspace = None;
                 self._new_workspace.clear();
                 self.workspace = None;
+                self.tasks = None;
+                self.selection = None;
             }
         }
     }
 
     /// Opens the view the sidebar selects, keeping it while the selection stays.
     fn follow_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(sidebar), Status::Connected(session)) =
-            (&self.sidebar, self.connection.read(cx).status())
-        else {
+        let Some(sidebar) = self.sidebar.clone() else {
+            return;
+        };
+        let (selection, snapshot) = {
+            let sidebar = sidebar.read(cx);
+            (sidebar.selection(), sidebar.snapshot().clone())
+        };
+        self.selection = Some(selection);
+        if let Some(tasks) = &self.tasks {
+            tasks.update(cx, |tasks, cx| tasks.set_snapshot(snapshot, cx));
+        }
+        let Status::Connected(session) = self.connection.read(cx).status() else {
             return;
         };
         let sidebar = sidebar.read(cx);
-        let row = match sidebar.selection() {
+        let row = match selection {
             Selection::Workspace(selected) => {
                 (sidebar.overview().workspaces.iter()).find(|row| row.id == selected)
             }
@@ -183,10 +202,15 @@ impl Shell {
                 .flex()
                 .children(self.sidebar.clone())
                 .child(Separator::new().orientation(SeparatorOrientation::Vertical))
-                .map(|body| match self.workspace.clone() {
-                    Some(workspace) => body.child(workspace),
-                    None => body.child(div().flex_1()),
-                })
+                .map(
+                    |body| match (self.selection, &self.workspace, &self.tasks) {
+                        (Some(Selection::Workspace(_)), Some(workspace), _) => {
+                            body.child(workspace.clone())
+                        }
+                        (Some(Selection::Tasks), _, Some(tasks)) => body.child(tasks.clone()),
+                        _ => body.child(div().flex_1()),
+                    },
+                )
                 .children(self.new_workspace.clone())
                 .into_any_element(),
         }
@@ -353,6 +377,27 @@ mod tests {
             cx.run_until_parked();
 
             assert_eq!(shown_workspace(&shell, cx), None);
+        }
+
+        mod tasks {
+            use super::*;
+
+            #[gpui::test]
+            fn should_show_the_tasks_view_when_the_sidebar_selects_it(cx: &mut TestAppContext) {
+                let connector = Rc::new(FakeConnector::default());
+                let _remote = connector.then_connect_to(workspace_with_a_pane());
+                let shell = open(connector, cx);
+                let sidebar = shell.read_with(cx, |shell, _| shell.sidebar.clone().unwrap());
+
+                sidebar.update(cx, |sidebar, cx| sidebar.select(Selection::Tasks, cx));
+                cx.run_until_parked();
+
+                shell.read_with(cx, |shell, _| {
+                    assert_eq!(shell.selection, Some(Selection::Tasks));
+                    assert!(shell.tasks.is_some());
+                });
+                assert_eq!(shown_workspace(&shell, cx), None);
+            }
         }
 
         mod new_workspace {

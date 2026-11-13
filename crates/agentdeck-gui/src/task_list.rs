@@ -6,9 +6,7 @@
 //! workspace.
 
 use agentdeck_client::types::Task;
-use agentdeck_core::{
-    AgentState, ChecksState, ReviewState, TaskId, TaskKind, TaskStatus, WorkspaceId,
-};
+use agentdeck_core::{AgentState, ChecksState, ReviewState, TaskId, TaskKind, TaskStatus};
 use gpui::SharedString;
 
 use crate::overview::Snapshot;
@@ -71,22 +69,9 @@ pub struct Group {
     pub rows: Vec<Row>,
 }
 
-/// Which tasks a list holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scope {
-    /// Every task: the Tasks view.
-    All,
-    /// Tasks with no workspace: the Inbox.
-    Inbox,
-    /// One workspace's tasks: the right panel.
-    Workspace(WorkspaceId),
-}
-
 /// What a list shows of the snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Query<'a> {
-    /// Which tasks.
-    pub scope: Scope,
     /// Text a row's title, PR reference or workspace must contain, ignoring case; empty
     /// matches every row.
     pub filter: &'a str,
@@ -112,12 +97,7 @@ pub fn groups(snapshot: &Snapshot, query: &Query) -> Vec<Group> {
 }
 
 /// The rows `query` picks, in the daemon's order, ungrouped.
-pub fn rows(snapshot: &Snapshot, query: &Query) -> Vec<Row> {
-    let in_scope = |task: &&Task| match query.scope {
-        Scope::All => true,
-        Scope::Inbox => task.workspace_id.is_none(),
-        Scope::Workspace(ws) => task.workspace_id == Some(ws),
-    };
+fn rows(snapshot: &Snapshot, query: &Query) -> Vec<Row> {
     let filter = query.filter.trim().to_lowercase();
     let matches = |row: &Row| {
         filter.is_empty()
@@ -133,7 +113,6 @@ pub fn rows(snapshot: &Snapshot, query: &Query) -> Vec<Row> {
     snapshot
         .tasks
         .iter()
-        .filter(in_scope)
         .filter(|task| query.show_done || task.status != TaskStatus::Done)
         .map(|task| row(snapshot, task))
         .filter(matches)
@@ -177,14 +156,13 @@ fn row(snapshot: &Snapshot, task: &Task) -> Row {
 #[cfg(test)]
 mod tests {
     use agentdeck_client::types::PullRequest;
-    use agentdeck_core::{Agent, PrState};
+    use agentdeck_core::{Agent, PrState, WorkspaceId};
 
     use super::*;
     use crate::overview::fixtures::{id, pane, task, workspace};
 
     fn all() -> Query<'static> {
         Query {
-            scope: Scope::All,
             filter: "",
             show_done: false,
         }
@@ -290,50 +268,6 @@ mod tests {
             assert_eq!(filtered("tabs"), [id(1)]);
             assert_eq!(filtered("TS-PACKAGES #142"), [id(2)]);
             assert_eq!(filtered("gpui"), [id(3)]);
-        }
-    }
-
-    mod scope {
-        use super::*;
-
-        #[test]
-        fn should_keep_the_inbox_to_tasks_with_no_workspace() {
-            let ws = workspace(1, "a");
-            let snapshot = Snapshot {
-                tasks: vec![
-                    task(1, TaskKind::Plain, Some(ws.id)),
-                    task(2, TaskKind::Pr, None),
-                ],
-                workspaces: vec![ws],
-                ..Snapshot::default()
-            };
-            let query = Query {
-                scope: Scope::Inbox,
-                ..all()
-            };
-
-            let ids: Vec<TaskId> = rows(&snapshot, &query).into_iter().map(|r| r.id).collect();
-            assert_eq!(ids, [id(2)]);
-        }
-
-        #[test]
-        fn should_keep_a_workspaces_list_to_its_tasks() {
-            let (a, b) = (workspace(1, "a"), workspace(2, "b"));
-            let snapshot = Snapshot {
-                tasks: vec![
-                    task(1, TaskKind::Plain, Some(a.id)),
-                    task(2, TaskKind::Plain, Some(b.id)),
-                ],
-                workspaces: vec![a.clone(), b],
-                ..Snapshot::default()
-            };
-            let query = Query {
-                scope: Scope::Workspace(a.id),
-                ..all()
-            };
-
-            let ids: Vec<TaskId> = rows(&snapshot, &query).into_iter().map(|r| r.id).collect();
-            assert_eq!(ids, [id(1)]);
         }
     }
 

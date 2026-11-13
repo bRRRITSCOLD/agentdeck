@@ -14,14 +14,14 @@ use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
-    div, px,
+    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
+    px,
 };
 use gpui_base::input::InputEvent;
 
 use crate::api::Api;
 use crate::overview::Snapshot;
-use crate::task_list::{self, Group, Query, Scope};
+use crate::task_list::{self, Group, Query};
 use crate::task_row;
 use crate::workspace::failed;
 
@@ -89,7 +89,8 @@ impl TasksView {
         let setting = self.api.set_task_status(task, status, cx);
         cx.spawn_in(window, async move |_, cx| {
             if let Err(err) = setting.await {
-                let _ = cx.update(|window, cx| failed("Couldn't change the status", &err, window, cx));
+                let _ =
+                    cx.update(|window, cx| failed("Couldn't change the status", &err, window, cx));
             }
         })
         .detach();
@@ -99,7 +100,6 @@ impl TasksView {
     pub fn groups(&self, cx: &gpui::App) -> Vec<Group> {
         let filter = self.filter.read(cx).value();
         let query = Query {
-            scope: Scope::All,
             filter: &filter,
             show_done: self.show_done,
         };
@@ -116,7 +116,6 @@ impl TasksView {
     fn counts(&self, cx: &gpui::App) -> Vec<(TaskStatus, usize)> {
         let filter = self.filter.read(cx).value();
         let query = Query {
-            scope: Scope::All,
             filter: &filter,
             show_done: self.show_done,
         };
@@ -234,5 +233,216 @@ impl Render for TasksView {
                         .child("No tasks to show."),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use agentdeck_client::types::{PullRequest, Task};
+    use agentdeck_core::{
+        Agent, AgentState, ChecksState, PrState, ReviewState, TaskKind, WorkspaceId,
+    };
+    use brrritscold_core_gpui::{Root, Theme, ThemePreference};
+    use gpui::{Modifiers, TestAppContext, VisualTestContext};
+
+    use super::*;
+    use crate::api::fake::FakeApi;
+    use crate::overview::PaneState;
+    use crate::overview::fixtures::{id, pane, task, workspace};
+
+    struct Harness {
+        api: Arc<FakeApi>,
+        view: Entity<TasksView>,
+    }
+
+    impl Harness {
+        fn open(snapshot: Snapshot, cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
+            cx.update(brrritscold_core_gpui::init);
+            let api = Arc::new(FakeApi::with(snapshot.clone()));
+            let mut view = None;
+            let window = cx.add_window(|window, cx| {
+                let api: Arc<dyn Api> = api.clone();
+                let tasks = cx.new(|cx| {
+                    let mut tasks = TasksView::new(api, window, cx);
+                    tasks.snapshot = snapshot;
+                    tasks
+                });
+                view = Some(tasks.clone());
+                Root::new(tasks, window, cx)
+            });
+            let cx = VisualTestContext::from_window(*window, cx).into_mut();
+            cx.run_until_parked();
+            let harness = Harness {
+                api,
+                view: view.unwrap(),
+            };
+            (harness, cx)
+        }
+
+        /// The rows shown, by group.
+        fn shown(&self, cx: &mut VisualTestContext) -> Vec<(TaskStatus, Vec<TaskId>)> {
+            self.view.read_with(cx, |view, cx| {
+                (view.groups(cx).into_iter())
+                    .map(|g| (g.status, g.rows.into_iter().map(|r| r.id).collect()))
+                    .collect()
+            })
+        }
+
+        fn draw(&self, cx: &mut VisualTestContext) {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+
+        fn click(&self, selector: &'static str, cx: &mut VisualTestContext) {
+            self.draw(cx);
+            let bounds = cx.debug_bounds(selector).expect(selector);
+            cx.simulate_click(bounds.center(), Modifiers::default());
+            cx.run_until_parked();
+        }
+    }
+
+    fn with_status(n: u32, status: TaskStatus, ws: Option<WorkspaceId>) -> Task {
+        Task {
+            status,
+            ..task(n, TaskKind::Plain, ws)
+        }
+    }
+
+    /// Workspace 1 with a doing task an agent works on, a PR in review, a todo in the inbox
+    /// and a done task.
+    fn board() -> Snapshot {
+        let ws = workspace(1, "tabs-a11y");
+        let pr = PullRequest {
+            checks: Some(ChecksState::Pending),
+            draft: true,
+            head_ref: "feat/x".into(),
+            number: 142,
+            repo: "bRRRITSCOLD/ts-packages".into(),
+            review: Some(ReviewState::Approved),
+            state: PrState::Open,
+            synced_at: "2026-11-13T00:00:00Z".into(),
+            updated_at: "2026-11-13T00:00:00Z".into(),
+            url: "https://github.com/bRRRITSCOLD/ts-packages/pull/142".into(),
+        };
+        Snapshot {
+            tasks: vec![
+                with_status(1, TaskStatus::Doing, Some(ws.id)),
+                Task {
+                    pr: Some(pr),
+                    status: TaskStatus::Review,
+                    ..task(2, TaskKind::Pr, Some(ws.id))
+                },
+                with_status(3, TaskStatus::Todo, None),
+                with_status(4, TaskStatus::Done, None),
+            ],
+            panes: vec![PaneState {
+                agent: Some(Agent::Claude),
+                task: Some(id(1)),
+                ..pane(10, ws.id, AgentState::Blocked)
+            }],
+            workspaces: vec![ws],
+            ..Snapshot::default()
+        }
+    }
+
+    #[gpui::test]
+    fn should_group_every_task_but_the_done_ones(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::open(board(), cx);
+
+        assert_eq!(
+            harness.shown(cx),
+            [
+                (TaskStatus::Doing, vec![id(1)]),
+                (TaskStatus::Review, vec![id(2)]),
+                (TaskStatus::Todo, vec![id(3)]),
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn should_draw_in_both_themes(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::open(board(), cx);
+        harness
+            .view
+            .update(cx, |view, cx| view.set_show_done(true, cx));
+
+        for preference in [ThemePreference::Light, ThemePreference::Dark] {
+            cx.update(|_, cx| Theme::set_preference(preference, cx));
+            cx.run_until_parked();
+            harness.draw(cx);
+        }
+    }
+
+    #[gpui::test]
+    fn should_show_done_tasks_once_asked(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::open(board(), cx);
+
+        harness
+            .view
+            .update(cx, |view, cx| view.set_show_done(true, cx));
+
+        assert_eq!(
+            harness.shown(cx).last(),
+            Some(&(TaskStatus::Done, vec![id(4)]))
+        );
+    }
+
+    #[gpui::test]
+    fn should_fold_a_group_when_its_header_is_clicked(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::open(board(), cx);
+
+        harness.click("group review", cx);
+        assert_eq!(harness.shown(cx)[1], (TaskStatus::Review, vec![]));
+
+        harness.click("group review", cx);
+        assert_eq!(harness.shown(cx)[1], (TaskStatus::Review, vec![id(2)]));
+    }
+
+    #[gpui::test]
+    fn should_keep_rows_matching_the_filter(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::open(board(), cx);
+        cx.update(|window, cx| {
+            let filter = harness.view.read(cx).filter.clone();
+            filter.update(cx, |filter, cx| filter.set_value("ts-packages", window, cx));
+        });
+
+        assert_eq!(harness.shown(cx), [(TaskStatus::Review, vec![id(2)])]);
+    }
+
+    #[gpui::test]
+    fn should_send_a_picked_status(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::open(board(), cx);
+
+        cx.update(|window, cx| {
+            harness.view.update(cx, |view, cx| {
+                view.set_status(id(3), TaskStatus::Doing, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let snapshot = cx.update(|_, cx| harness.api.snapshot(cx));
+        let status = cx
+            .foreground_executor()
+            .block_test(snapshot)
+            .unwrap()
+            .tasks
+            .iter()
+            .find(|t| t.id == id(3))
+            .map(|t| t.status);
+        assert_eq!(status, Some(TaskStatus::Doing));
+    }
+
+    #[gpui::test]
+    fn should_keep_going_when_a_status_cant_be_sent(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::open(board(), cx);
+        harness.api.fail_next("refused");
+
+        cx.update(|window, cx| {
+            harness.view.update(cx, |view, cx| {
+                view.set_status(id(3), TaskStatus::Doing, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        harness.draw(cx);
     }
 }
