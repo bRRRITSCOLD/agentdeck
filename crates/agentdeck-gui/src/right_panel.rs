@@ -167,12 +167,8 @@ impl Render for RightPanel {
                 format!("Show {done} done")
             };
             list = list.child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .px(space::S2)
-                    .debug_selector(|| "show done".into())
-                    .child(
+                div().flex().flex_none().px(space::S2).child(
+                    div().debug_selector(|| "show done".into()).child(
                         Button::new("panel-show-done")
                             .variant(ButtonVariant::Link)
                             .size(ButtonSize::Xs)
@@ -181,6 +177,7 @@ impl Render for RightPanel {
                                 this.set_show_done(show_done, cx);
                             })),
                     ),
+                ),
             );
         }
         // Penpot `RightPanel`: `card`, padded `space.3` down and `space.2` across, rows
