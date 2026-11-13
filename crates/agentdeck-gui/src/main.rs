@@ -12,7 +12,9 @@ mod runtime;
 mod shell;
 mod sidebar;
 mod state_dot;
+mod terminal;
 mod title_bar;
+mod workspace;
 
 use std::rc::Rc;
 
@@ -33,6 +35,7 @@ fn main() {
     gpui_platform::application().run(|cx: &mut App| {
         brrritscold_core_gpui::init(cx);
         runtime::init(cx);
+        terminal::init(cx);
         let connection = cx.new(|cx| Connection::new(Rc::new(DaemonConnector), cx));
         let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
         cx.open_window(

@@ -40,10 +40,6 @@ pub struct Session {
     /// The daemon's API.
     pub api: Arc<dyn Api>,
     /// Sends on its WebSocket.
-    #[expect(
-        dead_code,
-        reason = "the terminal attaches through it, in the next #12 PR"
-    )]
     pub sender: ws::Sender,
 }
 
@@ -73,6 +69,8 @@ pub struct Connection {
     status: Status,
     /// Connects, then reads the socket; replaced on each [`Connection::connect`].
     task: Option<Task<()>>,
+    /// The last channel handed out on this socket.
+    last_channel: Channel,
 }
 
 impl EventEmitter<DaemonEvent> for Connection {}
@@ -84,6 +82,7 @@ impl Connection {
             connector,
             status: Status::Connecting,
             task: None,
+            last_channel: 0,
         };
         connection.connect(cx);
         connection
@@ -94,8 +93,15 @@ impl Connection {
         &self.status
     }
 
+    /// A channel number no attachment on this socket has used yet.
+    pub fn open_channel(&mut self) -> Channel {
+        self.last_channel += 1;
+        self.last_channel
+    }
+
     /// Connects again from scratch, dropping any socket held now.
     pub fn connect(&mut self, cx: &mut Context<Self>) {
+        self.last_channel = 0;
         self.set_status(Status::Connecting, cx);
         let connecting = self.connector.connect(cx);
         self.task = Some(cx.spawn(async move |this, cx| {
