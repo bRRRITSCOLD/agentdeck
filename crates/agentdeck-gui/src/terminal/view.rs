@@ -17,7 +17,7 @@
 //!
 //! The mouse, after xterm: a program that asks for mouse reports (DECSET 1000 / 1002 / 1003)
 //! gets the buttons, drags, moves and wheel instead, and shift takes them back for selecting
-//! and the scrollback. Otherwise the wheel scrolls the scrollback, or on the alternate screen
+//! and the scrollback; a click the program hears clears that selection. Otherwise the wheel scrolls the scrollback, or on the alternate screen
 //! sends an arrow key per line (DECSET 1007).
 
 use std::ops::Range;
@@ -309,11 +309,23 @@ impl TerminalView {
         true
     }
 
-    /// A press of `button` the program hears of; whether it did.
-    fn report_press(&mut self, button: Button, event: &MouseDownEvent) -> bool {
+    /// A press of `button` the program hears of; whether it did. It clears a selection made
+    /// with shift, as clicking elsewhere does in a pane that keeps the mouse.
+    fn report_press(
+        &mut self,
+        button: Button,
+        event: &MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let reported = self.report(Mouse::Press(button), event.position, &event.modifiers, 1);
         if reported {
             self.held = Some(Held::Reporting(button));
+            if let Attachment::Live(screen) = &mut self.attachment
+                && screen.has_selection()
+            {
+                screen.clear_selection();
+                cx.notify();
+            }
         }
         reported
     }
@@ -325,7 +337,7 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus, cx);
-        if self.report_press(Button::Left, event) {
+        if self.report_press(Button::Left, event, cx) {
             return;
         }
         let (Attachment::Live(screen), Some(layout)) = (&mut self.attachment, self.layout) else {
@@ -342,7 +354,7 @@ impl TerminalView {
     }
 
     fn on_middle_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.report_press(Button::Middle, event) {
+        if self.report_press(Button::Middle, event, cx) {
             return;
         }
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -353,8 +365,8 @@ impl TerminalView {
         let _ = cx;
     }
 
-    fn on_right_down(&mut self, event: &MouseDownEvent, _: &mut Window, _: &mut Context<Self>) {
-        self.report_press(Button::Right, event);
+    fn on_right_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.report_press(Button::Right, event, cx);
     }
 
     /// A move over the terminal with no button held, which only DECSET 1003 hears of.
@@ -1546,6 +1558,28 @@ mod tests {
 
             assert_eq!(harness.sent(), []);
             assert_eq!(harness.copied(cx).as_deref(), Some("hello"));
+        }
+
+        #[gpui::test]
+        fn should_clear_the_selection_on_a_click_the_program_hears(cx: &mut TestAppContext) {
+            let (mut harness, cx) = Harness::live(SGR_CLICKS, cx);
+            let from = harness.at(0, 0, Side::Left, cx);
+            let to = harness.at(0, 4, Side::Right, cx);
+            harness.drag(from, to, 1, Modifiers::shift(), cx);
+            cx.write_to_clipboard(ClipboardItem::new_string("before".into()));
+
+            harness.click(
+                harness.at(1, 1, Side::Left, cx),
+                MouseButton::Left,
+                Modifiers::default(),
+                cx,
+            );
+
+            assert_eq!(
+                harness.sent(),
+                [input(b"\x1b[<0;2;2M"), input(b"\x1b[<0;2;2m")]
+            );
+            assert_eq!(harness.copied(cx).as_deref(), Some("before"));
         }
 
         #[gpui::test]
