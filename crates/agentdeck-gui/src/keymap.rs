@@ -33,6 +33,14 @@ actions!(
         NextPane,
         /// Focuses the previous pane of the tab, wrapping.
         PreviousPane,
+        /// Opens a tab with a shell in the workspace's dir.
+        NewTab,
+        /// Splits the focused pane with a shell on its right.
+        SplitRight,
+        /// Splits the focused pane with a shell below it.
+        SplitDown,
+        /// Closes the focused pane, asking first while it runs.
+        ClosePane,
         /// Copies the terminal's selection to the clipboard.
         Copy,
         /// Pastes the clipboard into the terminal.
@@ -82,6 +90,27 @@ fn bindings(cx: &App) -> Vec<KeyBinding> {
         (
             "secondary-shift-up".into(),
             Box::new(PreviousPane),
+            workspace.clone(),
+        ),
+        // After Terminator: e splits side by side, o stacks.
+        (
+            "secondary-shift-t".into(),
+            Box::new(NewTab),
+            workspace.clone(),
+        ),
+        (
+            "secondary-shift-e".into(),
+            Box::new(SplitRight),
+            workspace.clone(),
+        ),
+        (
+            "secondary-shift-o".into(),
+            Box::new(SplitDown),
+            workspace.clone(),
+        ),
+        (
+            "secondary-shift-w".into(),
+            Box::new(ClosePane),
             workspace.clone(),
         ),
         ("secondary-shift-c".into(), Box::new(Copy), terminal.clone()),
@@ -152,6 +181,10 @@ mod tests {
                 .on_action(self.record(|SelectTab(n): &SelectTab| format!("tab {n}")))
                 .on_action(self.record(|_: &NextPane| "next pane".into()))
                 .on_action(self.record(|_: &PreviousPane| "previous pane".into()))
+                .on_action(self.record(|_: &NewTab| "new tab".into()))
+                .on_action(self.record(|_: &SplitRight| "split right".into()))
+                .on_action(self.record(|_: &SplitDown| "split down".into()))
+                .on_action(self.record(|_: &ClosePane| "close pane".into()))
                 .on_action(self.record(|_: &Copy| "copy".into()))
                 .on_action(self.record(|_: &Paste| "paste".into()))
                 .child(focused)
@@ -205,6 +238,17 @@ mod tests {
             assert_eq!(
                 typed("secondary-shift-down secondary-shift-up", cx),
                 ["next pane", "previous pane"]
+            );
+        }
+
+        #[gpui::test]
+        fn should_open_split_and_close_panes(cx: &mut TestAppContext) {
+            assert_eq!(
+                typed(
+                    "secondary-shift-t secondary-shift-e secondary-shift-o secondary-shift-w",
+                    cx
+                ),
+                ["new tab", "split right", "split down", "close pane"]
             );
         }
 

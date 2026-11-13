@@ -261,7 +261,7 @@ Built on `brrritscold-core-gpui` (`init`, `Root`, theme preference, toasts). Scr
 
 - **Title bar:** the window asks for the compositor's frame. Where the compositor draws none (GNOME's Mutter on Wayland), the app draws a 32px title bar across the top: drag to move, double-click to maximize, right-click for the window menu, minimize / maximize / close at the right. 4px resize strips run along the window's inside edges, except on a tiled side. Everything else sits under it.
 - **Sidebar:** workspaces, each with a rolled-up state (any blocked → blocked, else any working → working, else any done → done) and its unread-note and PR counts. Inbox and Tasks entries sit at the top.
-- **Workspace view:** tabs, with split panes inside each. Each pane has a header showing its title, state and linked task.
+- **Workspace view:** tabs, with split panes inside each. Each pane has a header showing its title, state and linked task, and a menu to split or close it. A `+` after the tabs opens a shell tab in the workspace dir; a workspace with no tabs when shown gets one.
 - **Right panel**, which can be toggled: the workspace's tasks and PRs, as a list grouped by status, plus its notes.
 - **Tasks view:** a grouped list of every task. Done tasks are hidden by default, and each row has a status picker.
 - **Inbox:** tasks with no workspace, mostly PRs.
@@ -282,7 +282,7 @@ Built on `brrritscold-core-gpui` (`init`, `Root`, theme preference, toasts). Scr
 - **Notifications:** an OS notification when a pane turns `blocked` or `done` while its tab isn't visible, and when a PR task's checks fail or a review arrives. They can be muted per workspace.
 - **Keymap:** `keymap.rs`, normal app shortcuts, `secondary-` bindings loaded with `KeyBinding::load`.
   - A binding wins over the terminal, so every shortcut is one a shell has no use for, after GNOME Terminal. Plain ctrl-letter, alt-letter, the arrows and the paging keys always reach the pane.
-  - Quit `secondary-shift-q`; next / previous tab `ctrl-pagedown` / `ctrl-pageup` (or `ctrl-tab` / `ctrl-shift-tab`); tab 1–9 `alt-1`…`alt-9`; next / previous pane `secondary-shift-down` / `secondary-shift-up`, in layout order.
+  - Quit `secondary-shift-q`; next / previous tab `ctrl-pagedown` / `ctrl-pageup` (or `ctrl-tab` / `ctrl-shift-tab`); tab 1–9 `alt-1`…`alt-9`; next / previous pane `secondary-shift-down` / `secondary-shift-up`, in layout order; new shell tab `secondary-shift-t`; split the focused pane with a shell right / down `secondary-shift-e` / `secondary-shift-o` (after Terminator); close it `secondary-shift-w`, asking first while it runs. Closing a tab's last pane closes the tab.
 
 ## 12. Testing
 
