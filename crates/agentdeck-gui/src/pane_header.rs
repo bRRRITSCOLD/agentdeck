@@ -2,7 +2,7 @@
 //! terminal (spec §11). Penpot's page "Screens" board "Pane states" shows each state.
 
 use agentdeck_core::AgentState;
-use brrritscold_core_gpui::{ActiveTheme as _, Badge, BadgeVariant, Icon, IconName};
+use brrritscold_core_gpui::{ActiveTheme as _, Badge, BadgeVariant, DropdownMenu, Icon, IconName};
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -66,6 +66,7 @@ pub struct PaneHeader {
     state: AgentState,
     exit_code: Option<i64>,
     task: Option<SharedString>,
+    menu: Option<DropdownMenu>,
 }
 
 impl PaneHeader {
@@ -76,6 +77,7 @@ impl PaneHeader {
             state: AgentState::Idle,
             exit_code: None,
             task: None,
+            menu: None,
         }
     }
 
@@ -90,6 +92,12 @@ impl PaneHeader {
     /// The linked task's title: the `Task` part, absent without one.
     pub fn task(mut self, task: Option<SharedString>) -> Self {
         self.task = task;
+        self
+    }
+
+    /// The pane's actions: the `Menu` part, at the right end after the `Spacer`.
+    pub fn menu(mut self, menu: DropdownMenu) -> Self {
+        self.menu = Some(menu);
         self
     }
 }
@@ -162,6 +170,12 @@ impl RenderOnce for PaneHeader {
                                 .child(task),
                         ),
                 )
+            })
+            // Penpot `Spacer` then `Menu`.
+            .when_some(self.menu, |header, menu| {
+                header
+                    .child(div().flex_1())
+                    .child(div().flex_none().child(menu))
             })
     }
 }

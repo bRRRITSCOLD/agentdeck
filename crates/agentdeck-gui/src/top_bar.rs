@@ -40,6 +40,11 @@ impl TopBar {
             dir: dir.into(),
         }
     }
+
+    /// The workspace's directory, as given.
+    pub fn dir(&self) -> &SharedString {
+        &self.dir
+    }
 }
 
 impl RenderOnce for TopBar {
