@@ -113,7 +113,10 @@ fn paint(frame: &Frame, origin: Point<Pixels>, m: Metrics, window: &mut Window, 
     let base = font();
     for (line, row) in frame.lines.iter().enumerate() {
         for bg in &row.backgrounds {
-            let bounds = Bounds::new(at(line, bg.col), size(cell.width * bg.cells as f32, cell.height));
+            let bounds = Bounds::new(
+                at(line, bg.col),
+                size(cell.width * bg.cells as f32, cell.height),
+            );
             window.paint_quad(fill(bounds, bg.color));
         }
         for run in &row.runs {
@@ -158,7 +161,14 @@ fn paint(frame: &Frame, origin: Point<Pixels>, m: Metrics, window: &mut Window, 
                 &[text_run],
                 Some(force_width),
             );
-            let _ = shaped.paint(at(line, run.col), cell.height, TextAlign::Left, None, window, cx);
+            let _ = shaped.paint(
+                at(line, run.col),
+                cell.height,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
         }
     }
     if let Some(cursor) = frame.cursor {
@@ -171,7 +181,10 @@ fn cursor_quad(cursor: Cursor, origin: Point<Pixels>, cell: Size<Pixels>) -> gpu
     match cursor.shape {
         CursorShape::Beam => fill(Bounds::new(origin, size(px(2.), cell.height)), cursor.color),
         CursorShape::Underline => fill(
-            Bounds::new(origin + point(px(0.), cell.height - px(2.)), size(width, px(2.))),
+            Bounds::new(
+                origin + point(px(0.), cell.height - px(2.)),
+                size(width, px(2.)),
+            ),
             cursor.color,
         ),
         _ => outline(
@@ -198,7 +211,10 @@ mod tests {
 
             assert_eq!(
                 metrics.grid(size(px(807.), px(500.))),
-                GridSize { cols: 100, rows: 29 }
+                GridSize {
+                    cols: 100,
+                    rows: 29
+                }
             );
         }
 
@@ -209,7 +225,10 @@ mod tests {
                 cell: size(px(8.), px(16.8)),
             };
 
-            assert_eq!(metrics.grid(size(px(0.), px(3.))), GridSize { cols: 1, rows: 1 });
+            assert_eq!(
+                metrics.grid(size(px(0.), px(3.))),
+                GridSize { cols: 1, rows: 1 }
+            );
         }
     }
 

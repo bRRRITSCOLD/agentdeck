@@ -217,6 +217,22 @@ pub(crate) mod fixtures {
         }
     }
 
+    /// A tab of `workspace` at `position`, holding `pane` alone, or no pane.
+    pub fn tab(
+        n: u32,
+        workspace: WorkspaceId,
+        position: i64,
+        pane: Option<PaneId>,
+    ) -> agentdeck_client::types::Tab {
+        agentdeck_client::types::Tab {
+            id: id(n),
+            layout: pane.map(agentdeck_core::Layout::single),
+            position,
+            title: format!("tab {n}"),
+            workspace_id: workspace,
+        }
+    }
+
     /// A pane in `workspace`.
     pub fn pane(n: u32, workspace: WorkspaceId, state: AgentState) -> PaneState {
         PaneState {

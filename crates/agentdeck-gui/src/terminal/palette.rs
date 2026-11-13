@@ -86,8 +86,7 @@ impl Palette {
             16..232 => {
                 let level = |n: usize| if n == 0 { 0 } else { 55 + n * 40 } as u32;
                 let cube = index - 16;
-                rgb((level(cube / 36) << 16) | (level(cube / 6 % 6) << 8) | level(cube % 6))
-                    .into()
+                rgb((level(cube / 36) << 16) | (level(cube / 6 % 6) << 8) | level(cube % 6)).into()
             }
             232..256 => {
                 let grey = (8 + (index - 232) * 10) as u32;

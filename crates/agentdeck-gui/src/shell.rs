@@ -1,6 +1,6 @@
 //! The main window's content: what the daemon connection allows. Until it connects, a
-//! centred status; once it does, the sidebar beside the selected view (the panes arrive with
-//! the following #12 PRs). When the compositor leaves decorations to the app, a title bar and
+//! centred status; once it does, the sidebar beside the selected view: a workspace's pane
+//! (the Inbox and Tasks views arrive with later PRs). When the compositor leaves decorations to the app, a title bar and
 //! resize edges frame it.
 
 use brrritscold_core_gpui::{
@@ -10,19 +10,25 @@ use brrritscold_core_gpui::{
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, AppContext as _, Context, Decorations, Entity, FocusHandle,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _, Window, div, px,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _, Subscription,
+    Window, div, px,
 };
 
 use crate::connection::{Connection, Status};
 use crate::frame;
-use crate::sidebar::SidebarView;
+use crate::sidebar::{Selection, SidebarView};
 use crate::title_bar::{Close, Minimize, TitleBar, ToggleMaximize};
+use crate::workspace::WorkspaceView;
 
 /// The main window's root view, inside core-gpui's `Root`.
 pub struct Shell {
     connection: Entity<Connection>,
     /// The sidebar, while connected; a new connection gets a new one.
     sidebar: Option<Entity<SidebarView>>,
+    /// Follows the sidebar's selection.
+    _selection: Option<Subscription>,
+    /// The selected workspace.
+    workspace: Option<Entity<WorkspaceView>>,
     /// Held by the shell so the title bar's actions reach its handlers while nothing inside
     /// has focus.
     focus: FocusHandle,
@@ -35,8 +41,8 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        cx.observe(&connection, |shell, _, cx| {
-            shell.follow_connection(cx);
+        cx.observe_in(&connection, window, |shell, _, window, cx| {
+            shell.follow_connection(window, cx);
             cx.notify();
         })
         .detach();
@@ -45,24 +51,63 @@ impl Shell {
         let mut shell = Shell {
             connection,
             sidebar: None,
+            _selection: None,
+            workspace: None,
             focus,
         };
-        shell.follow_connection(cx);
+        shell.follow_connection(window, cx);
         shell
     }
 
-    /// Opens a sidebar on a new session, and drops it once the connection is lost.
-    fn follow_connection(&mut self, cx: &mut Context<Self>) {
+    /// Opens a sidebar on a new session, and drops it and the selected view once the
+    /// connection is lost.
+    fn follow_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.connection.read(cx).status() {
             Status::Connected(session) => {
                 if self.sidebar.is_none() {
                     let api = session.api.clone();
                     let connection = self.connection.clone();
-                    self.sidebar = Some(cx.new(|cx| SidebarView::new(api, &connection, cx)));
+                    let sidebar = cx.new(|cx| SidebarView::new(api, &connection, cx));
+                    self._selection =
+                        Some(cx.observe_in(&sidebar, window, |shell, _, window, cx| {
+                            shell.follow_selection(window, cx);
+                        }));
+                    self.sidebar = Some(sidebar);
+                    self.follow_selection(window, cx);
                 }
             }
-            Status::Connecting | Status::Failed(_) => self.sidebar = None,
+            Status::Connecting | Status::Failed(_) => {
+                self.sidebar = None;
+                self._selection = None;
+                self.workspace = None;
+            }
         }
+    }
+
+    /// Opens the view the sidebar selects, keeping it while the selection stays.
+    fn follow_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(sidebar), Status::Connected(session)) =
+            (&self.sidebar, self.connection.read(cx).status())
+        else {
+            return;
+        };
+        let Selection::Workspace(selected) = sidebar.read(cx).selection() else {
+            self.workspace = None;
+            cx.notify();
+            return;
+        };
+        if self
+            .workspace
+            .as_ref()
+            .is_some_and(|view| view.read(cx).workspace() == selected)
+        {
+            return;
+        }
+        let (api, sender) = (session.api.clone(), session.sender.clone());
+        let connection = self.connection.clone();
+        self.workspace =
+            Some(cx.new(|cx| WorkspaceView::new(selected, api, connection, sender, window, cx)));
+        cx.notify();
     }
 
     /// What the connection allows, filling the space under the title bar.
@@ -103,7 +148,10 @@ impl Shell {
                 .flex()
                 .children(self.sidebar.clone())
                 .child(Separator::new().orientation(SeparatorOrientation::Vertical))
-                .child(div().flex_1())
+                .map(|body| match self.workspace.clone() {
+                    Some(workspace) => body.child(workspace),
+                    None => body.child(div().flex_1()),
+                })
                 .into_any_element(),
         }
     }
@@ -146,10 +194,15 @@ mod tests {
     use brrritscold_core_gpui::{Root, Theme, ThemePreference};
     use gpui::{App, Task, TestAppContext, VisualTestContext};
 
+    use agentdeck_core::WorkspaceId;
+
     use super::*;
     use crate::api::Api;
+    use crate::api::fake::FakeApi;
     use crate::connection::Connector;
     use crate::connection::fake::FakeConnector;
+    use crate::overview::Snapshot;
+    use crate::overview::fixtures::{id, tab, workspace};
 
     /// A connect that never resolves, so the shell stays connecting.
     struct Pending;
@@ -164,6 +217,7 @@ mod tests {
     /// it in light, then dark.
     fn draw_in_both_themes(connector: Rc<dyn Connector>, cx: &mut TestAppContext) {
         cx.update(brrritscold_core_gpui::init);
+        cx.update(crate::terminal::init);
         let window = cx.add_window(|window, cx| {
             let connection = cx.new(|cx| Connection::new(connector, cx));
             let shell = cx.new(|cx| Shell::new(connection, window, cx));
@@ -196,6 +250,73 @@ mod tests {
             let _remote = connector.then_connect();
 
             draw_in_both_themes(connector, cx);
+        }
+
+        #[gpui::test]
+        fn should_draw_a_workspaces_pane_in_both_themes(cx: &mut TestAppContext) {
+            let connector = Rc::new(FakeConnector::default());
+            let _remote = connector.then_connect_to(workspace_with_a_pane());
+
+            draw_in_both_themes(connector, cx);
+        }
+    }
+
+    /// A daemon with workspace 1, whose one tab holds pane 7.
+    fn workspace_with_a_pane() -> Arc<FakeApi> {
+        let api = Arc::new(FakeApi::with(Snapshot {
+            workspaces: vec![workspace(1, "agentdeck")],
+            ..Snapshot::default()
+        }));
+        api.set_tabs(id(1), vec![tab(1, id(1), 0, Some(id(7)))]);
+        api
+    }
+
+    mod selection {
+        use super::*;
+
+        fn open(connector: Rc<FakeConnector>, cx: &mut TestAppContext) -> Entity<Shell> {
+            cx.update(brrritscold_core_gpui::init);
+            cx.update(crate::terminal::init);
+            let mut shell = None;
+            cx.add_window(|window, cx| {
+                let connection = cx.new(|cx| Connection::new(connector, cx));
+                let view = cx.new(|cx| Shell::new(connection, window, cx));
+                shell = Some(view.clone());
+                Root::new(view, window, cx)
+            });
+            cx.run_until_parked();
+            shell.unwrap()
+        }
+
+        fn shown_workspace(shell: &Entity<Shell>, cx: &TestAppContext) -> Option<WorkspaceId> {
+            shell.read_with(cx, |shell, cx| {
+                shell
+                    .workspace
+                    .as_ref()
+                    .map(|view| view.read(cx).workspace())
+            })
+        }
+
+        #[gpui::test]
+        fn should_open_the_selected_workspace(cx: &mut TestAppContext) {
+            let connector = Rc::new(FakeConnector::default());
+            let _remote = connector.then_connect_to(workspace_with_a_pane());
+
+            let shell = open(connector, cx);
+
+            assert_eq!(shown_workspace(&shell, cx), Some(id(1)));
+        }
+
+        #[gpui::test]
+        fn should_drop_the_workspace_once_the_connection_is_lost(cx: &mut TestAppContext) {
+            let connector = Rc::new(FakeConnector::default());
+            let remote = connector.then_connect_to(workspace_with_a_pane());
+            let shell = open(connector, cx);
+
+            drop(remote);
+            cx.run_until_parked();
+
+            assert_eq!(shown_workspace(&shell, cx), None);
         }
     }
 

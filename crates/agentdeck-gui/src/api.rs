@@ -3,6 +3,8 @@
 
 use agentdeck_client::Client;
 use agentdeck_client::daemon::Daemon;
+use agentdeck_client::types::Tab;
+use agentdeck_core::WorkspaceId;
 use gpui::{App, Task};
 
 use crate::overview::{PaneState, Snapshot};
@@ -12,11 +14,21 @@ use crate::runtime;
 pub trait Api: Send + Sync {
     /// Everything the sidebar shows, read fresh.
     fn snapshot(&self, cx: &App) -> Task<anyhow::Result<Snapshot>>;
+
+    /// `workspace`'s tabs.
+    fn tabs(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<Vec<Tab>>>;
 }
 
 impl Api for Daemon {
     fn snapshot(&self, cx: &App) -> Task<anyhow::Result<Snapshot>> {
         runtime::spawn(cx, snapshot(self.client.clone()))
+    }
+
+    fn tabs(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<Vec<Tab>>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            Ok(client.tab_list().id(workspace).send().await?.into_inner())
+        })
     }
 }
 
@@ -57,15 +69,17 @@ async fn snapshot(client: Client) -> anyhow::Result<Snapshot> {
 /// A scripted [`Api`] for tests.
 #[cfg(test)]
 pub(crate) mod fake {
+    use std::collections::HashMap;
     use std::sync::Mutex;
 
     use super::*;
 
-    /// Answers every read with the snapshot it holds now, and counts the reads.
+    /// Answers every read with what it holds now, and counts the snapshot reads.
     #[derive(Default)]
     pub struct FakeApi {
         snapshot: Mutex<Snapshot>,
         reads: Mutex<usize>,
+        tabs: Mutex<HashMap<WorkspaceId, Vec<Tab>>>,
     }
 
     impl FakeApi {
@@ -73,13 +87,18 @@ pub(crate) mod fake {
         pub fn with(snapshot: Snapshot) -> Self {
             FakeApi {
                 snapshot: Mutex::new(snapshot),
-                reads: Mutex::default(),
+                ..FakeApi::default()
             }
         }
 
         /// Answers later reads with `snapshot`.
         pub fn set(&self, snapshot: Snapshot) {
             *self.snapshot.lock().unwrap() = snapshot;
+        }
+
+        /// Answers later reads of `workspace`'s tabs with `tabs`.
+        pub fn set_tabs(&self, workspace: WorkspaceId, tabs: Vec<Tab>) {
+            self.tabs.lock().unwrap().insert(workspace, tabs);
         }
 
         /// How many snapshots were read.
@@ -92,6 +111,11 @@ pub(crate) mod fake {
         fn snapshot(&self, _cx: &App) -> Task<anyhow::Result<Snapshot>> {
             *self.reads.lock().unwrap() += 1;
             Task::ready(Ok(self.snapshot.lock().unwrap().clone()))
+        }
+
+        fn tabs(&self, workspace: WorkspaceId, _cx: &App) -> Task<anyhow::Result<Vec<Tab>>> {
+            let tabs = self.tabs.lock().unwrap().get(&workspace).cloned();
+            Task::ready(Ok(tabs.unwrap_or_default()))
         }
     }
 }

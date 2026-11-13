@@ -345,7 +345,8 @@ mod tests {
         }
 
         fn view(&self, cx: &mut VisualTestContext) -> Entity<TerminalView> {
-            self.host.read_with(cx, |host, _| host.0.clone().expect("a terminal"))
+            self.host
+                .read_with(cx, |host, _| host.0.clone().expect("a terminal"))
         }
 
         fn draw(&self, cx: &mut VisualTestContext) {
@@ -430,10 +431,7 @@ mod tests {
             harness.attached(10, 2, b"", cx);
             harness.sent();
 
-            harness.deliver(
-                Event::Message(ServerMessage::Lagged { channel: 1 }),
-                cx,
-            );
+            harness.deliver(Event::Message(ServerMessage::Lagged { channel: 1 }), cx);
 
             assert_eq!(harness.sent(), [attach(1, 1)]);
             assert_eq!(harness.text(1, cx), None);
@@ -563,7 +561,8 @@ mod tests {
             harness.attached(
                 20,
                 3,
-                "\x1b[1;31m✻ red\x1b[0m \x1b[7minv\x1b[0m 漢字 ⎿ ◐\r\n\x1b[4munder\x1b[0m".as_bytes(),
+                "\x1b[1;31m✻ red\x1b[0m \x1b[7minv\x1b[0m 漢字 ⎿ ◐\r\n\x1b[4munder\x1b[0m"
+                    .as_bytes(),
                 cx,
             );
 

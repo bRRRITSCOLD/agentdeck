@@ -7,7 +7,7 @@
 use alacritty_terminal::Term;
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::index::Point;
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config, TermMode};
@@ -165,7 +165,7 @@ impl Screen {
         };
         let cursor_line = content.cursor.point.line.0 + offset;
         let cursor_at = (cursor_shape != CursorShape::Hidden && cursor_line >= 0)
-            .then(|| (cursor_line as usize, content.cursor.point.column.0));
+            .then_some((cursor_line as usize, content.cursor.point.column.0));
         let mut cursor = None;
 
         let mut builder = LineBuilder::default();
@@ -213,6 +213,8 @@ impl Screen {
     /// The visible text, one string per line with trailing blanks trimmed.
     #[cfg(test)]
     pub fn text(&self) -> Vec<String> {
+        use alacritty_terminal::index::{Column, Line};
+
         let grid = self.term.grid();
         (0..self.term.screen_lines() as i32)
             .map(|line| {

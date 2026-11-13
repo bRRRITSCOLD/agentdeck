@@ -14,6 +14,7 @@ mod sidebar;
 mod state_dot;
 mod terminal;
 mod title_bar;
+mod workspace;
 
 use std::rc::Rc;
 

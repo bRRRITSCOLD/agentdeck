@@ -163,6 +163,7 @@ version = "0.1.0"
 dependencies = [
  "agentdeck-client",
  "agentdeck-core",
+ "alacritty_terminal",
  "anyhow",
  "brrritscold-core-gpui",
  "brrritscold-core-gpui-tokens",
