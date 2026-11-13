@@ -168,6 +168,7 @@ dependencies = [
  "brrritscold-core-gpui",
  "brrritscold-core-gpui-tokens",
  "chrono",
+ "gpui-base",
  "gpui-pre",
  "gpui-pre-platform",
  "tokio",

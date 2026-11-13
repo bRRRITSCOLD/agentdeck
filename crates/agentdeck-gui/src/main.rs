@@ -8,6 +8,7 @@ mod connection;
 mod count;
 mod frame;
 mod keymap;
+mod new_workspace;
 mod overview;
 mod pane;
 mod pane_header;

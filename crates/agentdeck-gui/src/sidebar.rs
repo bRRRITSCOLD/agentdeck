@@ -1,6 +1,7 @@
-//! The main window's sidebar (spec §11), the `Sidebar` board of Penpot's "Main window": Inbox
-//! and Tasks at the top, then every workspace with its rolled-up state, unread notes and open
-//! PRs, and when PRs last synced at the bottom.
+//! The main window's sidebar (spec §11), the `Sidebar` board of Penpot's "Main window": the
+//! brand with its new workspace `+`, Inbox and Tasks, then every workspace with its rolled-up
+//! state, unread notes and open PRs, and when PRs last synced at the bottom. The `+` asks the
+//! window for the dialog with a [`SidebarEvent`].
 //!
 //! It reads a [`Snapshot`] through the session's [`Api`] when it opens and again whenever the
 //! daemon reports a `changed`; `state` and `exit` messages patch pane states in place.
@@ -11,12 +12,13 @@ use std::time::Duration;
 use agentdeck_core::ws::ServerMessage;
 use agentdeck_core::{AgentState, WorkspaceId};
 use brrritscold_core_gpui::{
-    ActiveTheme as _, Icon, IconName, Separator, Sidebar, SidebarMenuButton,
+    ActiveTheme as _, Button, ButtonSize, ButtonVariant, Icon, IconName, Separator, Sidebar,
+    SidebarMenuButton,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Context, ElementId, Entity, InteractiveElement as _, IntoElement,
+    AnyElement, Context, ElementId, Entity, EventEmitter, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
     Subscription, Task, Window, div, px,
 };
@@ -43,6 +45,13 @@ pub enum Selection {
     Tasks,
     /// One workspace.
     Workspace(WorkspaceId),
+}
+
+/// What the sidebar asks of the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarEvent {
+    /// Its `+` was clicked: open the new workspace dialog.
+    NewWorkspace,
 }
 
 /// The sidebar view.
@@ -109,7 +118,8 @@ impl SidebarView {
         &self.overview
     }
 
-    fn select(&mut self, selection: Selection, cx: &mut Context<Self>) {
+    /// Selects `selection`. A workspace not read yet is selected once a read shows it.
+    pub fn select(&mut self, selection: Selection, cx: &mut Context<Self>) {
         self.picked = Some(selection);
         cx.notify();
     }
@@ -255,6 +265,8 @@ enum Lead {
     Dot(StateDotState),
 }
 
+impl EventEmitter<SidebarEvent> for SidebarView {}
+
 impl Render for SidebarView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
@@ -323,7 +335,20 @@ impl Render for SidebarView {
                     .text_size(font_size::SM)
                     .font_weight(font_weight::MEDIUM)
                     .text_color(s.foreground)
-                    .child("agentdeck"),
+                    .child("agentdeck")
+                    // Penpot `Spacer`, then `NewWorkspace`: ghost, icon-sm, `Plus`.
+                    .child(div().flex_1())
+                    .child(
+                        div().debug_selector(|| "new workspace".into()).child(
+                            Button::new("new-workspace")
+                                .variant(ButtonVariant::Ghost)
+                                .size(ButtonSize::IconSm)
+                                .icon(IconName::Plus)
+                                .on_click(cx.listener(|_, _, _, cx| {
+                                    cx.emit(SidebarEvent::NewWorkspace);
+                                })),
+                        ),
+                    ),
             )
             .child(inbox)
             .child(tasks)
@@ -452,6 +477,28 @@ mod tests {
             ],
             workspaces: vec![a, b],
             ..Snapshot::default()
+        }
+    }
+
+    mod new_workspace {
+        use std::cell::RefCell;
+
+        use super::*;
+
+        #[gpui::test]
+        fn should_ask_for_the_dialog_from_its_plus(cx: &mut TestAppContext) {
+            let mut open = open(two_workspaces(), cx);
+            let asked = Rc::new(RefCell::new(Vec::new()));
+            let seen = asked.clone();
+            let _asks = open.cx.update(|_, cx| {
+                cx.subscribe(&open.sidebar, move |_, event: &SidebarEvent, _| {
+                    seen.borrow_mut().push(*event);
+                })
+            });
+
+            open.click("new workspace");
+
+            assert_eq!(*asked.borrow(), [SidebarEvent::NewWorkspace]);
         }
     }
 

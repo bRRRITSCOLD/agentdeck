@@ -509,7 +509,7 @@ impl WorkspaceView {
 }
 
 /// Reports a failed action in a toast.
-fn failed(title: &'static str, err: &anyhow::Error, window: &mut Window, cx: &mut gpui::App) {
+pub fn failed(title: &'static str, err: &anyhow::Error, window: &mut Window, cx: &mut gpui::App) {
     window.push_toast(
         Toast::new()
             .toast_type(ToastType::Error)

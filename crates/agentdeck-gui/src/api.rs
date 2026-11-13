@@ -6,11 +6,12 @@ use std::collections::BTreeSet;
 
 use agentdeck_client::daemon::Daemon;
 use agentdeck_client::panes::{self, pane_if_any};
-use agentdeck_client::types::{Pane, Tab};
+use agentdeck_client::types::{NewWorkspace, Pane, Tab};
 use agentdeck_client::{ApiError, Client};
 use agentdeck_core::{PaneId, SplitDirection, TabId, TaskId, WorkspaceId};
 use gpui::{App, Task};
 
+use crate::new_workspace::Request;
 use crate::overview::{PaneState, Snapshot};
 use crate::runtime;
 
@@ -38,6 +39,10 @@ pub trait Api: Send + Sync {
     /// Takes the pane out of its tab's layout, then kills its process and deletes it. The
     /// tab's last pane takes the tab with it: a layout can't be emptied again.
     fn close_pane(&self, pane: PaneAt, cx: &App) -> Task<anyhow::Result<()>>;
+
+    /// Makes a workspace as `request` says; its id. A refusal is an [`ApiError`] whose code
+    /// names the field: `invalid_name` or `invalid_dir`.
+    fn new_workspace(&self, request: Request, cx: &App) -> Task<anyhow::Result<WorkspaceId>>;
 }
 
 pub use agentdeck_client::panes::PaneAt;
@@ -99,6 +104,20 @@ impl Api for Daemon {
             cx,
             async move { Ok(panes::close_pane(&client, pane).await?) },
         )
+    }
+
+    fn new_workspace(&self, request: Request, cx: &App) -> Task<anyhow::Result<WorkspaceId>> {
+        let client = self.client.clone();
+        let Request { name, dir } = request;
+        runtime::spawn(cx, async move {
+            let made = client
+                .workspace_create()
+                .body(NewWorkspace { dir, name })
+                .send()
+                .await
+                .map_err(ApiError::from)?;
+            Ok(made.id)
+        })
     }
 }
 
@@ -197,7 +216,9 @@ pub(crate) mod fake {
         /// The last id handed to a tab or pane it made.
         made: Mutex<u32>,
         /// Why the next write fails, if it should.
-        failure: Mutex<Option<String>>,
+        failure: Mutex<Option<anyhow::Error>>,
+        /// The workspaces asked for, in order.
+        pub made_workspaces: Mutex<Vec<Request>>,
         /// The panes closed, in order.
         pub closed: Mutex<Vec<PaneId>>,
     }
@@ -243,7 +264,16 @@ pub(crate) mod fake {
 
         /// Fails the next write with `reason`, changing nothing.
         pub fn fail_next(&self, reason: &str) {
-            *self.failure.lock().unwrap() = Some(reason.to_owned());
+            *self.failure.lock().unwrap() = Some(anyhow::Error::msg(reason.to_owned()));
+        }
+
+        /// Fails the next write as the daemon refuses one: `message`, with `code`.
+        pub fn refuse_next(&self, code: &str, message: &str) {
+            let refusal = ApiError {
+                message: message.to_owned(),
+                code: Some(code.to_owned()),
+            };
+            *self.failure.lock().unwrap() = Some(refusal.into());
         }
 
         /// The layout of `workspace`'s tab `tab`.
@@ -255,7 +285,7 @@ pub(crate) mod fake {
 
         /// The scripted failure, if any, taking it.
         fn failure(&self) -> Option<anyhow::Error> {
-            (self.failure.lock().unwrap().take()).map(anyhow::Error::msg)
+            self.failure.lock().unwrap().take()
         }
 
         /// A fresh id, from 101 up, so it can't clash with a fixture's.
@@ -374,6 +404,20 @@ pub(crate) mod fake {
             self.panes.lock().unwrap().retain(|p| p.id != at.pane);
             self.closed.lock().unwrap().push(at.pane);
             Task::ready(Ok(()))
+        }
+
+        fn new_workspace(&self, request: Request, _cx: &App) -> Task<anyhow::Result<WorkspaceId>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            let id: WorkspaceId = self.make_id();
+            let made = agentdeck_client::types::Workspace {
+                id,
+                ..crate::overview::fixtures::workspace(0, &request.name)
+            };
+            self.snapshot.lock().unwrap().workspaces.push(made);
+            self.made_workspaces.lock().unwrap().push(request);
+            Task::ready(Ok(id))
         }
     }
 }
