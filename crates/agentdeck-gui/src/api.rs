@@ -221,7 +221,7 @@ async fn snapshot(client: Client) -> anyhow::Result<Snapshot> {
         tasks: (client.task_list().send().await)
             .map_err(ApiError::from)?
             .into_inner(),
-        unread_notes: (client.note_list().unread(true).send().await)
+        notes: (client.note_list().send().await)
             .map_err(ApiError::from)?
             .into_inner(),
         pr_sync: (client.prs_status().send().await)
