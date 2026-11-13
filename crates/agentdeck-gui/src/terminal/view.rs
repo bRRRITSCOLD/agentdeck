@@ -242,7 +242,14 @@ impl TerminalView {
 
     fn on_scroll(&mut self, event: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
         let line = Metrics::measure(window).cell.height;
-        let lines = (event.delta.pixel_delta(line).y / line).round() as i32;
+        let delta = event.delta.pixel_delta(line);
+        // GPUI's Linux backends turn a shifted wheel sideways; it still means up or down here.
+        let pixels = if event.modifiers.shift && delta.y == Pixels::ZERO {
+            delta.x
+        } else {
+            delta.y
+        };
+        let lines = (pixels / line).round() as i32;
         if lines == 0 {
             return;
         }
@@ -862,7 +869,8 @@ mod tests {
             self.draw(cx);
         }
 
-        /// Turns the wheel `lines` notches at `at`: positive is up.
+        /// Turns the wheel `lines` notches at `at`: positive is up. Shift turns it sideways, as
+        /// GPUI's Linux backends do.
         fn wheel(
             &self,
             at: Point<Pixels>,
@@ -870,9 +878,14 @@ mod tests {
             modifiers: Modifiers,
             cx: &mut VisualTestContext,
         ) {
+            let delta = if modifiers.shift {
+                point(lines, 0.)
+            } else {
+                point(0., lines)
+            };
             cx.simulate_event(ScrollEvent {
                 position: at,
-                delta: ScrollDelta::Lines(point(0., lines)),
+                delta: ScrollDelta::Lines(delta),
                 modifiers,
                 ..ScrollEvent::default()
             });
