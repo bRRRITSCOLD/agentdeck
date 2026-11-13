@@ -1,6 +1,9 @@
 //! Penpot's page parts for task lists: `TaskRow` (its `wide` layout), `GroupHeader` and
 //! `Checks`, drawn from a [`task_list::Row`](crate::task_list::Row). The Tasks view and the
 //! Inbox lay them out, each as its [`Table`]; their column widths are [`Columns`]'s.
+//!
+//! Both lists draw only the items in view, through GPUI's [`list`](gpui::list): an inbox holds
+//! hundreds of PRs, and drawing every row made each frame take hundreds of milliseconds.
 
 use agentdeck_core::{ChecksState, ReviewState, TaskKind, TaskStatus};
 use brrritscold_core_gpui::{
@@ -10,13 +13,44 @@ use brrritscold_core_gpui::{
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, Div, ElementId, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    div, px,
+    AnyElement, App, Div, ElementId, Hsla, InteractiveElement as _, IntoElement, ListAlignment,
+    ListState, ParentElement as _, Pixels, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Window, div, px,
 };
 
 use crate::state_dot::{StateDot, StateDotState};
 use crate::task_list::Row;
+
+/// How far past the viewport a list draws, so a short scroll shows rows at once.
+const OVERDRAW: Pixels = px(200.);
+
+/// The state of a list of rows, empty until [`relist`]ed.
+pub fn list_state() -> ListState {
+    ListState::new(0, ListAlignment::Top, OVERDRAW)
+}
+
+/// Makes `list` hold `count` items, keeping its scroll position, and measures them again: a
+/// row's height follows its title, and an index may now hold a group header instead.
+pub fn relist(list: &ListState, count: usize) {
+    let old = list.item_count();
+    // An empty list drawn once keeps its top at item 0, which a splice at 0 would push past
+    // the items it adds, to their end. With nothing shown, there's no place to keep.
+    if old == 0 {
+        list.reset(count);
+        return;
+    }
+    if count > old {
+        list.splice(old..old, count - old);
+    } else if count < old {
+        list.splice(count..old, 0);
+    }
+    list.remeasure();
+}
+
+/// An item of a list, `space.0-5` from the next: a list has no gap of its own.
+pub fn spaced(item: AnyElement) -> AnyElement {
+    div().pb(space::S0_5).child(item).into_any_element()
+}
 
 /// The fixed column widths of Penpot's `Columns` and `TaskRow` (`wide`): raw there too, as
 /// no sizing token matches them. The title column takes what's left.

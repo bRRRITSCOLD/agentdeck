@@ -5,6 +5,8 @@
 //! Like the Tasks view it shows the sidebar's [`Snapshot`], passed on by the window. A sync
 //! asked for here emits [`Synced`] once done, so the window can have the sidebar read again:
 //! a sync that changes no task broadcasts nothing, yet moves the time it last ran.
+//!
+//! Its list draws only the rows in view: an inbox can hold hundreds of PRs.
 
 use std::sync::Arc;
 
@@ -13,8 +15,9 @@ use brrritscold_core_gpui::{ActiveTheme as _, Button, ButtonVariant};
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, EventEmitter, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    AnyElement, Context, EventEmitter, InteractiveElement as _, IntoElement, ListState,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
+    div, list,
 };
 
 use crate::api::Api;
@@ -33,6 +36,9 @@ pub struct InboxView {
     snapshot: Snapshot,
     /// Whether a sync asked for here is still running.
     syncing: bool,
+    /// The rows the list draws from, as last rendered.
+    shown: Vec<Row>,
+    list: ListState,
 }
 
 impl EventEmitter<Synced> for InboxView {}
@@ -45,6 +51,8 @@ impl InboxView {
             api,
             snapshot: Snapshot::default(),
             syncing: false,
+            shown: Vec::new(),
+            list: task_row::list_state(),
         }
     }
 
@@ -105,6 +113,22 @@ impl InboxView {
         .detach();
     }
 
+    /// The list's `ix`th row, with its status picker.
+    fn item(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(row) = self.shown.get(ix) else {
+            return div().into_any_element();
+        };
+        let task = row.id;
+        let picker = task_row::status_picker(
+            SharedString::from(format!("inbox-status-{task}")),
+            row.status,
+            cx.listener(move |this, status: &TaskStatus, window, cx| {
+                this.set_status(task, *status, window, cx);
+            }),
+        );
+        task_row::spaced(task_row::wide(row, picker, Table::Inbox, cx))
+    }
+
     /// Penpot `Header`: heading, spacer, when PRs last synced, "Sync now".
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
@@ -163,43 +187,40 @@ impl Render for InboxView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
         let rows = self.rows();
-        let mut list = div()
-            .id("inbox-list")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .gap(space::S0_5)
-            .overflow_y_scroll();
-        for row in &rows {
-            let task = row.id;
-            let picker = task_row::status_picker(
-                SharedString::from(format!("inbox-status-{task}")),
-                row.status,
-                cx.listener(move |this, status: &TaskStatus, window, cx| {
-                    this.set_status(task, *status, window, cx);
-                }),
-            );
-            list = list.child(task_row::wide(row, picker, Table::Inbox, cx));
+        if rows != self.shown {
+            task_row::relist(&self.list, rows.len());
+            self.shown = rows;
         }
+        let rows = list(
+            self.list.clone(),
+            cx.processor(|this, ix, _, cx| this.item(ix, cx)),
+        )
+        .flex_1()
+        .min_h_0();
         // Columns over List, never narrower than the table; it scrolls sideways instead.
         let table = div()
             .id("inbox-table")
             .flex_1()
             .min_h_0()
             .overflow_x_scroll()
+            // Only a sideways wheel scrolls it; a vertical one is the list's.
+            .restrict_scroll_to_axis()
+            .flex()
+            .flex_col()
             .child(
                 div()
-                    .size_full()
+                    .flex_1()
+                    .min_h_0()
                     .min_w(Table::Inbox.min_width())
                     .flex()
                     .flex_col()
                     .gap(space::S4)
                     .child(task_row::columns(Table::Inbox, cx))
-                    .child(list),
+                    .child(rows),
             );
         // Penpot `Content`: Header / Columns / List, `space.4` apart, padded `space.6`.
         div()
+            .size_full()
             .flex_1()
             .min_w_0()
             .min_h_0()
@@ -210,7 +231,7 @@ impl Render for InboxView {
             .bg(s.background)
             .child(self.header(cx))
             .child(table)
-            .when(rows.is_empty(), |content| {
+            .when(self.shown.is_empty(), |content| {
                 content.child(
                     div()
                         .text_size(font_size::SM)
@@ -230,7 +251,10 @@ mod tests {
     use agentdeck_client::types::Task;
     use agentdeck_core::TaskKind;
     use brrritscold_core_gpui::{Root, Theme, ThemePreference};
-    use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext};
+    use gpui::{
+        AppContext as _, Entity, Modifiers, ScrollDelta, ScrollEvent, TestAppContext,
+        VisualTestContext, point, px, size,
+    };
 
     use super::*;
     use crate::api::fake::FakeApi;
@@ -319,6 +343,101 @@ mod tests {
             cx.run_until_parked();
             harness.draw(cx);
         }
+    }
+
+    /// `n` todo tasks with no workspace.
+    fn crowded(n: u32) -> Snapshot {
+        Snapshot {
+            tasks: (1..=n).map(|n| task(n, TaskKind::Pr, None)).collect(),
+            ..Snapshot::default()
+        }
+    }
+
+    fn bounds(task: u32, cx: &mut VisualTestContext) -> Option<gpui::Bounds<gpui::Pixels>> {
+        cx.debug_bounds(format!("task {}", id::<TaskId>(task)).leak())
+    }
+
+    fn drawn(task: u32, cx: &mut VisualTestContext) -> bool {
+        bounds(task, cx).is_some()
+    }
+
+    #[gpui::test]
+    fn should_draw_only_the_rows_in_view(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::open(crowded(300), cx);
+        harness.draw(cx);
+
+        assert!(drawn(1, cx));
+        assert!(!drawn(300, cx));
+    }
+
+    #[gpui::test]
+    fn should_draw_the_last_row_once_scrolled_to(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::open(crowded(300), cx);
+        harness.draw(cx);
+        let at = bounds(1, cx).expect("the first row").center();
+
+        // A wheel scrolls a step at a time; the list measures rows as they come into view.
+        for _ in 0..100 {
+            if drawn(300, cx) {
+                break;
+            }
+            cx.simulate_event(ScrollEvent {
+                position: at,
+                delta: ScrollDelta::Pixels(point(px(0.), px(-2000.))),
+                ..ScrollEvent::default()
+            });
+            harness.draw(cx);
+        }
+
+        assert!(drawn(300, cx));
+        assert!(!drawn(1, cx));
+    }
+
+    #[gpui::test]
+    fn should_scroll_a_narrow_table_down_not_sideways(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::open(crowded(300), cx);
+        cx.simulate_resize(size(px(800.), px(600.)));
+        harness.draw(cx);
+        let before = bounds(2, cx).expect("the second row");
+
+        cx.simulate_event(ScrollEvent {
+            position: before.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-20.))),
+            ..ScrollEvent::default()
+        });
+        harness.draw(cx);
+
+        let after = bounds(2, cx).expect("the second row");
+        assert_eq!(after.origin.x, before.origin.x);
+        assert!(after.origin.y < before.origin.y);
+    }
+
+    #[gpui::test]
+    fn should_stay_at_the_top_when_tasks_arrive(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::open(crowded(300), cx);
+        harness.draw(cx);
+        let top = bounds(1, cx).expect("the first row").origin.y;
+
+        harness
+            .view
+            .update(cx, |view, cx| view.set_snapshot(crowded(400), cx));
+        harness.draw(cx);
+        harness.draw(cx);
+
+        assert_eq!(bounds(1, cx).map(|b| b.origin.y), Some(top));
+    }
+
+    #[gpui::test]
+    fn should_start_at_the_top_when_tasks_come_to_an_empty_list(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::open(Snapshot::default(), cx);
+        harness.draw(cx);
+
+        harness
+            .view
+            .update(cx, |view, cx| view.set_snapshot(crowded(300), cx));
+        harness.draw(cx);
+
+        assert!(drawn(1, cx));
     }
 
     #[gpui::test]
