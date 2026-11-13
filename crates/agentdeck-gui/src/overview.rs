@@ -34,8 +34,8 @@ pub struct Snapshot {
     pub panes: Vec<PaneState>,
     /// Every task.
     pub tasks: Vec<Task>,
-    /// The unread notes.
-    pub unread_notes: Vec<Note>,
+    /// Every note, read or not.
+    pub notes: Vec<Note>,
     /// PR sync's last run.
     pub pr_sync: PrSyncStatus,
 }
@@ -46,7 +46,7 @@ impl Default for Snapshot {
             workspaces: Vec::new(),
             panes: Vec::new(),
             tasks: Vec::new(),
-            unread_notes: Vec::new(),
+            notes: Vec::new(),
             pr_sync: PrSyncStatus {
                 last_error: None,
                 last_synced_at: None,
@@ -112,7 +112,7 @@ impl PrSync {
 }
 
 /// How long `since` is, as the sync labels say it.
-fn ago(since: chrono::TimeDelta) -> String {
+pub fn ago(since: chrono::TimeDelta) -> String {
     let minutes = since.num_minutes().max(0);
     match minutes {
         0 => "just now".to_owned(),
@@ -158,9 +158,9 @@ impl Snapshot {
         };
         let counts = |workspace: Option<WorkspaceId>| Counts {
             unread_notes: self
-                .unread_notes
+                .notes
                 .iter()
-                .filter(|note| note_workspace(note) == Some(workspace))
+                .filter(|note| note.read_at.is_none() && note_workspace(note) == Some(workspace))
                 .count(),
             prs: self
                 .tasks
@@ -379,11 +379,27 @@ mod tests {
             use super::*;
 
             #[test]
+            fn should_leave_read_notes_out_of_the_count() {
+                let a = workspace(1, "a");
+                let read = Note {
+                    read_at: Some("2026-11-13T00:00:00Z".into()),
+                    ..workspace_note(30, a.id)
+                };
+                let snapshot = Snapshot {
+                    notes: vec![read, workspace_note(31, a.id)],
+                    workspaces: vec![a],
+                    ..Snapshot::default()
+                };
+
+                assert_eq!(snapshot.overview().workspaces[0].counts.unread_notes, 1);
+            }
+
+            #[test]
             fn should_count_notes_on_the_workspace_and_on_its_tasks() {
                 let a = workspace(1, "a");
                 let task = task(20, TaskKind::Plain, Some(a.id));
                 let snapshot = Snapshot {
-                    unread_notes: vec![workspace_note(30, a.id), task_note(31, &task)],
+                    notes: vec![workspace_note(30, a.id), task_note(31, &task)],
                     tasks: vec![task],
                     workspaces: vec![a],
                     ..Snapshot::default()
@@ -417,7 +433,7 @@ mod tests {
                 let a = workspace(1, "a");
                 let inbox_pr = task(20, TaskKind::Pr, None);
                 let snapshot = Snapshot {
-                    unread_notes: vec![task_note(30, &inbox_pr)],
+                    notes: vec![task_note(30, &inbox_pr)],
                     tasks: vec![inbox_pr, task(21, TaskKind::Pr, Some(a.id))],
                     workspaces: vec![a],
                     ..Snapshot::default()

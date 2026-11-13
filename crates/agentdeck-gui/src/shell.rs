@@ -97,7 +97,7 @@ impl Shell {
                     let dialog = cx.new(|cx| NewWorkspaceDialog::new(api.clone(), window, cx));
                     self.tasks = Some(cx.new(|cx| TasksView::new(api.clone(), window, cx)));
                     let inbox = cx.new(|_| InboxView::new(api.clone()));
-                    self.panel = Some(cx.new(|_| RightPanel::new(api.clone())));
+                    self.panel = Some(cx.new(|cx| RightPanel::new(api.clone(), window, cx)));
                     let sidebar = cx.new(|cx| SidebarView::new(api, &connection, cx));
                     self._selection =
                         Some(cx.observe_in(&sidebar, window, |shell, _, window, cx| {
