@@ -21,8 +21,8 @@ use gpui_base::input::InputEvent;
 
 use crate::api::Api;
 use crate::overview::Snapshot;
-use crate::task_list::{self, Group, Query};
-use crate::task_row;
+use crate::task_list::{self, Group, Query, Scope};
+use crate::task_row::{self, Table};
 use crate::workspace::failed;
 
 /// The filter's width. Raw in Penpot too.
@@ -100,6 +100,7 @@ impl TasksView {
     pub fn groups(&self, cx: &gpui::App) -> Vec<Group> {
         let filter = self.filter.read(cx).value();
         let query = Query {
+            scope: Scope::All,
             filter: &filter,
             show_done: self.show_done,
         };
@@ -116,6 +117,7 @@ impl TasksView {
     fn counts(&self, cx: &gpui::App) -> Vec<(TaskStatus, usize)> {
         let filter = self.filter.read(cx).value();
         let query = Query {
+            scope: Scope::All,
             filter: &filter,
             show_done: self.show_done,
         };
@@ -208,7 +210,7 @@ impl Render for TasksView {
                         this.set_status(task, *status, window, cx);
                     }),
                 );
-                list = list.child(task_row::wide(row, picker, cx));
+                list = list.child(task_row::wide(row, picker, Table::Tasks, cx));
             }
         }
         // Columns over List, as wide as the window allows and never narrower than the table.
@@ -220,11 +222,11 @@ impl Render for TasksView {
             .child(
                 div()
                     .size_full()
-                    .min_w(task_row::Columns::TABLE_MIN)
+                    .min_w(Table::Tasks.min_width())
                     .flex()
                     .flex_col()
                     .gap(space::S4)
-                    .child(task_row::columns(cx))
+                    .child(task_row::columns(Table::Tasks, cx))
                     .child(list),
             );
         // Penpot `Content`: Header / Columns / List, `space.4` apart, padded `space.6`.

@@ -1,6 +1,6 @@
 //! Penpot's page parts for task lists: `TaskRow` (its `wide` layout), `GroupHeader` and
-//! `Checks`, drawn from a [`task_list::Row`](crate::task_list::Row). The Tasks view lays
-//! them out; their column widths are [`Columns`]'s.
+//! `Checks`, drawn from a [`task_list::Row`](crate::task_list::Row). The Tasks view and the
+//! Inbox lay them out, each as its [`Table`]; their column widths are [`Columns`]'s.
 
 use agentdeck_core::{ChecksState, ReviewState, TaskKind, TaskStatus};
 use brrritscold_core_gpui::{
@@ -39,13 +39,45 @@ impl Columns {
     pub const REVIEW: Pixels = px(128.);
     /// Workspace.
     pub const WORKSPACE: Pixels = px(140.);
-    /// The title's least width. Below it the table scrolls sideways instead: Penpot's board
-    /// is 1440 wide, and a narrower window would squeeze the title to nothing.
+    /// The title's least width. Below it the table scrolls sideways instead: Penpot's boards
+    /// are 1440 wide, and a narrower window would squeeze the title to nothing.
     pub const TITLE_MIN: Pixels = px(240.);
-    /// The table's least width: every column, the title at its least, the `space.3` gaps
-    /// and the rows' `space.2` padding.
-    pub const TABLE_MIN: Pixels =
-        px(100. + 16. + 240. + 96. + 140. + 52. + 80. + 128. + 140. + 8. * 12. + 2. * 8.);
+}
+
+/// Which list a table is: the Inbox's hides the agent and workspace columns and names the
+/// others its own way, as Penpot's "Inbox" board does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Table {
+    /// The Tasks view.
+    Tasks,
+    /// The Inbox.
+    Inbox,
+}
+
+impl Table {
+    /// Whether rows show the agent and workspace cells.
+    fn full(self) -> bool {
+        self == Table::Tasks
+    }
+
+    /// The table's least width: every column it shows, the title at its least, the
+    /// `space.3` gaps and the rows' `space.2` padding.
+    pub fn min_width(self) -> Pixels {
+        let fixed = [
+            Columns::STATUS,
+            Columns::ICON,
+            Columns::TITLE_MIN,
+            Columns::PR,
+            Columns::DRAFT,
+            Columns::CHECKS,
+            Columns::REVIEW,
+        ];
+        let extra = [Columns::AGENT, Columns::WORKSPACE];
+        let shown = extra.iter().filter(|_| self.full());
+        let (sum, count) =
+            (fixed.iter().chain(shown)).fold((px(0.), 0.), |(sum, n), w| (sum + *w, n + 1.));
+        sum + space::S3 * (count - 1.) + space::S2 * 2.
+    }
 }
 
 /// How a task status reads in a picker or a group header.
@@ -78,7 +110,7 @@ fn none(cx: &App) -> Div {
 }
 
 /// Penpot `Columns`: the column names over the rows, xs medium muted.
-pub fn columns(cx: &App) -> Div {
+pub fn columns(table: Table, cx: &App) -> Div {
     let s = cx.theme().semantic();
     let name = |width: Option<Pixels>, text: &'static str| {
         let cell = match width {
@@ -97,13 +129,21 @@ pub fn columns(cx: &App) -> Div {
         .text_color(s.muted_foreground)
         .child(name(Some(Columns::STATUS), "Status"))
         .child(name(Some(Columns::ICON), ""))
-        .child(name(None, "Task"))
-        .child(name(Some(Columns::AGENT), "Agent"))
-        .child(name(Some(Columns::PR), "PR"))
+        .map(|row| match table {
+            Table::Tasks => row
+                .child(name(None, "Task"))
+                .child(name(Some(Columns::AGENT), "Agent"))
+                .child(name(Some(Columns::PR), "PR")),
+            Table::Inbox => row
+                .child(name(None, "Title"))
+                .child(name(Some(Columns::PR), "Repository")),
+        })
         .child(name(Some(Columns::DRAFT), ""))
         .child(name(Some(Columns::CHECKS), "Checks"))
         .child(name(Some(Columns::REVIEW), "Review"))
-        .child(name(Some(Columns::WORKSPACE), "Workspace"))
+        .when(table.full(), |row| {
+            row.child(name(Some(Columns::WORKSPACE), "Workspace"))
+        })
 }
 
 /// Penpot `GroupHeader`: a chevron, the status and a `secondary` count badge. Clicking it
@@ -214,8 +254,9 @@ pub fn status_picker(
 }
 
 /// Penpot `TaskRow` (`wide`): picker, kind icon, title, agent, PR, draft, checks, review and
-/// workspace, `space.3` apart, padded `space.2`. `picker` is the row's status picker.
-pub fn wide(row: &Row, picker: Select, cx: &App) -> AnyElement {
+/// workspace, `space.3` apart, padded `space.2`; `table`'s columns only. `picker` is the
+/// row's status picker.
+pub fn wide(row: &Row, picker: Select, table: Table, cx: &App) -> AnyElement {
     let s = cx.theme().semantic();
     let muted = |text: SharedString, size: gpui::Rems| {
         div()
@@ -259,7 +300,7 @@ pub fn wide(row: &Row, picker: Select, cx: &App) -> AnyElement {
                 .text_color(s.foreground)
                 .child(row.title.clone()),
         )
-        .child(agent)
+        .when(table.full(), |r| r.child(agent))
         .child(cell(Columns::PR).when_some(pr, |c, pr| {
             c.child(muted(pr.reference.clone(), font_size::SM))
         }))
@@ -278,22 +319,41 @@ pub fn wide(row: &Row, picker: Select, cx: &App) -> AnyElement {
                 c.child(review(state, cx))
             }),
         )
-        .child(match &row.workspace {
-            Some(name) => cell(Columns::WORKSPACE)
-                .child(
-                    Icon::new(IconName::Folder)
-                        .size(px(14.))
-                        .text_color(s.foreground),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(font_size::SM)
-                        .text_color(s.foreground)
-                        .child(name.clone()),
-                ),
-            None => cell(Columns::WORKSPACE).child(none(cx)),
+        .when(table.full(), |r| {
+            r.child(match &row.workspace {
+                Some(name) => cell(Columns::WORKSPACE)
+                    .child(
+                        Icon::new(IconName::Folder)
+                            .size(px(14.))
+                            .text_color(s.foreground),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(font_size::SM)
+                            .text_color(s.foreground)
+                            .child(name.clone()),
+                    ),
+                None => cell(Columns::WORKSPACE).child(none(cx)),
+            })
         })
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod table {
+        use super::*;
+
+        #[test]
+        fn should_fit_every_column_the_title_at_its_least_and_the_gaps() {
+            // Penpot's Tasks board: 1131 wide with a 267px title, so 1104 with a 240px one.
+            assert_eq!(Table::Tasks.min_width(), px(1104.));
+            // Penpot's Inbox board: 1131 wide with a 527px title.
+            assert_eq!(Table::Inbox.min_width(), px(1131. - 527. + 240.));
+        }
+    }
 }

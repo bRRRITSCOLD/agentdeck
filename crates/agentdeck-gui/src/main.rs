@@ -7,6 +7,7 @@ mod api;
 mod connection;
 mod count;
 mod frame;
+mod inbox;
 mod keymap;
 mod new_workspace;
 mod overview;

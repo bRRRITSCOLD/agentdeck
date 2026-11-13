@@ -51,6 +51,9 @@ pub trait Api: Send + Sync {
         status: TaskStatus,
         cx: &App,
     ) -> Task<anyhow::Result<()>>;
+
+    /// Syncs PRs now, returning once the sync is done.
+    fn sync_prs(&self, cx: &App) -> Task<anyhow::Result<()>>;
 }
 
 pub use agentdeck_client::panes::PaneAt;
@@ -141,6 +144,14 @@ impl Api for Daemon {
                 ..TaskPatch::default()
             };
             (client.task_update().id(task).body(patch).send().await).map_err(ApiError::from)?;
+            Ok(())
+        })
+    }
+
+    fn sync_prs(&self, cx: &App) -> Task<anyhow::Result<()>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            client.prs_sync().send().await.map_err(ApiError::from)?;
             Ok(())
         })
     }
@@ -246,6 +257,8 @@ pub(crate) mod fake {
         failure: Mutex<Option<anyhow::Error>>,
         /// The workspaces asked for, in order.
         pub made_workspaces: Mutex<Vec<Request>>,
+        /// How many PR syncs were asked for.
+        pub syncs: Mutex<usize>,
         /// The panes closed, in order.
         pub closed: Mutex<Vec<PaneId>>,
     }
@@ -460,6 +473,14 @@ pub(crate) mod fake {
             if let Some(task) = snapshot.tasks.iter_mut().find(|t| t.id == task) {
                 task.status = status;
             }
+            Task::ready(Ok(()))
+        }
+
+        fn sync_prs(&self, _cx: &App) -> Task<anyhow::Result<()>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            *self.syncs.lock().unwrap() += 1;
             Task::ready(Ok(()))
         }
     }

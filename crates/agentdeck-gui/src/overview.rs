@@ -97,16 +97,28 @@ impl PrSync {
         match self {
             PrSync::NotYet => "PRs not synced yet".to_owned(),
             PrSync::Failed => "PR sync failed".to_owned(),
-            PrSync::SyncedAt(at) => {
-                let minutes = (now - at).num_minutes().max(0);
-                match minutes {
-                    0 => "PRs synced just now".to_owned(),
-                    1..60 => format!("PRs synced {minutes} min ago"),
-                    60..1440 => format!("PRs synced {} h ago", minutes / 60),
-                    _ => format!("PRs synced {} d ago", minutes / 1440),
-                }
-            }
+            PrSync::SyncedAt(at) => format!("PRs synced {}", ago(now - at)),
         }
+    }
+
+    /// The Inbox header's text, at `now`: the footer's without "PRs".
+    pub fn short_label(self, now: DateTime<Utc>) -> String {
+        match self {
+            PrSync::NotYet => "Not synced yet".to_owned(),
+            PrSync::Failed => "Sync failed".to_owned(),
+            PrSync::SyncedAt(at) => format!("Synced {}", ago(now - at)),
+        }
+    }
+}
+
+/// How long `since` is, as the sync labels say it.
+fn ago(since: chrono::TimeDelta) -> String {
+    let minutes = since.num_minutes().max(0);
+    match minutes {
+        0 => "just now".to_owned(),
+        1..60 => format!("{minutes} min ago"),
+        60..1440 => format!("{} h ago", minutes / 60),
+        _ => format!("{} d ago", minutes / 1440),
     }
 }
 
@@ -502,6 +514,17 @@ mod tests {
         #[test]
         fn should_say_just_now_for_a_sync_stamped_after_now() {
             assert_eq!(synced("2026-11-12T12:00:05Z"), "PRs synced just now");
+        }
+        #[test]
+        fn should_drop_prs_from_the_inbox_headers_label() {
+            let short = |sync: PrSync| sync.short_label(at(NOW));
+
+            assert_eq!(
+                short(PrSync::SyncedAt(at("2026-11-12T11:59:00Z"))),
+                "Synced 1 min ago"
+            );
+            assert_eq!(short(PrSync::NotYet), "Not synced yet");
+            assert_eq!(short(PrSync::Failed), "Sync failed");
         }
     }
 }
