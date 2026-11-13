@@ -112,7 +112,7 @@ impl PrSync {
 }
 
 /// How long `since` is, as the sync labels say it.
-fn ago(since: chrono::TimeDelta) -> String {
+pub fn ago(since: chrono::TimeDelta) -> String {
     let minutes = since.num_minutes().max(0);
     match minutes {
         0 => "just now".to_owned(),

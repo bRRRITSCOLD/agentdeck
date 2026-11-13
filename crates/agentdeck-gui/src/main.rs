@@ -10,6 +10,7 @@ mod frame;
 mod inbox;
 mod keymap;
 mod new_workspace;
+mod note_list;
 mod overview;
 mod pane;
 mod pane_header;
