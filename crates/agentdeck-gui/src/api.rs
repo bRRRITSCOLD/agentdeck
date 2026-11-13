@@ -1,12 +1,14 @@
-//! What the GUI reads from the daemon over REST (spec §4), behind [`Api`] so a view takes a
-//! fake in tests. The real one is the connected [`Daemon`].
+//! What the GUI reads from and asks of the daemon over REST (spec §4), behind [`Api`] so a
+//! view takes a fake in tests. The real one is the connected [`Daemon`]. A failed call reads
+//! as the daemon's own message, through [`ApiError`].
 
-use agentdeck_client::Client;
-use agentdeck_client::daemon::Daemon;
 use std::collections::BTreeSet;
 
+use agentdeck_client::daemon::Daemon;
+use agentdeck_client::panes::{self, pane_if_any};
 use agentdeck_client::types::{Pane, Tab};
-use agentdeck_core::{TaskId, WorkspaceId};
+use agentdeck_client::{ApiError, Client};
+use agentdeck_core::{PaneId, SplitDirection, TabId, TaskId, WorkspaceId};
 use gpui::{App, Task};
 
 use crate::overview::{PaneState, Snapshot};
@@ -19,6 +21,36 @@ pub trait Api: Send + Sync {
 
     /// `workspace`'s tabs, the panes in their layouts and the tasks those panes link.
     fn panes(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<WorkspacePanes>>;
+
+    /// Adds a tab titled `shell` to `workspace`, running a shell in `dir` as its one pane;
+    /// the new tab. A tab whose shell can't start is deleted again.
+    fn new_shell_tab(
+        &self,
+        workspace: WorkspaceId,
+        dir: String,
+        cx: &App,
+    ) -> Task<anyhow::Result<TabId>>;
+
+    /// Splits a pane as `split` says: a shell takes the new side. The new pane; it is closed
+    /// again if the layout can't take it.
+    fn split_pane(&self, split: Split, cx: &App) -> Task<anyhow::Result<PaneId>>;
+
+    /// Takes the pane out of its tab's layout, then kills its process and deletes it. The
+    /// tab's last pane takes the tab with it: a layout can't be emptied again.
+    fn close_pane(&self, pane: PaneAt, cx: &App) -> Task<anyhow::Result<()>>;
+}
+
+pub use agentdeck_client::panes::PaneAt;
+
+/// A split of one pane, for [`Api::split_pane`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Split {
+    /// The pane split; it keeps the first side.
+    pub at: PaneAt,
+    /// Side by side ([`SplitDirection::Horizontal`]) or stacked.
+    pub direction: SplitDirection,
+    /// Where the new shell starts.
+    pub cwd: String,
 }
 
 /// What the workspace view shows, read in one go.
@@ -26,7 +58,7 @@ pub trait Api: Send + Sync {
 pub struct WorkspacePanes {
     /// The tabs, in `position` order.
     pub tabs: Vec<Tab>,
-    /// Every pane in the tabs' layouts.
+    /// Every pane in the tabs' layouts that still exists.
     pub panes: Vec<Pane>,
     /// Every task a pane links.
     pub tasks: Vec<agentdeck_client::types::Task>,
@@ -40,24 +72,59 @@ impl Api for Daemon {
     fn panes(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<WorkspacePanes>> {
         runtime::spawn(cx, panes(self.client.clone(), workspace))
     }
+
+    fn new_shell_tab(
+        &self,
+        workspace: WorkspaceId,
+        dir: String,
+        cx: &App,
+    ) -> Task<anyhow::Result<TabId>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            Ok(panes::new_shell_tab(&client, workspace, dir).await?)
+        })
+    }
+
+    fn split_pane(&self, split: Split, cx: &App) -> Task<anyhow::Result<PaneId>> {
+        let client = self.client.clone();
+        let Split { at, direction, cwd } = split;
+        runtime::spawn(cx, async move {
+            Ok(panes::split_pane(&client, at, direction, cwd).await?)
+        })
+    }
+
+    fn close_pane(&self, pane: PaneAt, cx: &App) -> Task<anyhow::Result<()>> {
+        let client = self.client.clone();
+        runtime::spawn(
+            cx,
+            async move { Ok(panes::close_pane(&client, pane).await?) },
+        )
+    }
 }
 
 /// Reads a [`WorkspacePanes`]: the tabs, then each pane in their layouts, then each task
 /// those panes link.
 async fn panes(client: Client, workspace: WorkspaceId) -> anyhow::Result<WorkspacePanes> {
-    let tabs = client.tab_list().id(workspace).send().await?.into_inner();
+    let tabs = client
+        .tab_list()
+        .id(workspace)
+        .send()
+        .await
+        .map_err(ApiError::from)?
+        .into_inner();
     let mut panes = Vec::new();
     for pane in tabs
         .iter()
         .filter_map(|tab| tab.layout.as_ref())
         .flat_map(|l| l.panes())
     {
-        panes.push(client.pane_get().id(pane).send().await?.into_inner());
+        panes.extend(pane_if_any(&client, pane).await?);
     }
     let linked: BTreeSet<TaskId> = panes.iter().filter_map(|pane| pane.task_id).collect();
     let mut tasks = Vec::new();
     for task in linked {
-        tasks.push(client.task_get().id(task).send().await?.into_inner());
+        let task = client.task_get().id(task).send().await;
+        tasks.push(task.map_err(ApiError::from)?.into_inner());
     }
     Ok(WorkspacePanes { tabs, panes, tasks })
 }
@@ -65,34 +132,44 @@ async fn panes(client: Client, workspace: WorkspaceId) -> anyhow::Result<Workspa
 /// Reads a [`Snapshot`]: the workspaces, then each live one's tabs and the panes in their
 /// layouts, then the tasks, unread notes and PR sync status.
 async fn snapshot(client: Client) -> anyhow::Result<Snapshot> {
-    let workspaces = client.workspace_list().send().await?.into_inner();
+    let workspaces = (client.workspace_list().send().await)
+        .map_err(ApiError::from)?
+        .into_inner();
     let mut panes = Vec::new();
     for workspace in workspaces.iter().filter(|w| w.archived_at.is_none()) {
         let tabs = client
             .tab_list()
             .id(workspace.id)
             .send()
-            .await?
+            .await
+            .map_err(ApiError::from)?
             .into_inner();
         for pane in tabs
             .iter()
             .filter_map(|tab| tab.layout.as_ref())
             .flat_map(|l| l.panes())
         {
-            let pane = client.pane_get().id(pane).send().await?.into_inner();
-            panes.push(PaneState {
-                pane: pane.id,
-                workspace: workspace.id,
-                state: pane.state,
-            });
+            if let Some(pane) = pane_if_any(&client, pane).await? {
+                panes.push(PaneState {
+                    pane: pane.id,
+                    workspace: workspace.id,
+                    state: pane.state,
+                });
+            }
         }
     }
     Ok(Snapshot {
         workspaces,
         panes,
-        tasks: client.task_list().send().await?.into_inner(),
-        unread_notes: client.note_list().unread(true).send().await?.into_inner(),
-        pr_sync: client.prs_status().send().await?.into_inner(),
+        tasks: (client.task_list().send().await)
+            .map_err(ApiError::from)?
+            .into_inner(),
+        unread_notes: (client.note_list().unread(true).send().await)
+            .map_err(ApiError::from)?
+            .into_inner(),
+        pr_sync: (client.prs_status().send().await)
+            .map_err(ApiError::from)?
+            .into_inner(),
     })
 }
 
@@ -102,11 +179,12 @@ pub(crate) mod fake {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    use agentdeck_core::PaneId;
+    use agentdeck_core::{Layout, PaneId};
 
     use super::*;
 
-    /// Answers every read with what it holds now, and counts the snapshot reads.
+    /// Answers every read with what it holds now, and counts the snapshot reads. Writes
+    /// change what it holds, as the daemon would, but broadcast nothing.
     #[derive(Default)]
     pub struct FakeApi {
         snapshot: Mutex<Snapshot>,
@@ -114,6 +192,12 @@ pub(crate) mod fake {
         tabs: Mutex<HashMap<WorkspaceId, Vec<Tab>>>,
         panes: Mutex<Vec<Pane>>,
         tasks: Mutex<Vec<agentdeck_client::types::Task>>,
+        /// The last id handed to a tab or pane it made.
+        made: Mutex<u32>,
+        /// Why the next write fails, if it should.
+        failure: Mutex<Option<String>>,
+        /// The panes closed, in order.
+        pub closed: Mutex<Vec<PaneId>>,
     }
 
     impl FakeApi {
@@ -149,6 +233,45 @@ pub(crate) mod fake {
         pub fn reads(&self) -> usize {
             *self.reads.lock().unwrap()
         }
+
+        /// Fails the next write with `reason`, changing nothing.
+        pub fn fail_next(&self, reason: &str) {
+            *self.failure.lock().unwrap() = Some(reason.to_owned());
+        }
+
+        /// The layout of `workspace`'s tab `tab`.
+        pub fn layout(&self, workspace: WorkspaceId, tab: TabId) -> Option<Layout> {
+            let tabs = self.tabs.lock().unwrap();
+            let tab = tabs.get(&workspace)?.iter().find(|t| t.id == tab)?;
+            tab.layout.clone()
+        }
+
+        /// The scripted failure, if any, taking it.
+        fn failure(&self) -> Option<anyhow::Error> {
+            (self.failure.lock().unwrap().take()).map(anyhow::Error::msg)
+        }
+
+        /// A fresh id, from 101 up, so it can't clash with a fixture's.
+        fn make_id<T: std::str::FromStr<Err: std::fmt::Debug>>(&self) -> T {
+            let mut made = self.made.lock().unwrap();
+            *made += 1;
+            crate::overview::fixtures::id(100 + *made)
+        }
+
+        /// Adds a shell pane in `tab`, unplaced.
+        fn spawn_shell(&self, tab: TabId, cwd: String) -> PaneId {
+            let pane = Pane {
+                cwd,
+                ..crate::pane::fixtures::shell_pane(0, tab)
+            };
+            let pane = Pane {
+                id: self.make_id(),
+                ..pane
+            };
+            let id = pane.id;
+            self.panes.lock().unwrap().push(pane);
+            id
+        }
     }
 
     impl Api for FakeApi {
@@ -180,6 +303,69 @@ pub(crate) mod fake {
                 .cloned()
                 .collect();
             Task::ready(Ok(WorkspacePanes { tabs, panes, tasks }))
+        }
+
+        fn new_shell_tab(
+            &self,
+            workspace: WorkspaceId,
+            dir: String,
+            _cx: &App,
+        ) -> Task<anyhow::Result<TabId>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            let tab: TabId = self.make_id();
+            let pane = self.spawn_shell(tab, dir);
+            let mut tabs = self.tabs.lock().unwrap();
+            let tabs = tabs.entry(workspace).or_default();
+            let position = tabs.iter().map(|t| t.position + 1).max().unwrap_or(0);
+            tabs.push(Tab {
+                id: tab,
+                layout: Some(Layout::single(pane)),
+                position,
+                title: "shell".into(),
+                workspace_id: workspace,
+            });
+            Task::ready(Ok(tab))
+        }
+
+        fn split_pane(&self, split: Split, _cx: &App) -> Task<anyhow::Result<PaneId>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            let Split { at, direction, cwd } = split;
+            let pane = self.spawn_shell(at.tab, cwd);
+            let mut tabs = self.tabs.lock().unwrap();
+            let layout = (tabs.get_mut(&at.workspace))
+                .and_then(|tabs| tabs.iter_mut().find(|t| t.id == at.tab))
+                .and_then(|tab| tab.layout.as_mut())
+                .expect("the split's tab has a layout");
+            layout
+                .split(at.pane, direction, pane)
+                .expect("the split's pane is in the layout");
+            Task::ready(Ok(pane))
+        }
+
+        fn close_pane(&self, at: PaneAt, _cx: &App) -> Task<anyhow::Result<()>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            let mut tabs = self.tabs.lock().unwrap();
+            let tabs = tabs.entry(at.workspace).or_default();
+            // Closing a pane already gone is done, as with the daemon.
+            let holder = tabs
+                .iter_mut()
+                .find(|t| t.id == at.tab && t.layout.as_ref().is_some_and(|l| l.contains(at.pane)));
+            if let Some(tab) = holder {
+                let layout = tab.layout.take().expect("it holds the pane");
+                match layout.remove(at.pane).expect("it holds the pane") {
+                    Some(rest) => tab.layout = Some(rest),
+                    None => tabs.retain(|t| t.id != at.tab),
+                }
+            }
+            self.panes.lock().unwrap().retain(|p| p.id != at.pane);
+            self.closed.lock().unwrap().push(at.pane);
+            Task::ready(Ok(()))
         }
     }
 }

@@ -8,8 +8,8 @@ use agentdeck_client::Client;
 use agentdeck_client::types::{NewPane, NewTab, Pane, Tab, TabPatch};
 use agentdeck_core::{Agent, Layout, PaneKind, TabId, TaskId};
 
-use crate::api::ApiError;
 use crate::commands;
+use agentdeck_client::ApiError;
 
 /// What `agent new` was asked for.
 pub struct Launch<'a> {

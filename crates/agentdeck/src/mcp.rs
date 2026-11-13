@@ -11,8 +11,8 @@ use rmcp::schemars::JsonSchema;
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
 
-use crate::api::ApiError;
 use crate::commands::{self, caller_pane};
+use agentdeck_client::ApiError;
 use agentdeck_client::daemon;
 
 /// Names the workspace an agent runs in; the tools' default workspace.

@@ -2,16 +2,22 @@
 //!
 //! The header's title is the terminal's live one, then the one read over REST, then a name
 //! for what runs there. Its state follows the daemon's `state` and `exit` broadcasts between
-//! reads.
+//! reads. Its menu asks the workspace holding it for a split or a close, as a
+//! [`PaneRequest`]: only the workspace knows the tab's layout.
 
 use agentdeck_client::types::Pane;
 use agentdeck_client::ws;
-use agentdeck_core::PaneId;
 use agentdeck_core::ws::ServerMessage;
-use brrritscold_core_gpui::{ActiveTheme as _, Separator};
+use agentdeck_core::{PaneId, SplitDirection};
+use brrritscold_core_gpui::{
+    ActiveTheme as _, Button, ButtonSize, ButtonVariant, DropdownMenu, DropdownMenuContent,
+    DropdownMenuItem, DropdownMenuItemVariant, DropdownMenuSeparator, IconName, Separator,
+};
+use brrritscold_core_gpui_tokens::primitive::opacity;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Context, Entity, FocusHandle, Focusable, IntoElement, ParentElement as _,
-    Render, SharedString, Styled as _, Subscription, Window, div,
+    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
 };
 
 use crate::connection::{Connection, DaemonEvent};
@@ -38,6 +44,15 @@ pub fn shown_title(live: Option<&str>, pane: &Pane) -> SharedString {
     program.unwrap_or("shell").to_owned().into()
 }
 
+/// What a pane's header menu asks of the workspace holding it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneRequest {
+    /// Split it, a new shell taking the second side.
+    Split(SplitDirection),
+    /// Close it, killing what runs there.
+    Close,
+}
+
 /// A pane: header, rule, terminal.
 pub struct PaneView {
     pane: Pane,
@@ -45,6 +60,8 @@ pub struct PaneView {
     task: Option<SharedString>,
     /// The title the terminal reported last.
     live_title: Option<SharedString>,
+    /// Being closed: shown dimmed until it goes.
+    closing: bool,
     terminal: Entity<TerminalView>,
     _subscriptions: [Subscription; 2],
 }
@@ -72,6 +89,7 @@ impl PaneView {
             pane,
             task,
             live_title: None,
+            closing: false,
             terminal,
             _subscriptions: [titles, states],
         }
@@ -97,9 +115,65 @@ impl PaneView {
     }
 
     /// The pane as last read, with the state broadcasts since applied.
-    #[cfg(test)]
     pub fn pane(&self) -> &Pane {
         &self.pane
+    }
+
+    /// Dims it while it is being closed, or brings it back when the close failed.
+    pub fn set_closing(&mut self, closing: bool, cx: &mut Context<Self>) {
+        if self.closing != closing {
+            self.closing = closing;
+            cx.notify();
+        }
+    }
+
+    /// Whether it is being closed.
+    #[cfg(test)]
+    pub fn is_closing(&self) -> bool {
+        self.closing
+    }
+
+    /// Asks the workspace holding it for `request`.
+    pub fn request(&mut self, request: PaneRequest, cx: &mut Context<Self>) {
+        cx.emit(request);
+    }
+
+    /// The header's `Menu` part: a ghost icon-xs `Ellipsis` button opening the pane's actions.
+    fn menu(&self, cx: &mut Context<Self>) -> DropdownMenu {
+        let this = cx.entity().downgrade();
+        let item = |label: &'static str, icon: IconName, request: PaneRequest| {
+            let this = this.clone();
+            DropdownMenuItem::new(label)
+                .icon(icon)
+                .on_click(move |_, _, cx| {
+                    let _ = this.update(cx, |pane, cx| pane.request(request, cx));
+                })
+        };
+        DropdownMenu::new(SharedString::from(format!("pane-menu-{}", self.pane.id)))
+            .trigger(
+                Button::new("menu")
+                    .variant(ButtonVariant::Ghost)
+                    .size(ButtonSize::IconXs)
+                    .icon(IconName::Ellipsis),
+            )
+            .content(
+                DropdownMenuContent::new()
+                    .item(item(
+                        "Split right",
+                        IconName::Columns2,
+                        PaneRequest::Split(SplitDirection::Horizontal),
+                    ))
+                    .item(item(
+                        "Split down",
+                        IconName::Rows2,
+                        PaneRequest::Split(SplitDirection::Vertical),
+                    ))
+                    .separator(DropdownMenuSeparator::new())
+                    .item(
+                        item("Close pane", IconName::X, PaneRequest::Close)
+                            .variant(DropdownMenuItemVariant::Destructive),
+                    ),
+            )
     }
 
     /// The linked task's title.
@@ -123,6 +197,8 @@ impl PaneView {
     }
 }
 
+impl EventEmitter<PaneRequest> for PaneView {}
+
 impl Focusable for PaneView {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.terminal.focus_handle(cx)
@@ -134,7 +210,8 @@ impl Render for PaneView {
         let s = cx.theme().semantic();
         let header = PaneHeader::new(self.title())
             .state(self.pane.state, self.pane.exit_code)
-            .task(self.task.clone());
+            .task(self.task.clone())
+            .menu(self.menu(cx));
         // Penpot "Pane A": `background`, a `border` stroke inside, `radius-md`, clipped;
         // Header / HeaderRule / Terminal.
         div()
@@ -144,6 +221,8 @@ impl Render for PaneView {
             .flex()
             .flex_col()
             .overflow_hidden()
+            // Being closed: dimmed as a disabled control is (`opacity-50`).
+            .when(self.closing, |pane| pane.opacity(opacity::O50))
             .rounded(s.radius_md)
             .border_1()
             .border_color(s.border)

@@ -12,9 +12,9 @@ use futures_util::TryStreamExt;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::api::ApiError;
 use crate::cli::{AgentCommand, Command, NoteCommand, PrCommand, TaskCommand, WsCommand};
 use crate::{launch, render, resolve};
+use agentdeck_client::ApiError;
 
 /// Names the pane an agent runs in; `note read` records it as the reader.
 pub const PANE_VAR: &str = "AGENTDECK_PANE";
