@@ -266,6 +266,19 @@ impl WorkspaceView {
         }
     }
 
+    /// Shows `tab` and focuses `pane` in it once a read has both: a pane just placed there.
+    pub fn show_pane(
+        &mut self,
+        tab: TabId,
+        pane: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.selected = Some(tab);
+        self.focus_next = Some(pane);
+        self.reread(window, cx);
+    }
+
     /// Shows the tab `tab`, if the workspace has it.
     pub fn select(&mut self, tab: TabId, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected != Some(tab) && self.read.tabs.iter().any(|t| t.id == tab) {

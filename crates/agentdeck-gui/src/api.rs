@@ -11,6 +11,7 @@ use agentdeck_client::{ApiError, Client};
 use agentdeck_core::{PaneId, SplitDirection, TabId, TaskId, TaskStatus, WorkspaceId};
 use gpui::{App, Task};
 
+use crate::new_agent::{Launch, Launched};
 use crate::new_workspace::Request;
 use crate::overview::{PaneState, Snapshot};
 use crate::runtime;
@@ -54,6 +55,11 @@ pub trait Api: Send + Sync {
 
     /// Syncs PRs now, returning once the sync is done.
     fn sync_prs(&self, cx: &App) -> Task<anyhow::Result<()>>;
+
+    /// Starts an agent as `launch` says and places it in a tab (spec §6): the workspace's
+    /// first empty tab, or a new one. A refusal is an [`ApiError`]; `invalid_argv` means the
+    /// agent CLI isn't installed.
+    fn launch_agent(&self, launch: Launch, cx: &App) -> Task<anyhow::Result<Launched>>;
 
     /// Leaves a note with `body` on `workspace`.
     fn new_note(&self, workspace: WorkspaceId, body: String, cx: &App) -> Task<anyhow::Result<()>>;
@@ -156,6 +162,23 @@ impl Api for Daemon {
         runtime::spawn(cx, async move {
             client.prs_sync().send().await.map_err(ApiError::from)?;
             Ok(())
+        })
+    }
+
+    fn launch_agent(&self, launch: Launch, cx: &App) -> Task<anyhow::Result<Launched>> {
+        let client = self.client.clone();
+        let Launch {
+            workspace,
+            agent,
+            cwd,
+            task,
+        } = launch;
+        runtime::spawn(cx, async move {
+            let pane = panes::launch_agent(&client, workspace, agent, cwd, task).await?;
+            Ok(Launched {
+                tab: pane.tab_id,
+                pane: pane.id,
+            })
         })
     }
 
@@ -282,6 +305,8 @@ pub(crate) mod fake {
         pub syncs: Mutex<usize>,
         /// The notes left, with the workspace each is on.
         pub notes_left: Mutex<Vec<(WorkspaceId, String)>>,
+        /// The agents started.
+        pub launched: Mutex<Vec<Launch>>,
         /// The panes closed, in order.
         pub closed: Mutex<Vec<PaneId>>,
     }
@@ -505,6 +530,16 @@ pub(crate) mod fake {
             }
             *self.syncs.lock().unwrap() += 1;
             Task::ready(Ok(()))
+        }
+
+        fn launch_agent(&self, launch: Launch, _cx: &App) -> Task<anyhow::Result<Launched>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            let tab: TabId = self.make_id();
+            let pane: PaneId = self.make_id();
+            self.launched.lock().unwrap().push(launch);
+            Task::ready(Ok(Launched { tab, pane }))
         }
 
         fn new_note(

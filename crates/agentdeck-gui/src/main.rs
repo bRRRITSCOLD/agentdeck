@@ -9,6 +9,7 @@ mod count;
 mod frame;
 mod inbox;
 mod keymap;
+mod new_agent;
 mod new_workspace;
 mod note_list;
 mod overview;
