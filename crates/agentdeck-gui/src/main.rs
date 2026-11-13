@@ -14,6 +14,7 @@ mod overview;
 mod pane;
 mod pane_header;
 mod rereads;
+mod right_panel;
 mod runtime;
 mod shell;
 mod sidebar;

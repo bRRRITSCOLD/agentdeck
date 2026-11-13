@@ -1,16 +1,19 @@
 //! Penpot `Centre / TopBar`: the selected workspace's name and directory, above its tabs
 //! (spec §11).
 //!
-//! The design's New agent button and right-panel toggle arrive with #13, along with the
-//! dialog and the panel they open.
+//! Its panel button toggles the right panel. The design's New agent button arrives with the
+//! new agent dialog (#13).
 
 use std::path::Path;
 
-use brrritscold_core_gpui::ActiveTheme as _;
+use brrritscold_core_gpui::{ActiveTheme as _, Button, ButtonSize, ButtonVariant, IconName};
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::{
-    App, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _, Window, div, px,
+    App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
+    Styled as _, Window, div, px,
 };
+
+use crate::keymap::ToggleRightPanel;
 
 /// The bar's height. Raw in Penpot too: no sizing token is 52px.
 const HEIGHT: f32 = 52.;
@@ -84,6 +87,19 @@ impl RenderOnce for TopBar {
                             .text_color(s.muted_foreground)
                             .child(dir),
                     ),
+            )
+            // Penpot `Spacer`, then `TogglePanel`: ghost, icon-sm, `PanelRight`.
+            .child(div().flex_1())
+            .child(
+                div().debug_selector(|| "toggle panel".into()).child(
+                    Button::new("toggle-panel")
+                        .variant(ButtonVariant::Ghost)
+                        .size(ButtonSize::IconSm)
+                        .icon(IconName::PanelRight)
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(ToggleRightPanel), cx);
+                        }),
+                ),
             )
     }
 }

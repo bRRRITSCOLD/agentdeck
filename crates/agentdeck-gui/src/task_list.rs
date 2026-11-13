@@ -6,7 +6,9 @@
 //! workspace.
 
 use agentdeck_client::types::Task;
-use agentdeck_core::{AgentState, ChecksState, ReviewState, TaskId, TaskKind, TaskStatus};
+use agentdeck_core::{
+    AgentState, ChecksState, ReviewState, TaskId, TaskKind, TaskStatus, WorkspaceId,
+};
 use gpui::SharedString;
 
 use crate::overview::Snapshot;
@@ -76,6 +78,8 @@ pub enum Scope {
     All,
     /// Tasks with no workspace: the Inbox.
     Inbox,
+    /// One workspace's tasks: the right panel.
+    Workspace(WorkspaceId),
 }
 
 /// What a list shows of the snapshot.
@@ -112,6 +116,7 @@ pub fn rows(snapshot: &Snapshot, query: &Query) -> Vec<Row> {
     let in_scope = |task: &&Task| match query.scope {
         Scope::All => true,
         Scope::Inbox => task.workspace_id.is_none(),
+        Scope::Workspace(ws) => task.workspace_id == Some(ws),
     };
     let filter = query.filter.trim().to_lowercase();
     let matches = |row: &Row| {
@@ -172,7 +177,7 @@ fn row(snapshot: &Snapshot, task: &Task) -> Row {
 #[cfg(test)]
 mod tests {
     use agentdeck_client::types::PullRequest;
-    use agentdeck_core::{Agent, PrState, WorkspaceId};
+    use agentdeck_core::{Agent, PrState};
 
     use super::*;
     use crate::overview::fixtures::{id, pane, task, workspace};
@@ -309,6 +314,31 @@ mod tests {
 
             let ids: Vec<TaskId> = rows(&snapshot, &query).into_iter().map(|r| r.id).collect();
             assert_eq!(ids, [id(2)]);
+        }
+    }
+
+    mod workspace_scope {
+        use super::*;
+
+        #[test]
+        fn should_keep_a_workspaces_list_to_its_tasks() {
+            let (a, b) = (workspace(1, "a"), workspace(2, "b"));
+            let snapshot = Snapshot {
+                tasks: vec![
+                    task(1, TaskKind::Plain, Some(a.id)),
+                    task(2, TaskKind::Plain, Some(b.id)),
+                    task(3, TaskKind::Plain, None),
+                ],
+                workspaces: vec![a.clone(), b],
+                ..Snapshot::default()
+            };
+            let query = Query {
+                scope: Scope::Workspace(a.id),
+                ..all()
+            };
+
+            let ids: Vec<TaskId> = rows(&snapshot, &query).into_iter().map(|r| r.id).collect();
+            assert_eq!(ids, [id(1)]);
         }
     }
 

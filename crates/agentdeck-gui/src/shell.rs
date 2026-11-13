@@ -18,7 +18,9 @@ use gpui::{
 use crate::connection::{Connection, Status};
 use crate::frame;
 use crate::inbox::{InboxView, Synced};
+use crate::keymap::ToggleRightPanel;
 use crate::new_workspace::{Created, NewWorkspaceDialog};
+use crate::right_panel::RightPanel;
 use crate::sidebar::{Selection, SidebarEvent, SidebarView};
 use crate::tasks::TasksView;
 use crate::title_bar::{Close, Minimize, TitleBar, ToggleMaximize};
@@ -41,6 +43,10 @@ pub struct Shell {
     tasks: Option<Entity<TasksView>>,
     /// The Inbox, while connected; shown while the sidebar selects it.
     inbox: Option<Entity<InboxView>>,
+    /// The right panel beside a workspace, while connected.
+    panel: Option<Entity<RightPanel>>,
+    /// Whether the right panel shows; the top bar's panel button flips it.
+    panel_open: bool,
     /// What the sidebar selects.
     selection: Option<Selection>,
     /// Held by the shell so the title bar's actions reach its handlers while nothing inside
@@ -71,6 +77,8 @@ impl Shell {
             workspace: None,
             tasks: None,
             inbox: None,
+            panel: None,
+            panel_open: true,
             selection: None,
             focus,
         };
@@ -89,6 +97,7 @@ impl Shell {
                     let dialog = cx.new(|cx| NewWorkspaceDialog::new(api.clone(), window, cx));
                     self.tasks = Some(cx.new(|cx| TasksView::new(api.clone(), window, cx)));
                     let inbox = cx.new(|_| InboxView::new(api.clone()));
+                    self.panel = Some(cx.new(|_| RightPanel::new(api.clone())));
                     let sidebar = cx.new(|cx| SidebarView::new(api, &connection, cx));
                     self._selection =
                         Some(cx.observe_in(&sidebar, window, |shell, _, window, cx| {
@@ -129,6 +138,7 @@ impl Shell {
                 self.workspace = None;
                 self.tasks = None;
                 self.inbox = None;
+                self.panel = None;
                 self.selection = None;
             }
         }
@@ -144,6 +154,10 @@ impl Shell {
             (sidebar.selection(), sidebar.snapshot().clone())
         };
         self.selection = Some(selection);
+        if let (Some(panel), Selection::Workspace(workspace)) = (&self.panel, selection) {
+            let snapshot = snapshot.clone();
+            panel.update(cx, |panel, cx| panel.show(workspace, snapshot, cx));
+        }
         if let Some(inbox) = &self.inbox {
             let snapshot = snapshot.clone();
             inbox.update(cx, |inbox, cx| inbox.set_snapshot(snapshot, cx));
@@ -222,7 +236,15 @@ impl Shell {
                 .child(Separator::new().orientation(SeparatorOrientation::Vertical))
                 .map(|body| match self.selection {
                     Some(Selection::Workspace(_)) if self.workspace.is_some() => {
-                        body.children(self.workspace.clone())
+                        body.children(self.workspace.clone()).when_some(
+                            self.panel.clone().filter(|_| self.panel_open),
+                            |body, panel| {
+                                body.child(
+                                    Separator::new().orientation(SeparatorOrientation::Vertical),
+                                )
+                                .child(panel)
+                            },
+                        )
                     }
                     Some(Selection::Tasks) if self.tasks.is_some() => {
                         body.children(self.tasks.clone())
@@ -253,6 +275,10 @@ impl Render for Shell {
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &ToggleMaximize, window, _| window.zoom_window())
             .on_action(|_: &Close, window, _| window.remove_window())
+            .on_action(cx.listener(|this, _: &ToggleRightPanel, _, cx| {
+                this.panel_open = !this.panel_open;
+                cx.notify();
+            }))
             // Penpot "Main window": TitleBar / Separator / Body.
             .when(client_tiling.is_some(), |shell| {
                 shell
@@ -418,6 +444,27 @@ mod tests {
                     assert!(shell.tasks.is_some());
                 });
                 assert_eq!(shown_workspace(&shell, cx), None);
+            }
+
+            #[gpui::test]
+            fn should_toggle_the_right_panel_from_its_action(cx: &mut TestAppContext) {
+                let connector = Rc::new(FakeConnector::default());
+                let _remote = connector.then_connect_to(workspace_with_a_pane());
+                let shell = open(connector, cx);
+                let window = cx.windows()[0];
+
+                let mut flip = || {
+                    window
+                        .update(cx, |_, window, cx| {
+                            window.dispatch_action(Box::new(ToggleRightPanel), cx);
+                        })
+                        .unwrap();
+                    cx.run_until_parked();
+                    shell.read_with(cx, |shell, _| shell.panel_open)
+                };
+
+                assert!(!flip());
+                assert!(flip());
             }
 
             #[gpui::test]

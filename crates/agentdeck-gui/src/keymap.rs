@@ -41,6 +41,8 @@ actions!(
         SplitDown,
         /// Closes the focused pane, asking first while it runs.
         ClosePane,
+        /// Shows or hides the right panel beside a workspace.
+        ToggleRightPanel,
         /// Copies the terminal's selection to the clipboard.
         Copy,
         /// Pastes the clipboard into the terminal.
