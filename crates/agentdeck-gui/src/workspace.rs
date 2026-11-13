@@ -6,8 +6,9 @@
 //! terminal, across reads; leaving a tab drops its panes' views, which detaches them.
 //!
 //! It handles the tab and pane shortcuts in [`keymap`]'s workspace context, opens a tab with a
-//! shell from its `NewTab` button, and carries out each pane menu's [`PaneRequest`]. Closing a
-//! pane that is still running asks first.
+//! shell from its `NewTab` button or shortcut, and carries out each pane menu's
+//! [`PaneRequest`], or the same request by shortcut on the focused pane. Closing a pane that is
+//! still running asks first. A workspace with no tabs when it opens gets a shell tab.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -32,7 +33,10 @@ use gpui::{
 
 use crate::api::{Api, PaneAt, Split, WorkspacePanes};
 use crate::connection::{Connection, DaemonEvent};
-use crate::keymap::{self, NextPane, NextTab, PreviousPane, PreviousTab, SelectTab};
+use crate::keymap::{
+    self, ClosePane, NewTab, NextPane, NextTab, PreviousPane, PreviousTab, SelectTab, SplitDown,
+    SplitRight,
+};
 use crate::pane::{PaneRequest, PaneView};
 use crate::rereads::Rereads;
 use crate::top_bar::TopBar;
@@ -73,6 +77,8 @@ pub struct WorkspaceView {
     closing_now: HashSet<PaneId>,
     /// The last read started.
     reading: Option<Task<()>>,
+    /// Whether a read has landed yet: the first one opens a shell tab in an empty workspace.
+    read_once: bool,
     rereads: Rereads,
     /// Holds the keyboard while the tab shown has no pane to.
     focus: FocusHandle,
@@ -116,6 +122,7 @@ impl WorkspaceView {
             close_dialog: DialogHandle::new(false),
             closing_now: HashSet::new(),
             reading: None,
+            read_once: false,
             rereads: Rereads::default(),
             focus: cx.focus_handle(),
             _events: events,
@@ -157,6 +164,15 @@ impl WorkspaceView {
             });
         })
         .detach();
+    }
+
+    /// Carries out `request` on the pane that has the keyboard, if one has: a shortcut.
+    fn on_focused(&mut self, request: PaneRequest, window: &mut Window, cx: &mut Context<Self>) {
+        let focused = (self.shown().into_iter())
+            .find(|pane| pane.focus_handle(cx).contains_focused(window, cx));
+        if let Some(pane) = focused {
+            self.on_request(&pane, request, window, cx);
+        }
     }
 
     fn on_request(
@@ -351,6 +367,10 @@ impl WorkspaceView {
             .filter(|selected| self.read.tabs.iter().any(|tab| tab.id == *selected));
         self.selected = kept.or_else(|| self.read.tabs.first().map(|tab| tab.id));
         self.sync(window, cx);
+        // A workspace opened with no tabs gets a shell; one emptied while shown stays empty.
+        if !std::mem::replace(&mut self.read_once, true) && self.read.tabs.is_empty() {
+            self.new_tab(window, cx);
+        }
     }
 
     /// The selected tab's layout, if it has a pane.
@@ -536,6 +556,16 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(|this, _: &NextPane, window, cx| this.step_pane(1, window, cx)))
             .on_action(cx.listener(|this, _: &PreviousPane, window, cx| {
                 this.step_pane(-1, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
+            .on_action(cx.listener(|this, _: &SplitRight, window, cx| {
+                this.on_focused(PaneRequest::Split(SplitDirection::Horizontal), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SplitDown, window, cx| {
+                this.on_focused(PaneRequest::Split(SplitDirection::Vertical), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ClosePane, window, cx| {
+                this.on_focused(PaneRequest::Close, window, cx);
             }))
             .flex_1()
             .min_w_0()
@@ -1031,6 +1061,102 @@ mod tests {
                 assert_eq!(harness.focused(cx), Some(id(21)));
             }
         }
+        mod pane_actions {
+            use super::*;
+
+            /// A split of `a` and `b` in `direction`, half each.
+            fn halves(direction: SplitDirection, a: Layout, b: Layout) -> Layout {
+                Layout::Split {
+                    split: direction,
+                    ratio: Ratio::HALF,
+                    a: Box::new(a),
+                    b: Box::new(b),
+                }
+            }
+
+            #[gpui::test]
+            fn should_open_a_tab_with_a_shell(cx: &mut TestAppContext) {
+                let (harness, cx) = three_tabs(cx);
+
+                cx.simulate_keystrokes("secondary-shift-t");
+
+                assert_eq!(harness.selected(cx), Some(id(101)));
+                assert_eq!(harness.focused(cx), Some(id(102)));
+            }
+
+            #[gpui::test]
+            fn should_split_the_focused_pane_right(cx: &mut TestAppContext) {
+                let (harness, cx) = three_tabs(cx);
+
+                cx.simulate_keystrokes("secondary-shift-e");
+
+                assert_eq!(
+                    harness.api.layout(id(1), id(1)),
+                    Some(halves(
+                        SplitDirection::Horizontal,
+                        Layout::single(id(11)),
+                        Layout::single(id(101))
+                    ))
+                );
+                assert_eq!(harness.focused(cx), Some(id(101)));
+            }
+
+            #[gpui::test]
+            fn should_split_the_focused_pane_down(cx: &mut TestAppContext) {
+                let (harness, cx) = three_tabs(cx);
+                cx.simulate_keystrokes("alt-2 secondary-shift-down");
+
+                cx.simulate_keystrokes("secondary-shift-o");
+
+                assert_eq!(
+                    harness.api.layout(id(1), id(2)),
+                    Some(halves(
+                        SplitDirection::Horizontal,
+                        Layout::single(id(21)),
+                        halves(
+                            SplitDirection::Vertical,
+                            Layout::single(id(22)),
+                            Layout::single(id(101))
+                        )
+                    ))
+                );
+            }
+
+            #[gpui::test]
+            fn should_ask_before_closing_the_focused_running_pane(cx: &mut TestAppContext) {
+                let (harness, cx) = three_tabs(cx);
+                cx.simulate_keystrokes("alt-2 secondary-shift-down");
+
+                cx.simulate_keystrokes("secondary-shift-w");
+
+                assert_eq!(harness.closing(cx), Some(id(22)));
+                assert_eq!(harness.closed(), []);
+            }
+
+            #[gpui::test]
+            fn should_close_the_focused_exited_pane_at_once(cx: &mut TestAppContext) {
+                let tabs = vec![tab(1, id(1), 0, Some(id(11)))];
+                let pane = Pane {
+                    state: AgentState::Exited,
+                    ..shell_pane(11, id(1))
+                };
+                let (harness, cx) = Harness::open(tabs, vec![pane], cx);
+
+                cx.simulate_keystrokes("secondary-shift-w");
+
+                assert_eq!(harness.closed(), [id(11)]);
+            }
+
+            #[gpui::test]
+            fn should_do_nothing_to_panes_on_a_tab_with_none(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open(vec![tab(1, id(1), 0, None)], vec![], cx);
+
+                cx.simulate_keystrokes("secondary-shift-e secondary-shift-w");
+
+                assert_eq!(harness.api.layout(id(1), id(1)), None);
+                assert_eq!(harness.closed(), []);
+            }
+        }
     }
 
     mod new_tab {
@@ -1063,6 +1189,27 @@ mod tests {
                 .pane(0, cx)
                 .read_with(cx, |pane, _| pane.pane().cwd.clone());
             assert_eq!(cwd, "/w/agentdeck");
+        }
+
+        #[gpui::test]
+        fn should_open_one_when_the_workspace_has_none(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(vec![], vec![], cx);
+
+            assert_eq!(harness.selected(cx), Some(id(101)));
+            assert_eq!(harness.shown(cx), [id(102)]);
+        }
+
+        #[gpui::test]
+        fn should_leave_the_workspace_empty_once_its_last_tab_closes(cx: &mut TestAppContext) {
+            let pane = Pane {
+                state: AgentState::Exited,
+                ..shell_pane(11, id(1))
+            };
+            let (harness, cx) = Harness::open(vec![tab(1, id(1), 0, Some(id(11)))], vec![pane], cx);
+
+            cx.simulate_keystrokes("secondary-shift-w");
+
+            assert_eq!(harness.selected(cx), None);
         }
 
         #[gpui::test]
