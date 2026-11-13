@@ -19,7 +19,7 @@ use alacritty_terminal::vte::ansi::CursorShape;
 const LINE_HEIGHT: f32 = 1.2;
 
 /// The symbol fonts the terminal falls back to, in order (see `assets/fonts/README.md`).
-const SYMBOL_FAMILIES: [&str; 2] = ["Noto Sans Symbols 2", "Noto Sans Symbols"];
+pub const SYMBOL_FAMILIES: [&str; 2] = ["Noto Sans Symbols 2", "Noto Sans Symbols"];
 
 /// JetBrains Mono's italic faces, which core-gpui doesn't bundle, then the symbol fonts.
 const FONTS: [&[u8]; 4] = [

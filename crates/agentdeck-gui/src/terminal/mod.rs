@@ -7,6 +7,7 @@ mod palette;
 mod screen;
 mod view;
 
+pub use element::SYMBOL_FAMILIES;
 pub use view::{TerminalEvent, TerminalView};
 
 /// Registers the terminal's fonts; call once, before the first window.

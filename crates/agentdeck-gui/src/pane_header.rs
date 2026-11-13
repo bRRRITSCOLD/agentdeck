@@ -10,6 +10,36 @@ use gpui::{
 };
 
 use crate::state_dot::{StateDot, StateDotState};
+use crate::terminal::SYMBOL_FAMILIES;
+
+/// A stretch of a title, and whether it is symbols to set in the symbol font.
+type Run<'a> = (&'a str, bool);
+
+/// Whether `c` is a symbol agents put in titles (`✳`, `✻`, `⚠`) that Inter lacks: the
+/// Miscellaneous Symbols and Dingbats blocks. GPUI's Linux text system ignores a font's
+/// fallbacks and finds these in a colour emoji font, so the header sets them in a symbol
+/// font itself.
+fn is_symbol(c: char) -> bool {
+    matches!(c, '\u{2600}'..='\u{27BF}')
+}
+
+/// `title` split into runs of symbols and of everything else, in order.
+fn runs(title: &str) -> Vec<Run<'_>> {
+    let mut runs = Vec::new();
+    let (mut start, mut current) = (0, None);
+    for (at, c) in title.char_indices() {
+        let symbol = is_symbol(c);
+        if current.is_some_and(|run| run != symbol) {
+            runs.push((&title[start..at], !symbol));
+            start = at;
+        }
+        current = Some(symbol);
+    }
+    if let Some(symbol) = current {
+        runs.push((&title[start..], symbol));
+    }
+    runs
+}
 
 /// The `StateBadge` part's variant and label for a pane in `state`; `exit_code` tells a
 /// failed exit from a clean one and is shown when known.
@@ -68,6 +98,16 @@ impl RenderOnce for PaneHeader {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let s = cx.theme().semantic();
         let (variant, label) = state_badge(self.state, self.exit_code);
+        let title = runs(&self.title).into_iter().map(|(run, symbol)| {
+            let run = div()
+                .whitespace_nowrap()
+                .child(SharedString::from(run.to_owned()));
+            if symbol {
+                run.flex_none().font_family(SYMBOL_FAMILIES[0])
+            } else {
+                run.min_w_0().overflow_hidden().text_ellipsis()
+            }
+        });
         // Penpot: `card`, 36px high (raw in Penpot too), px `space.3`, `space.2` apart. The
         // pane's corners clip it there; GPUI doesn't clip to a radius, so it rounds its own top.
         div()
@@ -84,13 +124,12 @@ impl RenderOnce for PaneHeader {
             .child(
                 div()
                     .min_w_0()
+                    .flex()
+                    .overflow_hidden()
                     .text_size(font_size::SM)
                     .font_weight(font_weight::MEDIUM)
                     .text_color(s.foreground)
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .child(self.title),
+                    .children(title),
             )
             .child(
                 div()
@@ -130,6 +169,36 @@ impl RenderOnce for PaneHeader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod runs {
+        use super::*;
+
+        #[test]
+        fn should_set_a_leading_symbol_apart() {
+            assert_eq!(
+                runs("✳ Claude Code"),
+                [("✳", true), (" Claude Code", false)]
+            );
+        }
+
+        #[test]
+        fn should_keep_a_title_without_symbols_whole() {
+            assert_eq!(runs("zsh — ts-packages"), [("zsh — ts-packages", false)]);
+        }
+
+        #[test]
+        fn should_split_around_each_run_of_symbols() {
+            assert_eq!(
+                runs("a ✻✳ b ⚠"),
+                [("a ", false), ("✻✳", true), (" b ", false), ("⚠", true)]
+            );
+        }
+
+        #[test]
+        fn should_make_no_runs_of_an_empty_title() {
+            assert!(runs("").is_empty());
+        }
+    }
 
     mod state_badge {
         use super::*;
