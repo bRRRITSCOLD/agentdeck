@@ -7,6 +7,7 @@ mod api;
 mod connection;
 mod count;
 mod frame;
+mod keymap;
 mod overview;
 mod pane;
 mod pane_header;
@@ -38,6 +39,7 @@ fn main() {
         brrritscold_core_gpui::init(cx);
         runtime::init(cx);
         terminal::init(cx);
+        keymap::init(cx);
         let connection = cx.new(|cx| Connection::new(Rc::new(DaemonConnector), cx));
         let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
         cx.open_window(

@@ -4,6 +4,8 @@
 //! It reads the workspace's tabs, panes and linked tasks when it opens and again whenever the
 //! daemon reports a tab, pane or task `changed`. Each shown pane keeps its view, and so its
 //! terminal, across reads; leaving a tab drops its panes' views, which detaches them.
+//!
+//! It handles the tab and pane shortcuts in [`keymap`]'s workspace context.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,13 +20,14 @@ use brrritscold_core_gpui::{
 use brrritscold_core_gpui_tokens::primitive::space;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, Context, Div, Entity, Focusable as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, div,
-    relative,
+    AnyElement, AppContext as _, Context, Div, Entity, FocusHandle, Focusable as _,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
+    Subscription, Task, Window, div, relative,
 };
 
 use crate::api::{Api, WorkspacePanes};
 use crate::connection::{Connection, DaemonEvent};
+use crate::keymap::{self, NextPane, NextTab, PreviousPane, PreviousTab, SelectTab};
 use crate::pane::PaneView;
 
 /// Where the read stands.
@@ -52,6 +55,8 @@ pub struct WorkspaceView {
     panes: HashMap<PaneId, Entity<PaneView>>,
     /// The read in flight; replaced by a newer one.
     reading: Option<Task<()>>,
+    /// Holds the keyboard while the tab shown has no pane to.
+    focus: FocusHandle,
     _events: Subscription,
 }
 
@@ -85,6 +90,7 @@ impl WorkspaceView {
             selected: None,
             panes: HashMap::new(),
             reading: None,
+            focus: cx.focus_handle(),
             _events: events,
         };
         view.reread(window, cx);
@@ -111,8 +117,43 @@ impl WorkspaceView {
         self.selected
     }
 
+    /// Shows the tab `step` places along from the one shown, wrapping around.
+    fn step_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let tabs = &self.read.tabs;
+        let Some(at) =
+            (self.selected).and_then(|selected| tabs.iter().position(|tab| tab.id == selected))
+        else {
+            return;
+        };
+        let to = (at as isize + step).rem_euclid(tabs.len() as isize) as usize;
+        self.select(tabs[to].id, window, cx);
+    }
+
+    /// Shows the tab at `index`, if there is one.
+    fn select_index(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab) = self.read.tabs.get(index) {
+            self.select(tab.id, window, cx);
+        }
+    }
+
+    /// Focuses the pane `step` places along from the focused one in layout order, wrapping
+    /// around; the first or last pane when none has focus.
+    fn step_pane(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let shown = self.shown();
+        let focused = shown
+            .iter()
+            .position(|pane| pane.focus_handle(cx).contains_focused(window, cx));
+        let to = match focused {
+            Some(at) => (at as isize + step).rem_euclid(shown.len() as isize) as usize,
+            None if step > 0 => 0,
+            None => shown.len().wrapping_sub(1),
+        };
+        if let Some(pane) = shown.get(to) {
+            window.focus(&pane.focus_handle(cx), cx);
+        }
+    }
+
     /// The panes it shows, left to right and top to bottom.
-    #[cfg(test)]
     pub fn shown(&self) -> Vec<Entity<PaneView>> {
         self.layout()
             .map(|layout| layout.panes())
@@ -165,7 +206,8 @@ impl WorkspaceView {
     }
 
     /// Makes `panes` the selected tab's: keeps and updates the views of panes still in it,
-    /// makes the new ones, and drops the rest. A tab shown afresh focuses its first pane.
+    /// makes the new ones, and drops the rest. A tab shown afresh focuses its first pane, or
+    /// the workspace itself when it has none, so the shortcuts still reach it.
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let wanted = self.layout().map(Layout::panes).unwrap_or_default();
         let fresh = !wanted.iter().any(|pane| self.panes.contains_key(pane));
@@ -190,8 +232,11 @@ impl WorkspaceView {
             panes.insert(*id, view);
         }
         self.panes = panes;
-        if fresh && let Some(first) = wanted.first().and_then(|pane| self.panes.get(pane)) {
-            window.focus(&first.focus_handle(cx), cx);
+        if fresh {
+            match wanted.first().and_then(|pane| self.panes.get(pane)) {
+                Some(first) => window.focus(&first.focus_handle(cx), cx),
+                None => window.focus(&self.focus, cx),
+            }
         }
     }
 
@@ -250,7 +295,27 @@ impl WorkspaceView {
 
 impl Render for WorkspaceView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let view = div().flex_1().min_w_0().min_h_0().flex().flex_col();
+        let view = div()
+            .key_context(keymap::WORKSPACE)
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &NextTab, window, cx| this.step_tab(1, window, cx)))
+            .on_action(cx.listener(|this, _: &PreviousTab, window, cx| {
+                this.step_tab(-1, window, cx);
+            }))
+            .on_action(
+                cx.listener(|this, SelectTab(index): &SelectTab, window, cx| {
+                    this.select_index(*index, window, cx);
+                }),
+            )
+            .on_action(cx.listener(|this, _: &NextPane, window, cx| this.step_pane(1, window, cx)))
+            .on_action(cx.listener(|this, _: &PreviousPane, window, cx| {
+                this.step_pane(-1, window, cx);
+            }))
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col();
         match &self.status {
             Status::Loading => view,
             Status::Failed(reason) => view.child(self.message(reason.clone(), cx)),
@@ -303,6 +368,7 @@ mod tests {
         ) -> (Harness, &mut VisualTestContext) {
             cx.update(brrritscold_core_gpui::init);
             cx.update(crate::terminal::init);
+            cx.update(crate::keymap::init);
             let api = Arc::new(FakeApi::default());
             api.set_tabs(id(1), tabs);
             api.set_panes(panes);
@@ -354,6 +420,17 @@ mod tests {
 
         fn selected(&self, cx: &mut VisualTestContext) -> Option<TabId> {
             self.view.read_with(cx, |view, _| view.selected())
+        }
+
+        /// The pane whose terminal has the keyboard.
+        fn focused(&self, cx: &mut VisualTestContext) -> Option<PaneId> {
+            let shown = self.view.read_with(cx, |view, _| view.shown());
+            cx.update(|window, cx| {
+                shown
+                    .iter()
+                    .find(|pane| pane.focus_handle(cx).is_focused(window))
+                    .map(|pane| pane.read(cx).id())
+            })
         }
 
         fn select(&self, tab: TabId, cx: &mut VisualTestContext) {
@@ -569,6 +646,108 @@ mod tests {
             }
 
             assert_eq!(harness.shown(cx), [id(7), id(8), id(9)]);
+        }
+    }
+
+    mod shortcuts {
+        use super::*;
+
+        /// Tabs 1, 2 and 3, at positions 0, 1 and 2, with panes 11, 21 + 22 and 31.
+        fn three_tabs(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
+            let tabs = vec![
+                tab(1, id(1), 0, Some(id(11))),
+                split_tab(2, 1, 21, 22),
+                tab(3, id(1), 2, Some(id(31))),
+            ];
+            let panes = vec![
+                shell_pane(11, id(1)),
+                shell_pane(21, id(2)),
+                shell_pane(22, id(2)),
+                shell_pane(31, id(3)),
+            ];
+            Harness::open(tabs, panes, cx)
+        }
+
+        mod tabs {
+            use super::*;
+
+            #[gpui::test]
+            fn should_show_the_next_tab_and_wrap_to_the_first(cx: &mut TestAppContext) {
+                let (harness, cx) = three_tabs(cx);
+
+                cx.simulate_keystrokes("ctrl-pagedown ctrl-tab");
+                assert_eq!(harness.selected(cx), Some(id(3)));
+
+                cx.simulate_keystrokes("ctrl-pagedown");
+                assert_eq!(harness.selected(cx), Some(id(1)));
+            }
+
+            #[gpui::test]
+            fn should_show_the_previous_tab_and_wrap_to_the_last(cx: &mut TestAppContext) {
+                let (harness, cx) = three_tabs(cx);
+
+                cx.simulate_keystrokes("ctrl-pageup");
+                assert_eq!(harness.selected(cx), Some(id(3)));
+
+                cx.simulate_keystrokes("ctrl-shift-tab");
+                assert_eq!(harness.selected(cx), Some(id(2)));
+            }
+
+            #[gpui::test]
+            fn should_show_the_tab_by_its_number(cx: &mut TestAppContext) {
+                let (harness, cx) = three_tabs(cx);
+
+                cx.simulate_keystrokes("alt-3");
+
+                assert_eq!(harness.selected(cx), Some(id(3)));
+            }
+
+            #[gpui::test]
+            fn should_ignore_a_number_past_the_last_tab(cx: &mut TestAppContext) {
+                let (harness, cx) = three_tabs(cx);
+
+                cx.simulate_keystrokes("alt-2 alt-9");
+
+                assert_eq!(harness.selected(cx), Some(id(2)));
+            }
+
+            #[gpui::test]
+            fn should_keep_the_keyboard_on_a_tab_with_no_panes(cx: &mut TestAppContext) {
+                let tabs = vec![tab(1, id(1), 0, None), tab(2, id(1), 1, Some(id(21)))];
+                let (harness, cx) = Harness::open(tabs, vec![shell_pane(21, id(2))], cx);
+
+                cx.simulate_keystrokes("ctrl-tab");
+
+                assert_eq!(harness.selected(cx), Some(id(2)));
+            }
+        }
+
+        mod panes {
+            use super::*;
+
+            #[gpui::test]
+            fn should_focus_the_next_pane_and_wrap_to_the_first(cx: &mut TestAppContext) {
+                let (harness, cx) = three_tabs(cx);
+                cx.simulate_keystrokes("alt-2");
+
+                cx.simulate_keystrokes("secondary-shift-down");
+                assert_eq!(harness.focused(cx), Some(id(22)));
+
+                cx.simulate_keystrokes("secondary-shift-down");
+                assert_eq!(harness.focused(cx), Some(id(21)));
+            }
+
+            #[gpui::test]
+            fn should_focus_the_previous_pane_and_wrap_to_the_last(cx: &mut TestAppContext) {
+                let (harness, cx) = three_tabs(cx);
+                cx.simulate_keystrokes("alt-2");
+
+                cx.simulate_keystrokes("secondary-shift-up");
+                assert_eq!(harness.focused(cx), Some(id(22)));
+
+                cx.simulate_keystrokes("secondary-shift-up");
+                assert_eq!(harness.focused(cx), Some(id(21)));
+            }
         }
     }
 

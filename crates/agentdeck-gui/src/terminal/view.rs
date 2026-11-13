@@ -632,14 +632,12 @@ mod tests {
 
             harness.attached(10, 2, b"", cx);
 
-            let sent = harness.sent();
-            assert!(
-                matches!(
-                    sent.as_slice(),
-                    [Outgoing::Message(ClientMessage::Resize { .. }), primary] if *primary == PRIMARY
-                ),
-                "{sent:?}"
-            );
+            let [resize, primary] = harness.sent().try_into().expect("a resize, then primary");
+            assert!(matches!(
+                resize,
+                Outgoing::Message(ClientMessage::Resize { .. })
+            ));
+            assert_eq!(primary, PRIMARY);
         }
 
         #[gpui::test]
