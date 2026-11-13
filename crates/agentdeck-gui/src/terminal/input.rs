@@ -85,6 +85,16 @@ pub fn paste(text: &str, bracketed: bool) -> Vec<u8> {
     }
 }
 
+/// What turning the wheel `lines` notches on the alternate screen sends: an up arrow per
+/// notch up (positive), a down arrow per notch down, as DECCKM has the cursor keys send them.
+pub fn scroll_keys(lines: i32, app_cursor: bool) -> Vec<u8> {
+    let prefix: &[u8] = if app_cursor { b"\x1bO" } else { b"\x1b[" };
+    let arrow = if lines > 0 { b'A' } else { b'B' };
+    [prefix, &[arrow]]
+        .concat()
+        .repeat(lines.unsigned_abs() as usize)
+}
+
 /// A mouse button a program can hear of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {

@@ -9,9 +9,9 @@ use std::rc::Rc;
 use brrritscold_core_gpui_tokens::primitive::{font_family, font_size};
 use gpui::{
     App, BorderStyle, Bounds, DispatchPhase, Font, FontFallbacks, FontFeatures, FontStyle,
-    FontWeight, Hsla, IntoElement, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Point,
-    SharedString, Size, StrikethroughStyle, Styled as _, TextAlign, TextRun, UnderlineStyle,
-    Window, canvas, fill, outline, point, px, size,
+    FontWeight, Hsla, IntoElement, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size,
+    StrikethroughStyle, Styled as _, TextAlign, TextRun, UnderlineStyle, Window, canvas, fill,
+    outline, point, px, size,
 };
 
 use super::screen::{Cursor, Frame, GridSize, Hit};
@@ -125,19 +125,19 @@ impl Layout {
     }
 }
 
-/// What the left button does, wherever the pointer is: a drag that started on a terminal
+/// What a held mouse button does, wherever the pointer is: a drag that started on a terminal
 /// goes on past its edges and over other views.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Pointer {
-    /// Moved with the button held, to this window position.
-    Dragged(Point<Pixels>),
-    /// Let go.
-    Released,
+    /// Moved with a button held.
+    Dragged(MouseMoveEvent),
+    /// Let go of a button.
+    Released(MouseUpEvent),
 }
 
 /// Paints `frame` over `background`, filling its parent. Each layout reports where the grid
-/// sits and the grid that fits to `on_layout`, before painting; every left-button drag and
-/// release in the window goes to `on_pointer`.
+/// sits and the grid that fits to `on_layout`, before painting; every drag and button release
+/// in the window goes to `on_pointer`.
 pub fn terminal(
     frame: Frame,
     background: Hsla,
@@ -160,15 +160,13 @@ pub fn terminal(
             let on_pointer = Rc::new(on_pointer);
             let dragged = on_pointer.clone();
             window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-                if phase == DispatchPhase::Capture
-                    && event.pressed_button == Some(MouseButton::Left)
-                {
-                    dragged(Pointer::Dragged(event.position), window, cx);
+                if phase == DispatchPhase::Capture && event.pressed_button.is_some() {
+                    dragged(Pointer::Dragged(event.clone()), window, cx);
                 }
             });
             window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
-                if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
-                    on_pointer(Pointer::Released, window, cx);
+                if phase == DispatchPhase::Capture {
+                    on_pointer(Pointer::Released(event.clone()), window, cx);
                 }
             });
             window.paint_quad(fill(bounds, background));
