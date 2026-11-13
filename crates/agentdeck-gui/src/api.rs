@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 use agentdeck_client::daemon::Daemon;
 use agentdeck_client::panes::{self, pane_if_any};
-use agentdeck_client::types::{NewWorkspace, Pane, Tab, TaskPatch};
+use agentdeck_client::types::{NewNote, NewWorkspace, Pane, Tab, TaskPatch};
 use agentdeck_client::{ApiError, Client};
 use agentdeck_core::{PaneId, SplitDirection, TabId, TaskId, TaskStatus, WorkspaceId};
 use gpui::{App, Task};
@@ -54,6 +54,9 @@ pub trait Api: Send + Sync {
 
     /// Syncs PRs now, returning once the sync is done.
     fn sync_prs(&self, cx: &App) -> Task<anyhow::Result<()>>;
+
+    /// Leaves a note with `body` on `workspace`.
+    fn new_note(&self, workspace: WorkspaceId, body: String, cx: &App) -> Task<anyhow::Result<()>>;
 }
 
 pub use agentdeck_client::panes::PaneAt;
@@ -152,6 +155,24 @@ impl Api for Daemon {
         let client = self.client.clone();
         runtime::spawn(cx, async move {
             client.prs_sync().send().await.map_err(ApiError::from)?;
+            Ok(())
+        })
+    }
+
+    fn new_note(&self, workspace: WorkspaceId, body: String, cx: &App) -> Task<anyhow::Result<()>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            let note = NewNote {
+                body,
+                task_id: None,
+                workspace_id: Some(workspace),
+            };
+            client
+                .note_create()
+                .body(note)
+                .send()
+                .await
+                .map_err(ApiError::from)?;
             Ok(())
         })
     }
@@ -259,6 +280,8 @@ pub(crate) mod fake {
         pub made_workspaces: Mutex<Vec<Request>>,
         /// How many PR syncs were asked for.
         pub syncs: Mutex<usize>,
+        /// The notes left, with the workspace each is on.
+        pub notes_left: Mutex<Vec<(WorkspaceId, String)>>,
         /// The panes closed, in order.
         pub closed: Mutex<Vec<PaneId>>,
     }
@@ -481,6 +504,19 @@ pub(crate) mod fake {
                 return Task::ready(Err(err));
             }
             *self.syncs.lock().unwrap() += 1;
+            Task::ready(Ok(()))
+        }
+
+        fn new_note(
+            &self,
+            workspace: WorkspaceId,
+            body: String,
+            _cx: &App,
+        ) -> Task<anyhow::Result<()>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            self.notes_left.lock().unwrap().push((workspace, body));
             Task::ready(Ok(()))
         }
     }
