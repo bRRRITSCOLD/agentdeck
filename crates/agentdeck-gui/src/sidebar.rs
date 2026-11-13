@@ -102,7 +102,6 @@ impl SidebarView {
     }
 
     /// The sidebar's content.
-    #[cfg(test)]
     pub fn overview(&self) -> &Overview {
         &self.overview
     }

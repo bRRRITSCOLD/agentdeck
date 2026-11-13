@@ -1,5 +1,5 @@
-//! The selected workspace (spec §11), Penpot "Main window" `Centre`: a row of tabs over the
-//! selected tab's split tree, a [`PaneView`] at each leaf.
+//! The selected workspace (spec §11), Penpot "Main window" `Centre`: its [`TopBar`], then a
+//! row of tabs over the selected tab's split tree, a [`PaneView`] at each leaf.
 //!
 //! It reads the workspace's tabs, panes and linked tasks when it opens and again whenever the
 //! daemon reports a tab, pane or task `changed`. Each shown pane keeps its view, and so its
@@ -29,6 +29,7 @@ use crate::api::{Api, WorkspacePanes};
 use crate::connection::{Connection, DaemonEvent};
 use crate::keymap::{self, NextPane, NextTab, PreviousPane, PreviousTab, SelectTab};
 use crate::pane::PaneView;
+use crate::top_bar::TopBar;
 
 /// Where the read stands.
 enum Status {
@@ -43,6 +44,7 @@ enum Status {
 /// One workspace's tabs and panes.
 pub struct WorkspaceView {
     workspace: WorkspaceId,
+    top_bar: TopBar,
     api: Arc<dyn Api>,
     connection: Entity<Connection>,
     sender: ws::Sender,
@@ -61,10 +63,11 @@ pub struct WorkspaceView {
 }
 
 impl WorkspaceView {
-    /// `workspace`, read through `api` and attached over `connection`'s socket through
-    /// `sender`. It starts reading at once.
+    /// `workspace`, headed by `top_bar`, read through `api` and attached over `connection`'s
+    /// socket through `sender`. It starts reading at once.
     pub fn new(
         workspace: WorkspaceId,
+        top_bar: TopBar,
         api: Arc<dyn Api>,
         connection: Entity<Connection>,
         sender: ws::Sender,
@@ -82,6 +85,7 @@ impl WorkspaceView {
         });
         let mut view = WorkspaceView {
             workspace,
+            top_bar,
             api,
             connection,
             sender,
@@ -100,6 +104,20 @@ impl WorkspaceView {
     /// The workspace it shows.
     pub fn workspace(&self) -> WorkspaceId {
         self.workspace
+    }
+
+    /// Heads it with `top_bar`, as the workspace now reads.
+    pub fn set_top_bar(&mut self, top_bar: TopBar, cx: &mut Context<Self>) {
+        if self.top_bar != top_bar {
+            self.top_bar = top_bar;
+            cx.notify();
+        }
+    }
+
+    /// The bar heading it.
+    #[cfg(test)]
+    pub fn top_bar(&self) -> &TopBar {
+        &self.top_bar
     }
 
     /// Shows the tab `tab`, if the workspace has it.
@@ -315,14 +333,16 @@ impl Render for WorkspaceView {
             .min_w_0()
             .min_h_0()
             .flex()
-            .flex_col();
+            .flex_col()
+            // Penpot `Centre`: TopBar / TabsRow / Separator / Panes.
+            .child(self.top_bar.clone());
         match &self.status {
             Status::Loading => view,
             Status::Failed(reason) => view.child(self.message(reason.clone(), cx)),
             Status::Ready if self.read.tabs.is_empty() => {
                 view.child(self.message("No tabs in this workspace yet", cx))
             }
-            // Penpot `Centre`: TabsRow / Separator / Panes, the panes `space.2` in.
+            // The panes `space.2` in.
             Status::Ready => {
                 view.child(self.tabs_row(cx))
                     .child(Separator::new())
@@ -386,6 +406,7 @@ mod tests {
                 let workspace = cx.new(|cx| {
                     WorkspaceView::new(
                         id(1),
+                        TopBar::new("agentdeck", "/w/agentdeck"),
                         session.api,
                         connection.clone(),
                         session.sender,
