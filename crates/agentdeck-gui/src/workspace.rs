@@ -184,7 +184,7 @@ impl WorkspaceView {
                 }
                 None => {
                     let (connection, sender) = (&self.connection, self.sender.clone());
-                    cx.new(|cx| PaneView::new(pane, task, connection, sender, cx))
+                    cx.new(|cx| PaneView::new(pane, task, connection, sender, window, cx))
                 }
             };
             panes.insert(*id, view);
