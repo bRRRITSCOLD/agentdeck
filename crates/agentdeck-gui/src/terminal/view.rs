@@ -16,6 +16,8 @@
 //! and the scrollback. Otherwise the wheel scrolls the scrollback, or on the alternate screen
 //! sends an arrow key per line (DECSET 1007).
 
+use std::ops::Range;
+
 use agentdeck_client::ws;
 use agentdeck_core::PaneId;
 use agentdeck_core::ws::{Channel, ClientMessage, ServerMessage};
@@ -23,10 +25,11 @@ use brrritscold_core_gpui::ActiveTheme as _;
 use brrritscold_core_gpui_tokens::primitive::space;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent,
-    MouseMoveEvent, ParentElement as _, Pixels, Point, Render, ScrollEvent, SharedString,
-    Styled as _, Subscription, Window, div,
+    App, Bounds, ClipboardItem, Context, ElementInputHandler, Entity, EntityInputHandler,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyDownEvent,
+    Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Pixels, Point,
+    Render, ScrollEvent, SharedString, Styled as _, Subscription, UTF16Selection, Window, canvas,
+    div,
 };
 
 use super::element::{Layout, Metrics, Pointer, terminal};
@@ -76,6 +79,8 @@ pub struct TerminalView {
     held: Option<Held>,
     /// The cell the mouse was last reported at, so a move is reported once per cell.
     reported: Option<(usize, usize)>,
+    /// What an input method is composing, shown at the cursor until it commits.
+    marked: Option<String>,
     focus: FocusHandle,
     _subscriptions: [Subscription; 2],
 }
@@ -104,6 +109,7 @@ impl TerminalView {
             layout: None,
             held: None,
             reported: None,
+            marked: None,
             focus,
             _subscriptions: [events, activation],
         };
@@ -411,6 +417,39 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// What a live terminal shows, with any composition at the cursor.
+    fn frame(&self, palette: &Palette, focused: bool) -> Frame {
+        let Attachment::Live(screen) = &self.attachment else {
+            return blank();
+        };
+        let mut frame = screen.frame(palette, focused);
+        frame.preedit = self
+            .marked
+            .as_deref()
+            .and_then(|text| screen.preedit(text, palette));
+        frame
+    }
+
+    /// Types text an input method or a dead key committed.
+    fn commit(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.marked = None;
+        cx.notify();
+        let Attachment::Live(screen) = &mut self.attachment else {
+            return;
+        };
+        if !text.is_empty() {
+            screen.scroll_to_bottom();
+            let _ = self.sender.input(self.channel, text.as_bytes());
+        }
+    }
+
+    /// The composition's length in UTF-16 code units, as input methods count.
+    fn marked_len(&self) -> usize {
+        self.marked
+            .as_deref()
+            .map_or(0, |text| text.encode_utf16().count())
+    }
+
     /// The visible text, for tests.
     #[cfg(test)]
     pub fn text(&self) -> Option<Vec<String>> {
@@ -432,6 +471,95 @@ impl TerminalView {
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
 
+/// Input methods and dead keys, after GNOME Terminal: a composition shows at the cursor and
+/// reaches the pane only when committed. The terminal has no text to edit, so the ranges an
+/// input method passes are ignored.
+impl EntityInputHandler for TerminalView {
+    fn text_for_range(
+        &mut self,
+        _: Range<usize>,
+        _: &mut Option<Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<String> {
+        None
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _: bool,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        // The caret sits at the end of any composition.
+        let end = self.marked_len();
+        Some(UTF16Selection {
+            range: end..end,
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
+        self.marked.as_ref().map(|_| 0..self.marked_len())
+    }
+
+    fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.marked = None;
+        cx.notify();
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        _: Option<Range<usize>>,
+        text: &str,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.commit(text, cx);
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _: Option<Range<usize>>,
+        text: &str,
+        _: Option<Range<usize>>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.marked = (!text.is_empty()).then(|| text.to_owned());
+        cx.notify();
+    }
+
+    /// The cursor's cell, so the candidate window opens beside it.
+    fn bounds_for_range(
+        &mut self,
+        _: Range<usize>,
+        _: Bounds<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        let (Attachment::Live(screen), Some(layout)) = (&self.attachment, self.layout) else {
+            return None;
+        };
+        let (line, col) = screen.cursor_cell()?;
+        let origin = layout.origin
+            + gpui::point(
+                layout.cell.width * col as f32,
+                layout.cell.height * line as f32,
+            );
+        Some(Bounds::new(origin, layout.cell))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _: Point<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
+    }
+}
+
 impl Drop for TerminalView {
     fn drop(&mut self) {
         let _ = self.sender.send(ClientMessage::Detach {
@@ -452,7 +580,7 @@ impl Render for TerminalView {
         let palette = Palette::new(mode);
         let focused = self.focus.is_focused(window);
         let (frame, status) = match &self.attachment {
-            Attachment::Live(screen) => (screen.frame(&palette, focused), None),
+            Attachment::Live(_) => (self.frame(&palette, focused), None),
             Attachment::Attaching | Attachment::AwaitingSnapshot(_) => (blank(), None),
             Attachment::Refused(reason) => (blank(), Some(reason.clone())),
         };
@@ -462,6 +590,19 @@ impl Render for TerminalView {
             move |layout, _: &mut Window, cx: &mut App| {
                 let _ = this.update(cx, |this, cx| this.set_layout(layout, cx));
             }
+        };
+        // Registered each frame while focused: input methods and dead keys commit through it.
+        let input = {
+            let focus = self.focus.clone();
+            let view = cx.entity();
+            canvas(
+                |_, _, _| {},
+                move |bounds, _, window, cx| {
+                    window.handle_input(&focus, ElementInputHandler::new(bounds, view), cx);
+                },
+            )
+            .absolute()
+            .size_full()
         };
         let on_pointer = move |pointer, _: &mut Window, cx: &mut App| {
             let _ = this.update(cx, |this, cx| this.on_pointer(pointer, cx));
@@ -485,6 +626,7 @@ impl Render for TerminalView {
             .on_key_down(cx.listener(Self::on_key_down))
             .on_scroll(cx.listener(Self::on_scroll))
             .child(terminal(frame, palette.background, on_layout, on_pointer))
+            .child(input)
             .when_some(status, |view, status| {
                 view.child(
                     div()
@@ -515,6 +657,7 @@ fn blank() -> Frame {
     Frame {
         lines: Vec::new(),
         cursor: None,
+        preedit: None,
     }
 }
 
@@ -1383,6 +1526,154 @@ mod tests {
 
             assert_eq!(harness.sent(), []);
             assert_eq!(harness.copied(cx).as_deref(), Some("hello"));
+        }
+    }
+
+    mod ime {
+        use gpui::Keystroke;
+
+        use super::*;
+
+        /// Runs `f` on the terminal, as the platform's input handler does.
+        fn handle<R>(
+            harness: &Harness,
+            cx: &mut VisualTestContext,
+            f: impl FnOnce(&mut TerminalView, &mut Window, &mut Context<TerminalView>) -> R,
+        ) -> R {
+            let view = harness.view(cx);
+            let result = cx.update(|window, cx| view.update(cx, |view, cx| f(view, window, cx)));
+            harness.draw(cx);
+            result
+        }
+
+        fn compose(harness: &Harness, text: &str, cx: &mut VisualTestContext) {
+            handle(harness, cx, |view, window, cx| {
+                view.replace_and_mark_text_in_range(None, text, None, window, cx)
+            });
+        }
+
+        fn commit(harness: &Harness, text: &str, cx: &mut VisualTestContext) {
+            handle(harness, cx, |view, window, cx| {
+                view.replace_text_in_range(None, text, window, cx)
+            });
+        }
+
+        /// What the terminal draws at the cursor for the composition.
+        fn preedit(harness: &Harness, cx: &mut VisualTestContext) -> Option<String> {
+            let palette = Palette::new(cx.update(|_, cx| cx.theme().mode()));
+            harness
+                .view(cx)
+                .read_with(cx, |view, _| view.frame(&palette, true).preedit)
+                .map(|preedit| preedit.text)
+        }
+
+        #[gpui::test]
+        fn should_type_the_text_an_input_method_commits(cx: &mut TestAppContext) {
+            let (mut harness, cx) = Harness::live(b"", cx);
+
+            commit(&harness, "日本", cx);
+
+            assert_eq!(
+                harness.sent(),
+                [Outgoing::Input(1, "日本".as_bytes().to_vec())]
+            );
+        }
+
+        #[gpui::test]
+        fn should_show_a_composition_at_the_cursor_and_send_nothing(cx: &mut TestAppContext) {
+            let (mut harness, cx) = Harness::live(b"", cx);
+
+            compose(&harness, "にほ", cx);
+
+            assert_eq!(preedit(&harness, cx).as_deref(), Some("にほ"));
+            let marked = handle(&harness, cx, |view, window, cx| {
+                view.marked_text_range(window, cx)
+            });
+            assert_eq!(marked, Some(0..2));
+            assert_eq!(harness.sent(), []);
+        }
+
+        #[gpui::test]
+        fn should_drop_the_composition_once_committed(cx: &mut TestAppContext) {
+            let (mut harness, cx) = Harness::live(b"", cx);
+            compose(&harness, "にほ", cx);
+
+            commit(&harness, "日本", cx);
+
+            assert_eq!(preedit(&harness, cx), None);
+            assert_eq!(
+                harness.sent(),
+                [Outgoing::Input(1, "日本".as_bytes().to_vec())]
+            );
+        }
+
+        #[gpui::test]
+        fn should_drop_the_composition_when_the_input_method_unmarks_it(cx: &mut TestAppContext) {
+            let (mut harness, cx) = Harness::live(b"", cx);
+            compose(&harness, "にほ", cx);
+
+            handle(&harness, cx, |view, window, cx| {
+                view.unmark_text(window, cx)
+            });
+
+            assert_eq!(preedit(&harness, cx), None);
+            assert_eq!(harness.sent(), []);
+        }
+
+        #[gpui::test]
+        fn should_put_the_candidate_window_at_the_cursor(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::live(b"ab", cx);
+            let layout = harness
+                .view(cx)
+                .read_with(cx, |view, _| view.layout)
+                .expect("laid out");
+
+            let bounds = handle(&harness, cx, |view, window, cx| {
+                view.bounds_for_range(0..0, Bounds::default(), window, cx)
+            });
+
+            assert_eq!(
+                bounds,
+                Some(Bounds::new(
+                    layout.origin + point(layout.cell.width * 2., px(0.)),
+                    layout.cell,
+                ))
+            );
+        }
+
+        #[gpui::test]
+        fn should_take_text_no_key_handler_took(cx: &mut TestAppContext) {
+            let (mut harness, cx) = Harness::live(b"", cx);
+            // The terminal sends no bytes for a function-modified key, so its text goes on to
+            // the platform's input handler, as a cancelled dead key's does.
+            let keystroke = Keystroke {
+                key: "e".into(),
+                key_char: Some("é".into()),
+                modifiers: Modifiers {
+                    function: true,
+                    ..Modifiers::default()
+                },
+            };
+
+            cx.update(|window, cx| window.dispatch_keystroke(keystroke, cx));
+
+            assert_eq!(
+                harness.sent(),
+                [Outgoing::Input(1, "é".as_bytes().to_vec())]
+            );
+        }
+
+        #[gpui::test]
+        fn should_draw_a_composition_in_both_themes(cx: &mut TestAppContext) {
+            use brrritscold_core_gpui::{Theme, ThemePreference};
+
+            let (harness, cx) = Harness::live(b"$ ", cx);
+            compose(&harness, "にほ", cx);
+
+            for preference in [ThemePreference::Light, ThemePreference::Dark] {
+                cx.update(|_, cx| Theme::set_preference(preference, cx));
+                harness.draw(cx);
+            }
         }
     }
 

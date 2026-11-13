@@ -14,7 +14,7 @@ use gpui::{
     outline, point, px, size,
 };
 
-use super::screen::{Cursor, Frame, GridSize, Hit};
+use super::screen::{Cursor, Frame, GridSize, Hit, Preedit};
 use alacritty_terminal::index::Side;
 use alacritty_terminal::vte::ansi::CursorShape;
 
@@ -245,6 +245,42 @@ fn paint(frame: &Frame, origin: Point<Pixels>, m: Metrics, window: &mut Window, 
     if let Some(cursor) = frame.cursor {
         window.paint_quad(cursor_quad(cursor, at(cursor.line, cursor.col), cell));
     }
+    if let Some(preedit) = &frame.preedit {
+        paint_preedit(preedit, at(preedit.line, preedit.col), m, window, cx);
+    }
+}
+
+/// A composition, underlined over the cells it covers; it may run past the grid's edge.
+fn paint_preedit(
+    preedit: &Preedit,
+    origin: Point<Pixels>,
+    m: Metrics,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let run = TextRun {
+        len: preedit.text.len(),
+        font: font(),
+        color: preedit.color,
+        background_color: None,
+        underline: Some(UnderlineStyle {
+            thickness: px(1.),
+            color: Some(preedit.color),
+            wavy: false,
+        }),
+        strikethrough: None,
+    };
+    let shaped = window.text_system().shape_line(
+        SharedString::from(preedit.text.clone()),
+        m.font_size,
+        &[run],
+        None,
+    );
+    window.paint_quad(fill(
+        Bounds::new(origin, size(shaped.width, m.cell.height)),
+        preedit.background,
+    ));
+    let _ = shaped.paint(origin, m.cell.height, TextAlign::Left, None, window, cx);
 }
 
 fn cursor_quad(cursor: Cursor, origin: Point<Pixels>, cell: Size<Pixels>) -> gpui::PaintQuad {
