@@ -1,6 +1,23 @@
 # Fonts
 
-The terminal draws JetBrains Mono, which `brrritscold-core-gpui` bundles as `font-family.mono`.
+## JetBrains Mono italics
+
+The terminal draws JetBrains Mono, which `brrritscold-core-gpui` bundles as `font-family.mono`
+in weights 400 and 700, upright only. Programs print italic (SGR 3), so the terminal adds the
+two italic faces, from the same release core-gpui vendors its faces from:
+[JetBrains Mono 2.304](https://github.com/JetBrains/JetBrainsMono/releases/tag/v2.304),
+`fonts/ttf/` in `JetBrainsMono-2.304.zip`, unmodified. Licensed under the SIL Open Font
+License 1.1 ([`JetBrainsMono-OFL.txt`](JetBrainsMono-OFL.txt), the release's `OFL.txt`).
+When core-gpui bundles them, delete these.
+
+| File | SHA-256 |
+|---|---|
+| `JetBrainsMono-2.304.zip` | `6f6376c6ed2960ea8a963cd7387ec9d76e3f629125bc33d1fdcd7eb7012f7bbf` |
+| `JetBrainsMono-Italic.ttf` | `9d0a1f7a708e6af183f1193b7e81d40da294f5c67682c085d8401c60aac8ded4` |
+| `JetBrainsMono-BoldItalic.ttf` | `4039d5ce0ed225bf9c8b2c8c6436290ae2f356b7e90d70fa666227238324aa3b` |
+
+## Symbol fallbacks
+
 JetBrains Mono has no glyph for several characters agents print (`⎿`, `✻`, `◐`, `✳`, `✔`, the
 braille spinners), so the terminal falls back to these two families, bundled so every machine
 draws the same glyphs:

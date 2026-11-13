@@ -1,7 +1,7 @@
 //! Our own renderer for a [`Frame`] (spec §11; Zed's GPL-3.0 terminal crates are never
 //! copied). A cell grid in JetBrains Mono at `font-size.sm` and line height 1.2, as Penpot's
-//! `agentdeck / TerminalSurface` sets it, with the bundled Noto symbol fonts as fallbacks for
-//! the glyphs agents print.
+//! `agentdeck / TerminalSurface` sets it, with its italic faces and the Noto symbol fonts
+//! bundled here (see `assets/fonts/README.md`).
 
 use std::borrow::Cow;
 
@@ -21,16 +21,19 @@ const LINE_HEIGHT: f32 = 1.2;
 /// The symbol fonts the terminal falls back to, in order (see `assets/fonts/README.md`).
 const SYMBOL_FAMILIES: [&str; 2] = ["Noto Sans Symbols 2", "Noto Sans Symbols"];
 
-const SYMBOL_FONTS: [&[u8]; 2] = [
+/// JetBrains Mono's italic faces, which core-gpui doesn't bundle, then the symbol fonts.
+const FONTS: [&[u8]; 4] = [
+    include_bytes!("../../assets/fonts/JetBrainsMono-Italic.ttf"),
+    include_bytes!("../../assets/fonts/JetBrainsMono-BoldItalic.ttf"),
     include_bytes!("../../assets/fonts/NotoSansSymbols2-Regular.ttf"),
     include_bytes!("../../assets/fonts/NotoSansSymbols-Regular.ttf"),
 ];
 
-/// Registers the bundled symbol fonts; call once, before the first terminal draws.
+/// Registers the bundled fonts; call once, before the first terminal draws.
 pub fn init(cx: &mut App) {
     cx.text_system()
-        .add_fonts(SYMBOL_FONTS.iter().map(|b| Cow::Borrowed(*b)).collect())
-        .expect("the bundled Noto symbol fonts are valid TTFs");
+        .add_fonts(FONTS.iter().map(|b| Cow::Borrowed(*b)).collect())
+        .expect("the bundled JetBrains Mono italics and Noto symbol fonts are valid TTFs");
 }
 
 /// The terminal's font: `font-family.mono` without ligatures, then the symbol fonts, then
