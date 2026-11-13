@@ -11,6 +11,8 @@ publish.workspace = true
 [dependencies]
 agentdeck-client.workspace = true
 agentdeck-core.workspace = true
+# The terminal model each attached pane is fed into; our own renderer draws it (spec §11).
+alacritty_terminal.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 brrritscold-core-gpui.workspace = true
