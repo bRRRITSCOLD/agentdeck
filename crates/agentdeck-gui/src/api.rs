@@ -173,6 +173,8 @@ async fn snapshot(client: Client) -> anyhow::Result<Snapshot> {
                     pane: pane.id,
                     workspace: workspace.id,
                     state: pane.state,
+                    agent: pane.agent,
+                    task: pane.task_id,
                 });
             }
         }

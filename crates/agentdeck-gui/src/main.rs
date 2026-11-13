@@ -17,6 +17,7 @@ mod runtime;
 mod shell;
 mod sidebar;
 mod state_dot;
+mod task_list;
 mod terminal;
 mod title_bar;
 mod top_bar;

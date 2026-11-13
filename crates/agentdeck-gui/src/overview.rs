@@ -6,11 +6,11 @@
 //! pane states in place; anything else that changes is read again.
 
 use agentdeck_client::types::{Note, PrSyncStatus, Task, Workspace};
-use agentdeck_core::{AgentState, PaneId, TaskKind, TaskStatus, WorkspaceId};
+use agentdeck_core::{Agent, AgentState, PaneId, TaskId, TaskKind, TaskStatus, WorkspaceId};
 use chrono::{DateTime, Utc};
 use gpui::SharedString;
 
-/// One pane's state, and the workspace whose tab holds it.
+/// One pane's state, the workspace whose tab holds it, and the task it links.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PaneState {
     /// The pane.
@@ -19,6 +19,10 @@ pub struct PaneState {
     pub workspace: WorkspaceId,
     /// Its state.
     pub state: AgentState,
+    /// The agent it runs; `None` for a shell.
+    pub agent: Option<Agent>,
+    /// The task it links.
+    pub task: Option<TaskId>,
 }
 
 /// The daemon's data behind the sidebar, as read over REST.
@@ -242,6 +246,8 @@ pub(crate) mod fixtures {
             pane: id::<PaneId>(n),
             workspace,
             state,
+            agent: None,
+            task: None,
         }
     }
 
