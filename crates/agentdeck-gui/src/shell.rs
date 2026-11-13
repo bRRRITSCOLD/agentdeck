@@ -1,6 +1,7 @@
 //! The main window's content: what the daemon connection allows. Until it connects, a
 //! centred status; once it does, the sidebar beside the selected view: a workspace's pane
-//! (the Inbox and Tasks views arrive with later PRs). When the compositor leaves decorations to the app, a title bar and
+//! (the Inbox and Tasks views arrive with later PRs), and the new workspace dialog the
+//! sidebar's `+` opens. When the compositor leaves decorations to the app, a title bar and
 //! resize edges frame it.
 
 use brrritscold_core_gpui::{
@@ -16,7 +17,8 @@ use gpui::{
 
 use crate::connection::{Connection, Status};
 use crate::frame;
-use crate::sidebar::{Selection, SidebarView};
+use crate::new_workspace::{Created, NewWorkspaceDialog};
+use crate::sidebar::{Selection, SidebarEvent, SidebarView};
 use crate::title_bar::{Close, Minimize, TitleBar, ToggleMaximize};
 use crate::top_bar::TopBar;
 use crate::workspace::WorkspaceView;
@@ -28,6 +30,9 @@ pub struct Shell {
     sidebar: Option<Entity<SidebarView>>,
     /// Follows the sidebar's selection.
     _selection: Option<Subscription>,
+    /// The new workspace dialog, while connected, and what joins it to the sidebar.
+    new_workspace: Option<Entity<NewWorkspaceDialog>>,
+    _new_workspace: Vec<Subscription>,
     /// The selected workspace.
     workspace: Option<Entity<WorkspaceView>>,
     /// Held by the shell so the title bar's actions reach its handlers while nothing inside
@@ -53,6 +58,8 @@ impl Shell {
             connection,
             sidebar: None,
             _selection: None,
+            new_workspace: None,
+            _new_workspace: Vec::new(),
             workspace: None,
             focus,
         };
@@ -68,11 +75,27 @@ impl Shell {
                 if self.sidebar.is_none() {
                     let api = session.api.clone();
                     let connection = self.connection.clone();
+                    let dialog = cx.new(|cx| NewWorkspaceDialog::new(api.clone(), window, cx));
                     let sidebar = cx.new(|cx| SidebarView::new(api, &connection, cx));
                     self._selection =
                         Some(cx.observe_in(&sidebar, window, |shell, _, window, cx| {
                             shell.follow_selection(window, cx);
                         }));
+                    self._new_workspace = vec![
+                        cx.subscribe_in(&sidebar, window, |shell, _, event, window, cx| {
+                            let SidebarEvent::NewWorkspace = event;
+                            if let Some(dialog) = &shell.new_workspace {
+                                dialog.update(cx, |dialog, cx| dialog.open(window, cx));
+                            }
+                        }),
+                        cx.subscribe(&dialog, |shell, _, Created(id), cx| {
+                            if let Some(sidebar) = &shell.sidebar {
+                                let selection = Selection::Workspace(*id);
+                                sidebar.update(cx, |sidebar, cx| sidebar.select(selection, cx));
+                            }
+                        }),
+                    ];
+                    self.new_workspace = Some(dialog);
                     self.sidebar = Some(sidebar);
                     self.follow_selection(window, cx);
                 }
@@ -80,6 +103,8 @@ impl Shell {
             Status::Connecting | Status::Failed(_) => {
                 self.sidebar = None;
                 self._selection = None;
+                self.new_workspace = None;
+                self._new_workspace.clear();
                 self.workspace = None;
             }
         }
@@ -162,6 +187,7 @@ impl Shell {
                     Some(workspace) => body.child(workspace),
                     None => body.child(div().flex_1()),
                 })
+                .children(self.new_workspace.clone())
                 .into_any_element(),
         }
     }
@@ -327,6 +353,61 @@ mod tests {
             cx.run_until_parked();
 
             assert_eq!(shown_workspace(&shell, cx), None);
+        }
+
+        mod new_workspace {
+            use agentdeck_client::ws::Event;
+            use agentdeck_core::ws::{Entity as Changed, ServerMessage};
+
+            use super::*;
+
+            fn dialog(shell: &Entity<Shell>, cx: &TestAppContext) -> Entity<NewWorkspaceDialog> {
+                shell.read_with(cx, |shell, _| shell.new_workspace.clone().unwrap())
+            }
+
+            fn ask(shell: &Entity<Shell>, cx: &mut TestAppContext) {
+                let sidebar = shell.read_with(cx, |shell, _| shell.sidebar.clone().unwrap());
+                sidebar.update(cx, |_, cx| cx.emit(SidebarEvent::NewWorkspace));
+                cx.run_until_parked();
+            }
+
+            #[gpui::test]
+            fn should_open_the_dialog_when_the_sidebar_asks(cx: &mut TestAppContext) {
+                let connector = Rc::new(FakeConnector::default());
+                let _remote = connector.then_connect_to(workspace_with_a_pane());
+                let shell = open(connector, cx);
+
+                ask(&shell, cx);
+
+                assert!(dialog(&shell, cx).read_with(cx, |d, _| d.is_open()));
+            }
+
+            #[gpui::test]
+            fn should_show_the_workspace_it_makes(cx: &mut TestAppContext) {
+                let connector = Rc::new(FakeConnector::default());
+                let remote = connector.then_connect_to(workspace_with_a_pane());
+                let shell = open(connector, cx);
+                let dialog = dialog(&shell, cx);
+                ask(&shell, cx);
+                let window = cx.windows()[0];
+                cx.simulate_input(window, "tabs-a11y");
+                window
+                    .update(cx, |_, window, cx| {
+                        dialog.update(cx, |d, cx| d.create(window, cx));
+                    })
+                    .unwrap();
+                // The daemon's broadcast for the new workspace.
+                remote
+                    .events
+                    .try_send(Event::Message(ServerMessage::Changed {
+                        entity: Changed::Workspace,
+                        id: "x".into(),
+                    }))
+                    .unwrap();
+                cx.run_until_parked();
+
+                assert_eq!(shown_workspace(&shell, cx), Some(id(101)));
+            }
         }
 
         mod top_bar {

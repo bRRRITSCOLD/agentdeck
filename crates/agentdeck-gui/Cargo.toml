@@ -18,6 +18,8 @@ chrono.workspace = true
 brrritscold-core-gpui.workspace = true
 brrritscold-core-gpui-tokens.workspace = true
 gpui.workspace = true
+# `InputEvent`, which core-gpui's `InputState` emits but doesn't re-export.
+gpui-base.workspace = true
 gpui-platform = { workspace = true, features = ["x11", "wayland"] }
 # The daemon's client and WebSocket need tokio's reactor; the GUI keeps a small runtime.
 tokio.workspace = true
