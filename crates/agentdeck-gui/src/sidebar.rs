@@ -113,6 +113,11 @@ impl SidebarView {
         })
     }
 
+    /// Reads the daemon's data again.
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.reread(cx);
+    }
+
     /// The daemon's data as last read, with live pane states.
     pub fn snapshot(&self) -> &Snapshot {
         &self.snapshot

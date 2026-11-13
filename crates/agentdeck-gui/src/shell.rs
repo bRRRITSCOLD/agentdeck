@@ -1,6 +1,6 @@
 //! The main window's content: what the daemon connection allows. Until it connects, a
 //! centred status; once it does, the sidebar beside the selected view: a workspace's pane
-//! or the Tasks view (the Inbox arrives with a later PR), and the new workspace dialog the
+//! the Tasks view or the Inbox, and the new workspace dialog the
 //! sidebar's `+` opens. When the compositor leaves decorations to the app, a title bar and
 //! resize edges frame it.
 
@@ -17,6 +17,7 @@ use gpui::{
 
 use crate::connection::{Connection, Status};
 use crate::frame;
+use crate::inbox::{InboxView, Synced};
 use crate::new_workspace::{Created, NewWorkspaceDialog};
 use crate::sidebar::{Selection, SidebarEvent, SidebarView};
 use crate::tasks::TasksView;
@@ -38,6 +39,8 @@ pub struct Shell {
     workspace: Option<Entity<WorkspaceView>>,
     /// The Tasks view, while connected; shown while the sidebar selects Tasks.
     tasks: Option<Entity<TasksView>>,
+    /// The Inbox, while connected; shown while the sidebar selects it.
+    inbox: Option<Entity<InboxView>>,
     /// What the sidebar selects.
     selection: Option<Selection>,
     /// Held by the shell so the title bar's actions reach its handlers while nothing inside
@@ -67,6 +70,7 @@ impl Shell {
             _new_workspace: Vec::new(),
             workspace: None,
             tasks: None,
+            inbox: None,
             selection: None,
             focus,
         };
@@ -84,6 +88,7 @@ impl Shell {
                     let connection = self.connection.clone();
                     let dialog = cx.new(|cx| NewWorkspaceDialog::new(api.clone(), window, cx));
                     self.tasks = Some(cx.new(|cx| TasksView::new(api.clone(), window, cx)));
+                    let inbox = cx.new(|_| InboxView::new(api.clone()));
                     let sidebar = cx.new(|cx| SidebarView::new(api, &connection, cx));
                     self._selection =
                         Some(cx.observe_in(&sidebar, window, |shell, _, window, cx| {
@@ -96,6 +101,13 @@ impl Shell {
                                 dialog.update(cx, |dialog, cx| dialog.open(window, cx));
                             }
                         }),
+                        // A sync that changes no task broadcasts nothing, yet moves when PRs
+                        // last synced.
+                        cx.subscribe(&inbox, |shell, _, _: &Synced, cx| {
+                            if let Some(sidebar) = &shell.sidebar {
+                                sidebar.update(cx, |sidebar, cx| sidebar.refresh(cx));
+                            }
+                        }),
                         cx.subscribe(&dialog, |shell, _, Created(id), cx| {
                             if let Some(sidebar) = &shell.sidebar {
                                 let selection = Selection::Workspace(*id);
@@ -104,6 +116,7 @@ impl Shell {
                         }),
                     ];
                     self.new_workspace = Some(dialog);
+                    self.inbox = Some(inbox);
                     self.sidebar = Some(sidebar);
                     self.follow_selection(window, cx);
                 }
@@ -115,6 +128,7 @@ impl Shell {
                 self._new_workspace.clear();
                 self.workspace = None;
                 self.tasks = None;
+                self.inbox = None;
                 self.selection = None;
             }
         }
@@ -130,6 +144,10 @@ impl Shell {
             (sidebar.selection(), sidebar.snapshot().clone())
         };
         self.selection = Some(selection);
+        if let Some(inbox) = &self.inbox {
+            let snapshot = snapshot.clone();
+            inbox.update(cx, |inbox, cx| inbox.set_snapshot(snapshot, cx));
+        }
         if let Some(tasks) = &self.tasks {
             tasks.update(cx, |tasks, cx| tasks.set_snapshot(snapshot, cx));
         }
@@ -202,15 +220,18 @@ impl Shell {
                 .flex()
                 .children(self.sidebar.clone())
                 .child(Separator::new().orientation(SeparatorOrientation::Vertical))
-                .map(
-                    |body| match (self.selection, &self.workspace, &self.tasks) {
-                        (Some(Selection::Workspace(_)), Some(workspace), _) => {
-                            body.child(workspace.clone())
-                        }
-                        (Some(Selection::Tasks), _, Some(tasks)) => body.child(tasks.clone()),
-                        _ => body.child(div().flex_1()),
-                    },
-                )
+                .map(|body| match self.selection {
+                    Some(Selection::Workspace(_)) if self.workspace.is_some() => {
+                        body.children(self.workspace.clone())
+                    }
+                    Some(Selection::Tasks) if self.tasks.is_some() => {
+                        body.children(self.tasks.clone())
+                    }
+                    Some(Selection::Inbox) if self.inbox.is_some() => {
+                        body.children(self.inbox.clone())
+                    }
+                    _ => body.child(div().flex_1()),
+                })
                 .children(self.new_workspace.clone())
                 .into_any_element(),
         }
@@ -397,6 +418,19 @@ mod tests {
                     assert!(shell.tasks.is_some());
                 });
                 assert_eq!(shown_workspace(&shell, cx), None);
+            }
+
+            #[gpui::test]
+            fn should_show_the_inbox_when_there_is_no_workspace(cx: &mut TestAppContext) {
+                let connector = Rc::new(FakeConnector::default());
+                let _remote = connector.then_connect_to(Arc::new(FakeApi::default()));
+
+                let shell = open(connector, cx);
+
+                shell.read_with(cx, |shell, _| {
+                    assert_eq!(shell.selection, Some(Selection::Inbox));
+                    assert!(shell.inbox.is_some());
+                });
             }
         }
 
