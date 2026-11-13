@@ -9,7 +9,7 @@
 //! shell from its `NewTab` button, and carries out each pane menu's [`PaneRequest`]. Closing a
 //! pane that is still running asks first.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use agentdeck_client::types::Tab;
@@ -68,6 +68,8 @@ pub struct WorkspaceView {
     closing: Option<PaneAt>,
     /// Opens and closes the close confirmation.
     close_dialog: DialogHandle,
+    /// The panes whose close is under way; asking again meanwhile does nothing.
+    closing_now: HashSet<PaneId>,
     /// The read in flight; replaced by a newer one.
     reading: Option<Task<()>>,
     /// Holds the keyboard while the tab shown has no pane to.
@@ -110,6 +112,7 @@ impl WorkspaceView {
             focus_next: None,
             closing: None,
             close_dialog: DialogHandle::new(false),
+            closing_now: HashSet::new(),
             reading: None,
             focus: cx.focus_handle(),
             _events: events,
@@ -215,16 +218,33 @@ impl WorkspaceView {
         self.closing.filter(|_| open).map(|at| at.pane)
     }
 
-    fn close_pane(&mut self, pane: PaneAt, window: &mut Window, cx: &mut Context<Self>) {
-        let closing = self.api.close_pane(pane, cx);
+    /// Closes `at`, dimming it until it goes. A close already under way isn't repeated.
+    fn close_pane(&mut self, at: PaneAt, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.closing_now.insert(at.pane) {
+            return;
+        }
+        self.set_closing(at.pane, true, cx);
+        let closing = self.api.close_pane(at, cx);
         cx.spawn_in(window, async move |this, cx| {
             let closed = closing.await;
-            let _ = this.update_in(cx, |this, window, cx| match closed {
-                Ok(()) => this.reread(window, cx),
-                Err(err) => failed("Couldn't close the pane", &err, window, cx),
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.closing_now.remove(&at.pane);
+                match closed {
+                    Ok(()) => this.reread(window, cx),
+                    Err(err) => {
+                        this.set_closing(at.pane, false, cx);
+                        failed("Couldn't close the pane", &err, window, cx);
+                    }
+                }
             });
         })
         .detach();
+    }
+
+    fn set_closing(&self, pane: PaneId, closing: bool, cx: &mut Context<Self>) {
+        if let Some(view) = self.panes.get(&pane) {
+            view.update(cx, |view, cx| view.set_closing(closing, cx));
+        }
     }
 
     /// Shows the tab `tab`, if the workspace has it.
@@ -1111,6 +1131,32 @@ mod tests {
                 assert_eq!(harness.closed(), [id(7)]);
                 assert_eq!(harness.closing(cx), None);
                 assert!(harness.shown(cx).is_empty());
+            }
+
+            #[gpui::test]
+            fn should_close_a_pane_once_however_often_asked(cx: &mut TestAppContext) {
+                let (harness, cx) = one_pane(AgentState::Exited, cx);
+                let pane = harness.pane(0, cx);
+
+                // Asked again before the first close finishes, as a slow daemon invites.
+                pane.update(cx, |pane, cx| {
+                    pane.request(PaneRequest::Close, cx);
+                    pane.request(PaneRequest::Close, cx);
+                });
+                cx.run_until_parked();
+
+                assert_eq!(harness.closed(), [id(7)]);
+            }
+
+            #[gpui::test]
+            fn should_dim_a_pane_while_it_closes(cx: &mut TestAppContext) {
+                let (harness, cx) = one_pane(AgentState::Exited, cx);
+                let pane = harness.pane(0, cx);
+
+                pane.update(cx, |pane, cx| pane.request(PaneRequest::Close, cx));
+
+                assert!(pane.read_with(cx, |pane, _| pane.is_closing()));
+                harness.draw(cx);
             }
 
             #[gpui::test]

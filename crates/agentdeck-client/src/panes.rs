@@ -101,30 +101,37 @@ pub async fn split_pane(
 /// Takes the pane `at` out of its tab's layout, then kills its process and deletes it. The
 /// tab's last pane takes the tab with it, since a layout can't be emptied again. The layout
 /// loses the pane first, so no read finds it naming a pane that is gone.
+///
+/// Closing is done once the pane is gone, so closing a pane already closed (a second click,
+/// or another client) succeeds.
 pub async fn close_pane(client: &Client, at: PaneAt) -> Result<(), PaneOpError> {
-    match layout(client, at.workspace, at.tab)
-        .await?
-        .remove(at.pane)?
-    {
-        Some(rest) => {
-            set_layout(client, at.tab, rest).await?;
-            client
-                .pane_delete()
-                .id(at.pane)
-                .send()
-                .await
-                .map_err(ApiError::from)?;
+    let layout = match layout(client, at.workspace, at.tab).await {
+        Ok(layout) => layout,
+        // The tab went, and its panes with it.
+        Err(PaneOpError::TabGone) => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    match layout.remove(at.pane) {
+        Ok(Some(rest)) => set_layout(client, at.tab, rest).await?,
+        Ok(None) => {
+            let deleted = client.tab_delete().id(at.tab).send().await;
+            return gone_is_done(deleted.map_err(ApiError::from));
         }
-        None => {
-            client
-                .tab_delete()
-                .id(at.tab)
-                .send()
-                .await
-                .map_err(ApiError::from)?;
-        }
+        // Out of the layout already; delete it in case it outlived its place.
+        Err(LayoutError::PaneNotFound(_)) => {}
+        Err(err) => return Err(err.into()),
     }
-    Ok(())
+    let deleted = client.pane_delete().id(at.pane).send().await;
+    gone_is_done(deleted.map_err(ApiError::from))
+}
+
+/// A delete that found nothing to delete still leaves it gone.
+fn gone_is_done<T>(deleted: Result<T, ApiError>) -> Result<(), PaneOpError> {
+    match deleted {
+        Ok(_) => Ok(()),
+        Err(err) if err.code.as_deref() == Some("not_found") => Ok(()),
+        Err(err) => Err(err.into()),
+    }
 }
 
 /// `tab`'s layout, read fresh from `workspace`'s tabs, so a change made elsewhere since the

@@ -13,6 +13,8 @@ use brrritscold_core_gpui::{
     ActiveTheme as _, Button, ButtonSize, ButtonVariant, DropdownMenu, DropdownMenuContent,
     DropdownMenuItem, DropdownMenuItemVariant, DropdownMenuSeparator, IconName, Separator,
 };
+use brrritscold_core_gpui_tokens::primitive::opacity;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
@@ -58,6 +60,8 @@ pub struct PaneView {
     task: Option<SharedString>,
     /// The title the terminal reported last.
     live_title: Option<SharedString>,
+    /// Being closed: shown dimmed until it goes.
+    closing: bool,
     terminal: Entity<TerminalView>,
     _subscriptions: [Subscription; 2],
 }
@@ -85,6 +89,7 @@ impl PaneView {
             pane,
             task,
             live_title: None,
+            closing: false,
             terminal,
             _subscriptions: [titles, states],
         }
@@ -112,6 +117,20 @@ impl PaneView {
     /// The pane as last read, with the state broadcasts since applied.
     pub fn pane(&self) -> &Pane {
         &self.pane
+    }
+
+    /// Dims it while it is being closed, or brings it back when the close failed.
+    pub fn set_closing(&mut self, closing: bool, cx: &mut Context<Self>) {
+        if self.closing != closing {
+            self.closing = closing;
+            cx.notify();
+        }
+    }
+
+    /// Whether it is being closed.
+    #[cfg(test)]
+    pub fn is_closing(&self) -> bool {
+        self.closing
     }
 
     /// Asks the workspace holding it for `request`.
@@ -202,6 +221,8 @@ impl Render for PaneView {
             .flex()
             .flex_col()
             .overflow_hidden()
+            // Being closed: dimmed as a disabled control is (`opacity-50`).
+            .when(self.closing, |pane| pane.opacity(opacity::O50))
             .rounded(s.radius_md)
             .border_1()
             .border_color(s.border)

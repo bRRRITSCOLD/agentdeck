@@ -351,12 +351,17 @@ pub(crate) mod fake {
                 return Task::ready(Err(err));
             }
             let mut tabs = self.tabs.lock().unwrap();
-            let tabs = tabs.get_mut(&at.workspace).expect("the pane's workspace");
-            let tab = (tabs.iter_mut().find(|t| t.id == at.tab)).expect("the pane's tab");
-            let layout = tab.layout.take().expect("the pane's tab has a layout");
-            match layout.remove(at.pane).expect("the pane is in the layout") {
-                Some(rest) => tab.layout = Some(rest),
-                None => tabs.retain(|t| t.id != at.tab),
+            let tabs = tabs.entry(at.workspace).or_default();
+            // Closing a pane already gone is done, as with the daemon.
+            let holder = tabs
+                .iter_mut()
+                .find(|t| t.id == at.tab && t.layout.as_ref().is_some_and(|l| l.contains(at.pane)));
+            if let Some(tab) = holder {
+                let layout = tab.layout.take().expect("it holds the pane");
+                match layout.remove(at.pane).expect("it holds the pane") {
+                    Some(rest) => tab.layout = Some(rest),
+                    None => tabs.retain(|t| t.id != at.tab),
+                }
             }
             self.panes.lock().unwrap().retain(|p| p.id != at.pane);
             self.closed.lock().unwrap().push(at.pane);

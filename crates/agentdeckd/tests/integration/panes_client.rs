@@ -192,6 +192,42 @@ mod close_pane {
     }
 
     #[tokio::test]
+    async fn should_be_done_when_the_pane_is_already_closed() {
+        let daemon = TestDaemon::start().await;
+        let (ws, tab, first) = shell_tab(&daemon.client).await;
+        let second = split_pane(
+            &daemon.client,
+            at(&ws, tab, first),
+            SplitDirection::Horizontal,
+            ws.dir.clone(),
+        )
+        .await
+        .expect("split");
+        close_pane(&daemon.client, at(&ws, tab, second))
+            .await
+            .expect("close");
+
+        close_pane(&daemon.client, at(&ws, tab, second))
+            .await
+            .expect("closing again is done");
+
+        assert_eq!(named_panes(&daemon.client, &ws).await, [(first, true)]);
+    }
+
+    #[tokio::test]
+    async fn should_be_done_when_the_tab_went_with_the_last_pane() {
+        let daemon = TestDaemon::start().await;
+        let (ws, tab, pane) = shell_tab(&daemon.client).await;
+        close_pane(&daemon.client, at(&ws, tab, pane))
+            .await
+            .expect("close");
+
+        close_pane(&daemon.client, at(&ws, tab, pane))
+            .await
+            .expect("closing again is done");
+    }
+
+    #[tokio::test]
     async fn should_delete_the_tab_with_its_last_pane() {
         let daemon = TestDaemon::start().await;
         let (ws, tab, pane) = shell_tab(&daemon.client).await;
