@@ -25,6 +25,7 @@ use crate::api::Api;
 use crate::connection::{Connection, DaemonEvent};
 use crate::count::Count;
 use crate::overview::{Counts, Overview, Snapshot};
+use crate::rereads::Rereads;
 use crate::state_dot::{StateDot, StateDotState};
 
 /// The sidebar's width. Raw in Penpot too: no sizing token is 260px.
@@ -53,8 +54,9 @@ pub struct SidebarView {
     error: Option<SharedString>,
     /// The user's pick; `None` until they make one.
     picked: Option<Selection>,
-    /// The read in flight; replaced by a newer one.
+    /// The last read started.
     read: Option<Task<()>>,
+    rereads: Rereads,
     _events: Subscription,
     _tick: Task<()>,
 }
@@ -79,6 +81,7 @@ impl SidebarView {
             error: None,
             picked: None,
             read: None,
+            rereads: Rereads::default(),
             _events: events,
             _tick: tick,
         };
@@ -135,8 +138,11 @@ impl SidebarView {
         cx.notify();
     }
 
-    /// Reads a fresh snapshot, dropping any read still in flight.
+    /// Reads a fresh snapshot, or once more after the read in flight.
     fn reread(&mut self, cx: &mut Context<Self>) {
+        if !self.rereads.ask() {
+            return;
+        }
         let reading = self.api.snapshot(cx);
         self.read = Some(cx.spawn(async move |this, cx| {
             let result = reading.await;
@@ -152,6 +158,9 @@ impl SidebarView {
                     }
                 }
                 cx.notify();
+                if this.rereads.landed() {
+                    this.reread(cx);
+                }
             });
         }));
     }
@@ -550,6 +559,28 @@ mod tests {
             });
 
             assert_eq!(open.api.reads(), 2);
+            assert!(open.shows("row c"));
+        }
+
+        #[gpui::test]
+        fn should_read_at_most_twice_more_for_a_burst_of_changes(cx: &mut TestAppContext) {
+            let mut open = open(two_workspaces(), cx);
+            let mut more = two_workspaces();
+            more.workspaces.push(workspace(3, "c"));
+            open.api.set(more);
+
+            for _ in 0..10 {
+                open.remote
+                    .events
+                    .try_send(ws::Event::Message(ServerMessage::Changed {
+                        entity: Changed::Task,
+                        id: "x".into(),
+                    }))
+                    .unwrap();
+            }
+            open.settle();
+
+            assert!(open.api.reads() <= 3, "{} reads", open.api.reads());
             assert!(open.shows("row c"));
         }
 

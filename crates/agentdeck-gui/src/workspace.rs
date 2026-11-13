@@ -34,6 +34,7 @@ use crate::api::{Api, PaneAt, Split, WorkspacePanes};
 use crate::connection::{Connection, DaemonEvent};
 use crate::keymap::{self, NextPane, NextTab, PreviousPane, PreviousTab, SelectTab};
 use crate::pane::{PaneRequest, PaneView};
+use crate::rereads::Rereads;
 use crate::top_bar::TopBar;
 
 /// Where the read stands.
@@ -70,8 +71,9 @@ pub struct WorkspaceView {
     close_dialog: DialogHandle,
     /// The panes whose close is under way; asking again meanwhile does nothing.
     closing_now: HashSet<PaneId>,
-    /// The read in flight; replaced by a newer one.
+    /// The last read started.
     reading: Option<Task<()>>,
+    rereads: Rereads,
     /// Holds the keyboard while the tab shown has no pane to.
     focus: FocusHandle,
     _events: Subscription,
@@ -114,6 +116,7 @@ impl WorkspaceView {
             close_dialog: DialogHandle::new(false),
             closing_now: HashSet::new(),
             reading: None,
+            rereads: Rereads::default(),
             focus: cx.focus_handle(),
             _events: events,
         };
@@ -308,13 +311,20 @@ impl WorkspaceView {
             .collect()
     }
 
+    /// Reads the tabs and panes, or once more after the read in flight.
     fn reread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.rereads.ask() {
+            return;
+        }
         let reading = self.api.panes(self.workspace, cx);
         self.reading = Some(cx.spawn_in(window, async move |this, cx| {
             let result = reading.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.show(result, window, cx);
                 cx.notify();
+                if this.rereads.landed() {
+                    this.reread(window, cx);
+                }
             });
         }));
     }
@@ -753,6 +763,32 @@ mod tests {
             harness.select(id(2), cx);
 
             assert_eq!(harness.shown(cx), [id(21), id(22)]);
+        }
+
+        #[gpui::test]
+        fn should_read_at_most_twice_more_for_a_burst_of_changes(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(vec![tab(1, id(1), 0, None)], vec![], cx);
+            let before = harness.api.pane_reads();
+            harness
+                .api
+                .set_tabs(id(1), vec![tab(1, id(1), 0, None), tab(2, id(1), 1, None)]);
+
+            for _ in 0..10 {
+                harness
+                    .remote
+                    .events
+                    .try_send(Event::Message(ServerMessage::Changed {
+                        entity: Changed::Task,
+                        id: "x".into(),
+                    }))
+                    .unwrap();
+            }
+            cx.run_until_parked();
+
+            let reads = harness.api.pane_reads() - before;
+            assert!(reads <= 2, "{reads} reads");
+            let tabs = harness.view.read_with(cx, |view, _| view.read.tabs.len());
+            assert_eq!(tabs, 2);
         }
 
         #[gpui::test]
