@@ -1,8 +1,8 @@
 //! Penpot `Centre / TopBar`: the selected workspace's name and directory, above its tabs
 //! (spec §11).
 //!
-//! Its panel button toggles the right panel. The design's New agent button arrives with the
-//! new agent dialog (#13).
+//! Its New agent button opens the new agent dialog and its panel button toggles the right
+//! panel, both as actions the window handles.
 
 use std::path::Path;
 
@@ -14,6 +14,7 @@ use gpui::{
 };
 
 use crate::keymap::ToggleRightPanel;
+use crate::new_agent::NewAgent;
 
 /// The bar's height. Raw in Penpot too: no sizing token is 52px.
 const HEIGHT: f32 = 52.;
@@ -88,8 +89,20 @@ impl RenderOnce for TopBar {
                             .child(dir),
                     ),
             )
-            // Penpot `Spacer`, then `TogglePanel`: ghost, icon-sm, `PanelRight`.
+            // Penpot `Spacer`, `NewAgent` (outline, sm), then `TogglePanel`: ghost, icon-sm,
+            // `PanelRight`.
             .child(div().flex_1())
+            .child(
+                div().debug_selector(|| "new agent".into()).child(
+                    Button::new("new-agent")
+                        .variant(ButtonVariant::Outline)
+                        .size(ButtonSize::Sm)
+                        .label("New agent")
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(NewAgent), cx);
+                        }),
+                ),
+            )
             .child(
                 div().debug_selector(|| "toggle panel".into()).child(
                     Button::new("toggle-panel")

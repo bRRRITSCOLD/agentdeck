@@ -19,6 +19,7 @@ use crate::connection::{Connection, Status};
 use crate::frame;
 use crate::inbox::{InboxView, Synced};
 use crate::keymap::ToggleRightPanel;
+use crate::new_agent::{self, Launched, NewAgent, NewAgentDialog, Target};
 use crate::new_workspace::{Created, NewWorkspaceDialog};
 use crate::right_panel::RightPanel;
 use crate::sidebar::{Selection, SidebarEvent, SidebarView};
@@ -36,6 +37,8 @@ pub struct Shell {
     _selection: Option<Subscription>,
     /// The new workspace dialog, while connected, and what joins it to the sidebar.
     new_workspace: Option<Entity<NewWorkspaceDialog>>,
+    /// The new agent dialog, while connected.
+    new_agent: Option<Entity<NewAgentDialog>>,
     _new_workspace: Vec<Subscription>,
     /// The selected workspace.
     workspace: Option<Entity<WorkspaceView>>,
@@ -73,6 +76,7 @@ impl Shell {
             sidebar: None,
             _selection: None,
             new_workspace: None,
+            new_agent: None,
             _new_workspace: Vec::new(),
             workspace: None,
             tasks: None,
@@ -97,6 +101,7 @@ impl Shell {
                     let dialog = cx.new(|cx| NewWorkspaceDialog::new(api.clone(), window, cx));
                     self.tasks = Some(cx.new(|cx| TasksView::new(api.clone(), window, cx)));
                     let inbox = cx.new(|_| InboxView::new(api.clone()));
+                    let new_agent = cx.new(|_| NewAgentDialog::new(api.clone()));
                     self.panel = Some(cx.new(|cx| RightPanel::new(api.clone(), window, cx)));
                     let sidebar = cx.new(|cx| SidebarView::new(api, &connection, cx));
                     self._selection =
@@ -117,6 +122,19 @@ impl Shell {
                                 sidebar.update(cx, |sidebar, cx| sidebar.refresh(cx));
                             }
                         }),
+                        // Show the agent's tab and focus it: it may be asking about trust.
+                        cx.subscribe_in(
+                            &new_agent,
+                            window,
+                            |shell, _, launched: &Launched, window, cx| {
+                                if let Some(workspace) = &shell.workspace {
+                                    let Launched { tab, pane } = *launched;
+                                    workspace.update(cx, |view, cx| {
+                                        view.show_pane(tab, pane, window, cx)
+                                    });
+                                }
+                            },
+                        ),
                         cx.subscribe(&dialog, |shell, _, Created(id), cx| {
                             if let Some(sidebar) = &shell.sidebar {
                                 let selection = Selection::Workspace(*id);
@@ -126,6 +144,7 @@ impl Shell {
                     ];
                     self.new_workspace = Some(dialog);
                     self.inbox = Some(inbox);
+                    self.new_agent = Some(new_agent);
                     self.sidebar = Some(sidebar);
                     self.follow_selection(window, cx);
                 }
@@ -139,6 +158,7 @@ impl Shell {
                 self.tasks = None;
                 self.inbox = None;
                 self.panel = None;
+                self.new_agent = None;
                 self.selection = None;
             }
         }
@@ -194,6 +214,30 @@ impl Shell {
                 WorkspaceView::new(selected, top_bar, api, connection, sender, window, cx)
             }));
         cx.notify();
+    }
+
+    /// Opens the new agent dialog on the workspace shown, offering its root and the repos in
+    /// it.
+    fn new_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(sidebar), Some(dialog), Some(Selection::Workspace(selected))) =
+            (&self.sidebar, &self.new_agent, self.selection)
+        else {
+            return;
+        };
+        let sidebar = sidebar.read(cx);
+        let Some(row) = (sidebar.overview().workspaces.iter()).find(|w| w.id == selected) else {
+            return;
+        };
+        let target = Target {
+            id: row.id,
+            name: row.name.clone(),
+            dir: row.dir.clone(),
+        };
+        let folders = new_agent::folders(&row.dir, new_agent::repos_in(&row.dir));
+        let snapshot = sidebar.snapshot().clone();
+        dialog.update(cx, |dialog, cx| {
+            dialog.open(target, folders, snapshot, window, cx)
+        });
     }
 
     /// What the connection allows, filling the space under the title bar.
@@ -255,6 +299,7 @@ impl Shell {
                     _ => body.child(div().flex_1()),
                 })
                 .children(self.new_workspace.clone())
+                .children(self.new_agent.clone())
                 .into_any_element(),
         }
     }
@@ -275,6 +320,7 @@ impl Render for Shell {
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &ToggleMaximize, window, _| window.zoom_window())
             .on_action(|_: &Close, window, _| window.remove_window())
+            .on_action(cx.listener(|this, _: &NewAgent, window, cx| this.new_agent(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleRightPanel, _, cx| {
                 this.panel_open = !this.panel_open;
                 cx.notify();
@@ -465,6 +511,24 @@ mod tests {
 
                 assert!(!flip());
                 assert!(flip());
+            }
+
+            #[gpui::test]
+            fn should_open_the_new_agent_dialog_on_the_workspace_shown(cx: &mut TestAppContext) {
+                let connector = Rc::new(FakeConnector::default());
+                let _remote = connector.then_connect_to(workspace_with_a_pane());
+                let shell = open(connector, cx);
+                let window = cx.windows()[0];
+
+                window
+                    .update(cx, |_, window, cx| {
+                        window.dispatch_action(Box::new(NewAgent), cx)
+                    })
+                    .unwrap();
+                cx.run_until_parked();
+
+                let dialog = shell.read_with(cx, |shell, _| shell.new_agent.clone().unwrap());
+                assert!(dialog.read_with(cx, |d, _| d.is_open()));
             }
 
             #[gpui::test]
