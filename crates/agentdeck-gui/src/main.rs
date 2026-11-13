@@ -11,6 +11,7 @@ mod keymap;
 mod overview;
 mod pane;
 mod pane_header;
+mod rereads;
 mod runtime;
 mod shell;
 mod sidebar;

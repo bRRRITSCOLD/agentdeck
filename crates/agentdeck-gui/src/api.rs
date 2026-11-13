@@ -189,6 +189,8 @@ pub(crate) mod fake {
     pub struct FakeApi {
         snapshot: Mutex<Snapshot>,
         reads: Mutex<usize>,
+        /// How many times a workspace's tabs and panes were read.
+        pane_reads: Mutex<usize>,
         tabs: Mutex<HashMap<WorkspaceId, Vec<Tab>>>,
         panes: Mutex<Vec<Pane>>,
         tasks: Mutex<Vec<agentdeck_client::types::Task>>,
@@ -232,6 +234,11 @@ pub(crate) mod fake {
         /// How many snapshots were read.
         pub fn reads(&self) -> usize {
             *self.reads.lock().unwrap()
+        }
+
+        /// How many times a workspace's tabs and panes were read.
+        pub fn pane_reads(&self) -> usize {
+            *self.pane_reads.lock().unwrap()
         }
 
         /// Fails the next write with `reason`, changing nothing.
@@ -281,6 +288,7 @@ pub(crate) mod fake {
         }
 
         fn panes(&self, workspace: WorkspaceId, _cx: &App) -> Task<anyhow::Result<WorkspacePanes>> {
+            *self.pane_reads.lock().unwrap() += 1;
             let mut tabs = self
                 .tabs
                 .lock()
