@@ -8,6 +8,8 @@ mod connection;
 mod count;
 mod frame;
 mod overview;
+mod pane;
+mod pane_header;
 mod runtime;
 mod shell;
 mod sidebar;

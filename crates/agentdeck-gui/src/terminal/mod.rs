@@ -7,7 +7,7 @@ mod palette;
 mod screen;
 mod view;
 
-pub use view::TerminalView;
+pub use view::{TerminalEvent, TerminalView};
 
 /// Registers the terminal's fonts; call once, before the first window.
 pub fn init(cx: &mut gpui::App) {

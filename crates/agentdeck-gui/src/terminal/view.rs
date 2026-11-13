@@ -9,9 +9,9 @@ use brrritscold_core_gpui::ActiveTheme as _;
 use brrritscold_core_gpui_tokens::primitive::space;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    KeyDownEvent, MouseButton, ParentElement as _, Render, ScrollEvent, SharedString, Styled as _,
-    Subscription, Window, div,
+    App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement as _,
+    IntoElement, KeyDownEvent, MouseButton, ParentElement as _, Render, ScrollEvent, SharedString,
+    Styled as _, Subscription, Window, div,
 };
 
 use super::element::{Metrics, terminal};
@@ -32,6 +32,13 @@ enum Attachment {
     Refused(SharedString),
 }
 
+/// What a terminal tells whoever shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TerminalEvent {
+    /// The program set the pane's title; also sent on attach with the title it had.
+    Title(SharedString),
+}
+
 /// A pane's terminal.
 pub struct TerminalView {
     pane: PaneId,
@@ -45,18 +52,16 @@ pub struct TerminalView {
 }
 
 impl TerminalView {
-    /// Attaches `pane` over `connection`'s socket, through `sender`, and takes focus.
+    /// Attaches `pane` over `connection`'s socket, through `sender`.
     pub fn new(
         pane: PaneId,
         connection: &Entity<Connection>,
         sender: ws::Sender,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let channel = connection.update(cx, |connection, _| connection.open_channel());
         let events = cx.subscribe(connection, |this, _, event, cx| this.on_event(event, cx));
         let focus = cx.focus_handle();
-        window.focus(&focus, cx);
         let view = TerminalView {
             pane,
             channel,
@@ -68,11 +73,6 @@ impl TerminalView {
         };
         view.attach();
         view
-    }
-
-    /// The pane it shows.
-    pub fn pane(&self) -> PaneId {
-        self.pane
     }
 
     fn attach(&self) {
@@ -89,6 +89,7 @@ impl TerminalView {
                 channel,
                 cols,
                 rows,
+                title,
                 ..
             }) if *channel == ours => {
                 let size = GridSize {
@@ -96,6 +97,11 @@ impl TerminalView {
                     rows: *rows,
                 };
                 self.attachment = Attachment::AwaitingSnapshot(Screen::new(size));
+                cx.emit(TerminalEvent::Title(title.clone().into()));
+            }
+            DaemonEvent::Message(ServerMessage::Title { channel, title }) if *channel == ours => {
+                cx.emit(TerminalEvent::Title(title.clone().into()));
+                return;
             }
             DaemonEvent::Output(channel, bytes) if *channel == ours => {
                 match std::mem::replace(&mut self.attachment, Attachment::Attaching) {
@@ -215,6 +221,8 @@ impl TerminalView {
     }
 }
 
+impl EventEmitter<TerminalEvent> for TerminalView {}
+
 impl Drop for TerminalView {
     fn drop(&mut self) {
         let _ = self.sender.send(ClientMessage::Detach {
@@ -285,6 +293,7 @@ fn blank() -> Frame {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::rc::Rc;
 
     use agentdeck_client::ws::{Event, Outgoing, Remote};
@@ -329,8 +338,7 @@ mod tests {
             };
             let mut host = None;
             let window = cx.add_window(|window, cx| {
-                let terminal =
-                    cx.new(|cx| TerminalView::new(id(1), &connection, sender, window, cx));
+                let terminal = cx.new(|cx| TerminalView::new(id(1), &connection, sender, cx));
                 let view = cx.new(|_| Host(Some(terminal)));
                 host = Some(view.clone());
                 Root::new(view, window, cx)
@@ -344,9 +352,29 @@ mod tests {
             (harness, cx)
         }
 
+        /// Records every title the terminal reports.
+        fn titles(&self, cx: &mut VisualTestContext) -> Rc<RefCell<Vec<TerminalEvent>>> {
+            let titles = Rc::new(RefCell::new(Vec::new()));
+            let view = self.view(cx);
+            let record = titles.clone();
+            cx.update(|_, cx| {
+                cx.subscribe(&view, move |_, event: &TerminalEvent, _| {
+                    record.borrow_mut().push(event.clone());
+                })
+                .detach();
+            });
+            titles
+        }
+
         fn view(&self, cx: &mut VisualTestContext) -> Entity<TerminalView> {
             self.host
                 .read_with(cx, |host, _| host.0.clone().expect("a terminal"))
+        }
+
+        /// Focuses the terminal, as its pane does when shown or clicked.
+        fn focus(&self, cx: &mut VisualTestContext) {
+            let view = self.view(cx);
+            cx.update(|window, cx| window.focus(&view.focus_handle(cx), cx));
         }
 
         fn draw(&self, cx: &mut VisualTestContext) {
@@ -394,6 +422,54 @@ mod tests {
             pane: id(pane),
             channel,
         })
+    }
+
+    mod title {
+        use super::*;
+
+        #[gpui::test]
+        fn should_report_the_title_it_attached_with(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(cx);
+            let titles = harness.titles(cx);
+
+            harness.attached(10, 2, b"", cx);
+
+            assert_eq!(*titles.borrow(), [TerminalEvent::Title("sh".into())]);
+        }
+
+        #[gpui::test]
+        fn should_report_a_title_the_program_sets(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(cx);
+            harness.attached(10, 2, b"", cx);
+            let titles = harness.titles(cx);
+
+            harness.deliver(
+                Event::Message(ServerMessage::Title {
+                    channel: 1,
+                    title: "vim".into(),
+                }),
+                cx,
+            );
+
+            assert_eq!(*titles.borrow(), [TerminalEvent::Title("vim".into())]);
+        }
+
+        #[gpui::test]
+        fn should_ignore_a_title_on_another_channel(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(cx);
+            harness.attached(10, 2, b"", cx);
+            let titles = harness.titles(cx);
+
+            harness.deliver(
+                Event::Message(ServerMessage::Title {
+                    channel: 9,
+                    title: "theirs".into(),
+                }),
+                cx,
+            );
+
+            assert!(titles.borrow().is_empty());
+        }
     }
 
     mod attach {
@@ -521,6 +597,7 @@ mod tests {
         #[gpui::test]
         fn should_send_keys_to_the_pane(cx: &mut TestAppContext) {
             let (mut harness, cx) = Harness::open(cx);
+            harness.focus(cx);
             harness.draw(cx);
             harness.attached(10, 2, b"", cx);
             harness.sent();
@@ -541,6 +618,7 @@ mod tests {
         #[gpui::test]
         fn should_send_nothing_before_it_is_attached(cx: &mut TestAppContext) {
             let (mut harness, cx) = Harness::open(cx);
+            harness.focus(cx);
             harness.sent();
 
             cx.simulate_keystrokes("a");
