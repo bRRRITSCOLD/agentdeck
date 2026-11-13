@@ -4,6 +4,12 @@
 //!
 //! While its window is the active one it claims `primary`, so its size wins over other
 //! clients' (spec §5): when it goes live, and again whenever the window is activated.
+//!
+//! Selection, after GNOME Terminal: drag to select cells, double-click for a word,
+//! triple-click for a line, shift-click to extend. `secondary-shift-c` copies it and
+//! `secondary-shift-v` pastes the clipboard. On Linux a finished selection is also the primary
+//! selection, which a middle click pastes. The selection lives in this client's model only;
+//! the pane never hears of it.
 
 use agentdeck_client::ws;
 use agentdeck_core::PaneId;
@@ -12,16 +18,17 @@ use brrritscold_core_gpui::ActiveTheme as _;
 use brrritscold_core_gpui_tokens::primitive::space;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement as _,
-    IntoElement, KeyDownEvent, MouseButton, ParentElement as _, Render, ScrollEvent, SharedString,
-    Styled as _, Subscription, Window, div,
+    App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    ParentElement as _, Render, ScrollEvent, SharedString, Styled as _, Subscription, Window, div,
 };
 
-use super::element::{Metrics, terminal};
+use super::element::{Layout, Metrics, Pointer, terminal};
 use super::input;
 use super::palette::Palette;
-use super::screen::{Frame, GridSize, Screen};
+use super::screen::{Frame, GridSize, Screen, SelectionKind};
 use crate::connection::{Connection, DaemonEvent};
+use crate::keymap::{self, Copy, Paste};
 
 /// Where the attachment stands.
 enum Attachment {
@@ -48,8 +55,10 @@ pub struct TerminalView {
     channel: Channel,
     sender: ws::Sender,
     attachment: Attachment,
-    /// The grid that fits the view, once laid out.
-    grid: Option<GridSize>,
+    /// Where the grid was last laid out, and the grid that fits.
+    layout: Option<Layout>,
+    /// Whether a left-button drag that started here is selecting.
+    selecting: bool,
     focus: FocusHandle,
     _subscriptions: [Subscription; 2],
 }
@@ -75,7 +84,8 @@ impl TerminalView {
             channel,
             sender,
             attachment: Attachment::Attaching,
-            grid: None,
+            layout: None,
+            selecting: false,
             focus,
             _subscriptions: [events, activation],
         };
@@ -165,19 +175,20 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// Records the grid that fits, and resizes the pane to it once live.
-    fn set_grid(&mut self, grid: GridSize, cx: &mut Context<Self>) {
-        if self.grid != Some(grid) {
-            self.grid = Some(grid);
-            if self.fit() {
-                cx.notify();
-            }
+    /// Records where the grid sits, and resizes the pane to the grid that fits once live.
+    fn set_layout(&mut self, layout: Layout, cx: &mut Context<Self>) {
+        let regrid = self.layout.map(|old| old.grid) != Some(layout.grid);
+        self.layout = Some(layout);
+        if regrid && self.fit() {
+            cx.notify();
         }
     }
 
     /// Resizes a live pane to the grid that fits; whether its size changed.
     fn fit(&mut self) -> bool {
-        let (Attachment::Live(screen), Some(grid)) = (&mut self.attachment, self.grid) else {
+        let (Attachment::Live(screen), Some(Layout { grid, .. })) =
+            (&mut self.attachment, self.layout)
+        else {
             return false;
         };
         if screen.size() == grid {
@@ -218,6 +229,87 @@ impl TerminalView {
             screen.scroll(lines);
             cx.notify();
         }
+    }
+
+    fn on_left_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus, cx);
+        let (Attachment::Live(screen), Some(layout)) = (&mut self.attachment, self.layout) else {
+            return;
+        };
+        let at = layout.hit(event.position);
+        if event.modifiers.shift && screen.has_selection() {
+            screen.extend_selection(at);
+        } else {
+            screen.select(SelectionKind::from_clicks(event.click_count), at);
+        }
+        self.selecting = true;
+        cx.notify();
+    }
+
+    fn on_pointer(&mut self, pointer: Pointer, cx: &mut Context<Self>) {
+        if !self.selecting {
+            return;
+        }
+        let Attachment::Live(screen) = &mut self.attachment else {
+            self.selecting = false;
+            return;
+        };
+        match (pointer, self.layout) {
+            (Pointer::Dragged(position), Some(layout)) => {
+                screen.extend_selection(layout.hit(position));
+                cx.notify();
+            }
+            (Pointer::Dragged(_), None) => {}
+            (Pointer::Released, _) => {
+                self.selecting = false;
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                if let Some(text) = screen.selected_text() {
+                    cx.write_to_primary(ClipboardItem::new_string(text));
+                }
+            }
+        }
+    }
+
+    fn on_middle_down(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if let Some(text) = cx.read_from_primary().and_then(|item| item.text()) {
+            self.paste(&text, cx);
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        let _ = cx;
+    }
+
+    fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        if let Attachment::Live(screen) = &self.attachment
+            && let Some(text) = screen.selected_text()
+        {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    fn paste_clipboard(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            self.paste(&text, cx);
+        }
+    }
+
+    /// Types `text` into the pane as a paste, and shows the bottom where it lands.
+    fn paste(&mut self, text: &str, cx: &mut Context<Self>) {
+        let Attachment::Live(screen) = &mut self.attachment else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        let bytes = input::paste(text, screen.bracketed_paste());
+        screen.scroll_to_bottom();
+        let _ = self.sender.input(self.channel, &bytes);
+        cx.notify();
     }
 
     /// The visible text, for tests.
@@ -265,27 +357,33 @@ impl Render for TerminalView {
             Attachment::Attaching | Attachment::AwaitingSnapshot(_) => (blank(), None),
             Attachment::Refused(reason) => (blank(), Some(reason.clone())),
         };
-        let view = cx.entity().downgrade();
-        let on_grid = move |grid, _: &mut Window, cx: &mut App| {
-            let _ = view.update(cx, |view, cx| view.set_grid(grid, cx));
+        let this = cx.entity().downgrade();
+        let on_layout = {
+            let this = this.clone();
+            move |layout, _: &mut Window, cx: &mut App| {
+                let _ = this.update(cx, |this, cx| this.set_layout(layout, cx));
+            }
+        };
+        let on_pointer = move |pointer, _: &mut Window, cx: &mut App| {
+            let _ = this.update(cx, |this, cx| this.on_pointer(pointer, cx));
         };
         let muted = mode.semantic().muted_foreground;
         // Penpot `agentdeck / TerminalSurface`: `background`, padding `space.3`.
         div()
             .id(("terminal", self.channel))
             .track_focus(&self.focus)
-            .key_context("Terminal")
+            .key_context(keymap::TERMINAL)
             .relative()
             .size_full()
             .p(space::S3)
             .bg(palette.background)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, window, cx| window.focus(&this.focus, cx)),
-            )
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_left_down))
+            .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_middle_down))
+            .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::paste_clipboard))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_scroll(cx.listener(Self::on_scroll))
-            .child(terminal(frame, palette.background, on_grid))
+            .child(terminal(frame, palette.background, on_layout, on_pointer))
             .when_some(status, |view, status| {
                 view.child(
                     div()
@@ -316,8 +414,12 @@ mod tests {
 
     use agentdeck_client::ws::{Event, Outgoing, Remote};
     use agentdeck_core::AgentState;
+    use alacritty_terminal::index::Side;
     use brrritscold_core_gpui::Root;
-    use gpui::{AppContext as _, TestAppContext, VisualTestContext};
+    use gpui::{
+        AppContext as _, ClipboardItem, Modifiers, MouseDownEvent, Pixels, Point, TestAppContext,
+        VisualTestContext, point, px,
+    };
 
     use super::*;
     use crate::connection::fake::FakeConnector;
@@ -345,6 +447,7 @@ mod tests {
         fn open(cx: &mut TestAppContext) -> (Self, &mut VisualTestContext) {
             cx.update(brrritscold_core_gpui::init);
             cx.update(super::super::init);
+            cx.update(crate::keymap::init);
             let connector = Rc::new(FakeConnector::default());
             let remote = connector.then_connect();
             let connector: Rc<dyn Connector> = connector;
@@ -432,6 +535,70 @@ mod tests {
                 cx,
             );
             self.deliver(Event::Output(1, snapshot.to_vec()), cx);
+        }
+
+        /// A window position over the cell at `line`, `col`: its left or right half.
+        fn at(
+            &self,
+            line: usize,
+            col: usize,
+            side: Side,
+            cx: &mut VisualTestContext,
+        ) -> Point<Pixels> {
+            let layout = self
+                .view(cx)
+                .read_with(cx, |view, _| view.layout)
+                .expect("laid out");
+            let x = match side {
+                Side::Left => 0.25,
+                Side::Right => 0.75,
+            };
+            layout.origin
+                + point(
+                    layout.cell.width * (col as f32 + x),
+                    layout.cell.height * (line as f32 + 0.5),
+                )
+        }
+
+        /// A live, focused terminal at 20 × 4 showing `snapshot`, laid out.
+        fn live<'a>(
+            snapshot: &[u8],
+            cx: &'a mut TestAppContext,
+        ) -> (Self, &'a mut VisualTestContext) {
+            let (mut harness, cx) = Harness::open(cx);
+            harness.focus(cx);
+            harness.draw(cx);
+            harness.attached(20, 4, snapshot, cx);
+            harness.draw(cx);
+            harness.sent();
+            (harness, cx)
+        }
+
+        /// Drags with the left button from `from` to `to`, with `clicks` on the press.
+        fn drag(
+            &self,
+            from: Point<Pixels>,
+            to: Point<Pixels>,
+            clicks: usize,
+            modifiers: Modifiers,
+            cx: &mut VisualTestContext,
+        ) {
+            cx.simulate_event(MouseDownEvent {
+                position: from,
+                button: MouseButton::Left,
+                modifiers,
+                click_count: clicks,
+                first_mouse: false,
+            });
+            cx.simulate_mouse_move(to, MouseButton::Left, modifiers);
+            cx.simulate_mouse_up(to, MouseButton::Left, modifiers);
+            self.draw(cx);
+        }
+
+        /// What `secondary-shift-c` put on the clipboard.
+        fn copied(&self, cx: &mut VisualTestContext) -> Option<String> {
+            cx.simulate_keystrokes("secondary-shift-c");
+            cx.read_from_clipboard().and_then(|item| item.text())
         }
 
         /// The first `lines` visible lines, once live.
@@ -592,7 +759,11 @@ mod tests {
             harness.attached(10, 2, b"", cx);
 
             let (cols, rows) = resized(&harness.sent()).expect("a resize");
-            let size = harness.view(cx).read_with(cx, |view, _| view.grid).unwrap();
+            let size = harness
+                .view(cx)
+                .read_with(cx, |view, _| view.layout)
+                .unwrap()
+                .grid;
             assert_eq!((cols, rows), (size.cols, size.rows));
             assert_ne!((cols, rows), (10, 2));
         }
@@ -709,6 +880,176 @@ mod tests {
             cx.simulate_keystrokes("a");
 
             assert_eq!(harness.sent(), []);
+        }
+    }
+
+    mod select {
+        use super::*;
+
+        #[gpui::test]
+        fn should_copy_the_cells_dragged_across(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::live(b"hello world", cx);
+            let from = harness.at(0, 0, Side::Left, cx);
+            let to = harness.at(0, 4, Side::Right, cx);
+
+            harness.drag(from, to, 1, Modifiers::default(), cx);
+
+            assert_eq!(harness.copied(cx).as_deref(), Some("hello"));
+        }
+
+        #[gpui::test]
+        fn should_keep_selecting_when_dragged_out_of_the_terminal(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::live(b"hello world\r\nnext", cx);
+            let from = harness.at(0, 6, Side::Left, cx);
+            let past_the_right_edge = point(px(10_000.), harness.at(0, 0, Side::Left, cx).y);
+
+            harness.drag(from, past_the_right_edge, 1, Modifiers::default(), cx);
+
+            assert_eq!(harness.copied(cx).as_deref(), Some("world"));
+        }
+
+        #[gpui::test]
+        fn should_select_a_word_on_a_double_click(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::live(b"cd ~/src/app", cx);
+            let at = harness.at(0, 6, Side::Left, cx);
+
+            harness.drag(at, at, 2, Modifiers::default(), cx);
+
+            assert_eq!(harness.copied(cx).as_deref(), Some("~/src/app"));
+        }
+
+        #[gpui::test]
+        fn should_select_a_line_on_a_triple_click(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::live(b"one\r\ntwo", cx);
+            let at = harness.at(1, 0, Side::Left, cx);
+
+            harness.drag(at, at, 3, Modifiers::default(), cx);
+
+            assert_eq!(harness.copied(cx).as_deref(), Some("two\n"));
+        }
+
+        #[gpui::test]
+        fn should_extend_the_selection_on_a_shift_click(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::live(b"hello world", cx);
+            let (from, to) = (
+                harness.at(0, 0, Side::Left, cx),
+                harness.at(0, 1, Side::Right, cx),
+            );
+            harness.drag(from, to, 1, Modifiers::default(), cx);
+            let further = harness.at(0, 10, Side::Right, cx);
+
+            harness.drag(further, further, 1, Modifiers::shift(), cx);
+
+            assert_eq!(harness.copied(cx).as_deref(), Some("hello world"));
+        }
+
+        #[gpui::test]
+        fn should_clear_the_selection_on_a_click(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::live(b"hello world", cx);
+            let (from, to) = (
+                harness.at(0, 0, Side::Left, cx),
+                harness.at(0, 4, Side::Right, cx),
+            );
+            harness.drag(from, to, 1, Modifiers::default(), cx);
+            cx.write_to_clipboard(ClipboardItem::new_string("before".into()));
+
+            harness.drag(from, from, 1, Modifiers::default(), cx);
+
+            assert_eq!(harness.copied(cx).as_deref(), Some("before"));
+        }
+
+        #[gpui::test]
+        fn should_put_a_finished_selection_on_the_primary_selection(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::live(b"hello world", cx);
+            let from = harness.at(0, 6, Side::Left, cx);
+            let to = harness.at(0, 10, Side::Right, cx);
+
+            harness.drag(from, to, 1, Modifiers::default(), cx);
+
+            let primary = cx
+                .update(|_, cx| cx.read_from_primary())
+                .and_then(|i| i.text());
+            assert_eq!(primary.as_deref(), Some("world"));
+        }
+
+        #[gpui::test]
+        fn should_send_nothing_to_the_pane(cx: &mut TestAppContext) {
+            let (mut harness, cx) = Harness::live(b"hello world", cx);
+            let (from, to) = (
+                harness.at(0, 0, Side::Left, cx),
+                harness.at(0, 4, Side::Right, cx),
+            );
+
+            harness.drag(from, to, 1, Modifiers::default(), cx);
+            harness.copied(cx);
+
+            assert_eq!(harness.sent(), []);
+        }
+
+        #[gpui::test]
+        fn should_draw_a_selection_in_both_themes(cx: &mut TestAppContext) {
+            use brrritscold_core_gpui::{Theme, ThemePreference};
+
+            let (harness, cx) = Harness::live(b"hello world", cx);
+            let (from, to) = (
+                harness.at(0, 0, Side::Left, cx),
+                harness.at(0, 4, Side::Right, cx),
+            );
+            harness.drag(from, to, 1, Modifiers::default(), cx);
+
+            for preference in [ThemePreference::Light, ThemePreference::Dark] {
+                cx.update(|_, cx| Theme::set_preference(preference, cx));
+                harness.draw(cx);
+            }
+        }
+    }
+
+    mod paste {
+        use super::*;
+
+        fn pasted(snapshot: &[u8], clipboard: &str, cx: &mut TestAppContext) -> Vec<Outgoing> {
+            let (mut harness, cx) = Harness::live(snapshot, cx);
+            cx.write_to_clipboard(ClipboardItem::new_string(clipboard.into()));
+
+            cx.simulate_keystrokes("secondary-shift-v");
+
+            harness.sent()
+        }
+
+        #[gpui::test]
+        fn should_type_the_clipboard_with_line_endings_as_enter(cx: &mut TestAppContext) {
+            assert_eq!(
+                pasted(b"", "ls\npwd\n", cx),
+                [Outgoing::Input(1, b"ls\rpwd\r".to_vec())]
+            );
+        }
+
+        #[gpui::test]
+        fn should_bracket_the_paste_when_the_program_asks(cx: &mut TestAppContext) {
+            assert_eq!(
+                pasted(b"\x1b[?2004h", "ls\n", cx),
+                [Outgoing::Input(1, b"\x1b[200~ls\n\x1b[201~".to_vec())]
+            );
+        }
+
+        #[gpui::test]
+        fn should_send_nothing_for_an_empty_clipboard(cx: &mut TestAppContext) {
+            let (mut harness, cx) = Harness::live(b"", cx);
+
+            cx.simulate_keystrokes("secondary-shift-v");
+
+            assert_eq!(harness.sent(), []);
+        }
+
+        #[gpui::test]
+        fn should_paste_the_primary_selection_on_a_middle_click(cx: &mut TestAppContext) {
+            let (mut harness, cx) = Harness::live(b"", cx);
+            cx.update(|_, cx| cx.write_to_primary(ClipboardItem::new_string("echo hi".into())));
+            let at = harness.at(0, 0, Side::Left, cx);
+
+            cx.simulate_mouse_down(at, MouseButton::Middle, Modifiers::default());
+
+            assert_eq!(harness.sent(), [Outgoing::Input(1, b"echo hi".to_vec())]);
         }
     }
 
