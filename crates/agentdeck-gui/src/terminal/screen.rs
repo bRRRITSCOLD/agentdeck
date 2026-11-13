@@ -91,6 +91,19 @@ pub struct Cursor {
     pub color: Hsla,
 }
 
+/// Text an input method is composing, drawn underlined over the cells from the cursor on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Preedit {
+    /// The visible line.
+    pub line: usize,
+    /// The column it starts at.
+    pub col: usize,
+    pub text: String,
+    pub color: Hsla,
+    /// What it covers the cells with.
+    pub background: Hsla,
+}
+
 /// What a terminal shows now, ready to paint.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Frame {
@@ -98,6 +111,8 @@ pub struct Frame {
     pub lines: Vec<FrameLine>,
     /// A cursor to draw over its cell; `None` when hidden, scrolled away or a filled block.
     pub cursor: Option<Cursor>,
+    /// What an input method is composing, if anything.
+    pub preedit: Option<Preedit>,
 }
 
 /// A spot under the pointer: a visible cell, and which half of it.
@@ -256,6 +271,33 @@ impl Screen {
         self.term.scroll_display(Scroll::Bottom);
     }
 
+    /// The visible cell the cursor is in, drawn or hidden; `None` once scrolled away from it.
+    pub fn cursor_cell(&self) -> Option<(usize, usize)> {
+        let grid = self.term.grid();
+        let point = grid.cursor.point;
+        let line = point.line.0 + grid.display_offset() as i32;
+        let visible = usize::try_from(line)
+            .ok()
+            .filter(|&line| line < self.term.screen_lines())?;
+        Some((visible, point.column.0))
+    }
+
+    /// `text` an input method is composing, placed at the cursor in `palette`; `None` for no
+    /// text, or once scrolled away from the cursor.
+    pub fn preedit(&self, text: &str, palette: &Palette) -> Option<Preedit> {
+        if text.is_empty() {
+            return None;
+        }
+        let (line, col) = self.cursor_cell()?;
+        Some(Preedit {
+            line,
+            col,
+            text: text.to_owned(),
+            color: palette.foreground,
+            background: palette.background,
+        })
+    }
+
     /// What it shows now, in `palette`; a `focused` terminal draws its cursor filled.
     pub fn frame(&self, palette: &Palette, focused: bool) -> Frame {
         let content = self.term.renderable_content();
@@ -313,7 +355,11 @@ impl Screen {
         if let Some(done) = current {
             lines[done] = builder.finish();
         }
-        Frame { lines, cursor }
+        Frame {
+            lines,
+            cursor,
+            preedit: None,
+        }
     }
 
     /// The visible text, one string per line with trailing blanks trimmed.
@@ -861,6 +907,47 @@ mod tests {
 
                 assert_eq!(frame.cursor, None);
             }
+        }
+    }
+
+    mod preedit {
+        use super::*;
+
+        #[test]
+        fn should_sit_at_the_cursor_in_the_foreground_over_the_background() {
+            let preedit = screen(b"ab\r\ncd").preedit("にほ", &palette());
+
+            assert_eq!(
+                preedit,
+                Some(Preedit {
+                    line: 1,
+                    col: 2,
+                    text: "にほ".into(),
+                    color: palette().foreground,
+                    background: palette().background,
+                })
+            );
+        }
+
+        #[test]
+        fn should_sit_at_the_cursor_the_program_hid() {
+            let preedit = screen(b"ab\x1b[?25l").preedit("é", &palette());
+
+            assert_eq!(preedit.map(|p| (p.line, p.col)), Some((0, 2)));
+        }
+
+        #[test]
+        fn should_be_none_without_text() {
+            assert_eq!(screen(b"ab").preedit("", &palette()), None);
+        }
+
+        #[test]
+        fn should_be_none_once_scrolled_away_from_the_cursor() {
+            let mut screen = screen(b"1\r\n2\r\n3\r\n4\r\n5\r\n6");
+            screen.scroll(4);
+
+            assert_eq!(screen.preedit("é", &palette()), None);
+            assert_eq!(screen.cursor_cell(), None);
         }
     }
 }

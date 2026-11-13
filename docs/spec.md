@@ -271,6 +271,7 @@ Built on `brrritscold-core-gpui` (`init`, `Root`, theme preference, toasts). Scr
   - **Zed's GPL-3.0 terminal crates are never copied.**
   - The font is Inter for the UI. The terminal gets a monospace font with a symbols fallback for agent glyphs (`⎿`, `✻`, `◐`).
   - The mouse, after xterm: a program that asks for mouse reports (1000 / 1002 / 1003, SGR 1006) gets clicks, drags and the wheel; shift takes them back for selecting and the scrollback. Otherwise, on the alternate screen, the wheel sends an arrow key per line (1007).
+  - Input methods and dead keys: a composition shows underlined at the cursor, and only committed text reaches the pane. The candidate window opens at the cursor.
 - **Colours** use semantic tokens only.
   - Agent state: working `info`, blocked `destructive`, done `success`, idle/unknown/exited-0 `muted-foreground`, exited ≠ 0 `destructive`.
   - Blocked and a failed exit share red, as in herdr: the label (`blocked` vs `exited 1`) and the StateDot shape (a filled dot vs a red `OctagonX`) tell them apart, so colour is never the only signal.
