@@ -39,6 +39,13 @@ impl Columns {
     pub const REVIEW: Pixels = px(128.);
     /// Workspace.
     pub const WORKSPACE: Pixels = px(140.);
+    /// The title's least width. Below it the table scrolls sideways instead: Penpot's board
+    /// is 1440 wide, and a narrower window would squeeze the title to nothing.
+    pub const TITLE_MIN: Pixels = px(240.);
+    /// The table's least width: every column, the title at its least, the `space.3` gaps
+    /// and the rows' `space.2` padding.
+    pub const TABLE_MIN: Pixels =
+        px(100. + 16. + 240. + 96. + 140. + 52. + 80. + 128. + 140. + 8. * 12. + 2. * 8.);
 }
 
 /// How a task status reads in a picker or a group header.
@@ -76,7 +83,7 @@ pub fn columns(cx: &App) -> Div {
     let name = |width: Option<Pixels>, text: &'static str| {
         let cell = match width {
             Some(width) => cell(width),
-            None => div().flex_1().min_w_0(),
+            None => div().flex_1().min_w(Columns::TITLE_MIN),
         };
         cell.child(text)
     };
@@ -195,7 +202,8 @@ pub fn status_picker(
             content.item(SelectItem::new(s.as_str(), status_label(*s)))
         });
     Select::new(id)
-        .trigger(SelectTrigger::new().size(SelectTriggerSize::Sm))
+        // Penpot's `Status` trigger is 95px whatever the status, so the column lines up.
+        .trigger(SelectTrigger::new().size(SelectTriggerSize::Sm).w(px(95.)))
         .content(content)
         .value(Some(status.as_str()))
         .on_value_change(move |value, window, cx| {
@@ -246,7 +254,7 @@ pub fn wide(row: &Row, picker: Select, cx: &App) -> AnyElement {
         .child(
             div()
                 .flex_1()
-                .min_w_0()
+                .min_w(Columns::TITLE_MIN)
                 .text_size(font_size::SM)
                 .text_color(s.foreground)
                 .child(row.title.clone()),

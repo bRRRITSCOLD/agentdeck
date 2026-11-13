@@ -211,6 +211,22 @@ impl Render for TasksView {
                 list = list.child(task_row::wide(row, picker, cx));
             }
         }
+        // Columns over List, as wide as the window allows and never narrower than the table.
+        let table = div()
+            .id("task-table")
+            .flex_1()
+            .min_h_0()
+            .overflow_x_scroll()
+            .child(
+                div()
+                    .size_full()
+                    .min_w(task_row::Columns::TABLE_MIN)
+                    .flex()
+                    .flex_col()
+                    .gap(space::S4)
+                    .child(task_row::columns(cx))
+                    .child(list),
+            );
         // Penpot `Content`: Header / Columns / List, `space.4` apart, padded `space.6`.
         div()
             .flex_1()
@@ -222,8 +238,7 @@ impl Render for TasksView {
             .p(space::S6)
             .bg(s.background)
             .child(self.header(cx))
-            .child(task_row::columns(cx))
-            .child(list)
+            .child(table)
             .when(counts.is_empty(), |content| {
                 content.child(
                     div()
