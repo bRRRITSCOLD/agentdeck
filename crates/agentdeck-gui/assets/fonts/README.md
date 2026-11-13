@@ -8,7 +8,10 @@ two italic faces, from the same release core-gpui vendors its faces from:
 [JetBrains Mono 2.304](https://github.com/JetBrains/JetBrainsMono/releases/tag/v2.304),
 `fonts/ttf/` in `JetBrainsMono-2.304.zip`, unmodified. Licensed under the SIL Open Font
 License 1.1 ([`JetBrainsMono-OFL.txt`](JetBrainsMono-OFL.txt), the release's `OFL.txt`).
-When core-gpui bundles them, delete these.
+
+They stay here, not in core-gpui. core-gpui follows core-react, and core-react loads only
+the upright `@fontsource/jetbrains-mono` faces: the design system sets no italic text. Move
+them only if core-react starts shipping italics; then core-gpui follows and these go.
 
 | File | SHA-256 |
 |---|---|
