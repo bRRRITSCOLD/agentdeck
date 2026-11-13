@@ -11,6 +11,10 @@
 //! selection, which a middle click pastes. The selection lives in this client's model only;
 //! the pane never hears of it.
 //!
+//! A program can copy too, with OSC 52, as Claude Code does with its own selection: live output
+//! that copies puts the text on the clipboard (or the primary selection). A snapshot never
+//! copies, so a reattach doesn't repeat an old copy.
+//!
 //! The mouse, after xterm: a program that asks for mouse reports (DECSET 1000 / 1002 / 1003)
 //! gets the buttons, drags, moves and wheel instead, and shift takes them back for selecting
 //! and the scrollback. Otherwise the wheel scrolls the scrollback, or on the alternate screen
@@ -35,7 +39,7 @@ use gpui::{
 use super::element::{Layout, Metrics, Pointer, terminal};
 use super::input::{self, Button, Mouse};
 use super::palette::Palette;
-use super::screen::{Frame, GridSize, Screen, SelectionKind};
+use super::screen::{Copied, Frame, GridSize, Screen, SelectionKind};
 use crate::connection::{Connection, DaemonEvent};
 use crate::keymap::{self, Copy, Paste};
 
@@ -160,13 +164,16 @@ impl TerminalView {
                     // the pane be resized to fit.
                     Attachment::AwaitingSnapshot(mut screen) => {
                         screen.feed(bytes);
+                        screen.take_copies();
                         self.attachment = Attachment::Live(screen);
                         self.fit();
                         self.claim_primary(window);
                     }
                     Attachment::Live(mut screen) => {
                         screen.feed(bytes);
+                        let copies = screen.take_copies();
                         self.attachment = Attachment::Live(screen);
+                        copy_out(copies, cx);
                     }
                     other => self.attachment = other,
                 }
@@ -564,6 +571,19 @@ impl EntityInputHandler for TerminalView {
         _: &mut Context<Self>,
     ) -> Option<usize> {
         None
+    }
+}
+
+/// Puts what a program copied where it asked: the clipboard, or on Linux the primary selection.
+fn copy_out(copies: Vec<Copied>, cx: &mut App) {
+    for copied in copies {
+        match copied {
+            Copied::Clipboard(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            Copied::Primary(text) => cx.write_to_primary(ClipboardItem::new_string(text)),
+            #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+            Copied::Primary(_) => {}
+        }
     }
 }
 
@@ -1760,6 +1780,35 @@ mod tests {
                 cx.update(|_, cx| Theme::set_preference(preference, cx));
                 harness.draw(cx);
             }
+        }
+    }
+
+    mod osc52 {
+        use super::*;
+
+        fn clipboard(cx: &mut VisualTestContext) -> Option<String> {
+            cx.read_from_clipboard().and_then(|item| item.text())
+        }
+
+        #[gpui::test]
+        fn should_put_what_the_program_copies_on_the_clipboard(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::live(b"", cx);
+
+            harness.deliver(Event::Output(1, b"\x1b]52;c;aGVsbG8=\x07".to_vec()), cx);
+
+            assert_eq!(clipboard(cx).as_deref(), Some("hello"));
+        }
+
+        #[gpui::test]
+        fn should_not_copy_again_from_a_snapshot(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(cx);
+            cx.write_to_clipboard(ClipboardItem::new_string("before".into()));
+            harness.focus(cx);
+            harness.draw(cx);
+
+            harness.attached(20, 4, b"\x1b]52;c;aGVsbG8=\x07", cx);
+
+            assert_eq!(clipboard(cx).as_deref(), Some("before"));
         }
     }
 }

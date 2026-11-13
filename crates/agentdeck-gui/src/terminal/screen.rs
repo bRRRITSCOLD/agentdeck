@@ -2,16 +2,20 @@
 //! into (spec §5), and the [`Frame`] it reads as, which the renderer paints.
 //!
 //! Replies the `Term` generates (DA, cursor position, colour queries) are dropped: only the
-//! daemon's `Term` answers queries.
+//! daemon's `Term` answers queries. What a program copies with OSC 52 is kept for the view to
+//! put on the clipboard ([`Screen::take_copies`]); a program reading the clipboard is refused.
+
+use std::cell::RefCell;
+use std::rc::Rc;
 
 use alacritty_terminal::Term;
-use alacritty_terminal::event::VoidListener;
+use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::test::TermSize;
-use alacritty_terminal::term::{Config, TermMode, viewport_to_point};
+use alacritty_terminal::term::{ClipboardType, Config, Osc52, TermMode, viewport_to_point};
 use alacritty_terminal::vte::ansi::{CursorShape, Processor};
 use gpui::Hsla;
 
@@ -148,24 +152,62 @@ impl SelectionKind {
     }
 }
 
+/// Text a program copied with OSC 52 (`ESC ] 52 ; c|p ; base64`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Copied {
+    /// For the clipboard.
+    Clipboard(String),
+    /// For the primary selection, which a middle click pastes.
+    Primary(String),
+}
+
+/// Keeps what the `Term` reports a program copied; drops its other events.
+#[derive(Clone, Default)]
+struct Copies(Rc<RefCell<Vec<Copied>>>);
+
+impl EventListener for Copies {
+    fn send_event(&self, event: Event) {
+        if let Event::ClipboardStore(kind, text) = event {
+            self.0.borrow_mut().push(match kind {
+                ClipboardType::Clipboard => Copied::Clipboard(text),
+                ClipboardType::Selection => Copied::Primary(text),
+            });
+        }
+    }
+}
+
 /// A terminal model, fed by the daemon.
 pub struct Screen {
-    term: Term<VoidListener>,
+    term: Term<Copies>,
     parser: Processor,
+    copies: Copies,
 }
 
 impl Screen {
     /// A blank terminal of `size`.
     pub fn new(size: GridSize) -> Self {
+        let copies = Copies::default();
+        // Copying only: a program that could read the clipboard could read what you copied
+        // anywhere else.
+        let config = Config {
+            osc52: Osc52::OnlyCopy,
+            ..Config::default()
+        };
         Screen {
-            term: Term::new(Config::default(), &term_size(size), VoidListener),
+            term: Term::new(config, &term_size(size), copies.clone()),
             parser: Processor::new(),
+            copies,
         }
     }
 
     /// Feeds bytes from the daemon: a snapshot or live output.
     pub fn feed(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.term, bytes);
+    }
+
+    /// What programs copied since the last call, oldest first.
+    pub fn take_copies(&mut self) -> Vec<Copied> {
+        std::mem::take(&mut *self.copies.0.borrow_mut())
     }
 
     /// Its size now.
@@ -506,6 +548,39 @@ mod tests {
         #[test]
         fn should_start_over_on_a_full_reset() {
             assert_eq!(screen(b"old\x1bcnew").text(), ["new", "", "", ""]);
+        }
+    }
+
+    mod copies {
+        use super::*;
+
+        #[test]
+        fn should_take_what_a_program_copies_to_the_clipboard() {
+            let mut screen = screen(b"\x1b]52;c;aGVsbG8=\x07");
+
+            assert_eq!(screen.take_copies(), [Copied::Clipboard("hello".into())]);
+        }
+
+        #[test]
+        fn should_take_a_copy_to_the_primary_selection() {
+            let mut screen = screen(b"\x1b]52;p;aGVsbG8=\x1b\\");
+
+            assert_eq!(screen.take_copies(), [Copied::Primary("hello".into())]);
+        }
+
+        #[test]
+        fn should_give_each_copy_once() {
+            let mut screen = screen(b"\x1b]52;c;aGVsbG8=\x07");
+            screen.take_copies();
+
+            assert_eq!(screen.take_copies(), []);
+        }
+
+        #[test]
+        fn should_refuse_a_program_reading_the_clipboard() {
+            let mut screen = screen(b"\x1b]52;c;?\x07");
+
+            assert_eq!(screen.take_copies(), []);
         }
     }
 
