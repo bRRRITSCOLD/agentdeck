@@ -30,7 +30,7 @@ use gpui::{
     Subscription, Task, Window, div, relative,
 };
 
-use crate::api::{Api, Split, WorkspacePanes};
+use crate::api::{Api, PaneAt, Split, WorkspacePanes};
 use crate::connection::{Connection, DaemonEvent};
 use crate::keymap::{self, NextPane, NextTab, PreviousPane, PreviousTab, SelectTab};
 use crate::pane::{PaneRequest, PaneView};
@@ -65,7 +65,7 @@ pub struct WorkspaceView {
     /// A pane to focus once a read shows it: the new side of a split.
     focus_next: Option<PaneId>,
     /// The running pane the close confirmation asks about, while it is open.
-    closing: Option<PaneId>,
+    closing: Option<PaneAt>,
     /// Opens and closes the close confirmation.
     close_dialog: DialogHandle,
     /// The read in flight; replaced by a newer one.
@@ -161,22 +161,21 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let pane = pane.read(cx).pane();
+        let at = PaneAt {
+            workspace: self.workspace,
+            tab: pane.tab_id,
+            pane: pane.id,
+        };
         match request {
             PaneRequest::Split(direction) => {
-                let split = Split {
-                    workspace: self.workspace,
-                    tab: pane.tab_id,
-                    target: pane.id,
-                    direction,
-                    cwd: pane.cwd.clone(),
-                };
-                self.split_pane(split, window, cx);
+                let cwd = pane.cwd.clone();
+                self.split_pane(Split { at, direction, cwd }, window, cx);
             }
             PaneRequest::Close if pane.state == AgentState::Exited => {
-                self.close_pane(pane.id, window, cx);
+                self.close_pane(at, window, cx);
             }
             PaneRequest::Close => {
-                self.closing = Some(pane.id);
+                self.closing = Some(at);
                 self.close_dialog.open(window, cx);
                 cx.notify();
             }
@@ -212,10 +211,11 @@ impl WorkspaceView {
     /// The running pane the close confirmation asks about, while it is open.
     #[cfg(test)]
     pub fn closing(&self) -> Option<PaneId> {
-        self.closing.filter(|_| self.close_dialog.is_open())
+        let open = self.close_dialog.is_open();
+        self.closing.filter(|_| open).map(|at| at.pane)
     }
 
-    fn close_pane(&mut self, pane: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+    fn close_pane(&mut self, pane: PaneAt, window: &mut Window, cx: &mut Context<Self>) {
         let closing = self.api.close_pane(pane, cx);
         cx.spawn_in(window, async move |this, cx| {
             let closed = closing.await;
@@ -380,15 +380,18 @@ impl WorkspaceView {
         }
     }
 
+    /// `text` centred in the space left, wrapping within it.
     fn message(&self, text: impl Into<SharedString>, cx: &mut Context<Self>) -> AnyElement {
         div()
             .size_full()
+            .min_w_0()
             .flex()
             .items_center()
             .justify_center()
+            .p(space::S8)
             .text_sm()
             .text_color(cx.theme().semantic().muted_foreground)
-            .child(text.into())
+            .child(div().max_w_full().text_center().child(text.into()))
             .into_any_element()
     }
 
@@ -431,7 +434,7 @@ impl WorkspaceView {
     fn close_confirmation(&self, cx: &mut Context<Self>) -> AlertDialog {
         let title = self
             .closing
-            .and_then(|pane| self.panes.get(&pane))
+            .and_then(|at| self.panes.get(&at.pane))
             .map(|pane| pane.read(cx).title());
         let what = title.map_or("What runs there".into(), |title| format!("“{title}”"));
         AlertDialog::new("close-pane")
@@ -1108,6 +1111,48 @@ mod tests {
                 assert_eq!(harness.closed(), [id(7)]);
                 assert_eq!(harness.closing(cx), None);
                 assert!(harness.shown(cx).is_empty());
+            }
+
+            #[gpui::test]
+            fn should_give_its_sibling_the_space(cx: &mut TestAppContext) {
+                let panes = vec![
+                    Pane {
+                        state: AgentState::Exited,
+                        ..shell_pane(7, id(1))
+                    },
+                    shell_pane(8, id(1)),
+                ];
+                let (harness, cx) = Harness::open(vec![split_tab(1, 0, 7, 8)], panes, cx);
+
+                harness.request(0, PaneRequest::Close, cx);
+
+                assert_eq!(
+                    harness.api.layout(id(1), id(1)),
+                    Some(Layout::single(id(8)))
+                );
+                assert_eq!(harness.shown(cx), [id(8)]);
+            }
+
+            #[gpui::test]
+            fn should_take_the_tab_with_its_last_pane(cx: &mut TestAppContext) {
+                let tabs = vec![
+                    tab(1, id(1), 0, Some(id(11))),
+                    tab(2, id(1), 1, Some(id(21))),
+                ];
+                let panes = vec![
+                    shell_pane(11, id(1)),
+                    Pane {
+                        state: AgentState::Exited,
+                        ..shell_pane(21, id(2))
+                    },
+                ];
+                let (harness, cx) = Harness::open(tabs, panes, cx);
+                harness.select(id(2), cx);
+
+                harness.request(0, PaneRequest::Close, cx);
+
+                assert_eq!(harness.selected(cx), Some(id(1)));
+                assert_eq!(harness.shown(cx), [id(11)]);
             }
 
             #[gpui::test]

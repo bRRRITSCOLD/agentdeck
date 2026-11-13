@@ -4,7 +4,6 @@
 //! HTTP client and the MCP server are async, so `main` drives them on a current-thread tokio
 //! runtime.
 
-mod api;
 mod cli;
 mod commands;
 mod launch;

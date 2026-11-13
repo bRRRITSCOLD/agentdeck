@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use agentdeck_client::types;
+use crate::types;
 
 /// A failed API call: what the daemon said, with its `error_code` when it gave one.
 #[derive(Debug)]
@@ -42,10 +42,10 @@ impl ErrorBody for types::DeleteWorkspaceError {
     }
 }
 
-impl<E: ErrorBody> From<agentdeck_client::Error<E>> for ApiError {
-    fn from(err: agentdeck_client::Error<E>) -> ApiError {
+impl<E: ErrorBody> From<crate::Error<E>> for ApiError {
+    fn from(err: crate::Error<E>) -> ApiError {
         match err {
-            agentdeck_client::Error::ErrorResponse(response) => {
+            crate::Error::ErrorResponse(response) => {
                 let (message, code) = response.into_inner().parts();
                 ApiError { message, code }
             }

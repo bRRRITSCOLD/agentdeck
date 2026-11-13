@@ -8,6 +8,7 @@ mod daemon;
 mod health;
 mod notes;
 mod panes;
+mod panes_client;
 mod prs;
 mod support;
 mod tabs;
