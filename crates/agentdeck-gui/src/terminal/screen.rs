@@ -15,6 +15,7 @@ use alacritty_terminal::term::{Config, TermMode, viewport_to_point};
 use alacritty_terminal::vte::ansi::{CursorShape, Processor};
 use gpui::Hsla;
 
+use super::input::{MouseProtocol, Tracking};
 use super::palette::{Palette, dim};
 
 /// A terminal's size in cells.
@@ -180,6 +181,33 @@ impl Screen {
     /// Whether the program asked for bracketed paste (DECSET 2004).
     pub fn bracketed_paste(&self) -> bool {
         self.term.mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
+    /// How the program asked to hear of the mouse (DECSET 1000 / 1002 / 1003, and 1006 for
+    /// SGR); `None` when it didn't.
+    pub fn mouse_protocol(&self) -> Option<MouseProtocol> {
+        let mode = self.term.mode();
+        let tracking = if mode.contains(TermMode::MOUSE_MOTION) {
+            Tracking::Motion
+        } else if mode.contains(TermMode::MOUSE_DRAG) {
+            Tracking::Drags
+        } else if mode.contains(TermMode::MOUSE_REPORT_CLICK) {
+            Tracking::Clicks
+        } else {
+            return None;
+        };
+        Some(MouseProtocol {
+            tracking,
+            sgr: mode.contains(TermMode::SGR_MOUSE),
+        })
+    }
+
+    /// Whether the wheel sends arrow keys: on the alternate screen, unless the program
+    /// turned that off (DECSET 1007, on by default).
+    pub fn alternate_scroll(&self) -> bool {
+        self.term
+            .mode()
+            .contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL)
     }
 
     /// Starts a selection of `kind` at `at`, replacing any other.

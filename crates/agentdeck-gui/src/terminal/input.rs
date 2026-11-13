@@ -1,7 +1,7 @@
-//! What a key press or a paste sends to the pane's PTY: xterm's sequences, as a terminal
-//! emulator writes them.
+//! What a key press, a paste or the mouse sends to the pane's PTY: xterm's sequences, as a
+//! terminal emulator writes them.
 
-use gpui::Keystroke;
+use gpui::{Keystroke, Modifiers};
 
 /// The bytes `keystroke` sends, or `None` when it isn't the terminal's to handle (a
 /// `secondary-` shortcut, a bare modifier). `app_cursor` is DECCKM: the cursor keys send
@@ -85,6 +85,103 @@ pub fn paste(text: &str, bracketed: bool) -> Vec<u8> {
     }
 }
 
+/// What turning the wheel `lines` notches on the alternate screen sends: an up arrow per
+/// notch up (positive), a down arrow per notch down, as DECCKM has the cursor keys send them.
+pub fn scroll_keys(lines: i32, app_cursor: bool) -> Vec<u8> {
+    let prefix: &[u8] = if app_cursor { b"\x1bO" } else { b"\x1b[" };
+    let arrow = if lines > 0 { b'A' } else { b'B' };
+    [prefix, &[arrow]]
+        .concat()
+        .repeat(lines.unsigned_abs() as usize)
+}
+
+/// A mouse button a program can hear of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Button {
+    Left,
+    Middle,
+    Right,
+}
+
+/// Something the mouse did over a cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mouse {
+    Press(Button),
+    Release(Button),
+    /// Moved onto another cell, with a button held or none.
+    Move(Option<Button>),
+    WheelUp,
+    WheelDown,
+}
+
+/// Which mouse events the program asked to hear of, least to most.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Tracking {
+    /// Presses, releases and the wheel (DECSET 1000).
+    Clicks,
+    /// Those, and moves with a button held (DECSET 1002).
+    Drags,
+    /// Those, and every move (DECSET 1003).
+    Motion,
+}
+
+/// How the program asked to hear of the mouse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MouseProtocol {
+    pub tracking: Tracking,
+    /// SGR encoding (DECSET 1006); without it, xterm's normal one.
+    pub sgr: bool,
+}
+
+/// The report `event` over the cell at zero-based `line`, `col` sends, or `None` when
+/// `protocol` doesn't ask for it or can't encode the cell.
+pub fn mouse(
+    event: Mouse,
+    line: usize,
+    col: usize,
+    modifiers: &Modifiers,
+    protocol: MouseProtocol,
+) -> Option<Vec<u8>> {
+    let code = |button: Button| match button {
+        Button::Left => 0,
+        Button::Middle => 1,
+        Button::Right => 2,
+    };
+    let (button, pressed) = match event {
+        Mouse::Press(button) => (code(button), true),
+        // The normal encoding can't say which button was let go.
+        Mouse::Release(button) if protocol.sgr => (code(button), false),
+        Mouse::Release(_) => (3, false),
+        Mouse::Move(Some(button)) if protocol.tracking >= Tracking::Drags => {
+            (32 + code(button), true)
+        }
+        Mouse::Move(None) if protocol.tracking == Tracking::Motion => (35, true),
+        Mouse::Move(_) => return None,
+        Mouse::WheelUp => (64, true),
+        Mouse::WheelDown => (65, true),
+    };
+    let button = button
+        + 4 * usize::from(modifiers.shift)
+        + 8 * usize::from(modifiers.alt)
+        + 16 * usize::from(modifiers.control);
+    let (col, line) = (col + 1, line + 1);
+
+    if protocol.sgr {
+        let end = if pressed { 'M' } else { 'm' };
+        return Some(format!("\x1b[<{button};{col};{line}{end}").into_bytes());
+    }
+    // One byte each, offset by 32: a cell past 223 doesn't fit, and xterm drops it.
+    let byte = |n: usize| u8::try_from(32 + n).ok();
+    Some(vec![
+        0x1b,
+        b'[',
+        b'M',
+        byte(button)?,
+        byte(col)?,
+        byte(line)?,
+    ])
+}
+
 /// F1–F4: `ESC O P` alone, `ESC [ 1 ; m P` with modifiers.
 fn ss3_or_csi(final_byte: char, modifier: u8) -> Vec<u8> {
     if modifier > 1 {
@@ -136,6 +233,163 @@ mod tests {
                 paste("a\x1b[201~rm -rf ~\n", true),
                 b"\x1b[200~a[201~rm -rf ~\n\x1b[201~"
             );
+        }
+    }
+
+    mod mouse {
+        use super::*;
+
+        const SGR: MouseProtocol = MouseProtocol {
+            tracking: Tracking::Clicks,
+            sgr: true,
+        };
+        const NORMAL: MouseProtocol = MouseProtocol {
+            tracking: Tracking::Clicks,
+            sgr: false,
+        };
+
+        fn report(
+            event: Mouse,
+            line: usize,
+            col: usize,
+            protocol: MouseProtocol,
+        ) -> Option<Vec<u8>> {
+            mouse(event, line, col, &Modifiers::default(), protocol)
+        }
+
+        fn tracking(tracking: Tracking) -> MouseProtocol {
+            MouseProtocol { tracking, ..SGR }
+        }
+
+        mod sgr {
+            use super::*;
+
+            #[test]
+            fn should_report_a_press_at_the_one_based_cell() {
+                assert_eq!(
+                    report(Mouse::Press(Button::Left), 2, 4, SGR),
+                    Some(b"\x1b[<0;5;3M".to_vec())
+                );
+                assert_eq!(
+                    report(Mouse::Press(Button::Right), 0, 0, SGR),
+                    Some(b"\x1b[<2;1;1M".to_vec())
+                );
+            }
+
+            #[test]
+            fn should_report_a_release_with_its_button_and_a_lowercase_m() {
+                assert_eq!(
+                    report(Mouse::Release(Button::Middle), 0, 0, SGR),
+                    Some(b"\x1b[<1;1;1m".to_vec())
+                );
+            }
+
+            #[test]
+            fn should_report_the_wheel_as_buttons_64_and_65() {
+                assert_eq!(
+                    report(Mouse::WheelUp, 0, 0, SGR),
+                    Some(b"\x1b[<64;1;1M".to_vec())
+                );
+                assert_eq!(
+                    report(Mouse::WheelDown, 0, 0, SGR),
+                    Some(b"\x1b[<65;1;1M".to_vec())
+                );
+            }
+
+            #[test]
+            fn should_report_cells_past_column_223() {
+                assert_eq!(
+                    report(Mouse::Press(Button::Left), 0, 299, SGR),
+                    Some(b"\x1b[<0;300;1M".to_vec())
+                );
+            }
+        }
+
+        mod normal {
+            use super::*;
+
+            #[test]
+            fn should_offset_the_button_and_one_based_cell_by_32() {
+                assert_eq!(
+                    report(Mouse::Press(Button::Left), 2, 4, NORMAL),
+                    Some(b"\x1b[M %#".to_vec())
+                );
+            }
+
+            #[test]
+            fn should_report_any_release_as_button_3() {
+                assert_eq!(
+                    report(Mouse::Release(Button::Right), 0, 0, NORMAL),
+                    Some(b"\x1b[M#!!".to_vec())
+                );
+            }
+
+            #[test]
+            fn should_report_up_to_column_223_and_drop_the_rest() {
+                assert_eq!(
+                    report(Mouse::Press(Button::Left), 0, 222, NORMAL),
+                    Some(vec![0x1b, b'[', b'M', 32, 255, 33])
+                );
+                assert_eq!(report(Mouse::Press(Button::Left), 0, 223, NORMAL), None);
+                assert_eq!(report(Mouse::Press(Button::Left), 223, 0, NORMAL), None);
+            }
+        }
+
+        #[test]
+        fn should_add_the_modifiers_to_the_button() {
+            let ctrl_alt = Modifiers {
+                control: true,
+                alt: true,
+                ..Modifiers::default()
+            };
+            assert_eq!(
+                mouse(Mouse::Press(Button::Left), 0, 0, &ctrl_alt, SGR),
+                Some(b"\x1b[<24;1;1M".to_vec())
+            );
+            assert_eq!(
+                mouse(Mouse::WheelUp, 0, 0, &Modifiers::shift(), SGR),
+                Some(b"\x1b[<68;1;1M".to_vec())
+            );
+        }
+
+        mod moves {
+            use super::*;
+
+            #[test]
+            fn should_add_32_to_a_drag() {
+                assert_eq!(
+                    report(
+                        Mouse::Move(Some(Button::Left)),
+                        0,
+                        1,
+                        tracking(Tracking::Drags)
+                    ),
+                    Some(b"\x1b[<32;2;1M".to_vec())
+                );
+            }
+
+            #[test]
+            fn should_report_a_buttonless_move_as_button_35() {
+                assert_eq!(
+                    report(Mouse::Move(None), 0, 1, tracking(Tracking::Motion)),
+                    Some(b"\x1b[<35;2;1M".to_vec())
+                );
+            }
+
+            #[test]
+            fn should_report_a_drag_only_when_drags_or_motion_are_tracked() {
+                let drag = Mouse::Move(Some(Button::Left));
+                assert_eq!(report(drag, 0, 0, tracking(Tracking::Clicks)), None);
+                assert!(report(drag, 0, 0, tracking(Tracking::Motion)).is_some());
+            }
+
+            #[test]
+            fn should_report_a_buttonless_move_only_when_motion_is_tracked() {
+                assert_eq!(
+                    report(Mouse::Move(None), 0, 0, tracking(Tracking::Drags)),
+                    None
+                );
+            }
         }
     }
 

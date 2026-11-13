@@ -10,6 +10,11 @@
 //! `secondary-shift-v` pastes the clipboard. On Linux a finished selection is also the primary
 //! selection, which a middle click pastes. The selection lives in this client's model only;
 //! the pane never hears of it.
+//!
+//! The mouse, after xterm: a program that asks for mouse reports (DECSET 1000 / 1002 / 1003)
+//! gets the buttons, drags, moves and wheel instead, and shift takes them back for selecting
+//! and the scrollback. Otherwise the wheel scrolls the scrollback, or on the alternate screen
+//! sends an arrow key per line (DECSET 1007).
 
 use agentdeck_client::ws;
 use agentdeck_core::PaneId;
@@ -19,12 +24,13 @@ use brrritscold_core_gpui_tokens::primitive::space;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    ParentElement as _, Render, ScrollEvent, SharedString, Styled as _, Subscription, Window, div,
+    InteractiveElement as _, IntoElement, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent,
+    MouseMoveEvent, ParentElement as _, Pixels, Point, Render, ScrollEvent, SharedString,
+    Styled as _, Subscription, Window, div,
 };
 
 use super::element::{Layout, Metrics, Pointer, terminal};
-use super::input;
+use super::input::{self, Button, Mouse};
 use super::palette::Palette;
 use super::screen::{Frame, GridSize, Screen, SelectionKind};
 use crate::connection::{Connection, DaemonEvent};
@@ -42,6 +48,15 @@ enum Attachment {
     Refused(SharedString),
 }
 
+/// What a held button that went down here is doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Held {
+    /// The left button, selecting.
+    Selecting,
+    /// A button the program hears of.
+    Reporting(Button),
+}
+
 /// What a terminal tells whoever shows it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TerminalEvent {
@@ -57,8 +72,10 @@ pub struct TerminalView {
     attachment: Attachment,
     /// Where the grid was last laid out, and the grid that fits.
     layout: Option<Layout>,
-    /// Whether a left-button drag that started here is selecting.
-    selecting: bool,
+    /// The button pressed here and not yet let go.
+    held: Option<Held>,
+    /// The cell the mouse was last reported at, so a move is reported once per cell.
+    reported: Option<(usize, usize)>,
     focus: FocusHandle,
     _subscriptions: [Subscription; 2],
 }
@@ -85,7 +102,8 @@ impl TerminalView {
             sender,
             attachment: Attachment::Attaching,
             layout: None,
-            selecting: false,
+            held: None,
+            reported: None,
             focus,
             _subscriptions: [events, activation],
         };
@@ -217,18 +235,67 @@ impl TerminalView {
     }
 
     fn on_scroll(&mut self, event: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let line = Metrics::measure(window).cell.height;
+        let lines = (event.delta.pixel_delta(line).y / line).round() as i32;
+        if lines == 0 {
+            return;
+        }
+        let wheel = if lines > 0 {
+            Mouse::WheelUp
+        } else {
+            Mouse::WheelDown
+        };
+        let count = lines.unsigned_abs() as usize;
+        if self.report(wheel, event.position, &event.modifiers, count) {
+            return;
+        }
         let Attachment::Live(screen) = &mut self.attachment else {
             return;
         };
-        if screen.alt_screen() {
-            return;
-        }
-        let line = Metrics::measure(window).cell.height;
-        let lines = (event.delta.pixel_delta(line).y / line).round() as i32;
-        if lines != 0 {
+        if screen.alternate_scroll() && !event.modifiers.shift {
+            let bytes = input::scroll_keys(lines, screen.app_cursor());
+            let _ = self.sender.input(self.channel, &bytes);
+        } else if !screen.alt_screen() {
             screen.scroll(lines);
             cx.notify();
         }
+    }
+
+    /// Sends `event` at `position` to the program `count` times, if it asked to hear of the
+    /// mouse and shift isn't held; whether the program has the mouse. A move is sent once per
+    /// cell.
+    fn report(
+        &mut self,
+        event: Mouse,
+        position: Point<Pixels>,
+        modifiers: &Modifiers,
+        count: usize,
+    ) -> bool {
+        let (Attachment::Live(screen), Some(layout)) = (&self.attachment, self.layout) else {
+            return false;
+        };
+        let Some(protocol) = screen.mouse_protocol().filter(|_| !modifiers.shift) else {
+            return false;
+        };
+        let at = layout.hit(position);
+        let cell = (at.line, at.col);
+        if matches!(event, Mouse::Move(_)) && self.reported == Some(cell) {
+            return true;
+        }
+        if let Some(report) = input::mouse(event, at.line, at.col, modifiers, protocol) {
+            self.reported = Some(cell);
+            let _ = self.sender.input(self.channel, &report.repeat(count));
+        }
+        true
+    }
+
+    /// A press of `button` the program hears of; whether it did.
+    fn report_press(&mut self, button: Button, event: &MouseDownEvent) -> bool {
+        let reported = self.report(Mouse::Press(button), event.position, &event.modifiers, 1);
+        if reported {
+            self.held = Some(Held::Reporting(button));
+        }
+        reported
     }
 
     fn on_left_down(
@@ -238,6 +305,9 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus, cx);
+        if self.report_press(Button::Left, event) {
+            return;
+        }
         let (Attachment::Live(screen), Some(layout)) = (&mut self.attachment, self.layout) else {
             return;
         };
@@ -247,41 +317,70 @@ impl TerminalView {
         } else {
             screen.select(SelectionKind::from_clicks(event.click_count), at);
         }
-        self.selecting = true;
+        self.held = Some(Held::Selecting);
         cx.notify();
     }
 
-    fn on_pointer(&mut self, pointer: Pointer, cx: &mut Context<Self>) {
-        if !self.selecting {
+    fn on_middle_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.report_press(Button::Middle, event) {
             return;
         }
-        let Attachment::Live(screen) = &mut self.attachment else {
-            self.selecting = false;
-            return;
-        };
-        match (pointer, self.layout) {
-            (Pointer::Dragged(position), Some(layout)) => {
-                screen.extend_selection(layout.hit(position));
-                cx.notify();
-            }
-            (Pointer::Dragged(_), None) => {}
-            (Pointer::Released, _) => {
-                self.selecting = false;
-                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                if let Some(text) = screen.selected_text() {
-                    cx.write_to_primary(ClipboardItem::new_string(text));
-                }
-            }
-        }
-    }
-
-    fn on_middle_down(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         if let Some(text) = cx.read_from_primary().and_then(|item| item.text()) {
             self.paste(&text, cx);
         }
         #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
         let _ = cx;
+    }
+
+    fn on_right_down(&mut self, event: &MouseDownEvent, _: &mut Window, _: &mut Context<Self>) {
+        self.report_press(Button::Right, event);
+    }
+
+    /// A move over the terminal with no button held, which only DECSET 1003 hears of.
+    fn on_hover(&mut self, event: &MouseMoveEvent, _: &mut Window, _: &mut Context<Self>) {
+        if event.pressed_button.is_none() {
+            self.report(Mouse::Move(None), event.position, &event.modifiers, 1);
+        }
+    }
+
+    fn on_pointer(&mut self, pointer: Pointer, cx: &mut Context<Self>) {
+        match (self.held, pointer) {
+            (Some(Held::Reporting(button)), Pointer::Dragged(event)) => {
+                self.report(
+                    Mouse::Move(Some(button)),
+                    event.position,
+                    &event.modifiers,
+                    1,
+                );
+            }
+            (Some(Held::Reporting(button)), Pointer::Released(event))
+                if heard(event.button) == Some(button) =>
+            {
+                self.held = None;
+                self.report(Mouse::Release(button), event.position, &event.modifiers, 1);
+            }
+            (Some(Held::Selecting), Pointer::Dragged(event)) => {
+                if let (Attachment::Live(screen), Some(layout)) =
+                    (&mut self.attachment, self.layout)
+                {
+                    screen.extend_selection(layout.hit(event.position));
+                    cx.notify();
+                }
+            }
+            (Some(Held::Selecting), Pointer::Released(event))
+                if event.button == MouseButton::Left =>
+            {
+                self.held = None;
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                if let Attachment::Live(screen) = &self.attachment
+                    && let Some(text) = screen.selected_text()
+                {
+                    cx.write_to_primary(ClipboardItem::new_string(text));
+                }
+            }
+            _ => {}
+        }
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -379,6 +478,8 @@ impl Render for TerminalView {
             .bg(palette.background)
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_left_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_middle_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_down))
+            .on_mouse_move(cx.listener(Self::on_hover))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste_clipboard))
             .on_key_down(cx.listener(Self::on_key_down))
@@ -400,6 +501,16 @@ impl Render for TerminalView {
     }
 }
 
+/// The button a program can hear of.
+fn heard(button: MouseButton) -> Option<Button> {
+    match button {
+        MouseButton::Left => Some(Button::Left),
+        MouseButton::Middle => Some(Button::Middle),
+        MouseButton::Right => Some(Button::Right),
+        MouseButton::Navigate(_) => None,
+    }
+}
+
 fn blank() -> Frame {
     Frame {
         lines: Vec::new(),
@@ -417,8 +528,8 @@ mod tests {
     use alacritty_terminal::index::Side;
     use brrritscold_core_gpui::Root;
     use gpui::{
-        AppContext as _, ClipboardItem, Modifiers, MouseDownEvent, Pixels, Point, TestAppContext,
-        VisualTestContext, point, px,
+        AppContext as _, ClipboardItem, Modifiers, MouseDownEvent, Pixels, Point, ScrollDelta,
+        TestAppContext, VisualTestContext, point, px,
     };
 
     use super::*;
@@ -593,6 +704,41 @@ mod tests {
             cx.simulate_mouse_move(to, MouseButton::Left, modifiers);
             cx.simulate_mouse_up(to, MouseButton::Left, modifiers);
             self.draw(cx);
+        }
+
+        /// Presses and lets go of `button` at `at`.
+        fn click(
+            &self,
+            at: Point<Pixels>,
+            button: MouseButton,
+            modifiers: Modifiers,
+            cx: &mut VisualTestContext,
+        ) {
+            cx.simulate_mouse_down(at, button, modifiers);
+            cx.simulate_mouse_up(at, button, modifiers);
+            self.draw(cx);
+        }
+
+        /// Turns the wheel `lines` notches at `at`: positive is up.
+        fn wheel(
+            &self,
+            at: Point<Pixels>,
+            lines: f32,
+            modifiers: Modifiers,
+            cx: &mut VisualTestContext,
+        ) {
+            cx.simulate_event(ScrollEvent {
+                position: at,
+                delta: ScrollDelta::Lines(point(0., lines)),
+                modifiers,
+                ..ScrollEvent::default()
+            });
+            self.draw(cx);
+        }
+
+        /// The first visible line.
+        fn top(&self, cx: &mut VisualTestContext) -> String {
+            self.text(1, cx).expect("live").remove(0)
         }
 
         /// What `secondary-shift-c` put on the clipboard.
@@ -1001,6 +1147,242 @@ mod tests {
                 cx.update(|_, cx| Theme::set_preference(preference, cx));
                 harness.draw(cx);
             }
+        }
+    }
+
+    mod wheel {
+        use super::*;
+
+        /// Numbered lines, more than the grid shows, so some sit in the scrollback.
+        fn numbered() -> Vec<u8> {
+            (0..200)
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join("\r\n")
+                .into_bytes()
+        }
+
+        fn top_number(harness: &Harness, cx: &mut VisualTestContext) -> i32 {
+            harness.top(cx).trim().parse().expect("a numbered line")
+        }
+
+        #[gpui::test]
+        fn should_scroll_the_scrollback_on_the_main_screen(cx: &mut TestAppContext) {
+            let (mut harness, cx) = Harness::live(&numbered(), cx);
+            let bottom = top_number(&harness, cx);
+            let at = harness.at(0, 0, Side::Left, cx);
+
+            harness.wheel(at, 3., Modifiers::default(), cx);
+
+            assert_eq!(top_number(&harness, cx), bottom - 3);
+            assert_eq!(harness.sent(), []);
+        }
+
+        mod alternate_screen {
+            use super::*;
+
+            #[gpui::test]
+            fn should_send_an_arrow_key_per_line(cx: &mut TestAppContext) {
+                let (mut harness, cx) = Harness::live(b"\x1b[?1049h", cx);
+                let at = harness.at(0, 0, Side::Left, cx);
+
+                harness.wheel(at, 2., Modifiers::default(), cx);
+                harness.wheel(at, -1., Modifiers::default(), cx);
+
+                assert_eq!(
+                    harness.sent(),
+                    [
+                        Outgoing::Input(1, b"\x1b[A\x1b[A".to_vec()),
+                        Outgoing::Input(1, b"\x1b[B".to_vec()),
+                    ]
+                );
+            }
+
+            #[gpui::test]
+            fn should_send_application_arrows_under_decckm(cx: &mut TestAppContext) {
+                let (mut harness, cx) = Harness::live(b"\x1b[?1049h\x1b[?1h", cx);
+                let at = harness.at(0, 0, Side::Left, cx);
+
+                harness.wheel(at, 1., Modifiers::default(), cx);
+
+                assert_eq!(harness.sent(), [Outgoing::Input(1, b"\x1bOA".to_vec())]);
+            }
+
+            #[gpui::test]
+            fn should_send_nothing_once_the_program_turns_alternate_scroll_off(
+                cx: &mut TestAppContext,
+            ) {
+                let (mut harness, cx) = Harness::live(b"\x1b[?1049h\x1b[?1007l", cx);
+                let at = harness.at(0, 0, Side::Left, cx);
+
+                harness.wheel(at, 1., Modifiers::default(), cx);
+
+                assert_eq!(harness.sent(), []);
+            }
+        }
+
+        mod mouse_tracking {
+            use super::*;
+
+            #[gpui::test]
+            fn should_report_a_wheel_button_per_line_at_the_cell(cx: &mut TestAppContext) {
+                let (mut harness, cx) = Harness::live(b"\x1b[?1049h\x1b[?1000h\x1b[?1006h", cx);
+                let at = harness.at(1, 3, Side::Left, cx);
+
+                harness.wheel(at, 2., Modifiers::default(), cx);
+                harness.wheel(at, -1., Modifiers::default(), cx);
+
+                assert_eq!(
+                    harness.sent(),
+                    [
+                        Outgoing::Input(1, b"\x1b[<64;4;2M\x1b[<64;4;2M".to_vec()),
+                        Outgoing::Input(1, b"\x1b[<65;4;2M".to_vec()),
+                    ]
+                );
+            }
+
+            #[gpui::test]
+            fn should_scroll_the_scrollback_instead_with_shift(cx: &mut TestAppContext) {
+                let mut snapshot = numbered();
+                snapshot.extend_from_slice(b"\x1b[?1000h");
+                let (mut harness, cx) = Harness::live(&snapshot, cx);
+                let bottom = top_number(&harness, cx);
+                let at = harness.at(0, 0, Side::Left, cx);
+
+                harness.wheel(at, 3., Modifiers::shift(), cx);
+
+                assert_eq!(top_number(&harness, cx), bottom - 3);
+                assert_eq!(harness.sent(), []);
+            }
+        }
+    }
+
+    mod mouse_tracking {
+        use super::*;
+
+        const SGR_CLICKS: &[u8] = b"hello world\x1b[?1000h\x1b[?1006h";
+
+        fn input(bytes: &[u8]) -> Outgoing {
+            Outgoing::Input(1, bytes.to_vec())
+        }
+
+        #[gpui::test]
+        fn should_report_a_click_instead_of_selecting(cx: &mut TestAppContext) {
+            let (mut harness, cx) = Harness::live(SGR_CLICKS, cx);
+            let at = harness.at(1, 3, Side::Left, cx);
+
+            harness.drag(at, at, 1, Modifiers::default(), cx);
+
+            assert_eq!(
+                harness.sent(),
+                [input(b"\x1b[<0;4;2M"), input(b"\x1b[<0;4;2m")]
+            );
+            assert_eq!(harness.copied(cx), None);
+        }
+
+        #[gpui::test]
+        fn should_report_the_middle_and_right_buttons(cx: &mut TestAppContext) {
+            let (mut harness, cx) = Harness::live(SGR_CLICKS, cx);
+            cx.update(|_, cx| cx.write_to_primary(ClipboardItem::new_string("echo hi".into())));
+            let at = harness.at(0, 0, Side::Left, cx);
+
+            harness.click(at, MouseButton::Middle, Modifiers::default(), cx);
+            harness.click(at, MouseButton::Right, Modifiers::default(), cx);
+
+            assert_eq!(
+                harness.sent(),
+                [
+                    input(b"\x1b[<1;1;1M"),
+                    input(b"\x1b[<1;1;1m"),
+                    input(b"\x1b[<2;1;1M"),
+                    input(b"\x1b[<2;1;1m"),
+                ]
+            );
+        }
+
+        #[gpui::test]
+        fn should_use_the_normal_encoding_without_sgr(cx: &mut TestAppContext) {
+            let (mut harness, cx) = Harness::live(b"\x1b[?1000h", cx);
+            let at = harness.at(1, 3, Side::Left, cx);
+
+            harness.click(at, MouseButton::Left, Modifiers::default(), cx);
+
+            assert_eq!(harness.sent(), [input(b"\x1b[M $\""), input(b"\x1b[M#$\"")]);
+        }
+
+        #[gpui::test]
+        fn should_not_report_drags_when_only_clicks_are_tracked(cx: &mut TestAppContext) {
+            let (mut harness, cx) = Harness::live(SGR_CLICKS, cx);
+            let (from, to) = (
+                harness.at(0, 0, Side::Left, cx),
+                harness.at(0, 2, Side::Left, cx),
+            );
+
+            harness.drag(from, to, 1, Modifiers::default(), cx);
+
+            assert_eq!(
+                harness.sent(),
+                [input(b"\x1b[<0;1;1M"), input(b"\x1b[<0;3;1m")]
+            );
+        }
+
+        #[gpui::test]
+        fn should_report_a_drag_once_per_cell_when_asked(cx: &mut TestAppContext) {
+            let (mut harness, cx) = Harness::live(b"\x1b[?1002h\x1b[?1006h", cx);
+            let from = harness.at(0, 0, Side::Left, cx);
+            let same_cell = harness.at(0, 0, Side::Right, cx);
+            let next = harness.at(0, 1, Side::Left, cx);
+
+            cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_move(same_cell, MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_move(next, MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_up(next, MouseButton::Left, Modifiers::default());
+
+            assert_eq!(
+                harness.sent(),
+                [
+                    input(b"\x1b[<0;1;1M"),
+                    input(b"\x1b[<32;2;1M"),
+                    input(b"\x1b[<0;2;1m"),
+                ]
+            );
+        }
+
+        #[gpui::test]
+        fn should_report_moves_without_a_button_under_any_event_tracking(cx: &mut TestAppContext) {
+            let (mut harness, cx) = Harness::live(b"\x1b[?1003h\x1b[?1006h", cx);
+            let at = harness.at(1, 1, Side::Left, cx);
+            let same_cell = harness.at(1, 1, Side::Right, cx);
+
+            cx.simulate_mouse_move(at, None, Modifiers::default());
+            cx.simulate_mouse_move(same_cell, None, Modifiers::default());
+
+            assert_eq!(harness.sent(), [input(b"\x1b[<35;2;2M")]);
+        }
+
+        #[gpui::test]
+        fn should_select_with_shift_held(cx: &mut TestAppContext) {
+            let (mut harness, cx) = Harness::live(SGR_CLICKS, cx);
+            let from = harness.at(0, 0, Side::Left, cx);
+            let to = harness.at(0, 4, Side::Right, cx);
+
+            harness.drag(from, to, 1, Modifiers::shift(), cx);
+
+            assert_eq!(harness.sent(), []);
+            assert_eq!(harness.copied(cx).as_deref(), Some("hello"));
+        }
+
+        #[gpui::test]
+        fn should_select_again_once_the_program_stops_tracking(cx: &mut TestAppContext) {
+            let (mut harness, cx) = Harness::live(SGR_CLICKS, cx);
+            harness.deliver(Event::Output(1, b"\x1b[?1000l".to_vec()), cx);
+            let from = harness.at(0, 0, Side::Left, cx);
+            let to = harness.at(0, 4, Side::Right, cx);
+
+            harness.drag(from, to, 1, Modifiers::default(), cx);
+
+            assert_eq!(harness.sent(), []);
+            assert_eq!(harness.copied(cx).as_deref(), Some("hello"));
         }
     }
 
