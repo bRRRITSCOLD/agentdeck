@@ -285,6 +285,11 @@ impl Screen {
         }
     }
 
+    /// Drops the selection, if any.
+    pub fn clear_selection(&mut self) {
+        self.term.selection = None;
+    }
+
     /// Whether there is a selection to extend.
     pub fn has_selection(&self) -> bool {
         self.term.selection.is_some()
