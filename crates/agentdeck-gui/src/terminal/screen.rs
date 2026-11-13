@@ -7,10 +7,11 @@
 use alacritty_terminal::Term;
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::Point;
+use alacritty_terminal::index::{Column, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::test::TermSize;
-use alacritty_terminal::term::{Config, TermMode};
+use alacritty_terminal::term::{Config, TermMode, viewport_to_point};
 use alacritty_terminal::vte::ansi::{CursorShape, Processor};
 use gpui::Hsla;
 
@@ -98,6 +99,39 @@ pub struct Frame {
     pub cursor: Option<Cursor>,
 }
 
+/// A spot under the pointer: a visible cell, and which half of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hit {
+    /// The visible line, from the top.
+    pub line: usize,
+    /// The column.
+    pub col: usize,
+    /// The cell's left or right half.
+    pub side: Side,
+}
+
+/// What a press selects, by its click count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionKind {
+    /// One click: the cells dragged across.
+    Cells,
+    /// A double click: whole words.
+    Words,
+    /// A triple click: whole lines.
+    Lines,
+}
+
+impl SelectionKind {
+    /// The kind a press of `clicks` starts.
+    pub fn from_clicks(clicks: usize) -> Self {
+        match clicks {
+            0 | 1 => SelectionKind::Cells,
+            2 => SelectionKind::Words,
+            _ => SelectionKind::Lines,
+        }
+    }
+}
+
 /// A terminal model, fed by the daemon.
 pub struct Screen {
     term: Term<VoidListener>,
@@ -141,6 +175,47 @@ impl Screen {
     /// Whether the alternate screen, which has no scrollback, is showing.
     pub fn alt_screen(&self) -> bool {
         self.term.mode().contains(TermMode::ALT_SCREEN)
+    }
+
+    /// Whether the program asked for bracketed paste (DECSET 2004).
+    pub fn bracketed_paste(&self) -> bool {
+        self.term.mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
+    /// Starts a selection of `kind` at `at`, replacing any other.
+    pub fn select(&mut self, kind: SelectionKind, at: Hit) {
+        let ty = match kind {
+            SelectionKind::Cells => SelectionType::Simple,
+            SelectionKind::Words => SelectionType::Semantic,
+            SelectionKind::Lines => SelectionType::Lines,
+        };
+        self.term.selection = Some(Selection::new(ty, self.point(at), at.side));
+    }
+
+    /// Moves the selection's moving end to `to`; nothing without a selection.
+    pub fn extend_selection(&mut self, to: Hit) {
+        let point = self.point(to);
+        if let Some(selection) = &mut self.term.selection {
+            selection.update(point, to.side);
+        }
+    }
+
+    /// Whether there is a selection to extend.
+    pub fn has_selection(&self) -> bool {
+        self.term.selection.is_some()
+    }
+
+    /// The selected text; `None` when nothing is selected.
+    pub fn selected_text(&self) -> Option<String> {
+        self.term
+            .selection_to_string()
+            .filter(|text| !text.is_empty())
+    }
+
+    /// The grid point a visible cell shows, scrollback included.
+    fn point(&self, at: Hit) -> Point {
+        let offset = self.term.grid().display_offset();
+        viewport_to_point(offset, Point::new(at.line, Column(at.col)))
     }
 
     /// Scrolls the view `lines` into the scrollback (positive) or back towards the bottom.
@@ -189,6 +264,9 @@ impl Screen {
                 1
             };
             let (mut fg, mut bg) = colors(cell, palette, content.colors);
+            if content.selection.is_some_and(|s| s.contains(indexed.point)) {
+                (fg, bg) = (palette.selection_foreground, palette.selection);
+            }
             if cursor_at == Some((visible, column.0)) {
                 if cursor_shape == CursorShape::Block {
                     (fg, bg) = (palette.background, palette.foreground);
@@ -386,6 +464,160 @@ mod tests {
         }
     }
 
+    mod select {
+        use super::*;
+
+        fn hit(line: usize, col: usize, side: Side) -> Hit {
+            Hit { line, col, side }
+        }
+
+        fn selected(bytes: &[u8], kind: SelectionKind, from: Hit, to: Hit) -> Option<String> {
+            let mut screen = screen(bytes);
+            screen.select(kind, from);
+            screen.extend_selection(to);
+            screen.selected_text()
+        }
+
+        #[test]
+        fn should_select_the_cells_dragged_across() {
+            let text = selected(
+                b"hello world",
+                SelectionKind::Cells,
+                hit(0, 0, Side::Left),
+                hit(0, 4, Side::Right),
+            );
+
+            assert_eq!(text.as_deref(), Some("hello"));
+        }
+
+        #[test]
+        fn should_select_backwards_too() {
+            let text = selected(
+                b"hello world",
+                SelectionKind::Cells,
+                hit(0, 10, Side::Right),
+                hit(0, 6, Side::Left),
+            );
+
+            assert_eq!(text.as_deref(), Some("world"));
+        }
+
+        #[test]
+        fn should_join_lines_with_a_newline() {
+            let text = selected(
+                b"one\r\ntwo",
+                SelectionKind::Cells,
+                hit(0, 0, Side::Left),
+                hit(1, 2, Side::Right),
+            );
+
+            assert_eq!(text.as_deref(), Some("one\ntwo"));
+        }
+
+        #[test]
+        fn should_select_nothing_for_a_click_without_a_drag() {
+            let at = hit(0, 1, Side::Left);
+
+            assert_eq!(selected(b"hello", SelectionKind::Cells, at, at), None);
+        }
+
+        #[test]
+        fn should_select_whole_words() {
+            let at = hit(0, 8, Side::Left);
+
+            let text = selected(b"cd ~/src/app && ls", SelectionKind::Words, at, at);
+
+            assert_eq!(text.as_deref(), Some("~/src/app"));
+        }
+
+        #[test]
+        fn should_select_whole_lines() {
+            let text = selected(
+                b"one\r\ntwo\r\nthree",
+                SelectionKind::Lines,
+                hit(0, 2, Side::Left),
+                hit(1, 0, Side::Left),
+            );
+
+            assert_eq!(text.as_deref(), Some("one\ntwo\n"));
+        }
+
+        #[test]
+        fn should_select_what_the_scrollback_shows() {
+            let mut screen = screen(b"1\r\n2\r\n3\r\n4\r\n5\r\n6");
+            screen.scroll(2);
+
+            screen.select(SelectionKind::Lines, hit(0, 0, Side::Left));
+
+            assert_eq!(screen.selected_text().as_deref(), Some("1\n"));
+        }
+
+        #[test]
+        fn should_extend_nothing_without_a_selection() {
+            let mut screen = screen(b"hello");
+
+            screen.extend_selection(hit(0, 4, Side::Right));
+
+            assert!(!screen.has_selection());
+            assert_eq!(screen.selected_text(), None);
+        }
+
+        #[test]
+        fn should_drop_the_selection_when_the_screen_is_cleared() {
+            let mut screen = screen(b"hello");
+            screen.select(SelectionKind::Lines, hit(0, 0, Side::Left));
+
+            screen.feed(b"\x1b[H\x1b[2J");
+
+            assert_eq!(screen.selected_text(), None);
+        }
+
+        #[test]
+        fn should_keep_the_selection_on_its_text_as_output_scrolls_it() {
+            let mut screen = screen(b"1\r\n2\r\n3\r\n4");
+            screen.select(SelectionKind::Lines, hit(0, 0, Side::Left));
+
+            screen.feed(b"\r\n5");
+
+            assert_eq!(screen.selected_text().as_deref(), Some("1\n"));
+        }
+    }
+
+    mod from_clicks {
+        use super::*;
+
+        #[test]
+        fn should_select_cells_then_words_then_lines() {
+            let kinds: Vec<_> = (1..=4).map(SelectionKind::from_clicks).collect();
+
+            assert_eq!(
+                kinds,
+                [
+                    SelectionKind::Cells,
+                    SelectionKind::Words,
+                    SelectionKind::Lines,
+                    SelectionKind::Lines
+                ]
+            );
+        }
+    }
+
+    mod bracketed_paste {
+        use super::*;
+
+        #[test]
+        fn should_follow_the_programs_request() {
+            let mut screen = screen(b"");
+            assert!(!screen.bracketed_paste());
+
+            screen.feed(b"\x1b[?2004h");
+            assert!(screen.bracketed_paste());
+
+            screen.feed(b"\x1b[?2004l");
+            assert!(!screen.bracketed_paste());
+        }
+    }
+
     mod frame {
         use super::*;
 
@@ -479,6 +711,66 @@ mod tests {
 
             assert_eq!(frame.lines[0].runs[0].text, "e\u{301}x");
             assert_eq!(frame.lines[0].runs[0].cells, 2);
+        }
+
+        mod selection {
+            use super::*;
+
+            #[test]
+            fn should_draw_selected_cells_in_the_selection_colours() {
+                let mut screen = screen(b"ab cd\x1b[?25l");
+                screen.select(
+                    SelectionKind::Cells,
+                    Hit {
+                        line: 0,
+                        col: 0,
+                        side: Side::Left,
+                    },
+                );
+                screen.extend_selection(Hit {
+                    line: 0,
+                    col: 2,
+                    side: Side::Right,
+                });
+
+                let frame = screen.frame(&palette(), true);
+                let line = &frame.lines[0];
+
+                assert_eq!(
+                    line.backgrounds,
+                    [Background {
+                        col: 0,
+                        cells: 3,
+                        color: palette().selection
+                    }]
+                );
+                assert_eq!(line.runs[0].text, "ab");
+                assert_eq!(line.runs[0].style.color, palette().selection_foreground);
+                assert_eq!(line.runs[1].style.color, palette().foreground);
+            }
+
+            #[test]
+            fn should_move_the_selection_with_its_line_when_scrolled() {
+                let mut screen = screen(b"1\r\n2\r\n3\r\n4\r\n5\r\n6\x1b[?25l");
+                screen.select(
+                    SelectionKind::Lines,
+                    Hit {
+                        line: 0,
+                        col: 0,
+                        side: Side::Left,
+                    },
+                );
+
+                screen.scroll(1);
+                let frame = screen.frame(&palette(), true);
+
+                let selected: Vec<_> = frame
+                    .lines
+                    .iter()
+                    .map(|line| !line.backgrounds.is_empty())
+                    .collect();
+                assert_eq!(selected, [false, true, false, false]);
+            }
         }
 
         mod cursor {

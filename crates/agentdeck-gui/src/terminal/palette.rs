@@ -1,6 +1,7 @@
 //! The terminal's colours in the active mode (spec §11: the terminal palette follows the
 //! theme). The default foreground, background and cursor are the `foreground` and
-//! `background` tokens, as on Penpot's `agentdeck / TerminalSurface`.
+//! `background` tokens, as on Penpot's `agentdeck / TerminalSurface`. Selected text is drawn
+//! in `primary-foreground` on `primary`, as core-react's Input styles its `::selection`.
 //!
 //! The 16 ANSI colours are app-local, one set per mode: the design system has no terminal
 //! palette yet, and its primitives lack magenta and cyan. Each set is Tailwind's hue scale at
@@ -36,6 +37,10 @@ pub struct Palette {
     pub foreground: Hsla,
     /// The surface behind every cell without a background of its own.
     pub background: Hsla,
+    /// Behind selected cells.
+    pub selection: Hsla,
+    /// Selected text.
+    pub selection_foreground: Hsla,
     ansi: [Hsla; 16],
 }
 
@@ -47,6 +52,8 @@ impl Palette {
         Palette {
             foreground: s.foreground,
             background: s.background,
+            selection: s.primary,
+            selection_foreground: s.primary_foreground,
             ansi: table.map(|hex| rgb(hex).into()),
         }
     }
@@ -130,6 +137,19 @@ mod tests {
 
                 assert_eq!(palette.foreground, mode.semantic().foreground);
                 assert_eq!(palette.background, mode.semantic().background);
+            }
+        }
+
+        #[test]
+        fn should_draw_a_selection_as_core_react_inputs_do() {
+            for mode in [Mode::Light, Mode::Dark] {
+                let palette = Palette::new(mode);
+
+                assert_eq!(palette.selection, mode.semantic().primary);
+                assert_eq!(
+                    palette.selection_foreground,
+                    mode.semantic().primary_foreground
+                );
             }
         }
 

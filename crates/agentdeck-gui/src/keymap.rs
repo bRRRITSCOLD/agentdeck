@@ -3,8 +3,9 @@
 //! GPUI matches a binding before the focused view sees the key, so a bound key never reaches
 //! the terminal. Every binding is one a shell has no use for, after GNOME Terminal: ctrl-shift
 //! chords (`secondary-shift-`, cmd-shift on macOS), ctrl-tab, ctrl-pageup / ctrl-pagedown and
-//! `alt-<digit>`. Plain `ctrl-<letter>`, `alt-<letter>`, the arrows and the paging keys stay
-//! the shell's.
+//! `alt-<digit>`. Copy and paste are `secondary-shift-c` / `secondary-shift-v` in a terminal,
+//! so `ctrl-c` and `ctrl-v` stay the shell's. Plain `ctrl-<letter>`, `alt-<letter>`, the
+//! arrows and the paging keys stay the shell's.
 //!
 //! `secondary-` resolves per OS only through [`KeyBinding::load`], so every binding loads
 //! that way.
@@ -15,6 +16,9 @@ use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate, actions};
 
 /// The key context the workspace view sets; its shortcuts only apply inside it.
 pub const WORKSPACE: &str = "Workspace";
+
+/// The key context a terminal sets; copy and paste only apply inside it.
+pub const TERMINAL: &str = "Terminal";
 
 actions!(
     agentdeck,
@@ -29,6 +33,10 @@ actions!(
         NextPane,
         /// Focuses the previous pane of the tab, wrapping.
         PreviousPane,
+        /// Copies the terminal's selection to the clipboard.
+        Copy,
+        /// Pastes the clipboard into the terminal.
+        Paste,
     ]
 );
 
@@ -45,9 +53,13 @@ pub fn init(cx: &mut App) {
 }
 
 fn bindings(cx: &App) -> Vec<KeyBinding> {
-    let workspace = Some(Rc::new(
-        KeyBindingContextPredicate::parse(WORKSPACE).expect("a context name parses"),
-    ));
+    let context = |name| {
+        Some(Rc::new(
+            KeyBindingContextPredicate::parse(name).expect("a context name parses"),
+        ))
+    };
+    let workspace = context(WORKSPACE);
+    let terminal = context(TERMINAL);
     let mut table: Vec<(String, Box<dyn Action>, _)> = vec![
         ("secondary-shift-q".into(), Box::new(Quit), None),
         ("ctrl-pagedown".into(), Box::new(NextTab), workspace.clone()),
@@ -72,6 +84,8 @@ fn bindings(cx: &App) -> Vec<KeyBinding> {
             Box::new(PreviousPane),
             workspace.clone(),
         ),
+        ("secondary-shift-c".into(), Box::new(Copy), terminal.clone()),
+        ("secondary-shift-v".into(), Box::new(Paste), terminal),
     ];
     table.extend((1..=9).map(|n| {
         let action: Box<dyn Action> = Box::new(SelectTab(n - 1));
@@ -90,6 +104,7 @@ fn bindings(cx: &App) -> Vec<KeyBinding> {
 mod tests {
     use std::cell::RefCell;
 
+    use gpui::prelude::FluentBuilder as _;
     use gpui::{
         Context, FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _, Render,
         Styled as _, TestAppContext, VisualTestContext, Window, div,
@@ -102,6 +117,8 @@ mod tests {
     struct Recorder {
         focus: FocusHandle,
         seen: Rc<RefCell<Vec<String>>>,
+        /// Whether the focused element is a terminal inside the workspace.
+        terminal: bool,
     }
 
     impl Recorder {
@@ -117,9 +134,17 @@ mod tests {
     impl Render for Recorder {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let seen = self.seen.clone();
+            let focused = div()
+                .when(self.terminal, |div| div.key_context(TERMINAL))
+                .track_focus(&self.focus)
+                .size_full()
+                .on_key_down(move |event, _, cx| {
+                    let key = event.keystroke.unparse(cx.platform_info().os);
+                    seen.borrow_mut().push(format!("key {key}"));
+                })
+                .child("");
             div()
                 .key_context(WORKSPACE)
-                .track_focus(&self.focus)
                 .size_full()
                 .on_action(self.record(|_: &Quit| "quit".into()))
                 .on_action(self.record(|_: &NextTab| "next tab".into()))
@@ -127,22 +152,26 @@ mod tests {
                 .on_action(self.record(|SelectTab(n): &SelectTab| format!("tab {n}")))
                 .on_action(self.record(|_: &NextPane| "next pane".into()))
                 .on_action(self.record(|_: &PreviousPane| "previous pane".into()))
-                .on_key_down(move |event, _, cx| {
-                    let key = event.keystroke.unparse(cx.platform_info().os);
-                    seen.borrow_mut().push(format!("key {key}"));
-                })
-                .child("")
+                .on_action(self.record(|_: &Copy| "copy".into()))
+                .on_action(self.record(|_: &Paste| "paste".into()))
+                .child(focused)
         }
     }
 
-    /// What typing `keystrokes` into the workspace did.
+    /// What typing `keystrokes` into a terminal in the workspace did.
     fn typed(keystrokes: &str, cx: &mut TestAppContext) -> Vec<String> {
+        typed_in(true, keystrokes, cx)
+    }
+
+    /// What typing `keystrokes` into the workspace did, in a terminal or not.
+    fn typed_in(terminal: bool, keystrokes: &str, cx: &mut TestAppContext) -> Vec<String> {
         cx.update(init);
         let seen = Rc::new(RefCell::new(Vec::new()));
         let recorded = seen.clone();
         let (view, cx) = cx.add_window_view(|_, cx| Recorder {
             focus: cx.focus_handle(),
             seen: recorded,
+            terminal,
         });
         let cx: &mut VisualTestContext = cx;
         cx.update(|window, cx| window.focus(&view.read(cx).focus.clone(), cx));
@@ -176,6 +205,24 @@ mod tests {
             assert_eq!(
                 typed("secondary-shift-down secondary-shift-up", cx),
                 ["next pane", "previous pane"]
+            );
+        }
+
+        #[gpui::test]
+        fn should_copy_and_paste_in_a_terminal(cx: &mut TestAppContext) {
+            assert_eq!(
+                typed("secondary-shift-c secondary-shift-v", cx),
+                ["copy", "paste"]
+            );
+        }
+
+        #[gpui::test]
+        fn should_leave_copy_and_paste_keys_alone_outside_a_terminal(cx: &mut TestAppContext) {
+            let seen = typed_in(false, "secondary-shift-c", cx);
+
+            assert!(
+                matches!(&seen[..], [key] if key.starts_with("key ")),
+                "{seen:?}"
             );
         }
 

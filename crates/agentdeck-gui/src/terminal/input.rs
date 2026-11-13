@@ -1,5 +1,5 @@
-//! What a key press sends to the pane's PTY: xterm's sequences, as a terminal emulator
-//! writes them.
+//! What a key press or a paste sends to the pane's PTY: xterm's sequences, as a terminal
+//! emulator writes them.
 
 use gpui::Keystroke;
 
@@ -73,6 +73,18 @@ pub fn bytes(keystroke: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
     Some(sequence)
 }
 
+/// The bytes pasting `text` sends. With bracketed paste on, `text` goes between
+/// `ESC [200~` and `ESC [201~`, with any ESC removed so it can't end the paste early; without
+/// it, every line ending becomes the CR that Enter sends.
+pub fn paste(text: &str, bracketed: bool) -> Vec<u8> {
+    if bracketed {
+        let text = text.replace('\x1b', "");
+        format!("\x1b[200~{text}\x1b[201~").into_bytes()
+    } else {
+        text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
+    }
+}
+
 /// F1–F4: `ESC O P` alone, `ESC [ 1 ; m P` with modifiers.
 fn ss3_or_csi(final_byte: char, modifier: u8) -> Vec<u8> {
     if modifier > 1 {
@@ -104,6 +116,28 @@ fn control(key: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod paste {
+        use super::*;
+
+        #[test]
+        fn should_send_line_endings_as_enter_does() {
+            assert_eq!(paste("a\nb\r\nc\rd", false), b"a\rb\rc\rd");
+        }
+
+        #[test]
+        fn should_wrap_text_in_brackets_when_the_program_asks() {
+            assert_eq!(paste("a\nb", true), b"\x1b[200~a\nb\x1b[201~");
+        }
+
+        #[test]
+        fn should_strip_escapes_that_could_end_a_bracketed_paste_early() {
+            assert_eq!(
+                paste("a\x1b[201~rm -rf ~\n", true),
+                b"\x1b[200~a[201~rm -rf ~\n\x1b[201~"
+            );
+        }
+    }
 
     fn send(keystroke: &'static str) -> Option<Vec<u8>> {
         bytes(&Keystroke::parse(keystroke).unwrap(), false)
