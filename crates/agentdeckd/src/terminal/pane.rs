@@ -465,7 +465,8 @@ impl Pane {
     /// output, all under the pane's lock.
     pub fn attach(&self, subscriber: SubscriberId, channel: Channel, outbox: Outbox) {
         let mut live = self.live();
-        let snapshot = snapshot::encode(&mut live.term);
+        let mut snapshot = snapshot::encode(&mut live.term);
+        snapshot::report_cwd(&mut snapshot, live.osc.reported_cwd());
         let attached = ServerMessage::Attached {
             channel,
             pane: self.id,

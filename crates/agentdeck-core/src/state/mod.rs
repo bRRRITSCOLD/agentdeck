@@ -4,7 +4,7 @@
 //!   [`Observation`] to a state.
 //! - [`tracker`]: [`StateTracker`] settles those states over time and adds `done` and
 //!   `exited`.
-//! - [`osc`]: reads OSC 9;4 and OSC 7501 out of raw output for the observation.
+//! - [`osc`]: reads OSC 9;4 and OSC 7501 out of raw output for the observation, and OSC 7.
 //! - `screen` (feature `screen`): reads an `alacritty_terminal` screen into the observation's
 //!   rows.
 
