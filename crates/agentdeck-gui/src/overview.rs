@@ -23,6 +23,8 @@ pub struct PaneState {
     pub agent: Option<Agent>,
     /// The task it links.
     pub task: Option<TaskId>,
+    /// The title of the tab it sits in.
+    pub tab: String,
 }
 
 /// The daemon's data behind the sidebar, as read over REST.
@@ -323,6 +325,7 @@ pub(crate) mod fixtures {
             state,
             agent: None,
             task: None,
+            tab: format!("tab {n}"),
         }
     }
 

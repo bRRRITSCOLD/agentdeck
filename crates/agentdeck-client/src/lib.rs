@@ -4,10 +4,12 @@
 //! Every daemon request carries a bearer token; [`authenticated`] builds a [`Client`] that
 //! sends it. [`daemon::connect`] finds the running daemon, starting it if need be, and
 //! [`ws::open`] opens its WebSocket. [`ApiError`] turns a failed call into what the daemon
-//! said; [`panes`] holds the pane operations that take more than one call.
+//! said; [`panes`] and [`notes`] hold the pane and note operations that take more than one
+//! call.
 
 pub mod daemon;
 pub mod error;
+pub mod notes;
 pub mod panes;
 pub mod ws;
 

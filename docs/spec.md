@@ -222,7 +222,7 @@ min_ms = 400                   # a new state must hold this long before it is pu
 
 - **On a task**, when a live agent pane is linked to the task: delivered automatically to the newest such pane, typed with Enter (`<body>\r`) once the pane is `idle` or `done`. Unlike `input` `when: "idle"`, it never goes into a `blocked` pane, so it can't answer a dialog. It is marked read when typed, and stays unread if the process exits first.
 - **On a workspace**, or on a task with no live pane: delivered in the next launch prompt there (§6).
-- **Any note** can be sent to a chosen pane at once with the GUI's "Send to agent" action or `agentdeck agent send`.
+- **Any note** can be sent to a chosen pane at once with the GUI's "Send to agent" action (typed with Enter, `when: "now"`, then marked read by that pane) or `agentdeck agent send`.
 - **Read:** delivery marks the note read and records the pane. A workspace note is not typed into live panes. Agents can also pull notes through the CLI or MCP.
 
 ## 10. CLI and MCP
@@ -268,6 +268,7 @@ Built on `brrritscold-core-gpui` (`init`, `Root`, theme preference, toasts). Scr
   - **Delete workspace…**, after a separator and in `destructive`, opens the delete dialog.
   - **An archived workspace** shows an outline **Unarchive** in place of New agent, and its menu has only Delete workspace…. In place of its tabs and panes it shows "<name> is archived" over "Unarchive it to open its tabs and start agents here again." It attaches no terminals and opens no shell tab.
 - **Right panel**, which can be toggled: the workspace's tasks and PRs, as a list grouped by status under a header whose `+` opens the new task dialog, plus its notes.
+  - **Send to agent:** each note's meta row ends with a ghost `…` menu: the label "Send to agent", then an item per live (not exited) agent pane in the note's workspace (a task note's is its task's), "<Agent> · <linked task title, else tab title>"; with none, one disabled "No agent is running here". Picking one types the note into that pane at once as `agentdeck agent send --now` does, then marks it read by that pane (§9); a failure toasts why and leaves it unread.
 - **Tasks view:** a grouped list of every task, with a filter, a Show done switch and **New task**. Done tasks are hidden by default, and each row has a status picker.
 - **Inbox:** tasks with no workspace, mostly PRs.
   - **gh logged out:** while `GET /v1/prs/status` says `logged_out`, a default alert with the `Info` icon sits between the Inbox's header and its columns: "GitHub isn't connected" / "PR sync uses the gh login. Run gh auth login in a terminal, then press Sync now." It goes once the login is back.

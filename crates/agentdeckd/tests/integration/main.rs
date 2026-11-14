@@ -7,6 +7,7 @@ mod auth;
 mod daemon;
 mod health;
 mod notes;
+mod notes_client;
 mod panes;
 mod panes_client;
 mod prs;
