@@ -24,6 +24,10 @@ pub const TERMINAL: &str = "Terminal";
 /// ([`Submit`]) and Escape cancels ([`CancelEdit`]), where Enter inserts a newline.
 pub const INSTRUCTION_EDITOR: &str = "InstructionEditor";
 
+/// The key context the task sheet's comment composer sets: Ctrl+Enter in its textarea sends
+/// ([`Submit`]), where Enter inserts a newline.
+pub const COMMENT_COMPOSER: &str = "CommentComposer";
+
 actions!(
     agentdeck,
     [
@@ -81,6 +85,7 @@ fn bindings(cx: &App) -> Vec<KeyBinding> {
     // Bound on the textarea itself and loaded after core-gpui's, so they win over its own
     // `ctrl-enter` (a newline) and `escape`.
     let instruction_editor = context(&format!("{INSTRUCTION_EDITOR} > Input"));
+    let comment_composer = context(&format!("{COMMENT_COMPOSER} > Input"));
     let mut table: Vec<(String, Box<dyn Action>, _)> = vec![
         ("secondary-shift-q".into(), Box::new(Quit), None),
         ("ctrl-pagedown".into(), Box::new(NextTab), workspace.clone()),
@@ -134,6 +139,7 @@ fn bindings(cx: &App) -> Vec<KeyBinding> {
             instruction_editor.clone(),
         ),
         ("escape".into(), Box::new(CancelEdit), instruction_editor),
+        ("secondary-enter".into(), Box::new(Submit), comment_composer),
     ];
     table.extend((1..=9).map(|n| {
         let action: Box<dyn Action> = Box::new(SelectTab(n - 1));

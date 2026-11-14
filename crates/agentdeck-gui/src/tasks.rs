@@ -27,6 +27,7 @@ use crate::new_task::NewTask;
 use crate::overview::Snapshot;
 use crate::task_list::{self, Group, Query, Row, Scope};
 use crate::task_row::{self, Table};
+use crate::task_sheet::OpenTask;
 use crate::workspace::failed;
 
 /// The filter's width. Raw in Penpot too.
@@ -58,6 +59,7 @@ pub struct TasksView {
 }
 
 impl EventEmitter<NewTask> for TasksView {}
+impl EventEmitter<OpenTask> for TasksView {}
 
 impl TasksView {
     /// A view that changes statuses through `api`; it shows nothing until given a snapshot.
@@ -192,7 +194,8 @@ impl TasksView {
                         this.set_status(task, *status, window, cx);
                     }),
                 );
-                task_row::spaced(task_row::wide(row, picker, Table::Tasks, cx))
+                let open = Box::new(cx.listener(move |_, _, _, cx| cx.emit(OpenTask(task))));
+                task_row::spaced(task_row::wide(row, picker, Table::Tasks, open, cx))
             }
             None => div().into_any_element(),
         }
@@ -451,6 +454,36 @@ mod tests {
         harness.click("new task", cx);
 
         assert_eq!(*asked.borrow(), [NewTask(None)]);
+    }
+
+    #[gpui::test]
+    fn should_ask_for_the_task_sheet_when_a_title_is_clicked(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::open(board(), cx);
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = asked.clone();
+        let _asks = cx.update(|_, cx| {
+            cx.subscribe(&harness.view, move |_, event: &OpenTask, _| {
+                seen.borrow_mut().push(*event)
+            })
+        });
+
+        harness.click(format!("task title {}", id::<TaskId>(2)).leak(), cx);
+
+        assert_eq!(*asked.borrow(), [OpenTask(id(2))]);
+    }
+
+    #[gpui::test]
+    fn should_dot_a_row_whose_agent_comments_are_unseen(cx: &mut TestAppContext) {
+        let mut snapshot = board();
+        snapshot.tasks[0].unseen_agent_comments = 1;
+        let (harness, cx) = Harness::open(snapshot, cx);
+        harness.draw(cx);
+
+        let dotted = |task: u32, cx: &mut VisualTestContext| {
+            (cx.debug_bounds(format!("unseen {}", id::<TaskId>(task)).leak())).is_some()
+        };
+        assert!(dotted(1, cx));
+        assert!(!dotted(2, cx));
     }
 
     #[gpui::test]

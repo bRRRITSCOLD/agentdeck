@@ -36,6 +36,7 @@ use crate::new_task::NewTask;
 use crate::overview::Snapshot;
 use crate::task_list::{self, Group, Query, Scope};
 use crate::task_row;
+use crate::task_sheet::OpenTask;
 use crate::workspace::failed;
 
 /// The panel's width. Raw in Penpot too: no sizing token is 340px.
@@ -62,6 +63,7 @@ pub struct RightPanel {
 }
 
 impl EventEmitter<NewTask> for RightPanel {}
+impl EventEmitter<OpenTask> for RightPanel {}
 
 impl RightPanel {
     /// A panel that changes statuses through `api`; it lists nothing until given a
@@ -367,7 +369,8 @@ impl Render for RightPanel {
                         this.set_status(task, *status, window, cx);
                     }),
                 );
-                list = list.child(task_row::panel(row, picker, cx));
+                let open = Box::new(cx.listener(move |_, _, _, cx| cx.emit(OpenTask(task))));
+                list = list.child(task_row::panel(row, picker, open, cx));
             }
         }
         // Penpot `ShowDone`: a link button at xs, at the start of its row, after the groups.
@@ -1081,6 +1084,51 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(*asked.borrow(), [NewTask(Some(id(1)))]);
+    }
+
+    #[gpui::test]
+    fn should_ask_for_the_task_sheet_when_a_title_is_clicked(cx: &mut TestAppContext) {
+        let (panel, cx) = open(cx);
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = asked.clone();
+        let _asks = cx.update(|_, cx| {
+            cx.subscribe(&panel, move |_, event: &OpenTask, _| {
+                seen.borrow_mut().push(*event)
+            })
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let title = format!("task title {}", id::<TaskId>(1));
+        let bounds = cx.debug_bounds(title.leak()).expect("the title shows");
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        assert_eq!(*asked.borrow(), [OpenTask(id(1))]);
+    }
+
+    #[gpui::test]
+    fn should_dot_a_row_whose_agent_comments_are_unseen(cx: &mut TestAppContext) {
+        let (panel, cx) = open(cx);
+        panel.update(cx, |p, cx| {
+            let mut snapshot = snapshot();
+            snapshot.tasks[0].unseen_agent_comments = 1;
+            p.show(id(1), snapshot, cx);
+            p.toggle(TaskStatus::Todo, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        assert!(
+            cx.debug_bounds(format!("unseen {}", id::<TaskId>(1)).leak())
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds(format!("task title {}", id::<TaskId>(2)).leak())
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds(format!("unseen {}", id::<TaskId>(2)).leak())
+                .is_none()
+        );
     }
 
     #[gpui::test]

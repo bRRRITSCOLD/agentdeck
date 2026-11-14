@@ -41,6 +41,23 @@ fn runs(title: &str) -> Vec<Run<'_>> {
     runs
 }
 
+/// `text` as a run of elements, each one line: its symbols in the symbol font, the rest
+/// truncated with an ellipsis. Lay them out in a flex row.
+pub fn symbol_runs(text: &str) -> Vec<gpui::Div> {
+    (runs(text).into_iter())
+        .map(|(run, symbol)| {
+            let run = div()
+                .whitespace_nowrap()
+                .child(SharedString::from(run.to_owned()));
+            if symbol {
+                run.flex_none().font_family(SYMBOL_FAMILIES[0])
+            } else {
+                run.min_w_0().overflow_hidden().text_ellipsis()
+            }
+        })
+        .collect()
+}
+
 /// The `StateBadge` part's variant and label for a pane in `state`; `exit_code` tells a
 /// failed exit from a clean one and is shown when known.
 pub fn state_badge(state: AgentState, exit_code: Option<i64>) -> (BadgeVariant, SharedString) {
@@ -106,16 +123,7 @@ impl RenderOnce for PaneHeader {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let s = cx.theme().semantic();
         let (variant, label) = state_badge(self.state, self.exit_code);
-        let title = runs(&self.title).into_iter().map(|(run, symbol)| {
-            let run = div()
-                .whitespace_nowrap()
-                .child(SharedString::from(run.to_owned()));
-            if symbol {
-                run.flex_none().font_family(SYMBOL_FAMILIES[0])
-            } else {
-                run.min_w_0().overflow_hidden().text_ellipsis()
-            }
-        });
+        let title = symbol_runs(&self.title);
         // Penpot: `card`, 36px high (raw in Penpot too), px `space.3`, `space.2` apart. The
         // pane's corners clip it there; GPUI doesn't clip to a radius, so it rounds its own top.
         div()
