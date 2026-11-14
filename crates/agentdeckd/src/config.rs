@@ -14,11 +14,14 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use agentdeck_core::opener::{self, FileOpener};
 use chrono::TimeDelta;
 use serde_json::Value as Json;
 use toml_edit::{DocumentMut, Item};
 
-use crate::model::{AppearanceSettings, PrSyncSettings, Settings, SettingsPatch, ThemePreference};
+use crate::model::{
+    AppearanceSettings, PrSyncSettings, Settings, SettingsPatch, TerminalSettings, ThemePreference,
+};
 
 /// The environment variable that overrides `[pr_sync] max_age_days` (tests use it). Empty is
 /// the same as unset.
@@ -30,6 +33,9 @@ pub const THEME_KEY: &str = "appearance.theme";
 /// The dotted key of the PR age cutoff.
 pub const MAX_AGE_KEY: &str = "pr_sync.max_age_days";
 
+/// The dotted key of the command a click on a file path in a pane runs.
+pub const FILE_OPENER_KEY: &str = "terminal.file_opener";
+
 /// The PR age cutoff when nothing sets one.
 const DEFAULT_MAX_AGE_DAYS: u32 = 90;
 
@@ -37,12 +43,14 @@ const DEFAULT_MAX_AGE_DAYS: u32 = 90;
 const THEMES: &str = "system, dark or light";
 
 /// The settings as `config.toml` gives them: each key's value, or its default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileValues {
     /// `appearance.theme`.
     pub theme: ThemePreference,
     /// `pr_sync.max_age_days`.
     pub max_age_days: u32,
+    /// `terminal.file_opener`.
+    pub file_opener: String,
 }
 
 impl Default for FileValues {
@@ -50,6 +58,7 @@ impl Default for FileValues {
         FileValues {
             theme: ThemePreference::System,
             max_age_days: DEFAULT_MAX_AGE_DAYS,
+            file_opener: opener::DEFAULT.to_owned(),
         }
     }
 }
@@ -82,6 +91,22 @@ impl FileValues {
                 ),
             }
         }
+        if let Some(item) = lookup(&doc, FILE_OPENER_KEY) {
+            match item
+                .as_str()
+                .map(|command| (command, FileOpener::parse(command)))
+            {
+                Some((command, Ok(_))) => values.file_opener = command.to_owned(),
+                Some((_, Err(err))) => tracing::warn!(
+                    "config.toml: {FILE_OPENER_KEY} {err}; using {}",
+                    opener::DEFAULT
+                ),
+                None => tracing::warn!(
+                    "config.toml: {FILE_OPENER_KEY} isn't a string; using {}",
+                    opener::DEFAULT
+                ),
+            }
+        }
         values
     }
 
@@ -91,6 +116,9 @@ impl FileValues {
         }
         if let Some(days) = changes.max_age_days {
             self.max_age_days = days;
+        }
+        if let Some(file_opener) = &changes.file_opener {
+            self.file_opener.clone_from(file_opener);
         }
     }
 }
@@ -131,17 +159,22 @@ pub fn effective(file: FileValues, env: EnvOverrides) -> Settings {
         pr_sync: PrSyncSettings {
             max_age_days: env.max_age_days.unwrap_or(file.max_age_days),
         },
+        terminal: TerminalSettings {
+            file_opener: file.file_opener,
+        },
         overridden_by_env,
     }
 }
 
 /// What a valid [`SettingsPatch`] changes.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Changes {
     /// A new `appearance.theme`.
     pub theme: Option<ThemePreference>,
     /// A new `pr_sync.max_age_days`.
     pub max_age_days: Option<u32>,
+    /// A new `terminal.file_opener`.
+    pub file_opener: Option<String>,
 }
 
 /// A PATCH named a key that isn't a setting, or gave one a value it can't take.
@@ -214,6 +247,22 @@ pub fn validate(patch: &SettingsPatch) -> Result<Changes, InvalidSetting> {
             _ => return Err(InvalidSetting::new(key, "isn't a setting")),
         }
     }
+    for (key, value) in section_entries("terminal", patch.terminal.as_ref())? {
+        match key.as_str() {
+            FILE_OPENER_KEY => {
+                let command = value.as_str().ok_or_else(|| {
+                    InvalidSetting::new(
+                        FILE_OPENER_KEY,
+                        format!("must be a command as a string, not {value}"),
+                    )
+                })?;
+                FileOpener::parse(command)
+                    .map_err(|err| InvalidSetting::new(FILE_OPENER_KEY, err.to_string()))?;
+                changes.file_opener = Some(command.to_owned());
+            }
+            _ => return Err(InvalidSetting::new(key, "isn't a setting")),
+        }
+    }
     Ok(changes)
 }
 
@@ -244,6 +293,9 @@ pub fn write_changes(text: &str, changes: &Changes) -> Result<String, toml_edit:
     }
     if let Some(days) = changes.max_age_days {
         set(&mut doc, MAX_AGE_KEY, i64::from(days).into());
+    }
+    if let Some(file_opener) = &changes.file_opener {
+        set(&mut doc, FILE_OPENER_KEY, file_opener.as_str().into());
     }
     Ok(doc.to_string())
 }
@@ -333,7 +385,7 @@ impl Config {
 
     /// Every setting, as the daemon uses it now.
     pub fn settings(&self) -> Settings {
-        effective(*self.file(), self.inner.env)
+        effective(self.file().clone(), self.inner.env)
     }
 
     /// `pr_sync.max_age_days` as PR sync uses it now; `0` for no cutoff.
@@ -365,7 +417,7 @@ impl Config {
         write_atomically(path, &written).map_err(io)?;
         *file = FileValues::read(Some(&text));
         file.apply(&changes);
-        Ok(effective(*file, self.inner.env))
+        Ok(effective(file.clone(), self.inner.env))
     }
 
     fn file(&self) -> MutexGuard<'_, FileValues> {
@@ -418,12 +470,13 @@ mod tests {
         }
 
         #[test]
-        fn should_default_to_system_and_90_days_without_a_file() {
+        fn should_default_to_system_90_days_and_xdg_open_without_a_file() {
             assert_eq!(
                 read(None),
                 FileValues {
                     theme: ThemePreference::System,
-                    max_age_days: 90
+                    max_age_days: 90,
+                    file_opener: "xdg-open {path}".into(),
                 }
             );
         }
@@ -437,11 +490,20 @@ mod tests {
         #[test]
         fn should_read_every_key() {
             let values = read(Some(
-                "[appearance]\ntheme = \"dark\"\n[pr_sync]\nmax_age_days = 30\n",
+                "[appearance]\ntheme = \"dark\"\n[pr_sync]\nmax_age_days = 30\n[terminal]\nfile_opener = \"code -g {path}:{line}\"\n",
             ));
 
             assert_eq!(values.theme, ThemePreference::Dark);
             assert_eq!(values.max_age_days, 30);
+            assert_eq!(values.file_opener, "code -g {path}:{line}");
+        }
+
+        #[test]
+        fn should_default_an_opener_that_is_not_one() {
+            for opener in ["\"\"", "\"code\"", "\"code '{path}\"", "1"] {
+                let text = format!("[terminal]\nfile_opener = {opener}\n");
+                assert_eq!(read(Some(&text)).file_opener, opener::DEFAULT, "{opener}");
+            }
         }
 
         #[test]
@@ -556,6 +618,7 @@ mod tests {
             let changes = validate(&patch(json!({
                 "appearance": { "theme": "light" },
                 "pr_sync": { "max_age_days": 0 },
+                "terminal": { "file_opener": "code -g {path}:{line}" },
             })))
             .unwrap();
 
@@ -564,7 +627,29 @@ mod tests {
                 Changes {
                     theme: Some(ThemePreference::Light),
                     max_age_days: Some(0),
+                    file_opener: Some("code -g {path}:{line}".into()),
                 }
+            );
+        }
+
+        #[test]
+        fn should_name_an_opener_that_is_not_one() {
+            for opener in [json!(""), json!("code"), json!("code '{path}"), json!(1)] {
+                assert_eq!(
+                    invalid_key(json!({"terminal": {"file_opener": opener}})),
+                    FILE_OPENER_KEY
+                );
+            }
+        }
+
+        #[test]
+        fn should_say_what_an_opener_needs() {
+            let err =
+                validate(&patch(json!({"terminal": {"file_opener": "code -g"}}))).unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                "terminal.file_opener must pass {path} to the command, as in `code -g {path}:{line}`"
             );
         }
 
@@ -610,7 +695,8 @@ mod tests {
                 invalid_key(json!({"appearance": {"colour": "red"}})),
                 "appearance.colour"
             );
-            assert_eq!(invalid_key(json!({"terminal": {"x": 1}})), "terminal");
+            assert_eq!(invalid_key(json!({"terminal": {"x": 1}})), "terminal.x");
+            assert_eq!(invalid_key(json!({"editor": {"x": 1}})), "editor");
             assert_eq!(invalid_key(json!({"pr_sync": 30})), "pr_sync");
         }
 
@@ -649,19 +735,20 @@ mod tests {
                 &Changes {
                     theme: Some(ThemePreference::Dark),
                     max_age_days: Some(30),
+                    file_opener: Some("code {path}".into()),
                 },
             )
             .unwrap();
 
             assert_eq!(
                 text,
-                "[appearance]\ntheme = \"dark\"\n\n[pr_sync]\nmax_age_days = 30\n"
+                "[appearance]\ntheme = \"dark\"\n\n[pr_sync]\nmax_age_days = 30\n\n[terminal]\nfile_opener = \"code {path}\"\n"
             );
         }
 
         #[test]
         fn should_keep_other_keys_tables_and_comments() {
-            let file = "# mine\n[pr_sync]\n# how far back\nmax_age_days = 90 # days\nlater = true\n\n[terminal]\nfile_opener = \"code {path}\"\n";
+            let file = "# mine\n[pr_sync]\n# how far back\nmax_age_days = 90 # days\nlater = true\n\n[terminal]\nfont = \"x\"\n";
 
             let text = write_changes(file, &days(14)).unwrap();
 
@@ -697,6 +784,21 @@ mod tests {
             let text = write_changes("", &theme(ThemePreference::Light)).unwrap();
 
             assert_eq!(FileValues::read(Some(&text)).theme, ThemePreference::Light);
+        }
+
+        #[test]
+        fn should_write_an_opener_holding_quotes_so_it_reads_back() {
+            let opener = r#"kitty --title "it's" nvim +{line} {path}"#;
+            let changes = Changes {
+                file_opener: Some(opener.into()),
+                ..Changes::default()
+            };
+
+            let text =
+                write_changes("[terminal]\nfile_opener = \"x {path}\" # mine\n", &changes).unwrap();
+
+            assert_eq!(FileValues::read(Some(&text)).file_opener, opener);
+            assert!(text.ends_with(" # mine\n"), "{text}");
         }
     }
 

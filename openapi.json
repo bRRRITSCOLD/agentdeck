@@ -994,12 +994,21 @@
               }
             ],
             "description": "`[pr_sync]`."
+          },
+          "terminal": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TerminalSettings"
+              }
+            ],
+            "description": "`[terminal]`."
           }
         },
         "required": [
           "appearance",
           "overridden_by_env",
-          "pr_sync"
+          "pr_sync",
+          "terminal"
         ],
         "type": "object"
       },
@@ -1022,6 +1031,15 @@
               }
             ],
             "description": "`[pr_sync]` keys to change.",
+            "nullable": true
+          },
+          "terminal": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TerminalPatch"
+              }
+            ],
+            "description": "`[terminal]` keys to change.",
             "nullable": true
           }
         },
@@ -1248,6 +1266,30 @@
           "done"
         ],
         "type": "string"
+      },
+      "TerminalPatch": {
+        "description": "`[terminal]` in a [`SettingsPatch`]: its schema only, since `config::validate` reads the JSON itself.",
+        "properties": {
+          "file_opener": {
+            "description": "A new `terminal.file_opener`: a command holding `{path}` in an argument.",
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "TerminalSettings": {
+        "description": "`[terminal]`: the GUI's terminal panes (spec §11).",
+        "properties": {
+          "file_opener": {
+            "description": "`terminal.file_opener`: the command a `secondary`-click on a file path in a pane runs, split into words as a shell would and never run through a shell. `{path}` is the file's absolute path, `{line}` and `{col}` where the path names them (else `1`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file_opener"
+        ],
+        "type": "object"
       },
       "ThemePreference": {
         "description": "`appearance.theme`.",

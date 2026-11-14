@@ -484,15 +484,21 @@ pub(crate) mod fake {
 
     use super::*;
 
-    /// The daemon's defaults: the system theme and a 90-day PR cutoff, nothing overridden.
+    /// The daemon's defaults: the system theme, a 90-day PR cutoff and `xdg-open`, nothing
+    /// overridden.
     pub fn default_settings() -> Settings {
-        use agentdeck_client::types::{AppearanceSettings, PrSyncSettings, ThemePreference};
+        use agentdeck_client::types::{
+            AppearanceSettings, PrSyncSettings, TerminalSettings, ThemePreference,
+        };
 
         Settings {
             appearance: AppearanceSettings {
                 theme: ThemePreference::System,
             },
             pr_sync: PrSyncSettings { max_age_days: 90 },
+            terminal: TerminalSettings {
+                file_opener: agentdeck_core::opener::DEFAULT.into(),
+            },
             overridden_by_env: Vec::new(),
         }
     }
@@ -1008,6 +1014,9 @@ pub(crate) mod fake {
             }
             if let Some(days) = patch.pr_sync.as_ref().and_then(|p| p.max_age_days) {
                 settings.pr_sync.max_age_days = days;
+            }
+            if let Some(opener) = patch.terminal.as_ref().and_then(|t| t.file_opener.clone()) {
+                settings.terminal.file_opener = opener;
             }
             self.set_settings(settings.clone());
             self.settings_patches.lock().unwrap().push(patch);

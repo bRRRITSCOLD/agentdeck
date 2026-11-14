@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use agentdeck_client::types::{
-    AppearancePatch, PrSyncPatch, Settings, SettingsPatch, ThemePreference,
+    AppearancePatch, PrSyncPatch, Settings, SettingsPatch, TerminalPatch, ThemePreference,
 };
 use agentdeck_core::ws::{Entity, ServerMessage};
 use httpmock::MockServer;
@@ -46,6 +46,7 @@ fn theme(theme: ThemePreference) -> SettingsPatch {
     SettingsPatch {
         appearance: Some(AppearancePatch { theme: Some(theme) }),
         pr_sync: None,
+        terminal: None,
     }
 }
 
@@ -54,6 +55,17 @@ fn max_age(days: u32) -> SettingsPatch {
         appearance: None,
         pr_sync: Some(PrSyncPatch {
             max_age_days: Some(days),
+        }),
+        terminal: None,
+    }
+}
+
+fn file_opener(command: &str) -> SettingsPatch {
+    SettingsPatch {
+        appearance: None,
+        pr_sync: None,
+        terminal: Some(TerminalPatch {
+            file_opener: Some(command.into()),
         }),
     }
 }
@@ -94,6 +106,7 @@ mod get_v1_settings {
 
         assert_eq!(settings.appearance.theme, ThemePreference::System);
         assert_eq!(settings.pr_sync.max_age_days, 90);
+        assert_eq!(settings.terminal.file_opener, "xdg-open {path}");
         assert!(settings.overridden_by_env.is_empty());
     }
 
@@ -102,7 +115,7 @@ mod get_v1_settings {
         let dirs = dirs_without_env();
         write_config(
             dirs.path(),
-            "[appearance]\ntheme = \"light\"\n[pr_sync]\nmax_age_days = 14\n",
+            "[appearance]\ntheme = \"light\"\n[pr_sync]\nmax_age_days = 14\n[terminal]\nfile_opener = \"code -g {path}:{line}\"\n",
         );
         let daemon = TestDaemon::start_in(dirs).await;
 
@@ -110,6 +123,7 @@ mod get_v1_settings {
 
         assert_eq!(settings.appearance.theme, ThemePreference::Light);
         assert_eq!(settings.pr_sync.max_age_days, 14);
+        assert_eq!(settings.terminal.file_opener, "code -g {path}:{line}");
     }
 
     #[tokio::test]
@@ -153,7 +167,7 @@ mod patch_v1_settings {
     #[tokio::test]
     async fn should_keep_unknown_keys_and_comments_in_config_toml_200() {
         let dirs = dirs_without_env();
-        let before = "# my settings\n[pr_sync]\nmax_age_days = 90 # days\nlater = true\n\n[terminal]\nfile_opener = \"code {path}\"\n";
+        let before = "# my settings\n[pr_sync]\nmax_age_days = 90 # days\nlater = true\n\n[terminal]\nfont = \"x\"\n";
         write_config(dirs.path(), before);
         let daemon = TestDaemon::start_in(dirs).await;
 
@@ -250,6 +264,37 @@ mod patch_v1_settings {
         let message = body["message"].as_str().expect("a message");
         assert!(message.starts_with("pr_sync.max_age_days "), "{message}");
         assert_eq!(get(&daemon).await.pr_sync.max_age_days, 90);
+    }
+
+    #[tokio::test]
+    async fn should_set_the_file_opener_200() {
+        let daemon = TestDaemon::start_in(dirs_without_env()).await;
+
+        let settings = patch(&daemon, file_opener("code -g '{path}:{line}'")).await;
+
+        assert_eq!(settings.terminal.file_opener, "code -g '{path}:{line}'");
+        let text = std::fs::read_to_string(config_file(daemon.root())).expect("config.toml");
+        assert_eq!(
+            text,
+            "[terminal]\nfile_opener = \"code -g '{path}:{line}'\"\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_reject_a_file_opener_that_is_not_one_and_name_it_400() {
+        let daemon = TestDaemon::start_in(dirs_without_env()).await;
+
+        for opener in [json!(""), json!("code -g"), json!("code '{path}"), json!(1)] {
+            let (status, body) =
+                patch_raw(&daemon, json!({"terminal": {"file_opener": opener}})).await;
+
+            assert_eq!(status, 400, "{opener}");
+            assert_eq!(body["error_code"], "invalid_setting");
+            let message = body["message"].as_str().expect("a message");
+            assert!(message.starts_with("terminal.file_opener "), "{message}");
+        }
+        assert_eq!(get(&daemon).await.terminal.file_opener, "xdg-open {path}");
+        assert!(!config_file(daemon.root()).exists());
     }
 
     #[tokio::test]

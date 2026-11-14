@@ -22,6 +22,7 @@ alacritty_terminal = { workspace = true, optional = true }
 regex.workspace = true
 schemars = { workspace = true, optional = true }
 serde.workspace = true
+shell-words.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 uuid.workspace = true

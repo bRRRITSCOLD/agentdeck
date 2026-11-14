@@ -151,6 +151,7 @@ dependencies = [
  "schemars 0.8.22",
  "serde",
  "serde_json",
+ "shell-words",
  "thiserror 2.0.21",
  "toml 1.2.1+spec-1.1.0",
  "uuid",

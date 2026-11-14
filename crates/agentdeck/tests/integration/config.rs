@@ -17,7 +17,7 @@ mod config_ls {
 
         assert_eq!(
             stdout,
-            "appearance.theme      system\npr_sync.max_age_days  90\n"
+            "appearance.theme      system\npr_sync.max_age_days  90\nterminal.file_opener  xdg-open {path}\n"
         );
     }
 
@@ -81,6 +81,24 @@ mod config_set {
         assert_eq!(stdout, "pr_sync.max_age_days  30\n");
         assert_eq!(config_toml(&env), "[pr_sync]\nmax_age_days = 30\n");
         assert_eq!(env.json(&["pr", "status"])["max_age_days"], 30);
+    }
+
+    #[test]
+    fn should_set_the_file_opener_as_one_value() {
+        let env = TestEnv::new();
+
+        let stdout = env.ok(&[
+            "config",
+            "set",
+            "terminal.file_opener",
+            "code -g {path}:{line}",
+        ]);
+
+        assert_eq!(stdout, "terminal.file_opener  code -g {path}:{line}\n");
+        assert_eq!(
+            config_toml(&env),
+            "[terminal]\nfile_opener = \"code -g {path}:{line}\"\n"
+        );
     }
 
     #[test]

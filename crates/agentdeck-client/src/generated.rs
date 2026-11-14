@@ -582,6 +582,8 @@ pub mod types {
         pub overridden_by_env: ::std::vec::Vec<::std::string::String>,
         ///`[pr_sync]`.
         pub pr_sync: PrSyncSettings,
+        ///`[terminal]`.
+        pub terminal: TerminalSettings,
     }
     impl Settings {
         pub fn builder() -> builder::Settings {
@@ -599,6 +601,9 @@ pub mod types {
         ///`[pr_sync]` keys to change.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub pr_sync: ::std::option::Option<PrSyncPatch>,
+        ///`[terminal]` keys to change.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub terminal: ::std::option::Option<TerminalPatch>,
     }
     impl SettingsPatch {
         pub fn builder() -> builder::SettingsPatch {
@@ -695,6 +700,29 @@ pub mod types {
     }
     impl TaskPatch {
         pub fn builder() -> builder::TaskPatch {
+            Default::default()
+        }
+    }
+    ///`[terminal]` in a [`SettingsPatch`]: its schema only, since `config::validate` reads the JSON itself.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
+    pub struct TerminalPatch {
+        ///A new `terminal.file_opener`: a command holding `{path}` in an argument.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub file_opener: ::std::option::Option<::std::string::String>,
+    }
+    impl TerminalPatch {
+        pub fn builder() -> builder::TerminalPatch {
+            Default::default()
+        }
+    }
+    ///`[terminal]`: the GUI's terminal panes (spec §11).
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct TerminalSettings {
+        ///`terminal.file_opener`: the command a `secondary`-click on a file path in a pane runs, split into words as a shell would and never run through a shell. `{path}` is the file's absolute path, `{line}` and `{col}` where the path names them (else `1`).
+        pub file_opener: ::std::string::String,
+    }
+    impl TerminalSettings {
+        pub fn builder() -> builder::TerminalSettings {
             Default::default()
         }
     }
@@ -2678,6 +2706,7 @@ pub mod types {
                 ::std::string::String,
             >,
             pr_sync: ::std::result::Result<super::PrSyncSettings, ::std::string::String>,
+            terminal: ::std::result::Result<super::TerminalSettings, ::std::string::String>,
         }
         impl ::std::default::Default for Settings {
             fn default() -> Self {
@@ -2685,6 +2714,7 @@ pub mod types {
                     appearance: Err("no value supplied for appearance".to_string()),
                     overridden_by_env: Err("no value supplied for overridden_by_env".to_string()),
                     pr_sync: Err("no value supplied for pr_sync".to_string()),
+                    terminal: Err("no value supplied for terminal".to_string()),
                 }
             }
         }
@@ -2719,6 +2749,16 @@ pub mod types {
                     .map_err(|e| format!("error converting supplied value for pr_sync: {e}"));
                 self
             }
+            pub fn terminal<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<super::TerminalSettings>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.terminal = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for terminal: {e}"));
+                self
+            }
         }
         impl ::std::convert::TryFrom<Settings> for super::Settings {
             type Error = super::error::ConversionError;
@@ -2729,6 +2769,7 @@ pub mod types {
                     appearance: value.appearance?,
                     overridden_by_env: value.overridden_by_env?,
                     pr_sync: value.pr_sync?,
+                    terminal: value.terminal?,
                 })
             }
         }
@@ -2738,6 +2779,7 @@ pub mod types {
                     appearance: Ok(value.appearance),
                     overridden_by_env: Ok(value.overridden_by_env),
                     pr_sync: Ok(value.pr_sync),
+                    terminal: Ok(value.terminal),
                 }
             }
         }
@@ -2751,12 +2793,17 @@ pub mod types {
                 ::std::option::Option<super::PrSyncPatch>,
                 ::std::string::String,
             >,
+            terminal: ::std::result::Result<
+                ::std::option::Option<super::TerminalPatch>,
+                ::std::string::String,
+            >,
         }
         impl ::std::default::Default for SettingsPatch {
             fn default() -> Self {
                 Self {
                     appearance: Ok(Default::default()),
                     pr_sync: Ok(Default::default()),
+                    terminal: Ok(Default::default()),
                 }
             }
         }
@@ -2781,6 +2828,16 @@ pub mod types {
                     .map_err(|e| format!("error converting supplied value for pr_sync: {e}"));
                 self
             }
+            pub fn terminal<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<super::TerminalPatch>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.terminal = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for terminal: {e}"));
+                self
+            }
         }
         impl ::std::convert::TryFrom<SettingsPatch> for super::SettingsPatch {
             type Error = super::error::ConversionError;
@@ -2790,6 +2847,7 @@ pub mod types {
                 Ok(Self {
                     appearance: value.appearance?,
                     pr_sync: value.pr_sync?,
+                    terminal: value.terminal?,
                 })
             }
         }
@@ -2798,6 +2856,7 @@ pub mod types {
                 Self {
                     appearance: Ok(value.appearance),
                     pr_sync: Ok(value.pr_sync),
+                    terminal: Ok(value.terminal),
                 }
             }
         }
@@ -3252,6 +3311,89 @@ pub mod types {
                     status: Ok(value.status),
                     title: Ok(value.title),
                     workspace_id: Ok(value.workspace_id),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
+        pub struct TerminalPatch {
+            file_opener: ::std::result::Result<
+                ::std::option::Option<::std::string::String>,
+                ::std::string::String,
+            >,
+        }
+        impl ::std::default::Default for TerminalPatch {
+            fn default() -> Self {
+                Self {
+                    file_opener: Ok(Default::default()),
+                }
+            }
+        }
+        impl TerminalPatch {
+            pub fn file_opener<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<::std::string::String>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.file_opener = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for file_opener: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<TerminalPatch> for super::TerminalPatch {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: TerminalPatch,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    file_opener: value.file_opener?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::TerminalPatch> for TerminalPatch {
+            fn from(value: super::TerminalPatch) -> Self {
+                Self {
+                    file_opener: Ok(value.file_opener),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
+        pub struct TerminalSettings {
+            file_opener: ::std::result::Result<::std::string::String, ::std::string::String>,
+        }
+        impl ::std::default::Default for TerminalSettings {
+            fn default() -> Self {
+                Self {
+                    file_opener: Err("no value supplied for file_opener".to_string()),
+                }
+            }
+        }
+        impl TerminalSettings {
+            pub fn file_opener<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::string::String>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.file_opener = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for file_opener: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<TerminalSettings> for super::TerminalSettings {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: TerminalSettings,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    file_opener: value.file_opener?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::TerminalSettings> for TerminalSettings {
+            fn from(value: super::TerminalSettings) -> Self {
+                Self {
+                    file_opener: Ok(value.file_opener),
                 }
             }
         }

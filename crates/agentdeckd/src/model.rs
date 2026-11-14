@@ -414,6 +414,8 @@ pub struct Settings {
     pub appearance: AppearanceSettings,
     /// `[pr_sync]`.
     pub pr_sync: PrSyncSettings,
+    /// `[terminal]`.
+    pub terminal: TerminalSettings,
     /// The dotted keys (`pr_sync.max_age_days`) whose value comes from an environment
     /// variable, not `config.toml`. A PATCH of one is written to the file, but the variable
     /// still wins until the daemon runs without it.
@@ -433,6 +435,15 @@ pub struct PrSyncSettings {
     /// `pr_sync.max_age_days`: only open PRs GitHub updated in the last this many days sync;
     /// `0` for every open PR.
     pub max_age_days: u32,
+}
+
+/// `[terminal]`: the GUI's terminal panes (spec §11).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TerminalSettings {
+    /// `terminal.file_opener`: the command a `secondary`-click on a file path in a pane runs,
+    /// split into words as a shell would and never run through a shell. `{path}` is the
+    /// file's absolute path, `{line}` and `{col}` where the path names them (else `1`).
+    pub file_opener: String,
 }
 
 /// `appearance.theme`.
@@ -460,6 +471,9 @@ pub struct SettingsPatch {
     /// `[pr_sync]` keys to change.
     #[schemars(with = "Option<PrSyncPatch>")]
     pub pr_sync: Option<serde_json::Value>,
+    /// `[terminal]` keys to change.
+    #[schemars(with = "Option<TerminalPatch>")]
+    pub terminal: Option<serde_json::Value>,
     /// Sections no setting is in, so the PATCH can name them in its error.
     #[serde(flatten)]
     #[schemars(skip)]
@@ -482,4 +496,13 @@ pub struct AppearancePatch {
 pub struct PrSyncPatch {
     /// A new `pr_sync.max_age_days`; `0` for no cutoff.
     pub max_age_days: Option<u32>,
+}
+
+/// `[terminal]` in a [`SettingsPatch`]: its schema only, since `config::validate` reads the
+/// JSON itself.
+#[derive(JsonSchema)]
+#[expect(dead_code, reason = "a schema, never built")]
+pub struct TerminalPatch {
+    /// A new `terminal.file_opener`: a command holding `{path}` in an argument.
+    pub file_opener: Option<String>,
 }
