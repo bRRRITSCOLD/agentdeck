@@ -15,10 +15,10 @@
 //! `lagged` rule instead).
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -115,7 +115,10 @@ struct Queued {
 pub enum SpawnError {
     /// The PTY or the threads serving it couldn't be set up.
     Pty(anyhow::Error),
-    /// The command couldn't be started: no such program, not executable, …
+    /// `program`, a bare name, is in none of the `PATH`'s directories; `err` says where it
+    /// looked.
+    NotOnPath { program: String, err: anyhow::Error },
+    /// The command couldn't be started: not executable, a directory, …
     Command(anyhow::Error),
 }
 
@@ -123,9 +126,37 @@ impl fmt::Display for SpawnError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SpawnError::Pty(err) => write!(f, "setting up the PTY: {err:#}"),
+            // The lookup's error lists every PATH directory; it goes to the log instead.
+            SpawnError::NotOnPath { program, .. } => write!(
+                f,
+                "`{program}` isn't on agentdeckd's PATH. Install it, or start agentdeckd from a \
+                 shell where it's found."
+            ),
             SpawnError::Command(err) => write!(f, "{err:#}"),
         }
     }
+}
+
+impl SpawnError {
+    /// Everything that went wrong, for the log: the lookup's whole error for
+    /// [`SpawnError::NotOnPath`].
+    pub fn detail(&self) -> String {
+        match self {
+            SpawnError::NotOnPath { err, .. } => format!("{err:#}"),
+            other => other.to_string(),
+        }
+    }
+}
+
+/// Whether `program` is a bare name found in none of `path`'s directories, each read against
+/// `cwd` as `portable-pty`'s lookup reads them. A program named by a path isn't looked up.
+fn not_on_path(program: &str, path: Option<&OsStr>, cwd: &Path) -> bool {
+    if program.contains('/') {
+        return false;
+    }
+    path.is_none_or(|path| {
+        !std::env::split_paths(path).any(|dir| cwd.join(dir).join(program).exists())
+    })
 }
 
 /// The pane's process has exited, so it takes no input.
@@ -202,10 +233,18 @@ impl Pane {
             command.env(name, value);
         }
         command.cwd(&launch.cwd);
-        let mut child = pair
-            .slave
-            .spawn_command(command)
-            .map_err(SpawnError::Command)?;
+        let mut child = pair.slave.spawn_command(command).map_err(|err| {
+            let program = launch.argv.first().map_or("", String::as_str);
+            let path = launch.env.get(OsStr::new("PATH")).map(OsString::as_os_str);
+            if not_on_path(program, path, &launch.cwd) {
+                SpawnError::NotOnPath {
+                    program: program.to_owned(),
+                    err,
+                }
+            } else {
+                SpawnError::Command(err)
+            }
+        })?;
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().map_err(SpawnError::Pty)?;
         let mut writer = pair.master.take_writer().map_err(SpawnError::Pty)?;
@@ -535,6 +574,24 @@ fn pty_size(size: Size) -> PtySize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod spawn_error {
+        use super::*;
+
+        #[test]
+        fn should_say_only_what_to_do_about_a_program_not_on_the_path() {
+            let err = SpawnError::NotOnPath {
+                program: "codex".into(),
+                err: anyhow::anyhow!("No viable candidates found in PATH \"/usr/bin:/bin\""),
+            };
+
+            assert_eq!(
+                err.to_string(),
+                "`codex` isn't on agentdeckd's PATH. Install it, or start agentdeckd from a \
+                 shell where it's found."
+            );
+        }
+    }
 
     mod when {
         use super::*;

@@ -110,6 +110,41 @@ mod post_v1_panes {
 
         assert_eq!(status, 400);
         assert_eq!(body.error_code.as_deref(), Some("invalid_argv"));
+        assert_eq!(
+            body.message,
+            "`agentdeck-no-such-program` isn't on agentdeckd's PATH. Install it, or start \
+             agentdeckd from a shell where it's found."
+        );
+    }
+
+    #[tokio::test]
+    async fn should_keep_the_spawn_error_for_a_program_that_is_not_executable_400() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let program = std::path::Path::new(&place.workspace.dir).join("not-executable");
+        std::fs::write(&program, "#!/bin/sh\n").expect("writing the program");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o644))
+            .expect("making it not executable");
+
+        let (status, body) = error_response(
+            daemon
+                .client
+                .pane_create()
+                .body(place.new_pane(&["./not-executable"]))
+                .send()
+                .await,
+        );
+
+        assert_eq!(status, 400);
+        assert_eq!(body.error_code.as_deref(), Some("invalid_argv"));
+        assert!(
+            body.message
+                .contains("not-executable because it is not executable"),
+            "{}",
+            body.message
+        );
     }
 
     #[tokio::test]

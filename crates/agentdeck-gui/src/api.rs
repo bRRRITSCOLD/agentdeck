@@ -68,7 +68,7 @@ pub trait Api: Send + Sync {
 
     /// Starts an agent as `launch` says and places it in a tab (spec §6): the workspace's
     /// first empty tab, or a new one. A refusal is an [`ApiError`]; `invalid_argv` means the
-    /// agent CLI isn't installed.
+    /// agent CLI couldn't start, and its message says why.
     fn launch_agent(&self, launch: Launch, cx: &App) -> Task<anyhow::Result<Launched>>;
 
     /// Types an instruction's `body` into `pane` at once with Enter (spec §9). The

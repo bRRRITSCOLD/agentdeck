@@ -158,6 +158,7 @@ The message types are `agentdeck_core::ws::{ClientMessage, ServerMessage}`.
 
 - **Environment:** built from an allowlist: `PATH HOME USER SHELL LANG LC_* TERM COLORTERM XDG_* SSH_AUTH_SOCK GH_* EDITOR CODEX_HOME`, plus `TERM=xterm-256color` and `COLORTERM=truecolor`. Nothing else from the daemon's own environment is passed on, and that rule is tested.
 - **Argv by agent:** `claude` and `codex` are looked up on the pane's `PATH`, so tests put stubs first.
+- **A program that can't start** is refused with 400 `invalid_argv` and the pane row is dropped. When `argv[0]` is a bare name in none of the pane's `PATH` directories, the message is only what to do: "`codex` isn't on agentdeckd's PATH. Install it, or start agentdeckd from a shell where it's found."; the lookup's whole error, which lists every `PATH` directory, goes to `agentdeckd.log` at warn. Any other spawn error keeps its text. The GUI's toast and `agentdeck agent new` show an `invalid_argv` refusal as that message alone.
   - `claude`: `claude --session-id <uuid> [<launch prompt>]`, with a UUIDv4 agentdeck chooses.
   - `codex`: `codex [<launch prompt>]`. Codex has no flag to start on a chosen session id (checked against `openai/codex` on 2026-11-11: `codex resume <id>` and `codex fork <id>` only). It writes each session to `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl` (`CODEX_HOME` from the pane's environment, default `$HOME/.codex`). The daemon lists those files just before launch, then polls every 250 ms for up to 2 min, while the pane runs, for the newest new one whose id no other pane holds, and stores its id as `session_id` (a `changed` pane event follows).
   - `other` and `shell`: argv as given.
@@ -249,7 +250,7 @@ min_ms = 400                   # a new state must hold this long before it is pu
 
 ## 10. CLI and MCP
 
-`agentdeck` (clap) reads `daemon.json` and starts the daemon when it isn't running: no file, a pid that isn't running, or a port that refuses the connection. It starts `$AGENTDECK_DAEMON` if set, else the `agentdeckd` beside its own executable, else `agentdeckd` from `PATH`, in its own process group with no terminal, and waits up to 10 s for a `daemon.json` that answers `/v1/health`. Output is human-readable, or with `--json` the API's own objects (`ws rm` prints `{id, deleted}`, `tail` prints `{pane, output}`). A failure prints `agentdeck: <message> (<error_code>)` to stderr and exits 1.
+`agentdeck` (clap) reads `daemon.json` and starts the daemon when it isn't running: no file, a pid that isn't running, or a port that refuses the connection. It starts `$AGENTDECK_DAEMON` if set, else the `agentdeckd` beside its own executable, else `agentdeckd` from `PATH`, in its own process group with no terminal, and waits up to 10 s for a `daemon.json` that answers `/v1/health`. Output is human-readable, or with `--json` the API's own objects (`ws rm` prints `{id, deleted}`, `tail` prints `{pane, output}`). A failure prints `agentdeck: <message> (<error_code>)` to stderr and exits 1; `agent new`'s `invalid_argv` prints the message alone (§6).
 
 ```
 agentdeck ws ls | new <name> [--dir PATH] | archive <ws> | rm <ws> [--force]
