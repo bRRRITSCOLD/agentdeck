@@ -280,6 +280,18 @@ pub struct PrSyncProgress {
     pub prs_done: u32,
     /// PRs this sync expects, from the search's count; `0` until the first page answers.
     pub prs: u32,
+    /// What the sync is doing now.
+    pub stage: PrSyncStage,
+}
+
+/// What a running PR sync is doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PrSyncStage {
+    /// Reading the list or the search, page by page; `prs_done` counts.
+    Listing,
+    /// Fetching reviews and checks by number, after the last page.
+    Details,
 }
 
 /// A terminal in a tab, running an agent CLI or a shell.

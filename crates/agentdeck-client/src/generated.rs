@@ -385,10 +385,65 @@ pub mod types {
         pub prs: u32,
         ///PRs read and stored so far.
         pub prs_done: u32,
+        ///What the sync is doing now.
+        pub stage: PrSyncStage,
     }
     impl PrSyncProgress {
         pub fn builder() -> builder::PrSyncProgress {
             Default::default()
+        }
+    }
+    ///What a running PR sync is doing.
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum PrSyncStage {
+        ///Reading the list or the search, page by page; `prs_done` counts.
+        #[serde(rename = "listing")]
+        Listing,
+        ///Fetching reviews and checks by number, after the last page.
+        #[serde(rename = "details")]
+        Details,
+    }
+    impl ::std::fmt::Display for PrSyncStage {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Listing => f.write_str("listing"),
+                Self::Details => f.write_str("details"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for PrSyncStage {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "listing" => Ok(Self::Listing),
+                "details" => Ok(Self::Details),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for PrSyncStage {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for PrSyncStage {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
         }
     }
     ///`GET /v1/prs/status` and `POST /v1/prs/sync`: the `gh` login and the last sync.
@@ -1799,12 +1854,14 @@ pub mod types {
         pub struct PrSyncProgress {
             prs: ::std::result::Result<u32, ::std::string::String>,
             prs_done: ::std::result::Result<u32, ::std::string::String>,
+            stage: ::std::result::Result<super::PrSyncStage, ::std::string::String>,
         }
         impl ::std::default::Default for PrSyncProgress {
             fn default() -> Self {
                 Self {
                     prs: Err("no value supplied for prs".to_string()),
                     prs_done: Err("no value supplied for prs_done".to_string()),
+                    stage: Err("no value supplied for stage".to_string()),
                 }
             }
         }
@@ -1829,6 +1886,16 @@ pub mod types {
                     .map_err(|e| format!("error converting supplied value for prs_done: {e}"));
                 self
             }
+            pub fn stage<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<super::PrSyncStage>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.stage = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for stage: {e}"));
+                self
+            }
         }
         impl ::std::convert::TryFrom<PrSyncProgress> for super::PrSyncProgress {
             type Error = super::error::ConversionError;
@@ -1838,6 +1905,7 @@ pub mod types {
                 Ok(Self {
                     prs: value.prs?,
                     prs_done: value.prs_done?,
+                    stage: value.stage?,
                 })
             }
         }
@@ -1846,6 +1914,7 @@ pub mod types {
                 Self {
                     prs: Ok(value.prs),
                     prs_done: Ok(value.prs_done),
+                    stage: Ok(value.stage),
                 }
             }
         }

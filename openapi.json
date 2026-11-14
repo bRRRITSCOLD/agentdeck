@@ -686,13 +686,41 @@
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
+          },
+          "stage": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PrSyncStage"
+              }
+            ],
+            "description": "What the sync is doing now."
           }
         },
         "required": [
           "prs",
-          "prs_done"
+          "prs_done",
+          "stage"
         ],
         "type": "object"
+      },
+      "PrSyncStage": {
+        "description": "What a running PR sync is doing.",
+        "oneOf": [
+          {
+            "description": "Reading the list or the search, page by page; `prs_done` counts.",
+            "enum": [
+              "listing"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "Fetching reviews and checks by number, after the last page.",
+            "enum": [
+              "details"
+            ],
+            "type": "string"
+          }
+        ]
       },
       "PrSyncStatus": {
         "description": "`GET /v1/prs/status` and `POST /v1/prs/sync`: the `gh` login and the last sync.",

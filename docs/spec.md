@@ -216,7 +216,7 @@ min_ms = 400                   # a new state must hold this long before it is pu
   - **New PR:** a PR task created with status `review`.
   - **Merged or closed:** the task goes to `done`; reopened, back to `review`. While the PR's state holds, the task keeps whatever status it has. In a full sync, PRs that left the list are fetched by number, once; one GitHub no longer shows is stored as closed. Fetches by number go 25 to a request, 4 requests at a time.
 - `checks` and `review` come from `statusCheckRollup` (`ERROR` counts as failure, `EXPECTED` as pending) and `reviewDecision`. Every task in the API carries its PR as `pr` (null for a plain task).
-- A sync stores each page as it arrives, and each task it creates or changes gets a `changed` event (§5) then. While it runs, the status's `progress` is `{ prs_done, prs }` (`prs` from the search's count, `0` until the first page answers), and every change to it sends a `pr_sync` event. Clients show it: "Syncing… 100 of 271 PRs".
+- A sync stores each page as it arrives, and each task it creates or changes gets a `changed` event (§5) then. While it runs, the status's `progress` is `{ prs_done, prs, stage }` (`prs` from the search's count, `0` until the first page answers; `stage` is `listing`, then `details` while reviews and checks are fetched by number), and every change to it sends a `pr_sync` event. Clients show it: "Syncing… 100 of 271 PRs", then "Syncing details…".
 
 ## 9. Notes
 

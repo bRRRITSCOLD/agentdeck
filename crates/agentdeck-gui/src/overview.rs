@@ -99,6 +99,8 @@ pub enum PrSync {
         prs_done: u32,
         /// PRs expected.
         prs: u32,
+        /// Fetching reviews and checks, after the last page: no count to show.
+        details: bool,
     },
 }
 
@@ -109,7 +111,8 @@ impl PrSync {
             PrSync::NotYet => "PRs not synced yet".to_owned(),
             PrSync::Failed => "PR sync failed".to_owned(),
             PrSync::SyncedAt(at) => format!("PRs synced {}", ago(now - at)),
-            PrSync::Syncing { prs_done, prs } => {
+            PrSync::Syncing { details: true, .. } => "Syncing PR details…".to_owned(),
+            PrSync::Syncing { prs_done, prs, .. } => {
                 format!("Syncing PRs…{}", of(prs_done, prs, ""))
             }
         }
@@ -121,7 +124,10 @@ impl PrSync {
             PrSync::NotYet => "Not synced yet".to_owned(),
             PrSync::Failed => "Sync failed".to_owned(),
             PrSync::SyncedAt(at) => format!("Synced {}", ago(now - at)),
-            PrSync::Syncing { prs_done, prs } => format!("Syncing…{}", of(prs_done, prs, " PRs")),
+            PrSync::Syncing { details: true, .. } => "Syncing details…".to_owned(),
+            PrSync::Syncing { prs_done, prs, .. } => {
+                format!("Syncing…{}", of(prs_done, prs, " PRs"))
+            }
         }
     }
 }
@@ -241,6 +247,7 @@ impl Snapshot {
             (Some(progress), _, _) => PrSync::Syncing {
                 prs_done: progress.prs_done,
                 prs: progress.prs,
+                details: progress.stage == agentdeck_client::types::PrSyncStage::Details,
             },
             (None, Some(_), _) => PrSync::Failed,
             (None, None, Some(at)) => PrSync::SyncedAt(at.to_utc()),
@@ -582,13 +589,15 @@ mod tests {
                 snapshot.pr_sync.progress = Some(agentdeck_client::types::PrSyncProgress {
                     prs_done: 100,
                     prs: 271,
+                    stage: agentdeck_client::types::PrSyncStage::Listing,
                 });
 
                 assert_eq!(
                     snapshot.overview().pr_sync,
                     PrSync::Syncing {
                         prs_done: 100,
-                        prs: 271
+                        prs: 271,
+                        details: false,
                     }
                 );
             }
@@ -660,8 +669,24 @@ mod tests {
         }
 
         #[test]
+        fn should_say_a_sync_is_fetching_details_without_a_count() {
+            let details = PrSync::Syncing {
+                prs_done: 271,
+                prs: 271,
+                details: true,
+            };
+
+            assert_eq!(details.label(at(NOW)), "Syncing PR details…");
+            assert_eq!(details.short_label(at(NOW)), "Syncing details…");
+        }
+
+        #[test]
         fn should_say_how_far_a_running_sync_is_once_it_knows() {
-            let syncing = |prs_done, prs| PrSync::Syncing { prs_done, prs };
+            let syncing = |prs_done, prs| PrSync::Syncing {
+                prs_done,
+                prs,
+                details: false,
+            };
 
             assert_eq!(syncing(100, 271).label(at(NOW)), "Syncing PRs… 100 of 271");
             assert_eq!(syncing(0, 0).label(at(NOW)), "Syncing PRs…");
