@@ -761,6 +761,24 @@
         ],
         "type": "string"
       },
+      "PanePatch": {
+        "description": "`PATCH /v1/panes/{id}`: the task to link the pane to, or null to unlink it. `task_id` is required, so an empty body can't unlink a pane by accident.",
+        "properties": {
+          "task_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TaskId"
+              }
+            ],
+            "description": "A task in the pane's workspace that isn't done, or null.",
+            "nullable": true
+          }
+        },
+        "required": [
+          "task_id"
+        ],
+        "type": "object"
+      },
       "PrState": {
         "enum": [
           "open",
@@ -1636,6 +1654,50 @@
           }
         },
         "summary": "One pane, with its live title and state."
+      },
+      "patch": {
+        "description": "null). The task's comments no agent has had yet are then typed into the pane once it is idle, as a new comment would be (spec §9).",
+        "operationId": "pane_update",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/PaneId"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PanePatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Pane"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Links the pane to a task in its workspace that isn't done, or unlinks it (`task_id`"
       }
     },
     "/v1/panes/{id}/input": {

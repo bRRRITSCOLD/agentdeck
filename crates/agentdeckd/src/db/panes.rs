@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use agentdeck_core::{AgentState, PaneId, TaskId, WorkspaceId};
+use agentdeck_core::{AgentState, PaneId, TaskId, TaskStatus, WorkspaceId};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::{DbError, exists, new_id, now, opt_text, text};
@@ -116,6 +116,49 @@ pub fn agents_on_task(conn: &Connection, task: TaskId) -> Result<Vec<PaneId>, Db
     )?;
     let rows = stmt.query_map([task.to_string()], |row| text(row, "id"))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Links pane `id` to `task`, or unlinks it with `None`. The task must exist
+/// (`unknown_task`), be in the pane's workspace and not be done (`invalid_task`). Returns the
+/// pane as it is now and the task it was linked to before.
+pub fn set_task(
+    conn: &Connection,
+    id: PaneId,
+    task: Option<TaskId>,
+) -> Result<(Pane, Option<TaskId>), DbError> {
+    let before = get(conn, id)?;
+    if let Some(task) = task {
+        let found: Option<(Option<WorkspaceId>, TaskStatus)> = conn
+            .query_row(
+                "SELECT workspace_id, status FROM tasks WHERE id = ?1",
+                [task.to_string()],
+                |row| Ok((opt_text(row, "workspace_id")?, text(row, "status")?)),
+            )
+            .optional()?;
+        let (workspace, status) = found.ok_or(DbError::UnknownReference("task"))?;
+        let pane_workspace: WorkspaceId = conn.query_row(
+            "SELECT workspace_id FROM tabs WHERE id = ?1",
+            [before.tab_id.to_string()],
+            |row| text(row, "workspace_id"),
+        )?;
+        let invalid = |message: String| DbError::Invalid {
+            code: "invalid_task",
+            message,
+        };
+        if workspace != Some(pane_workspace) {
+            return Err(invalid(format!(
+                "task {task} isn't in the pane's workspace"
+            )));
+        }
+        if status == TaskStatus::Done {
+            return Err(invalid(format!("task {task} is done")));
+        }
+    }
+    conn.execute(
+        "UPDATE panes SET task_id = ?2 WHERE id = ?1",
+        params![id.to_string(), task.map(|task| task.to_string())],
+    )?;
+    Ok((get(conn, id)?, before.task_id))
 }
 
 /// Every session id a pane has.

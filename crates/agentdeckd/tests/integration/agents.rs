@@ -7,12 +7,13 @@ use std::time::Duration;
 
 use agentdeck_client::Client;
 use agentdeck_client::types::{
-    Comment, InputWhen, Instruction, NewComment, NewInstruction, NewTask, PaneInput, Task,
+    Comment, InputWhen, Instruction, NewComment, NewInstruction, NewTask, PaneInput, PanePatch,
+    Task,
 };
 use agentdeck_core::{Agent, AgentState, CommentId, PaneId, PaneKind, TaskId, WorkspaceId};
 
 use crate::support::agents::{codex_session, launches, trust_answer, typed};
-use crate::support::terminal::{Place, eventually, in_state, printed, sh};
+use crate::support::terminal::{Place, daemon_with_shell_rules, eventually, in_state, printed, sh};
 use crate::support::{TestDaemon, error_response};
 
 async fn task(client: &Client, workspace: WorkspaceId, title: &str, body: &str) -> Task {
@@ -79,6 +80,17 @@ async fn delivered_to(client: &Client, task: TaskId, id: CommentId, pane: PaneId
         },
     )
     .await
+}
+
+/// Links `pane` to `task`, or unlinks it.
+async fn link(client: &Client, pane: PaneId, task: Option<TaskId>) {
+    client
+        .pane_update()
+        .id(pane)
+        .body(PanePatch { task_id: task })
+        .send()
+        .await
+        .expect("link the pane");
 }
 
 async fn type_now(client: &Client, pane: PaneId, text: &str) {
@@ -334,6 +346,51 @@ mod comment_delivery {
 
         delivered_to(&daemon.client, task.id, created.id, newer.id).await;
         assert_eq!(typed(&daemon, older.id), "");
+    }
+
+    #[tokio::test]
+    async fn should_type_the_tasks_waiting_comments_into_an_agent_linked_to_it() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
+        let first = comment(&daemon.client, &task, "Also check Firefox", None).await;
+        let second = comment(&daemon.client, &task, "And Safari", None).await;
+        let pane = place.launch(&daemon.client, Agent::Claude, None).await;
+        in_state(&daemon.client, pane.id, AgentState::Idle).await;
+
+        link(&daemon.client, pane.id, Some(task.id)).await;
+
+        eventually("the comments to be typed", || async {
+            (typed(&daemon, pane.id) == "Also check Firefox\nAnd Safari\n").then_some(())
+        })
+        .await;
+        delivered_to(&daemon.client, task.id, first.id, pane.id).await;
+        delivered_to(&daemon.client, task.id, second.id, pane.id).await;
+    }
+
+    #[tokio::test]
+    async fn should_type_nothing_into_a_shell_linked_to_the_task() {
+        let daemon = daemon_with_shell_rules().await;
+        let place = Place::new(&daemon).await;
+        let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
+        let waiting = comment(&daemon.client, &task, "Also check Firefox", None).await;
+        let pane = place
+            .spawn(
+                &daemon.client,
+                &sh("printf '\\033]0;idle\\007'; cat > typed"),
+            )
+            .await;
+        in_state(&daemon.client, pane.id, AgentState::Idle).await;
+
+        link(&daemon.client, pane.id, Some(task.id)).await;
+        // Long past the 100 ms the shell's state takes to settle: an agent would have had it.
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+
+        let comment = read_comment(&daemon.client, task.id, waiting.id).await;
+        assert_eq!(comment.delivered_at, None);
+        let typed =
+            std::fs::read_to_string(std::path::Path::new(&place.workspace.dir).join("typed"));
+        assert_eq!(typed.unwrap_or_default(), "");
     }
 
     #[tokio::test]

@@ -12,6 +12,7 @@ mod frame;
 mod inbox;
 mod instruction_list;
 mod keymap;
+mod link_task;
 mod new_agent;
 mod new_task;
 mod new_workspace;

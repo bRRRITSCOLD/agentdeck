@@ -429,6 +429,18 @@ pub mod types {
             Default::default()
         }
     }
+    ///`PATCH /v1/panes/{id}`: the task to link the pane to, or null to unlink it. `task_id` is required, so an empty body can't unlink a pane by accident.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct PanePatch {
+        ///A task in the pane's workspace that isn't done, or null.
+        #[serde(deserialize_with = "::std::option::Option::deserialize")]
+        pub task_id: ::std::option::Option<agentdeck_core::TaskId>,
+    }
+    impl PanePatch {
+        pub fn builder() -> builder::PanePatch {
+            Default::default()
+        }
+    }
     ///`[pr_sync]` in a [`SettingsPatch`]: its schema only, since `config::validate` reads the JSON itself.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
     pub struct PrSyncPatch {
@@ -2274,6 +2286,49 @@ pub mod types {
             }
         }
         #[derive(Clone, Debug)]
+        pub struct PanePatch {
+            task_id: ::std::result::Result<
+                ::std::option::Option<agentdeck_core::TaskId>,
+                ::std::string::String,
+            >,
+        }
+        impl ::std::default::Default for PanePatch {
+            fn default() -> Self {
+                Self {
+                    task_id: Err("no value supplied for task_id".to_string()),
+                }
+            }
+        }
+        impl PanePatch {
+            pub fn task_id<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::TaskId>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.task_id = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for task_id: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<PanePatch> for super::PanePatch {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: PanePatch,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    task_id: value.task_id?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::PanePatch> for PanePatch {
+            fn from(value: super::PanePatch) -> Self {
+                Self {
+                    task_id: Ok(value.task_id),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
         pub struct PrSyncPatch {
             max_age_days: ::std::result::Result<::std::option::Option<u32>, ::std::string::String>,
         }
@@ -3848,6 +3903,25 @@ impl Client {
     pub fn pane_delete(&self) -> builder::PaneDelete<'_> {
         builder::PaneDelete::new(self)
     }
+    ///Links the pane to a task in its workspace that isn't done, or unlinks it (`task_id`
+    ///
+    ///null). The task's comments no agent has had yet are then typed into the pane once it is idle, as a new comment would be (spec §9).
+    ///
+    ///Sends a `PATCH` request to `/v1/panes/{id}`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///- `body`
+    ///```ignore
+    ///let response = client.pane_update()
+    ///    .id(id)
+    ///    .body(body)
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn pane_update(&self) -> builder::PaneUpdate<'_> {
+        builder::PaneUpdate::new(self)
+    }
     ///Types text into the pane: now, or once it is idle, done or blocked (`when: "idle"`)
     ///
     ///Sends a `POST` request to `/v1/panes/{id}/input`
@@ -4775,6 +4849,97 @@ pub mod builder {
             let response = result?;
             match response.status().as_u16() {
                 204u16 => Ok(ResponseValue::empty(response)),
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::pane_update`]
+    ///
+    ///[`Client::pane_update`]: super::Client::pane_update
+    #[derive(Debug, Clone)]
+    pub struct PaneUpdate<'a> {
+        client: &'a super::Client,
+        id: Result<agentdeck_core::PaneId, String>,
+        body: Result<types::builder::PanePatch, String>,
+    }
+    impl<'a> PaneUpdate<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self {
+                client: client,
+                id: Err("id was not initialized".to_string()),
+                body: Ok(::std::default::Default::default()),
+            }
+        }
+        pub fn id<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<agentdeck_core::PaneId>,
+        {
+            self.id = value
+                .try_into()
+                .map_err(|_| "conversion to `agentdeck_core :: PaneId` for id failed".to_string());
+            self
+        }
+        pub fn body<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<types::PanePatch>,
+            <V as std::convert::TryInto<types::PanePatch>>::Error: std::fmt::Display,
+        {
+            self.body = value
+                .try_into()
+                .map(From::from)
+                .map_err(|s| format!("conversion to `PanePatch` for body failed: {}", s));
+            self
+        }
+        pub fn body_map<F>(mut self, f: F) -> Self
+        where
+            F: std::ops::FnOnce(types::builder::PanePatch) -> types::builder::PanePatch,
+        {
+            self.body = self.body.map(f);
+            self
+        }
+        ///Sends a `PATCH` request to `/v1/panes/{id}`
+        pub async fn send(self) -> Result<ResponseValue<types::Pane>, Error<types::Error>> {
+            let Self { client, id, body } = self;
+            let id = id.map_err(Error::InvalidRequest)?;
+            let body = body
+                .and_then(|v| types::PanePatch::try_from(v).map_err(|e| e.to_string()))
+                .map_err(Error::InvalidRequest)?;
+            let url = format!(
+                "{}/v1/panes/{}",
+                client.baseurl,
+                encode_path(&id.to_string()),
+            );
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .patch(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .json(&body)
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "pane_update",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                200u16 => ResponseValue::from_response(response).await,
                 400u16..=499u16 => Err(Error::ErrorResponse(
                     ResponseValue::from_response(response).await?,
                 )),

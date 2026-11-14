@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use agentdeck_core::{Agent, InstructionId, PaneId, TaskId, TaskStatus};
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand};
 
 /// `agentdeck`: drive agentdeck's workspaces, tasks, comments, instructions and agents from a
 /// shell or an agent.
@@ -191,6 +191,19 @@ pub enum AgentCommand {
         /// A task to link; its title, body and new comments go into the launch prompt.
         #[arg(long, value_name = "T")]
         task: Option<TaskId>,
+    },
+    /// Link a running pane to a task in its workspace, or unlink it. The task's comments no
+    /// agent has had yet are typed in once the agent is idle.
+    #[command(group(ArgGroup::new("link").required(true).args(["task", "none"])))]
+    Link {
+        /// The pane's id.
+        pane: PaneId,
+        /// The task to link it to.
+        #[arg(long, value_name = "T")]
+        task: Option<TaskId>,
+        /// Unlink it from its task.
+        #[arg(long)]
+        none: bool,
     },
     /// Type a message into a pane and press Enter, once the pane is idle.
     Send {
@@ -389,6 +402,37 @@ mod tests {
         #[test]
         fn should_reject_an_agent_it_cant_launch() {
             assert!(parse(&["agent", "new", "--ws", "web", "--agent", "other"]).is_err());
+        }
+
+        #[test]
+        fn should_link_to_a_task() {
+            let cli = parse(&["agent", "link", TASK, "--task", TASK]).unwrap();
+
+            let Command::Agent(AgentCommand::Link { task, none, .. }) = cli.command else {
+                panic!("not agent link: {:?}", cli.command);
+            };
+            assert_eq!(task, Some(TASK.parse().unwrap()));
+            assert!(!none);
+        }
+
+        #[test]
+        fn should_unlink_with_none() {
+            let cli = parse(&["agent", "link", TASK, "--none"]).unwrap();
+
+            assert!(matches!(
+                cli.command,
+                Command::Agent(AgentCommand::Link {
+                    task: None,
+                    none: true,
+                    ..
+                })
+            ));
+        }
+
+        #[test]
+        fn should_need_exactly_one_of_task_and_none_to_link() {
+            assert!(parse(&["agent", "link", TASK]).is_err());
+            assert!(parse(&["agent", "link", TASK, "--task", TASK, "--none"]).is_err());
         }
 
         #[test]

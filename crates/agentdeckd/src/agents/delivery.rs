@@ -3,12 +3,13 @@
 //! Delivery records the time and the pane. An agent's comments are never delivered.
 
 use agentdeck_core::ws::Entity;
-use agentdeck_core::{AgentState, CommentAuthor, CommentId, PaneId};
+use agentdeck_core::{AgentState, CommentAuthor, CommentId, PaneId, PaneKind, TaskId};
 
 use crate::db::{self, Db};
 use crate::events::Events;
 use crate::model::Comment;
 use crate::terminal::Terminals;
+use crate::terminal::pane::Pane;
 
 /// Hands a new user `comment` to its task's newest live agent pane, if the task has one. It
 /// is typed, with Enter, once the agent is idle or done, and marked delivered then; it stays
@@ -38,9 +39,48 @@ pub async fn deliver_to_task_pane(
             .get(id)
             .filter(|pane| pane.status().state != AgentState::Exited)
     });
-    let Some(pane) = live else {
+    if let Some(pane) = live {
+        deliver(db, events, &pane, comment);
+    }
+}
+
+/// Hands `task`'s user comments no agent has had yet, oldest first, to `pane`, which was just
+/// linked to it, if it is a live agent pane: each is typed and marked delivered as
+/// [`deliver_to_task_pane`] does.
+pub async fn deliver_waiting(
+    db: &Db,
+    terminals: &Terminals,
+    events: &Events,
+    task: TaskId,
+    pane: PaneId,
+) {
+    let Some(live) = terminals
+        .get(pane)
+        .filter(|live| live.status().state != AgentState::Exited)
+    else {
         return;
     };
+    let waiting = db
+        .call(move |c| {
+            if db::panes::get(c, pane)?.kind != PaneKind::Agent {
+                return Ok(Vec::new());
+            }
+            db::comments::undelivered(c, task)
+        })
+        .await;
+    match waiting {
+        Ok(waiting) => {
+            for comment in &waiting {
+                deliver(db, events, &live, comment);
+            }
+        }
+        Err(err) => tracing::warn!("finding task {task}'s comments for pane {pane}: {err}"),
+    }
+}
+
+/// Types `comment`, with Enter, into `pane` once the agent is idle or done, and marks it
+/// delivered then; it stays undelivered if the pane exits first.
+fn deliver(db: &Db, events: &Events, pane: &Pane, comment: &Comment) {
     let text = format!("{}\r", comment.body.trim_end());
     let Ok(typed) = pane.deliver(text.as_bytes()) else {
         return;

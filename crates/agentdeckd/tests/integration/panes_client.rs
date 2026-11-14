@@ -3,7 +3,7 @@
 
 use agentdeck_client::Client;
 use agentdeck_client::panes::{
-    PaneAt, PaneOpError, close_pane, new_shell_tab, pane_if_any, split_pane,
+    PaneAt, PaneOpError, close_pane, link_task, new_shell_tab, pane_if_any, split_pane,
 };
 use agentdeck_client::types::{NewWorkspace, Tab, Workspace};
 use agentdeck_core::{Layout, LayoutError, PaneId, PaneKind, Ratio, SplitDirection, TabId};
@@ -254,5 +254,50 @@ mod pane_if_any {
             .expect("not found is not an error");
 
         assert!(pane.is_none());
+    }
+}
+
+mod link_task {
+    use agentdeck_client::types::NewTask;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn should_link_the_pane_to_the_task_then_unlink_it() {
+        let daemon = TestDaemon::start().await;
+        let (ws, _, pane) = shell_tab(&daemon.client).await;
+        let task = daemon
+            .client
+            .task_create()
+            .body(NewTask {
+                title: "t".into(),
+                body: None,
+                status: None,
+                workspace_id: Some(ws.id),
+            })
+            .send()
+            .await
+            .expect("create a task")
+            .into_inner();
+
+        let linked = link_task(&daemon.client, pane, Some(task.id))
+            .await
+            .expect("link");
+        assert_eq!(linked.task_id, Some(task.id));
+
+        let unlinked = link_task(&daemon.client, pane, None).await.expect("unlink");
+        assert_eq!(unlinked.task_id, None);
+    }
+
+    #[tokio::test]
+    async fn should_carry_the_daemons_refusal() {
+        let daemon = TestDaemon::start().await;
+        let (_, _, pane) = shell_tab(&daemon.client).await;
+
+        let err = link_task(&daemon.client, pane, Some(uuid::Uuid::now_v7().into()))
+            .await
+            .expect_err("an unknown task");
+
+        assert_eq!(err.code.as_deref(), Some("unknown_task"));
     }
 }

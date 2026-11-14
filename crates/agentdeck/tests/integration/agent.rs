@@ -23,6 +23,48 @@ mod agent_send {
     }
 }
 
+mod agent_link {
+    use super::*;
+
+    #[test]
+    fn should_link_the_pane_to_the_task_then_unlink_it() {
+        let env = TestEnv::new();
+        let ws = env.workspace("web");
+        let pane = shell_pane(&env, &ws, "sleep 60");
+        let task = env.json(&["task", "add", "Fix it", "--ws", "web"]);
+
+        let linked = env.json(&["agent", "link", &pane, "--task", text(&task, "id")]);
+        assert_eq!(linked["task_id"], task["id"]);
+        assert_eq!(
+            env.ok(&["agent", "link", &pane, "--task", text(&task, "id")]),
+            format!("linked {pane} to {}\n", text(&task, "id"))
+        );
+
+        assert_eq!(
+            env.ok(&["agent", "link", &pane, "--none"]),
+            format!("unlinked {pane}\n")
+        );
+        let unlinked = env.json(&["agent", "link", &pane, "--none"]);
+        assert!(
+            unlinked.get("task_id").is_none_or(|id| id.is_null()),
+            "{unlinked}"
+        );
+    }
+
+    #[test]
+    fn should_fail_for_a_done_task() {
+        let env = TestEnv::new();
+        let ws = env.workspace("web");
+        let pane = shell_pane(&env, &ws, "sleep 60");
+        let task = env.json(&["task", "add", "Fix it", "--ws", "web"]);
+        env.ok(&["task", "set", text(&task, "id"), "--status", "done"]);
+
+        let stderr = env.fails(&["agent", "link", &pane, "--task", text(&task, "id")]);
+
+        assert!(stderr.contains("(invalid_task)"), "{stderr}");
+    }
+}
+
 mod tail {
     use super::*;
 
