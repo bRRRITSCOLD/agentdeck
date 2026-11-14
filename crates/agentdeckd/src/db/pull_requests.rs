@@ -1,6 +1,6 @@
 //! `pull_requests` queries: storing what PR sync saw, and the PR tasks it moves (spec §8).
 
-use agentdeck_core::{PrState, TaskId, TaskKind, WorkspaceId, pr_task_status};
+use agentdeck_core::{ChecksState, PrState, TaskId, TaskKind, WorkspaceId, pr_task_status};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::{DbError, now, tasks, text};
@@ -15,6 +15,55 @@ pub fn open(conn: &Connection) -> Result<Vec<(String, i64)>, DbError> {
         Ok((row.get(0)?, row.get(1)?))
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// `(repo, number)` of every PR stored as open whose checks are pending.
+pub fn open_pending(conn: &Connection) -> Result<Vec<(String, i64)>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT repo, number FROM pull_requests WHERE state = ?1 AND checks = ?2
+         ORDER BY repo, number",
+    )?;
+    let rows = stmt.query_map(
+        [PrState::Open.as_str(), ChecksState::Pending.as_str()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Every PR stored as open whose task is in the inbox, as last synced, so it can be matched
+/// to a workspace again without asking GitHub.
+pub fn inbox_open(conn: &Connection) -> Result<Vec<RemotePr>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT p.task_id FROM pull_requests p JOIN tasks t ON t.id = p.task_id
+         WHERE p.state = ?1 AND t.workspace_id IS NULL ORDER BY p.repo, p.number",
+    )?;
+    let ids = stmt
+        .query_map([PrState::Open.as_str()], |row| text(row, "task_id"))?
+        .collect::<rusqlite::Result<Vec<TaskId>>>()?;
+    let mut prs = Vec::with_capacity(ids.len());
+    for id in ids {
+        if let Some(pr) = stored(conn, id)? {
+            prs.push(pr);
+        }
+    }
+    Ok(prs)
+}
+
+/// Task `id`'s PR as last synced; `None` for a plain task.
+fn stored(conn: &Connection, id: TaskId) -> Result<Option<RemotePr>, DbError> {
+    let task = tasks::get(conn, id)?;
+    Ok(task.pr.map(|pr| RemotePr {
+        repo: pr.repo,
+        number: pr.number,
+        title: task.title,
+        url: pr.url,
+        state: pr.state,
+        draft: pr.draft,
+        head_ref: pr.head_ref,
+        checks: pr.checks,
+        review: pr.review,
+        updated_at: pr.updated_at,
+    }))
 }
 
 /// Stores each PR with the workspace it matched, and closes each `gone` PR (`(repo, number)`:
@@ -54,21 +103,12 @@ fn close_gone(
     let Some(task_id) = task_for(conn, repo, number)? else {
         return Ok(None);
     };
-    let task = tasks::get(conn, task_id)?;
-    let Some(pr) = task.pr else {
+    let Some(pr) = stored(conn, task_id)? else {
         return Ok(None);
     };
     let closed = RemotePr {
-        repo: pr.repo,
-        number: pr.number,
-        title: task.title,
-        url: pr.url,
         state: PrState::Closed,
-        draft: pr.draft,
-        head_ref: pr.head_ref,
-        checks: pr.checks,
-        review: pr.review,
-        updated_at: pr.updated_at,
+        ..pr
     };
     store_one(conn, &closed, None, synced_at)
 }

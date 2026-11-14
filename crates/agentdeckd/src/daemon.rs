@@ -42,7 +42,11 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
     let github_api = std::env::var(prsync::ENDPOINT_VAR)
         .unwrap_or_else(|_| prsync::github::DEFAULT_ENDPOINT.into());
     let events = Events::new();
-    let prs = PrSync::start(db.clone(), events.clone(), github_api)?;
+    let full_every = std::env::var(prsync::FULL_SYNC_VAR)
+        .ok()
+        .and_then(|secs| secs.parse().ok())
+        .map_or(prsync::FULL_SYNC_EVERY, Duration::from_secs);
+    let prs = PrSync::start(db.clone(), events.clone(), github_api, full_every)?;
     let terminals = Terminals::new(db.clone(), events.clone(), paths.rules_dir());
     terminals.run_state_timer();
     agents::resume::resume_panes(&db, &terminals)

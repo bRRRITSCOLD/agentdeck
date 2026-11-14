@@ -9,8 +9,14 @@ use serde_json::{Value, json};
 /// Where the GraphQL API lives unless `AGENTDECK_GITHUB_API` says otherwise.
 pub const DEFAULT_ENDPOINT: &str = "https://api.github.com/graphql";
 
-/// The search spec §8 names.
-const SEARCH: &str = "is:pr is:open author:@me";
+/// The full search spec §8 names: every open PR the token's user authored.
+pub const OPEN_SEARCH: &str = "is:pr is:open author:@me";
+
+/// The incremental search: every PR the token's user authored, in any state, that changed at
+/// or after `since` (RFC 3339).
+pub fn updated_search(since: &str) -> String {
+    format!("is:pr author:@me updated:>={since}")
+}
 
 /// Search results per page, and how many pages one sync reads at most.
 const PAGE_SIZE: u32 = 50;
@@ -93,8 +99,8 @@ impl Github {
         Ok(Github { http, endpoint })
     }
 
-    /// Every open PR the token's user authored (`is:pr is:open author:@me`).
-    pub async fn open_prs(&self, token: &str) -> Result<Vec<RemotePr>, GithubError> {
+    /// Every PR the search `q` finds, up to `MAX_PAGES` pages.
+    pub async fn search(&self, token: &str, q: &str) -> Result<Vec<RemotePr>, GithubError> {
         let query = format!(
             "query($q: String!, $first: Int!, $after: String) {{
   search(query: $q, type: ISSUE, first: $first, after: $after) {{
@@ -107,7 +113,7 @@ impl Github {
         let mut prs = Vec::new();
         let mut after: Option<String> = None;
         for _ in 0..MAX_PAGES {
-            let variables = json!({ "q": SEARCH, "first": PAGE_SIZE, "after": after });
+            let variables = json!({ "q": q, "first": PAGE_SIZE, "after": after });
             let data = self.query(token, &query, variables).await?;
             let page = parse_search(data)?;
             prs.extend(page.prs);
