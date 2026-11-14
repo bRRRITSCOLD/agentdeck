@@ -1,8 +1,8 @@
 //! The main window's sidebar (spec §11), the `Sidebar` board of Penpot's "Main window": the
-//! brand with its new workspace `+`, Inbox and Tasks, then every workspace with its rolled-up
-//! state and open PRs, the archived ones in a foldable Archived group, and when
-//! PRs last synced at the bottom. The `+` asks the window for the dialog with a
-//! [`SidebarEvent`].
+//! brand, Inbox and Tasks, then the Workspaces header with its new workspace `+`, every
+//! workspace with its rolled-up state and open PRs, the archived ones in a foldable Archived
+//! group, and when PRs last synced at the bottom. The `+` asks the window for the dialog with
+//! a [`SidebarEvent`].
 //!
 //! It reads a [`Snapshot`] through the session's [`Api`] when it opens and again whenever the
 //! daemon reports a `changed`; `state` and `exit` messages patch pane states in place.
@@ -375,6 +375,7 @@ impl Render for SidebarView {
             // Penpot `Brand`.
             .child(
                 div()
+                    .debug_selector(|| "brand".into())
                     .flex()
                     .flex_none()
                     .h(space::S8)
@@ -383,14 +384,27 @@ impl Render for SidebarView {
                     .text_size(font_size::SM)
                     .font_weight(font_weight::MEDIUM)
                     .text_color(s.foreground)
-                    .child("agentdeck")
-                    // Penpot `Spacer`, then `NewWorkspace`: ghost, icon-sm, `Plus`.
+                    .child("agentdeck"),
+            )
+            .child(inbox)
+            .child(tasks)
+            // Penpot gives the separator 8px above and below, on top of the 4px row gap.
+            .child(Separator::new().my(space::S2))
+            // Penpot `Section`: 32px, the label, a spacer, then `NewWorkspace`, the same ghost
+            // icon-xs `Plus` as the right panel's Tasks & PRs header.
+            .child(
+                small()
+                    .debug_selector(|| "workspaces header".into())
+                    .h(space::S8)
+                    .gap(space::S2)
+                    .font_weight(font_weight::MEDIUM)
+                    .child("Workspaces")
                     .child(div().flex_1())
                     .child(
                         div().debug_selector(|| "new workspace".into()).child(
                             Button::new("new-workspace")
                                 .variant(ButtonVariant::Ghost)
-                                .size(ButtonSize::IconSm)
+                                .size(ButtonSize::IconXs)
                                 .icon(IconName::Plus)
                                 .on_click(cx.listener(|_, _, _, cx| {
                                     cx.emit(SidebarEvent::NewWorkspace);
@@ -398,12 +412,6 @@ impl Render for SidebarView {
                         ),
                     ),
             )
-            .child(inbox)
-            .child(tasks)
-            // Penpot gives the separator 8px above and below, on top of the 4px row gap.
-            .child(Separator::new().my(space::S2))
-            // Penpot `Section`.
-            .child(small().font_weight(font_weight::MEDIUM).child("Workspaces"))
             // Penpot's `Spacer` pushes the footer down; the list takes that room and scrolls.
             .child(
                 div()
@@ -544,6 +552,35 @@ mod tests {
                 })
             });
 
+            open.click("new workspace");
+
+            assert_eq!(*asked.borrow(), [SidebarEvent::NewWorkspace]);
+        }
+
+        #[gpui::test]
+        fn should_open_the_new_workspace_dialog_from_the_workspaces_header(
+            cx: &mut TestAppContext,
+        ) {
+            let mut open = open(two_workspaces(), cx);
+            let asked = Rc::new(RefCell::new(Vec::new()));
+            let seen = asked.clone();
+            let _asks = open.cx.update(|_, cx| {
+                cx.subscribe(&open.sidebar, move |_, event: &SidebarEvent, _| {
+                    seen.borrow_mut().push(*event);
+                })
+            });
+
+            let bounds =
+                |open: &mut Open, selector| open.cx.debug_bounds(selector).expect(selector);
+            let (brand, header) = (
+                bounds(&mut open, "brand"),
+                bounds(&mut open, "workspaces header"),
+            );
+            let plus = bounds(&mut open, "new workspace");
+            assert!(header.contains(&plus.center()), "{plus:?} in {header:?}");
+            assert!(!brand.intersects(&plus), "{plus:?} off {brand:?}");
+            assert_eq!(brand.size.height, space::S8);
+            assert_eq!(header.size.height, space::S8);
             open.click("new workspace");
 
             assert_eq!(*asked.borrow(), [SidebarEvent::NewWorkspace]);
