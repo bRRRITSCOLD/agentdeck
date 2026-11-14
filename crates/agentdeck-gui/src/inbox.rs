@@ -21,13 +21,11 @@ use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Context, EventEmitter, InteractiveElement as _, IntoElement, ListState,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    div, list,
+    ParentElement as _, Render, SharedString, Styled as _, Window, div, list,
 };
 
 use crate::api::Api;
 use crate::overview::{PrSync, Snapshot};
-use crate::scrollbar;
 use crate::task_list::{self, Query, Row, Scope};
 use crate::task_row::{self, Table};
 use crate::task_sheet::OpenTask;
@@ -246,29 +244,15 @@ impl Render for InboxView {
                 )
                 .flex_1()
                 .min_h_0(),
-            )
-            .child(scrollbar::vertical(&self.list, cx));
-        // Columns over List, never narrower than the table; it scrolls sideways instead.
-        let table = div()
-            .id("inbox-table")
-            .flex_1()
-            .min_h_0()
-            .overflow_x_scroll()
-            // Only a sideways wheel scrolls it; a vertical one is the list's.
-            .restrict_scroll_to_axis()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .min_w(Table::Inbox.min_width())
-                    .flex()
-                    .flex_col()
-                    .gap(space::S4)
-                    .child(task_row::columns(Table::Inbox, cx))
-                    .child(rows),
             );
+        let table = task_row::table(
+            "inbox-table",
+            "inbox table",
+            Table::Inbox,
+            rows,
+            &self.list,
+            cx,
+        );
         // Penpot `Content`: Header / Columns / List, `space.4` apart, padded `space.6`.
         div()
             .size_full()
@@ -708,7 +692,7 @@ mod tests {
     }
 
     mod scrollbar {
-        use gpui::{ScrollDelta, ScrollEvent, point, px};
+        use gpui::{ScrollDelta, ScrollEvent, point, px, size};
 
         use super::*;
         use crate::scrollbar::testing::thumb;
@@ -751,6 +735,31 @@ mod tests {
 
             let after = thumb(list, cx).expect("a thumb");
             assert!(after.origin.y > before.origin.y);
+        }
+
+        #[gpui::test]
+        fn should_keep_the_scrollbar_in_view_when_the_table_is_wider_than_the_window(
+            cx: &mut TestAppContext,
+        ) {
+            let (harness, cx) = Harness::open(crowded(300), cx);
+            cx.simulate_resize(size(px(600.), px(600.)));
+            harness.draw(cx);
+            let table = cx.debug_bounds("inbox table").expect("the table");
+            assert!(
+                list(cx).right() > table.right(),
+                "the table fits the window"
+            );
+
+            let shown = thumb(table, cx).expect("a thumb in view");
+            let list = list(cx);
+            assert!(shown.top() >= list.top() && shown.bottom() <= list.bottom());
+            cx.simulate_event(ScrollEvent {
+                position: table.center(),
+                delta: ScrollDelta::Pixels(point(px(-200.), px(0.))),
+                ..ScrollEvent::default()
+            });
+            harness.draw(cx);
+            assert!(thumb(table, cx).is_some(), "scrolled sideways");
         }
     }
 }
