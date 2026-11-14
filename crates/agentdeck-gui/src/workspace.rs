@@ -9,6 +9,9 @@
 //! shell from its `NewTab` button or shortcut, and carries out each pane menu's
 //! [`PaneRequest`], or the same request by shortcut on the focused pane. Closing a pane that is
 //! still running asks first. A workspace with no tabs when it opens gets a shell tab.
+//!
+//! An archived workspace shows only its top bar over a note saying so: it reads no tabs and
+//! attaches no terminals. The window opens a fresh view when that changes.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -21,9 +24,9 @@ use brrritscold_core_gpui::{
     ActiveTheme as _, AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
     AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, Button,
     ButtonSize, ButtonVariant, DialogHandle, IconName, Separator, Tabs, TabsList, TabsListVariant,
-    TabsTrigger, Toast, ToastDescription, ToastExt as _, ToastTitle, ToastType,
+    TabsTrigger,
 };
-use brrritscold_core_gpui_tokens::primitive::space;
+use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, AppContext as _, Context, Div, Entity, FocusHandle, Focusable as _,
@@ -37,6 +40,7 @@ use crate::keymap::{
     self, ClosePane, NewTab, NextPane, NextTab, PreviousPane, PreviousTab, SelectTab, SplitDown,
     SplitRight,
 };
+use crate::notice::Notice;
 use crate::pane::{PaneRequest, PaneView};
 use crate::rereads::Rereads;
 use crate::top_bar::TopBar;
@@ -98,6 +102,9 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> Self {
         let events = cx.subscribe_in(&connection, window, |this, _, event, window, cx| {
+            if this.top_bar.is_archived() {
+                return;
+            }
             if let DaemonEvent::Message(ServerMessage::Changed {
                 entity: Changed::Tab | Changed::Pane | Changed::Task,
                 ..
@@ -127,7 +134,9 @@ impl WorkspaceView {
             focus: cx.focus_handle(),
             _events: events,
         };
-        view.reread(window, cx);
+        if !view.top_bar.is_archived() {
+            view.reread(window, cx);
+        }
         view
     }
 
@@ -145,7 +154,6 @@ impl WorkspaceView {
     }
 
     /// The bar heading it.
-    #[cfg(test)]
     pub fn top_bar(&self) -> &TopBar {
         &self.top_bar
     }
@@ -443,6 +451,36 @@ impl WorkspaceView {
         }
     }
 
+    /// Penpot "Archived workspace": "\<name> is archived" over how to open it again, centred
+    /// in the space under the top bar, `space.1` apart.
+    fn archived_note(&self, cx: &mut Context<Self>) -> AnyElement {
+        let s = cx.theme().semantic();
+        div()
+            .debug_selector(|| "archived".into())
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(space::S1)
+            .p(space::S8)
+            .text_size(font_size::SM)
+            .text_center()
+            .child(
+                div()
+                    .font_weight(font_weight::MEDIUM)
+                    .text_color(s.foreground)
+                    .child(format!("{} is archived", self.top_bar.name())),
+            )
+            .child(
+                div()
+                    .text_color(s.muted_foreground)
+                    .child("Unarchive it to open its tabs and start agents here again."),
+            )
+            .into_any_element()
+    }
+
     /// `text` centred in the space left, wrapping within it.
     fn message(&self, text: impl Into<SharedString>, cx: &mut Context<Self>) -> AnyElement {
         div()
@@ -542,14 +580,13 @@ impl WorkspaceView {
 }
 
 /// Reports a failed action in a toast.
-pub fn failed(title: &'static str, err: &anyhow::Error, window: &mut Window, cx: &mut gpui::App) {
-    window.push_toast(
-        Toast::new()
-            .toast_type(ToastType::Error)
-            .title(ToastTitle::new(title))
-            .description(ToastDescription::new(format!("{err:#}"))),
-        cx,
-    );
+pub fn failed(
+    title: impl Into<SharedString>,
+    err: &anyhow::Error,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) {
+    Notice::error(title, format!("{err:#}")).show(window, cx);
 }
 
 impl Render for WorkspaceView {
@@ -588,6 +625,9 @@ impl Render for WorkspaceView {
             // Penpot `Centre`: TopBar / TabsRow / Separator / Panes.
             .child(self.top_bar.clone())
             .child(self.close_confirmation(cx));
+        if self.top_bar.is_archived() {
+            return view.child(self.archived_note(cx));
+        }
         match &self.status {
             Status::Loading => view,
             Status::Failed(reason) => view.child(self.message(reason.clone(), cx)),
@@ -638,6 +678,16 @@ mod tests {
             panes: Vec<Pane>,
             cx: &mut TestAppContext,
         ) -> (Harness, &mut VisualTestContext) {
+            Harness::open_with(TopBar::new("agentdeck", "/w/agentdeck"), tabs, panes, cx)
+        }
+
+        /// [`Harness::open`], headed by `top_bar`.
+        fn open_with(
+            top_bar: TopBar,
+            tabs: Vec<Tab>,
+            panes: Vec<Pane>,
+            cx: &mut TestAppContext,
+        ) -> (Harness, &mut VisualTestContext) {
             cx.update(brrritscold_core_gpui::init);
             cx.update(crate::terminal::init);
             cx.update(crate::keymap::init);
@@ -658,7 +708,7 @@ mod tests {
                 let workspace = cx.new(|cx| {
                     WorkspaceView::new(
                         id(1),
-                        TopBar::new("agentdeck", "/w/agentdeck"),
+                        top_bar,
                         session.api,
                         connection.clone(),
                         session.sender,
@@ -773,6 +823,55 @@ mod tests {
                 b: Box::new(Layout::single(id(b))),
             }),
             ..tab(n, id(1), position, None)
+        }
+    }
+
+    mod archived {
+        use super::*;
+
+        fn archived(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
+            let top_bar = TopBar::new("old", "/w/old").archived(true);
+            let tabs = vec![tab(1, id(1), 0, Some(id(11)))];
+            let (harness, cx) = Harness::open_with(top_bar, tabs, vec![shell_pane(11, id(1))], cx);
+            harness.draw(cx);
+            (harness, cx)
+        }
+
+        #[gpui::test]
+        fn should_say_it_is_archived_in_place_of_tabs_and_panes(cx: &mut TestAppContext) {
+            let (harness, cx) = archived(cx);
+
+            assert!(cx.debug_bounds("archived").is_some());
+            assert!(harness.shown(cx).is_empty());
+        }
+
+        #[gpui::test]
+        fn should_offer_unarchive_in_place_of_new_agent_and_the_menu(cx: &mut TestAppContext) {
+            let (_harness, cx) = archived(cx);
+
+            assert!(cx.debug_bounds("unarchive").is_some());
+            assert!(cx.debug_bounds("new agent").is_none());
+            assert!(cx.debug_bounds("workspace menu").is_none());
+        }
+
+        #[gpui::test]
+        fn should_read_no_tabs_even_when_they_change(cx: &mut TestAppContext) {
+            let (harness, cx) = archived(cx);
+
+            harness.changed(Changed::Tab, cx);
+
+            assert_eq!(harness.api.pane_reads(), 0);
+        }
+
+        #[gpui::test]
+        fn should_show_new_agent_and_the_menu_while_live(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(vec![], vec![], cx);
+            harness.draw(cx);
+
+            assert!(cx.debug_bounds("new agent").is_some());
+            assert!(cx.debug_bounds("workspace menu").is_some());
+            assert!(cx.debug_bounds("unarchive").is_none());
+            assert!(cx.debug_bounds("archived").is_none());
         }
     }
 

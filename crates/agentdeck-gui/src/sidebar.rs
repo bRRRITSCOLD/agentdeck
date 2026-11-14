@@ -1,7 +1,8 @@
 //! The main window's sidebar (spec §11), the `Sidebar` board of Penpot's "Main window": the
 //! brand with its new workspace `+`, Inbox and Tasks, then every workspace with its rolled-up
-//! state, unread notes and open PRs, and when PRs last synced at the bottom. The `+` asks the
-//! window for the dialog with a [`SidebarEvent`].
+//! state, unread notes and open PRs, the archived ones in a foldable Archived group, and when
+//! PRs last synced at the bottom. The `+` asks the window for the dialog with a
+//! [`SidebarEvent`].
 //!
 //! It reads a [`Snapshot`] through the session's [`Api`] when it opens and again whenever the
 //! daemon reports a `changed`; `state` and `exit` messages patch pane states in place.
@@ -26,9 +27,10 @@ use gpui::{
 use crate::api::Api;
 use crate::connection::{Connection, DaemonEvent};
 use crate::count::Count;
-use crate::overview::{Counts, Overview, Snapshot};
+use crate::overview::{Counts, Overview, Snapshot, WorkspaceRow};
 use crate::rereads::Rereads;
 use crate::state_dot::{StateDot, StateDotState};
+use crate::task_row;
 
 /// The sidebar's width. Raw in Penpot too: no sizing token is 260px.
 const WIDTH: gpui::Pixels = px(260.);
@@ -63,6 +65,8 @@ pub struct SidebarView {
     error: Option<SharedString>,
     /// The user's pick; `None` until they make one.
     picked: Option<Selection>,
+    /// Whether the Archived group is unfolded; it shows anyway while it holds the selection.
+    archived_open: bool,
     /// The last read started.
     read: Option<Task<()>>,
     rereads: Rereads,
@@ -89,6 +93,7 @@ impl SidebarView {
             snapshot,
             error: None,
             picked: None,
+            archived_open: false,
             read: None,
             rereads: Rereads::default(),
             _events: events,
@@ -98,11 +103,11 @@ impl SidebarView {
         sidebar
     }
 
-    /// What is selected: the user's pick while it still exists, else the first workspace,
-    /// else the inbox.
+    /// What is selected: the user's pick while it still exists, archived or not, else the
+    /// first workspace, else the inbox.
     pub fn selection(&self) -> Selection {
         let exists = |picked: &Selection| match picked {
-            Selection::Workspace(id) => self.overview.workspaces.iter().any(|w| w.id == *id),
+            Selection::Workspace(id) => self.overview.workspace(*id).is_some(),
             Selection::Inbox | Selection::Tasks => true,
         };
         self.picked.filter(exists).unwrap_or_else(|| {
@@ -111,6 +116,15 @@ impl SidebarView {
                 .first()
                 .map_or(Selection::Inbox, |w| Selection::Workspace(w.id))
         })
+    }
+
+    /// Whether the Archived group shows its rows: unfolded, or holding the selection.
+    fn archived_shown(&self) -> bool {
+        let selected_archived = match self.selection() {
+            Selection::Workspace(id) => self.overview.workspace(id).is_some_and(|w| w.archived),
+            Selection::Inbox | Selection::Tasks => false,
+        };
+        self.archived_open || selected_archived
     }
 
     /// Reads the daemon's data again.
@@ -198,9 +212,18 @@ impl SidebarView {
         let id = id.into();
         let name = self.debug_name(selection);
         let has_counts = counts != Counts::default();
+        let active = self.selection() == selection;
+        let archived = match selection {
+            Selection::Workspace(id) => self.overview.workspace(id).is_some_and(|w| w.archived),
+            Selection::Inbox | Selection::Tasks => false,
+        };
         let button = SidebarMenuButton::new(id.clone())
             .label(label)
-            .is_active(self.selection() == selection)
+            .is_active(active)
+            // Penpot "Archived": an archived row's label is `muted-foreground` until selected.
+            .when(archived && !active, |b| {
+                b.text_color(cx.theme().semantic().muted_foreground)
+            })
             .on_click(cx.listener(move |this, _, _, cx| this.select(selection, cx)))
             // A long name stops short of the counts.
             .min_w_0()
@@ -259,12 +282,9 @@ impl SidebarView {
         match selection {
             Selection::Inbox => "inbox".into(),
             Selection::Tasks => "tasks".into(),
-            Selection::Workspace(id) => self
-                .overview
-                .workspaces
-                .iter()
-                .find(|w| w.id == id)
-                .map_or_else(|| id.to_string(), |w| w.name.to_string()),
+            Selection::Workspace(id) => {
+                (self.overview.workspace(id)).map_or_else(|| id.to_string(), |w| w.name.to_string())
+            }
         }
     }
 }
@@ -307,22 +327,43 @@ impl Render for SidebarView {
             Counts::default(),
             cx,
         );
-        let workspaces: Vec<_> = self
+        let workspace_row = |this: &Self, w: WorkspaceRow, cx: &mut Context<Self>| {
+            this.row(
+                ElementId::Name(format!("workspace-{}", w.id).into()),
+                Selection::Workspace(w.id),
+                w.name,
+                Lead::Dot(StateDotState::of(w.state, None)),
+                w.counts,
+                cx,
+            )
+        };
+        let mut workspaces: Vec<_> = self
             .overview
             .workspaces
             .clone()
             .into_iter()
-            .map(|w| {
-                self.row(
-                    ElementId::Name(format!("workspace-{}", w.id).into()),
-                    Selection::Workspace(w.id),
-                    w.name,
-                    Lead::Dot(StateDotState::of(w.state, None)),
-                    w.counts,
-                    cx,
-                )
-            })
+            .map(|w| workspace_row(self, w, cx))
             .collect();
+        // Penpot "Archived": a `GroupHeader` below the workspace rows, folded at first.
+        if !self.overview.archived.is_empty() {
+            let shown = self.archived_shown();
+            workspaces.push(task_row::group_header(
+                "archived",
+                "Archived",
+                self.overview.archived.len(),
+                !shown,
+                cx.listener(|this, _, _, cx| {
+                    this.archived_open = !this.archived_open;
+                    cx.notify();
+                }),
+                cx,
+            ));
+            if shown {
+                for w in self.overview.archived.clone() {
+                    workspaces.push(workspace_row(self, w, cx));
+                }
+            }
+        }
         let footer = match &self.error {
             Some(error) => error.clone(),
             None => self.overview.pr_sync.label(chrono::Utc::now()).into(),
@@ -585,6 +626,83 @@ mod tests {
             });
 
             assert_eq!(open.selection(), Selection::Workspace(id(1)));
+        }
+    }
+
+    mod archived {
+        use agentdeck_client::types::Workspace;
+
+        use super::*;
+
+        /// [`two_workspaces`], plus `old` (id 3) and `older` (id 4), archived.
+        fn with_archived() -> Snapshot {
+            let archived = |n, name| Workspace {
+                archived_at: Some("2026-11-13T00:00:00Z".into()),
+                ..workspace(n, name)
+            };
+            let mut snapshot = two_workspaces();
+            snapshot
+                .workspaces
+                .extend([archived(3, "old"), archived(4, "older")]);
+            snapshot
+        }
+
+        #[gpui::test]
+        fn should_hide_the_group_when_none_is_archived(cx: &mut TestAppContext) {
+            let mut open = open(two_workspaces(), cx);
+
+            assert!(!open.shows("group archived"));
+        }
+
+        #[gpui::test]
+        fn should_start_collapsed_below_the_workspaces(cx: &mut TestAppContext) {
+            let mut open = open(with_archived(), cx);
+
+            let group = open.cx.debug_bounds("group archived").expect("shown");
+            let last = open.cx.debug_bounds("row b").expect("shown");
+            assert!(group.top() > last.top());
+            assert!(!open.shows("row old"));
+        }
+
+        #[gpui::test]
+        fn should_list_the_archived_rows_once_opened_and_hide_them_again(cx: &mut TestAppContext) {
+            let mut open = open(with_archived(), cx);
+
+            open.click("group archived");
+            let top = |open: &mut Open, selector| open.cx.debug_bounds(selector).unwrap().top();
+            let tops = [
+                top(&mut open, "group archived"),
+                top(&mut open, "row old"),
+                top(&mut open, "row older"),
+            ];
+            assert!(tops.is_sorted_by(|x, y| x < y), "{tops:?}");
+
+            open.click("group archived");
+            assert!(!open.shows("row old"));
+        }
+
+        #[gpui::test]
+        fn should_select_an_archived_row(cx: &mut TestAppContext) {
+            let mut open = open(with_archived(), cx);
+            open.click("group archived");
+
+            open.click("row old");
+
+            assert_eq!(open.selection(), Selection::Workspace(id(3)));
+        }
+
+        #[gpui::test]
+        fn should_stay_open_while_the_selected_workspace_is_archived(cx: &mut TestAppContext) {
+            let mut open = open(with_archived(), cx);
+            open.sidebar.update(open.cx, |sidebar, cx| {
+                sidebar.select(Selection::Workspace(id(4)), cx);
+            });
+            open.settle();
+
+            assert!(open.shows("row older"));
+            open.click("group archived");
+            assert!(open.shows("row older"), "it can't fold away the selection");
+            assert_eq!(open.selection(), Selection::Workspace(id(4)));
         }
     }
 

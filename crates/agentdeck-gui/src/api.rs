@@ -63,6 +63,13 @@ pub trait Api: Send + Sync {
 
     /// Leaves a note with `body` on `workspace`.
     fn new_note(&self, workspace: WorkspaceId, body: String, cx: &App) -> Task<anyhow::Result<()>>;
+
+    /// Archives `workspace`, keeping its dir, tasks and notes. A refusal is an [`ApiError`];
+    /// `panes_running` means a pane of it still runs.
+    fn archive_workspace(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<()>>;
+
+    /// Brings the archived `workspace` back.
+    fn unarchive_workspace(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<()>>;
 }
 
 pub use agentdeck_client::panes::PaneAt;
@@ -199,6 +206,22 @@ impl Api for Daemon {
             Ok(())
         })
     }
+
+    fn archive_workspace(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<()>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            (client.workspace_archive().id(workspace).send().await).map_err(ApiError::from)?;
+            Ok(())
+        })
+    }
+
+    fn unarchive_workspace(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<()>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            (client.workspace_unarchive().id(workspace).send().await).map_err(ApiError::from)?;
+            Ok(())
+        })
+    }
 }
 
 /// Reads a [`WorkspacePanes`]: the tabs, then each pane in their layouts, then each task
@@ -309,6 +332,10 @@ pub(crate) mod fake {
         pub launched: Mutex<Vec<Launch>>,
         /// The panes closed, in order.
         pub closed: Mutex<Vec<PaneId>>,
+        /// The workspaces archived, in order.
+        pub archived: Mutex<Vec<WorkspaceId>>,
+        /// The workspaces unarchived, in order.
+        pub unarchived: Mutex<Vec<WorkspaceId>>,
     }
 
     impl FakeApi {
@@ -369,6 +396,14 @@ pub(crate) mod fake {
             let tabs = self.tabs.lock().unwrap();
             let tab = tabs.get(&workspace)?.iter().find(|t| t.id == tab)?;
             tab.layout.clone()
+        }
+
+        /// Stamps or clears `workspace`'s `archived_at`, as the daemon does.
+        fn set_archived(&self, workspace: WorkspaceId, archived: bool) {
+            let mut snapshot = self.snapshot.lock().unwrap();
+            if let Some(w) = snapshot.workspaces.iter_mut().find(|w| w.id == workspace) {
+                w.archived_at = archived.then(|| "2026-11-14T00:00:00Z".to_owned());
+            }
         }
 
         /// The scripted failure, if any, taking it.
@@ -552,6 +587,28 @@ pub(crate) mod fake {
                 return Task::ready(Err(err));
             }
             self.notes_left.lock().unwrap().push((workspace, body));
+            Task::ready(Ok(()))
+        }
+
+        fn archive_workspace(&self, workspace: WorkspaceId, _cx: &App) -> Task<anyhow::Result<()>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            self.set_archived(workspace, true);
+            self.archived.lock().unwrap().push(workspace);
+            Task::ready(Ok(()))
+        }
+
+        fn unarchive_workspace(
+            &self,
+            workspace: WorkspaceId,
+            _cx: &App,
+        ) -> Task<anyhow::Result<()>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            self.set_archived(workspace, false);
+            self.unarchived.lock().unwrap().push(workspace);
             Task::ready(Ok(()))
         }
     }

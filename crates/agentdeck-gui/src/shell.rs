@@ -3,30 +3,45 @@
 //! the Tasks view or the Inbox, and the new workspace dialog the
 //! sidebar's `+` opens. When the compositor leaves decorations to the app, a title bar and
 //! resize edges frame it.
+//!
+//! It archives and unarchives the selected workspace when the top bar asks, toasting the
+//! outcome; an archive's toast offers Undo.
 
+use std::sync::Arc;
+
+use agentdeck_client::ApiError;
+use agentdeck_core::WorkspaceId;
 use brrritscold_core_gpui::{
     ActiveTheme as _, Alert, AlertAction, AlertDescription, AlertTitle, AlertVariant, Button,
     ButtonSize, ButtonVariant, IconName, Separator, SeparatorOrientation,
 };
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, Context, Decorations, Entity, FocusHandle,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _, Subscription,
-    Window, div, px,
+    AnyElement, App, AppContext as _, Context, Decorations, Entity, FocusHandle,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
+    Subscription, Window, div, px,
 };
 
+use crate::api::Api;
 use crate::connection::{Connection, Status};
 use crate::frame;
 use crate::inbox::{InboxView, Synced};
 use crate::keymap::ToggleRightPanel;
 use crate::new_agent::{self, Launched, NewAgent, NewAgentDialog, Target};
 use crate::new_workspace::{Created, NewWorkspaceDialog};
+use crate::notice::{self, Notice, NoticeAction};
 use crate::right_panel::RightPanel;
 use crate::sidebar::{Selection, SidebarEvent, SidebarView};
 use crate::tasks::TasksView;
 use crate::title_bar::{Close, Minimize, TitleBar, ToggleMaximize};
-use crate::top_bar::TopBar;
-use crate::workspace::WorkspaceView;
+use crate::top_bar::{ArchiveWorkspace, TopBar, UnarchiveWorkspace};
+use crate::workspace::{WorkspaceView, failed};
+
+/// Whether `err` is the daemon refusing with `code`.
+fn is_refusal(err: &anyhow::Error, code: &str) -> bool {
+    err.downcast_ref::<ApiError>()
+        .is_some_and(|err| err.code.as_deref() == Some(code))
+}
 
 /// The main window's root view, inside core-gpui's `Root`.
 pub struct Shell {
@@ -190,9 +205,7 @@ impl Shell {
         };
         let sidebar = sidebar.read(cx);
         let row = match selection {
-            Selection::Workspace(selected) => {
-                (sidebar.overview().workspaces.iter()).find(|row| row.id == selected)
-            }
+            Selection::Workspace(selected) => sidebar.overview().workspace(selected),
             Selection::Inbox | Selection::Tasks => None,
         };
         let Some(row) = row else {
@@ -200,9 +213,12 @@ impl Shell {
             cx.notify();
             return;
         };
-        let (selected, top_bar) = (row.id, TopBar::new(row.name.clone(), row.dir.clone()));
+        let top_bar = TopBar::new(row.name.clone(), row.dir.clone()).archived(row.archived);
+        let selected = row.id;
+        // Archiving or unarchiving swaps the view: an archived one holds no terminals.
         if let Some(view) = &self.workspace
             && view.read(cx).workspace() == selected
+            && view.read(cx).top_bar().is_archived() == row.archived
         {
             view.update(cx, |view, cx| view.set_top_bar(top_bar, cx));
             return;
@@ -238,6 +254,97 @@ impl Shell {
         dialog.update(cx, |dialog, cx| {
             dialog.open(target, folders, snapshot, window, cx)
         });
+    }
+
+    /// The selected workspace's id and name, if a workspace is selected.
+    fn selected_workspace(&self, cx: &App) -> Option<(WorkspaceId, SharedString, bool)> {
+        let (Some(sidebar), Some(Selection::Workspace(selected))) = (&self.sidebar, self.selection)
+        else {
+            return None;
+        };
+        let row = sidebar.read(cx).overview().workspace(selected)?;
+        Some((row.id, row.name.clone(), row.archived))
+    }
+
+    /// The connected session's API.
+    fn api(&self, cx: &App) -> Option<Arc<dyn Api>> {
+        match self.connection.read(cx).status() {
+            Status::Connected(session) => Some(session.api.clone()),
+            Status::Connecting | Status::Failed(_) => None,
+        }
+    }
+
+    /// Reads the sidebar again, so the window follows a change it made.
+    fn refresh(&self, cx: &mut Context<Self>) {
+        if let Some(sidebar) = &self.sidebar {
+            sidebar.update(cx, |sidebar, cx| sidebar.refresh(cx));
+        }
+    }
+
+    /// Archives the selected workspace, keeping it selected, and toasts the outcome: a refusal
+    /// in the daemon's words, or the archive with an Undo.
+    fn archive(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some((workspace, name, false)), Some(api)) =
+            (self.selected_workspace(cx), self.api(cx))
+        else {
+            return;
+        };
+        let archiving = api.archive_workspace(workspace, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let archived = archiving.await;
+            let _ = this.update_in(cx, |this, window, cx| match archived {
+                Ok(()) => {
+                    // Picked, so it stays selected once it leaves the workspace rows.
+                    if let Some(sidebar) = &this.sidebar {
+                        let selection = Selection::Workspace(workspace);
+                        sidebar.update(cx, |sidebar, cx| sidebar.select(selection, cx));
+                    }
+                    this.refresh(cx);
+                    let shell = cx.entity().downgrade();
+                    let undo = NoticeAction::new("Undo", {
+                        let name = name.clone();
+                        move |window, cx| {
+                            let name = name.clone();
+                            let _ = shell.update(cx, |shell, cx| {
+                                shell.unarchive(workspace, name, window, cx);
+                            });
+                        }
+                    });
+                    Notice::new(format!("Archived {name}"))
+                        .description("Its folder, tasks and notes are kept.")
+                        .action(undo)
+                        .show(window, cx);
+                }
+                Err(err) if is_refusal(&err, "panes_running") => {
+                    Notice::error(format!("Can't archive {name}"), notice::message(&err))
+                        .show(window, cx);
+                }
+                Err(err) => failed(format!("Couldn't archive {name}"), &err, window, cx),
+            });
+        })
+        .detach();
+    }
+
+    /// Brings `workspace`, named `name`, back from the archive.
+    fn unarchive(
+        &mut self,
+        workspace: WorkspaceId,
+        name: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(api) = self.api(cx) else {
+            return;
+        };
+        let unarchiving = api.unarchive_workspace(workspace, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let unarchived = unarchiving.await;
+            let _ = this.update_in(cx, |this, window, cx| match unarchived {
+                Ok(()) => this.refresh(cx),
+                Err(err) => failed(format!("Couldn't unarchive {name}"), &err, window, cx),
+            });
+        })
+        .detach();
     }
 
     /// What the connection allows, filling the space under the title bar.
@@ -321,6 +428,14 @@ impl Render for Shell {
             .on_action(|_: &ToggleMaximize, window, _| window.zoom_window())
             .on_action(|_: &Close, window, _| window.remove_window())
             .on_action(cx.listener(|this, _: &NewAgent, window, cx| this.new_agent(window, cx)))
+            .on_action(cx.listener(|this, _: &ArchiveWorkspace, window, cx| {
+                this.archive(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &UnarchiveWorkspace, window, cx| {
+                if let Some((workspace, name, true)) = this.selected_workspace(cx) {
+                    this.unarchive(workspace, name, window, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &ToggleRightPanel, _, cx| {
                 this.panel_open = !this.panel_open;
                 cx.notify();
@@ -651,6 +766,208 @@ mod tests {
                     Some(TopBar::new("renamed", "/w/renamed"))
                 );
             }
+        }
+    }
+
+    mod archive {
+        use agentdeck_client::types::Workspace;
+        use gpui::Modifiers;
+
+        use super::*;
+        use crate::notice::{self, Notice};
+        use crate::top_bar::ArchiveWorkspace;
+
+        struct Harness {
+            shell: Entity<Shell>,
+            api: Arc<FakeApi>,
+            _remote: agentdeck_client::ws::Remote,
+        }
+
+        impl Harness {
+            /// A shell showing `api`'s workspaces, the first selected.
+            fn open(
+                api: Arc<FakeApi>,
+                cx: &mut TestAppContext,
+            ) -> (Harness, &mut VisualTestContext) {
+                cx.update(brrritscold_core_gpui::init);
+                cx.update(crate::terminal::init);
+                let connector = Rc::new(FakeConnector::default());
+                let remote = connector.then_connect_to(api.clone());
+                let mut shell = None;
+                let window = cx.add_window(|window, cx| {
+                    let connection = cx.new(|cx| Connection::new(connector, cx));
+                    let view = cx.new(|cx| Shell::new(connection, window, cx));
+                    shell = Some(view.clone());
+                    Root::new(view, window, cx)
+                });
+                let cx = VisualTestContext::from_window(*window, cx).into_mut();
+                let harness = Harness {
+                    shell: shell.unwrap(),
+                    api,
+                    _remote: remote,
+                };
+                harness.settle(cx);
+                (harness, cx)
+            }
+
+            fn settle(&self, cx: &mut VisualTestContext) {
+                cx.run_until_parked();
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                cx.run_until_parked();
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+            }
+
+            fn click(&self, at: gpui::Point<gpui::Pixels>, cx: &mut VisualTestContext) {
+                cx.simulate_click(at, Modifiers::default());
+                self.settle(cx);
+            }
+
+            fn select(&self, workspace: u32, cx: &mut VisualTestContext) {
+                let sidebar = self.shell.read_with(cx, |shell, _| shell.sidebar.clone());
+                sidebar.unwrap().update(cx, |sidebar, cx| {
+                    sidebar.select(Selection::Workspace(id(workspace)), cx);
+                });
+                self.settle(cx);
+            }
+
+            fn archive(&self, cx: &mut VisualTestContext) {
+                cx.dispatch_action(ArchiveWorkspace);
+                self.settle(cx);
+            }
+
+            /// Whether the sidebar has workspace `n` as archived.
+            fn is_archived(&self, n: u32, cx: &mut VisualTestContext) -> bool {
+                self.shell.read_with(cx, |shell, cx| {
+                    let sidebar = shell.sidebar.as_ref().unwrap().read(cx);
+                    sidebar.overview().workspace(id(n)).unwrap().archived
+                })
+            }
+
+            /// The top bar of the workspace shown says it's archived.
+            fn shows_archived(&self, cx: &mut VisualTestContext) -> bool {
+                self.shell.read_with(cx, |shell, cx| {
+                    let view = shell
+                        .workspace
+                        .as_ref()
+                        .expect("a workspace shows")
+                        .read(cx);
+                    view.top_bar().is_archived()
+                })
+            }
+
+            fn last_notice(&self, cx: &mut VisualTestContext) -> Notice {
+                cx.update(|_, cx| notice::shown(cx).last().cloned().expect("a toast"))
+            }
+        }
+
+        /// Workspace 1, `agentdeck`, live; workspace 2, `old`, archived.
+        fn daemon() -> Arc<FakeApi> {
+            let old = Workspace {
+                archived_at: Some("2026-11-13T00:00:00Z".into()),
+                ..workspace(2, "old")
+            };
+            Arc::new(FakeApi::with(Snapshot {
+                workspaces: vec![workspace(1, "agentdeck"), old],
+                ..Snapshot::default()
+            }))
+        }
+
+        #[gpui::test]
+        fn should_archive_the_selected_workspace_from_the_top_bar_menu(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(), cx);
+
+            let trigger = cx.debug_bounds("workspace menu").expect("the menu shows");
+            harness.click(trigger.center(), cx);
+            let menu = cx.debug_bounds("dropdown-menu-content").expect("it opens");
+            // The first item: the menu's 4px padding, then half a 32px row.
+            harness.click(gpui::point(menu.center().x, menu.top() + gpui::px(20.)), cx);
+
+            assert_eq!(*harness.api.archived.lock().unwrap(), [id(1)]);
+        }
+
+        #[gpui::test]
+        fn should_toast_the_daemons_refusal_and_leave_it_unarchived(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(), cx);
+            harness
+                .api
+                .refuse_next("panes_running", "Close its 2 running panes first");
+
+            harness.archive(cx);
+
+            let notice = harness.last_notice(cx);
+            assert_eq!(notice.title, "Can't archive agentdeck");
+            assert_eq!(
+                notice.description.as_deref(),
+                Some("Close its 2 running panes first")
+            );
+            assert!(!harness.is_archived(1, cx));
+            assert!(!harness.shows_archived(cx));
+        }
+
+        #[gpui::test]
+        fn should_keep_the_workspace_selected_and_show_it_archived(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(), cx);
+
+            harness.archive(cx);
+
+            assert!(harness.is_archived(1, cx));
+            assert_eq!(shown(&harness, cx), Some(id(1)));
+            assert!(harness.shows_archived(cx));
+        }
+
+        #[gpui::test]
+        fn should_toast_the_archive_with_an_undo_that_unarchives(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(), cx);
+
+            harness.archive(cx);
+            let notice = harness.last_notice(cx);
+            assert_eq!(notice.title, "Archived agentdeck");
+            assert_eq!(
+                notice.description.as_deref(),
+                Some("Its folder, tasks and notes are kept.")
+            );
+            let undo = notice.action.expect("an Undo");
+            assert_eq!(undo.label, "Undo");
+            cx.update(|window, cx| undo.run(window, cx));
+            harness.settle(cx);
+
+            assert_eq!(*harness.api.unarchived.lock().unwrap(), [id(1)]);
+            assert!(!harness.is_archived(1, cx));
+            assert!(!harness.shows_archived(cx));
+        }
+
+        #[gpui::test]
+        fn should_unarchive_from_the_top_bars_button(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(), cx);
+            harness.select(2, cx);
+            assert!(harness.shows_archived(cx));
+
+            let button = cx.debug_bounds("unarchive").expect("Unarchive shows");
+            harness.click(button.center(), cx);
+
+            assert_eq!(*harness.api.unarchived.lock().unwrap(), [id(2)]);
+            assert!(!harness.is_archived(2, cx));
+            assert!(!harness.shows_archived(cx));
+        }
+
+        #[gpui::test]
+        fn should_toast_a_failed_unarchive(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(), cx);
+            harness.select(2, cx);
+            harness.api.fail_next("connection refused");
+
+            let button = cx.debug_bounds("unarchive").expect("Unarchive shows");
+            harness.click(button.center(), cx);
+
+            let notice = harness.last_notice(cx);
+            assert_eq!(notice.title, "Couldn't unarchive old");
+            assert!(harness.is_archived(2, cx));
+        }
+
+        fn shown(harness: &Harness, cx: &mut VisualTestContext) -> Option<WorkspaceId> {
+            harness.shell.read_with(cx, |shell, cx| {
+                (shell.workspace.as_ref()).map(|view| view.read(cx).workspace())
+            })
         }
     }
 

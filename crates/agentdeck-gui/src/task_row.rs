@@ -180,19 +180,21 @@ pub fn columns(table: Table, cx: &App) -> Div {
         })
 }
 
-/// Penpot `GroupHeader`: a chevron, the status and a `secondary` count badge. Clicking it
-/// runs `on_toggle`.
+/// Penpot `GroupHeader`: a chevron, `label` and a `secondary` count badge. Clicking it runs
+/// `on_toggle`. `key` names it: its id is `group-<key>`, and tests find it as `group <key>`.
 pub fn group_header(
-    status: TaskStatus,
+    key: impl Into<SharedString>,
+    label: impl Into<SharedString>,
     count: usize,
     collapsed: bool,
     on_toggle: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> AnyElement {
     let s = cx.theme().semantic();
+    let key = key.into();
     div()
-        .id(SharedString::from(format!("group-{status}")))
-        .debug_selector(move || format!("group {status}"))
+        .id(SharedString::from(format!("group-{key}")))
+        .debug_selector(move || format!("group {key}"))
         .flex()
         .flex_none()
         .items_center()
@@ -215,7 +217,7 @@ pub fn group_header(
                 .text_size(font_size::SM)
                 .font_weight(font_weight::MEDIUM)
                 .text_color(s.foreground)
-                .child(status_label(status)),
+                .child(label.into()),
         )
         .child(
             Badge::new()

@@ -12,6 +12,7 @@ mod keymap;
 mod new_agent;
 mod new_workspace;
 mod note_list;
+mod notice;
 mod overview;
 mod pane;
 mod pane_header;

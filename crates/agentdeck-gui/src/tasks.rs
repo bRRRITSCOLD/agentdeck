@@ -172,7 +172,8 @@ impl TasksView {
                 count,
                 collapsed,
             }) => task_row::spaced(task_row::group_header(
-                status,
+                status.to_string(),
+                task_row::status_label(status),
                 count,
                 collapsed,
                 cx.listener(move |this, _, _, cx| this.toggle(status, cx)),
