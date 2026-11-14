@@ -322,6 +322,11 @@ Built on `brrritscold-core-gpui` (`init`, `Root`, theme preference, toasts). Scr
   - **Zed's GPL-3.0 terminal crates are never copied.**
   - The font is Inter for the UI. The terminal gets a monospace font with a symbols fallback for agent glyphs (`⎿`, `✻`, `◐`).
   - The mouse, after xterm: a program that asks for mouse reports (1000 / 1002 / 1003, SGR 1006) gets clicks, drags and the wheel; shift takes them back for selecting and the scrollback. Otherwise, on the alternate screen, the wheel sends an arrow key per line (1007).
+  - **Links:** `secondary` (ctrl; cmd on macOS) and a left click opens the link under the pointer with the OS's handler; a plain click selects as before. A link is an OSC 8 hyperlink (`gh`, `ls --hyperlink`, Claude Code), else an `http://` / `https://` URL in the text, found across soft wraps, without the trailing `.`, `,`, `:`, `;`, `!`, `?`, quotes and unopened `)` / `]` that end a sentence around it.
+    - It opens even while the program has the mouse (vim, tmux, Claude Code), and the program hears nothing of that click. A `secondary`-click off a link is reported as before.
+    - Only `http`, `https` and `mailto` open; any other scheme, `file://` included, is refused silently (a debug log line), so a program can't make a click run a custom URL handler.
+    - While `secondary` is held over a link, its cells are underlined and the pointer is a pointing hand, until the key is let go or the pointer leaves.
+    - File paths (`src/main.rs:42`) aren't links yet: https://github.com/bRRRITSCOLD/agentdeck/issues/92.
   - Input methods and dead keys: a composition shows underlined at the cursor, and only committed text reaches the pane. The candidate window opens at the cursor.
 - **Colours** use semantic tokens only.
   - Agent state: working `info`, blocked `destructive`, done `success`, idle/unknown/exited-0 `muted-foreground`, exited ≠ 0 `destructive`.

@@ -11,15 +11,17 @@ use std::rc::Rc;
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Point, Side};
+use alacritty_terminal::index::{Boundary, Column, Direction, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::{Cell, Flags};
+use alacritty_terminal::term::search::{RegexIter, RegexSearch};
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{ClipboardType, Config, Osc52, TermMode, viewport_to_point};
 use alacritty_terminal::vte::ansi::{CursorShape, Processor};
 use gpui::Hsla;
 
 use super::input::{MouseProtocol, Tracking};
+use super::link::{Link, trim_url};
 use super::palette::{Palette, dim};
 
 /// A terminal's size in cells.
@@ -176,11 +178,18 @@ impl EventListener for Copies {
     }
 }
 
+/// A URL in the text, after Alacritty's own hint: `http://` or `https://`, then anything but
+/// controls, spaces, quotes and the brackets that usually close around a URL. Lowercase only,
+/// so the search ignores case.
+const URL: &str = r#"https?://[^\x00-\x1f\x7f-\x9f<>"\s{|}\\^⟨⟩`]+"#;
+
 /// A terminal model, fed by the daemon.
 pub struct Screen {
     term: Term<Copies>,
     parser: Processor,
     copies: Copies,
+    /// Finds [`URL`]s; searching needs it mutably.
+    urls: RefCell<RegexSearch>,
 }
 
 impl Screen {
@@ -197,6 +206,7 @@ impl Screen {
             term: Term::new(config, &term_size(size), copies.clone()),
             parser: Processor::new(),
             copies,
+            urls: RefCell::new(RegexSearch::new(URL).expect("the URL pattern is valid")),
         }
     }
 
@@ -308,6 +318,58 @@ impl Screen {
         viewport_to_point(offset, Point::new(at.line, Column(at.col)))
     }
 
+    /// The link under the visible cell `at`: an OSC 8 hyperlink, else an `http(s)://` URL in the
+    /// text, which may soft-wrap across lines; `None` off a link.
+    pub fn link_at(&self, at: Hit) -> Option<Link> {
+        let point = self.point(at);
+        self.hyperlink_at(point).or_else(|| self.url_at(point))
+    }
+
+    /// The OSC 8 hyperlink at `point`, over every neighbouring cell carrying it.
+    fn hyperlink_at(&self, point: Point) -> Option<Link> {
+        let grid = self.term.grid();
+        let link = grid[point].hyperlink()?;
+        let carries = |p: Point| grid[p].hyperlink().as_ref() == Some(&link);
+        let (mut start, mut end) = (point, point);
+        loop {
+            let before = start.sub(&self.term, Boundary::Grid, 1);
+            if before == start || !carries(before) {
+                break;
+            }
+            start = before;
+        }
+        loop {
+            let after = end.add(&self.term, Boundary::Grid, 1);
+            if after == end || !carries(after) {
+                break;
+            }
+            end = after;
+        }
+        Some(Link {
+            uri: link.uri().to_owned(),
+            cells: start..=end,
+        })
+    }
+
+    /// The URL in the text at `point`, searched for across the soft wraps of its line, without
+    /// the punctuation that ends a sentence around it.
+    fn url_at(&self, point: Point) -> Option<Link> {
+        let start = self.term.line_search_left(point);
+        let end = self.term.line_search_right(point);
+        let mut urls = self.urls.borrow_mut();
+        let found = RegexIter::new(start, end, Direction::Right, &self.term, &mut urls)
+            .find(|found| found.contains(&point))?;
+        let text = self.term.bounds_to_string(*found.start(), *found.end());
+        let uri = trim_url(&text);
+        // What trimming drops is ASCII, a cell a character.
+        let dropped = text.chars().count() - uri.chars().count();
+        let end = found.end().sub(&self.term, Boundary::Grid, dropped);
+        (point <= end).then(|| Link {
+            uri: uri.to_owned(),
+            cells: *found.start()..=end,
+        })
+    }
+
     /// Scrolls the view `lines` into the scrollback (positive) or back towards the bottom.
     pub fn scroll(&mut self, lines: i32) {
         self.term.scroll_display(Scroll::Delta(lines));
@@ -345,8 +407,9 @@ impl Screen {
         })
     }
 
-    /// What it shows now, in `palette`; a `focused` terminal draws its cursor filled.
-    pub fn frame(&self, palette: &Palette, focused: bool) -> Frame {
+    /// What it shows now, in `palette`; a `focused` terminal draws its cursor filled, and
+    /// `link`'s cells are underlined.
+    pub fn frame(&self, palette: &Palette, focused: bool, link: Option<&Link>) -> Frame {
         let content = self.term.renderable_content();
         let offset = content.display_offset as i32;
         let mut lines = vec![FrameLine::default(); self.term.screen_lines()];
@@ -397,7 +460,15 @@ impl Screen {
                     });
                 }
             }
-            builder.push(column.0, cells, cell, fg, bg, palette.background);
+            let linked = link.is_some_and(|link| link.cells.contains(&indexed.point));
+            builder.push(
+                column.0,
+                cells,
+                cell,
+                style(cell, fg, linked),
+                bg,
+                palette.background,
+            );
         }
         if let Some(done) = current {
             lines[done] = builder.finish();
@@ -453,6 +524,17 @@ fn colors(
     (fg, bg)
 }
 
+/// How a cell's text is drawn in `fg`; a `linked` cell, under a hovered link, is underlined.
+fn style(cell: &Cell, fg: Hsla, linked: bool) -> Style {
+    Style {
+        color: fg,
+        bold: cell.flags.contains(Flags::BOLD),
+        italic: cell.flags.contains(Flags::ITALIC),
+        underline: linked || cell.flags.intersects(Flags::ALL_UNDERLINES),
+        strikethrough: cell.flags.contains(Flags::STRIKEOUT),
+    }
+}
+
 /// Gathers one line's cells into runs and backgrounds.
 #[derive(Default)]
 struct LineBuilder {
@@ -460,7 +542,7 @@ struct LineBuilder {
 }
 
 impl LineBuilder {
-    fn push(&mut self, col: usize, cells: usize, cell: &Cell, fg: Hsla, bg: Hsla, base: Hsla) {
+    fn push(&mut self, col: usize, cells: usize, cell: &Cell, style: Style, bg: Hsla, base: Hsla) {
         if bg != base {
             match self.line.backgrounds.last_mut() {
                 Some(last) if last.color == bg && last.col + last.cells == col => {
@@ -474,13 +556,6 @@ impl LineBuilder {
             }
         }
 
-        let style = Style {
-            color: fg,
-            bold: cell.flags.contains(Flags::BOLD),
-            italic: cell.flags.contains(Flags::ITALIC),
-            underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
-            strikethrough: cell.flags.contains(Flags::STRIKEOUT),
-        };
         let blank = cell.c == ' ' || cell.c == '\0' || cell.c == '\t';
         if blank && !style.underline && !style.strikethrough {
             return;
@@ -535,7 +610,7 @@ mod tests {
     }
 
     fn frame(bytes: &[u8]) -> Frame {
-        screen(bytes).frame(&palette(), true)
+        screen(bytes).frame(&palette(), true, None)
     }
 
     fn red() -> Hsla {
@@ -737,6 +812,110 @@ mod tests {
         }
     }
 
+    mod link_at {
+        use alacritty_terminal::index::Line;
+
+        use super::*;
+
+        fn at(line: usize, col: usize) -> Hit {
+            Hit {
+                line,
+                col,
+                side: Side::Left,
+            }
+        }
+
+        fn cells(from: (i32, usize), to: (i32, usize)) -> std::ops::RangeInclusive<Point> {
+            Point::new(Line(from.0), Column(from.1))..=Point::new(Line(to.0), Column(to.1))
+        }
+
+        #[test]
+        fn should_find_an_osc_8_link_and_its_cells() {
+            let screen = screen(b"ab \x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\ c");
+
+            assert_eq!(
+                screen.link_at(at(0, 4)),
+                Some(Link {
+                    uri: "https://example.com".into(),
+                    cells: cells((0, 3), (0, 6)),
+                })
+            );
+        }
+
+        #[test]
+        fn should_find_a_link_as_the_daemons_snapshot_writes_it() {
+            let screen = screen(b"\x1b]8;id=7_alacritty;https://example.com\x1b\\ab\x1b]8;;\x1b\\");
+
+            assert_eq!(
+                screen.link_at(at(0, 1)).map(|l| l.uri).as_deref(),
+                Some("https://example.com")
+            );
+        }
+
+        #[test]
+        fn should_find_a_url_in_the_text() {
+            let screen = screen(b"see https://a.io/x");
+
+            assert_eq!(
+                screen.link_at(at(0, 6)),
+                Some(Link {
+                    uri: "https://a.io/x".into(),
+                    cells: cells((0, 4), (0, 17)),
+                })
+            );
+        }
+
+        #[test]
+        fn should_join_a_url_that_soft_wraps() {
+            let screen = screen(b"go https://example.com/a/long/path now");
+
+            let link = screen.link_at(at(1, 2)).expect("a link");
+
+            assert_eq!(link.uri, "https://example.com/a/long/path");
+            assert_eq!(link.cells, cells((0, 3), (1, 13)));
+        }
+
+        #[test]
+        fn should_leave_trailing_punctuation_out() {
+            let screen = screen(b"(at https://a.io/x).");
+
+            let link = screen.link_at(at(0, 8)).expect("a link");
+
+            assert_eq!(link.uri, "https://a.io/x");
+            assert_eq!(link.cells, cells((0, 4), (0, 17)));
+            assert_eq!(screen.link_at(at(0, 18)), None);
+        }
+
+        #[test]
+        fn should_find_nothing_off_a_link() {
+            let screen = screen(b"hello https://a.io");
+
+            assert_eq!(screen.link_at(at(0, 1)), None);
+            assert_eq!(screen.link_at(at(1, 1)), None);
+        }
+
+        #[test]
+        fn should_prefer_an_osc_8_link_over_the_url_it_shows() {
+            let screen = screen(b"\x1b]8;;https://b.io\x1b\\https://a.io\x1b]8;;\x1b\\");
+
+            assert_eq!(
+                screen.link_at(at(0, 2)).map(|l| l.uri).as_deref(),
+                Some("https://b.io")
+            );
+        }
+
+        #[test]
+        fn should_find_a_link_the_scrollback_shows() {
+            let mut screen = screen(b"https://a.io\r\n2\r\n3\r\n4\r\n5");
+            screen.scroll(1);
+
+            assert_eq!(
+                screen.link_at(at(0, 0)).map(|l| l.uri).as_deref(),
+                Some("https://a.io")
+            );
+        }
+    }
+
     mod from_clicks {
         use super::*;
 
@@ -887,7 +1066,7 @@ mod tests {
                     side: Side::Right,
                 });
 
-                let frame = screen.frame(&palette(), true);
+                let frame = screen.frame(&palette(), true, None);
                 let line = &frame.lines[0];
 
                 assert_eq!(
@@ -916,7 +1095,7 @@ mod tests {
                 );
 
                 screen.scroll(1);
-                let frame = screen.frame(&palette(), true);
+                let frame = screen.frame(&palette(), true, None);
 
                 let selected: Vec<_> = frame
                     .lines
@@ -924,6 +1103,34 @@ mod tests {
                     .map(|line| !line.backgrounds.is_empty())
                     .collect();
                 assert_eq!(selected, [false, true, false, false]);
+            }
+        }
+
+        mod link {
+            use super::*;
+
+            #[test]
+            fn should_underline_only_the_links_cells() {
+                let screen = screen(b"see https://a.io ok\x1b[?25l");
+                let link = screen
+                    .link_at(Hit {
+                        line: 0,
+                        col: 5,
+                        side: Side::Left,
+                    })
+                    .expect("a link");
+
+                let frame = screen.frame(&palette(), true, Some(&link));
+
+                let runs: Vec<_> = frame.lines[0]
+                    .runs
+                    .iter()
+                    .map(|r| (r.text.as_str(), r.style.underline))
+                    .collect();
+                assert_eq!(
+                    runs,
+                    [("see", false), ("https://a.io", true), ("ok", false)]
+                );
             }
         }
 
@@ -949,7 +1156,7 @@ mod tests {
 
             #[test]
             fn should_outline_the_block_when_unfocused() {
-                let frame = screen(b"ab").frame(&palette(), false);
+                let frame = screen(b"ab").frame(&palette(), false, None);
 
                 assert_eq!(
                     frame.cursor,
@@ -983,7 +1190,7 @@ mod tests {
                 let mut screen = screen(b"1\r\n2\r\n3\r\n4\r\n5\r\n6");
                 screen.scroll(4);
 
-                let frame = screen.frame(&palette(), false);
+                let frame = screen.frame(&palette(), false, None);
 
                 assert_eq!(frame.cursor, None);
             }
