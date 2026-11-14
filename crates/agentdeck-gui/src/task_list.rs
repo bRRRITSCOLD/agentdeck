@@ -60,7 +60,7 @@ pub struct Row {
     pub pr: Option<PrCell>,
     /// Its workspace's name; `None` in the inbox.
     pub workspace: Option<SharedString>,
-    /// Whether an agent commented on it since the user last opened it: the row's dot.
+    /// Whether an agent commented on it since the user last opened it: the row's unseen mark.
     pub unseen: bool,
 }
 

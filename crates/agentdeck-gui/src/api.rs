@@ -100,7 +100,7 @@ pub trait Api: Send + Sync {
     /// Adds the user's comment with `body` to `task`, for its agent (spec §9).
     fn new_comment(&self, task: TaskId, body: String, cx: &App) -> Task<anyhow::Result<()>>;
 
-    /// Marks every agent comment on `task` seen, which clears its row's dot.
+    /// Marks every agent comment on `task` seen, which clears its row's unseen mark.
     fn mark_comments_seen(&self, task: TaskId, cx: &App) -> Task<anyhow::Result<()>>;
 
     /// Archives `workspace`, keeping its dir, tasks and instructions. A refusal is an [`ApiError`];

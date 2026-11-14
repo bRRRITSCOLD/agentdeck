@@ -453,17 +453,22 @@ mod tests {
     }
 
     #[gpui::test]
-    fn should_dot_a_row_whose_agent_comments_are_unseen(cx: &mut TestAppContext) {
+    fn should_mark_a_row_whose_agent_comments_are_unseen_after_its_title(cx: &mut TestAppContext) {
         let mut snapshot = inbox();
         snapshot.tasks[1].unseen_agent_comments = 3;
         let (harness, cx) = Harness::open(snapshot, cx);
         harness.draw(cx);
 
-        let dotted = |task: u32, cx: &mut VisualTestContext| {
-            (cx.debug_bounds(format!("unseen {}", id::<TaskId>(task)).leak())).is_some()
-        };
-        assert!(dotted(2, cx));
-        assert!(!dotted(1, cx));
+        let mark =
+            (cx.debug_bounds(format!("unseen {}", id::<TaskId>(2)).leak())).expect("task 2's mark");
+        let title = (cx.debug_bounds(format!("task title {}", id::<TaskId>(2)).leak()))
+            .expect("task 2's title");
+        assert_eq!(mark.size, gpui::size(gpui::px(14.), gpui::px(14.)));
+        assert!(mark.left() >= title.right(), "{mark:?} after {title:?}");
+        assert!(
+            cx.debug_bounds(format!("unseen {}", id::<TaskId>(1)).leak())
+                .is_none()
+        );
     }
 
     #[gpui::test]

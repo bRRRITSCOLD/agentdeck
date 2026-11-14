@@ -6,7 +6,7 @@
 //!
 //! Clicking a task's title in the Tasks view, the Inbox or the right panel asks the window
 //! for it with [`OpenTask`]. Opening it reads the thread and marks the task's agent comments
-//! seen, which clears the row's dot. While open, a `changed comment` reads the thread again.
+//! seen, which clears the row's unseen mark. While open, a `changed comment` reads the thread again.
 //! The task itself comes from the sidebar's [`Snapshot`], passed on by the window.
 
 use std::sync::Arc;
@@ -308,7 +308,7 @@ impl TaskSheet {
         .detach();
     }
 
-    /// Marks `task`'s agent comments seen. A failure only leaves the dot on its row.
+    /// Marks `task`'s agent comments seen. A failure only leaves the unseen mark on its row.
     fn mark_seen(&self, task: TaskId, cx: &mut Context<Self>) {
         self.api.mark_comments_seen(task, cx).detach();
     }
