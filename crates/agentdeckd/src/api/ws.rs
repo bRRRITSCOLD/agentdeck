@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use agentdeck_core::ws::{Channel, ClientMessage, ServerMessage, frame, parse_frame};
-use dropshot::{RequestContext, WebsocketChannelResult, WebsocketConnection, channel};
+use dropshot::{RequestContext, WebsocketEndpointResult, WebsocketUpgrade, endpoint};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::WebSocketStream;
@@ -25,21 +25,29 @@ use crate::terminal::pane::Pane;
 /// The terminal and events WebSocket. Binary frames are `[u32 channel][bytes]`; text frames
 /// are JSON tagged with `t`. See spec §5 for the messages.
 ///
+/// An endpoint over [`WebsocketUpgrade`] rather than a `#[channel]`: a channel's body runs
+/// only once the upgrade completes, after the client has seen the 101. Subscribing here,
+/// before the 101 goes out, means every event published after the client sees the
+/// connection open reaches it.
+///
 /// Unpublished: OpenAPI can't describe the messages, and progenitor's generated upgrade
 /// needs tokio, which the GUI and the CLI don't run. Clients speak the protocol through
 /// `agentdeck_core::ws` over their own WebSocket client.
-#[channel { protocol = WEBSOCKETS, path = "/v1/ws", unpublished = true }]
+#[endpoint { method = GET, path = "/v1/ws", unpublished = true }]
 pub(crate) async fn ws(
     rqctx: RequestContext<ApiContext>,
     _auth: Authorized,
-    upgraded: WebsocketConnection,
-) -> WebsocketChannelResult {
-    let socket = WebSocketStream::from_raw_socket(upgraded.into_inner(), Role::Server, None).await;
+    upgrade: WebsocketUpgrade,
+) -> WebsocketEndpointResult {
     let context = rqctx.context();
-    Session::new(context.terminals.clone())
-        .run(socket, context.events.subscribe())
-        .await;
-    Ok(())
+    let events = context.events.subscribe();
+    let session = Session::new(context.terminals.clone());
+    upgrade.handle(move |upgraded| async move {
+        let socket =
+            WebSocketStream::from_raw_socket(upgraded.into_inner(), Role::Server, None).await;
+        session.run(socket, events).await;
+        Ok(())
+    })
 }
 
 /// One connection's attachments.
