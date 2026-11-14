@@ -15,17 +15,17 @@ use agentdeck_client::types::{Comment, Task};
 use agentdeck_core::ws::{Entity as Changed, ServerMessage};
 use agentdeck_core::{Agent, AgentState, CommentAuthor, TaskId, TaskStatus, WorkspaceId};
 use brrritscold_core_gpui::{
-    ActiveTheme as _, Badge, BadgeVariant, Button, ButtonSize, DialogHandle, Select, SelectTrigger,
-    Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle, Textarea,
-    TextareaState,
+    ActiveTheme as _, Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, DialogHandle, Select,
+    SelectTrigger, Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle,
+    Textarea, TextareaState, Tooltip, TooltipContent,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use chrono::{DateTime, Utc};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, px,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, px,
 };
 use gpui_base::input::InputEvent;
 
@@ -43,6 +43,16 @@ use crate::workspace::failed;
 /// A view asks the window for the task sheet on this task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenTask(pub TaskId);
+
+/// The sheet's Start agent asks the window for New agent on `workspace`, the task's, with
+/// `task` picked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartAgentOn {
+    /// The task's workspace.
+    pub workspace: WorkspaceId,
+    /// The task.
+    pub task: TaskId,
+}
 
 /// The status picker's width. Raw in Penpot too.
 const STATUS_WIDTH: f32 = 120.;
@@ -211,6 +221,8 @@ pub struct TaskSheet {
     _composer: Subscription,
     _events: Subscription,
 }
+
+impl EventEmitter<StartAgentOn> for TaskSheet {}
 
 impl TaskSheet {
     /// A closed sheet that reads and writes comments through `api`, and follows `connection`'s
@@ -422,7 +434,8 @@ impl TaskSheet {
                     .items_center()
                     .gap(space::S3)
                     .child(status)
-                    .child(muted(summary.place.clone())),
+                    .child(muted(summary.place.clone()))
+                    .children(self.start_agent_button(&summary.start_agent, cx)),
             )
             .when_some(summary.description.clone(), |body, description| {
                 body.child(muted(description))
@@ -446,6 +459,49 @@ impl TaskSheet {
                     .children(thread.into_iter().map(|row| comment(row, cx))),
             )
             .into_any_element()
+    }
+
+    /// Penpot `TaskSheetBody` → `StartAgent`: an outline sm **Start agent** pushed to the end
+    /// of the status row; disabled with a tooltip saying why when the task has nowhere to
+    /// start one; nothing while an agent works on it.
+    fn start_agent_button(&self, start: &StartAgent, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let button = Button::new("task-sheet-start-agent")
+            .variant(ButtonVariant::Outline)
+            .size(ButtonSize::Sm)
+            .label("Start agent");
+        let shown = match start {
+            StartAgent::Hidden => return None,
+            StartAgent::On(_) => button
+                .on_click(cx.listener(|this, _, window, cx| this.start_agent(window, cx)))
+                .into_any_element(),
+            StartAgent::Disabled(why) => Tooltip::new("task-sheet-start-agent-why")
+                .trigger(button.disabled(true))
+                .content(TooltipContent::new(why.clone()))
+                .into_any_element(),
+        };
+        Some(
+            div()
+                .ml_auto()
+                .debug_selector(|| "start agent".into())
+                .child(shown)
+                .into_any_element(),
+        )
+    }
+
+    /// Closes the sheet and asks the window for New agent on the task's workspace with the
+    /// task picked: what Start agent does. Nothing while the task has nowhere to start one.
+    pub fn start_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(task) = self.task else {
+            return;
+        };
+        let Some(StartAgent::On(workspace)) =
+            summary(&self.snapshot, task).map(|summary| summary.start_agent)
+        else {
+            return;
+        };
+        self.handle.close(window, cx);
+        cx.emit(StartAgentOn { workspace, task });
+        cx.notify();
     }
 
     /// Penpot `agentdeck/CommentComposer`: the Textarea over "Ctrl+Enter to send" and a sm
@@ -1145,6 +1201,107 @@ mod tests {
             for preference in [ThemePreference::Light, ThemePreference::Dark] {
                 cx.update(|_, cx| Theme::set_preference(preference, cx));
                 harness.settle(cx);
+            }
+        }
+
+        mod start_agent {
+            use std::cell::RefCell;
+
+            use super::*;
+
+            /// The sheet opened on `task` as `snapshot` holds it, and what it asked the
+            /// window for.
+            fn open_over(
+                snapshot: Snapshot,
+                task: u32,
+                cx: &mut TestAppContext,
+            ) -> (
+                Harness,
+                Rc<RefCell<Vec<StartAgentOn>>>,
+                Subscription,
+                &mut VisualTestContext,
+            ) {
+                let (harness, cx) = Harness::new(Vec::new(), cx);
+                let asked = Rc::new(RefCell::new(Vec::new()));
+                let seen = asked.clone();
+                let subscription = cx.update(|_, cx| {
+                    cx.subscribe(&harness.sheet, move |_, ask: &StartAgentOn, _| {
+                        seen.borrow_mut().push(*ask);
+                    })
+                });
+                cx.update(|window, cx| {
+                    harness
+                        .sheet
+                        .update(cx, |s, cx| s.open(id(task), snapshot, window, cx));
+                });
+                harness.settle(cx);
+                (harness, asked, subscription, cx)
+            }
+
+            fn click(harness: &Harness, cx: &mut VisualTestContext) {
+                let button = cx.debug_bounds("start agent").expect("Start agent shows");
+                cx.simulate_click(button.center(), Modifiers::default());
+                harness.settle(cx);
+            }
+
+            #[gpui::test]
+            fn should_show_with_no_agent_on_the_task(cx: &mut TestAppContext) {
+                let (_harness, _, _s, cx) = open_over(snapshot(), 10, cx);
+
+                assert!(cx.debug_bounds("start agent").is_some());
+            }
+
+            #[gpui::test]
+            fn should_hide_while_an_agent_works_on_the_task(cx: &mut TestAppContext) {
+                let mut snapshot = snapshot();
+                let ws = snapshot.workspaces[0].clone();
+                snapshot.panes = vec![agent_pane(30, &ws, Agent::Claude, 10)];
+
+                let (_harness, _, _s, cx) = open_over(snapshot, 10, cx);
+
+                assert!(cx.debug_bounds("start agent").is_none());
+            }
+
+            #[gpui::test]
+            fn should_ask_for_new_agent_on_the_tasks_workspace_and_close(cx: &mut TestAppContext) {
+                let (harness, asked, _s, cx) = open_over(snapshot(), 10, cx);
+
+                click(&harness, cx);
+
+                assert_eq!(
+                    *asked.borrow(),
+                    [StartAgentOn {
+                        workspace: id(1),
+                        task: id(10),
+                    }]
+                );
+                assert!(!harness.sheet.read_with(cx, |s, _| s.is_open()));
+            }
+
+            #[gpui::test]
+            fn should_do_nothing_while_disabled_for_an_inbox_task(cx: &mut TestAppContext) {
+                let snapshot = Snapshot {
+                    tasks: vec![task(11, TaskKind::Plain, None)],
+                    ..snapshot()
+                };
+                let (harness, asked, _s, cx) = open_over(snapshot, 11, cx);
+
+                click(&harness, cx);
+
+                assert_eq!(*asked.borrow(), []);
+                assert!(harness.sheet.read_with(cx, |s, _| s.is_open()));
+            }
+
+            #[gpui::test]
+            fn should_do_nothing_while_disabled_in_an_archived_workspace(cx: &mut TestAppContext) {
+                let mut snapshot = snapshot();
+                snapshot.workspaces[0].archived_at = Some(NOW.into());
+                let (harness, asked, _s, cx) = open_over(snapshot, 10, cx);
+
+                click(&harness, cx);
+
+                assert_eq!(*asked.borrow(), []);
+                assert!(harness.sheet.read_with(cx, |s, _| s.is_open()));
             }
         }
     }
