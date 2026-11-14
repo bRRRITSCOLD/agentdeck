@@ -1,6 +1,7 @@
-//! The two status channels a program can send besides its title, which `alacritty_terminal`
-//! ignores: OSC 9;4 progress and OSC 7501 program status. [`OscScanner`] reads them from the
-//! raw output and keeps the latest of each.
+//! What a program can send besides its title that `alacritty_terminal` ignores: OSC 9;4
+//! progress and OSC 7501 program status, for the agent state, and the OSC 7 working directory,
+//! for the attach snapshot. [`OscScanner`] reads them from the raw output and keeps the latest
+//! of each.
 
 use crate::text_enum::text_enum;
 
@@ -36,7 +37,7 @@ text_enum! {
     }
 }
 
-/// Reads OSC 9;4 and OSC 7501 out of a program's output, across any chunking.
+/// Reads OSC 9;4, OSC 7501 and OSC 7 out of a program's output, across any chunking.
 #[derive(Default)]
 pub struct OscScanner {
     parser: vte::Parser,
@@ -47,6 +48,7 @@ pub struct OscScanner {
 struct Latest {
     progress: Option<Progress>,
     program_state: Option<ProgramState>,
+    cwd: Option<String>,
 }
 
 impl OscScanner {
@@ -63,6 +65,12 @@ impl OscScanner {
     /// The last OSC 9;4 state, or `None` if the program never sent one.
     pub fn progress(&self) -> Option<Progress> {
         self.latest.progress
+    }
+
+    /// The `file://` URI of the working directory the shell last reported with OSC 7
+    /// (`ESC ] 7 ; file://host/path ST`), as it was sent; `None` until it reports one.
+    pub fn reported_cwd(&self) -> Option<&str> {
+        self.latest.cwd.as_deref()
     }
 
     /// The last OSC 7501 state, or `None` if the program never sent one or cleared it.
@@ -87,6 +95,15 @@ impl vte::Perform for Latest {
                     self.program_state = None;
                 } else if let Ok(state) = state.parse() {
                     self.program_state = Some(state);
+                }
+            }
+            [b"7", uri @ ..] => {
+                // A `;` in the URI splits it into more params.
+                let uri = uri.join(&b';');
+                if let Ok(uri) = String::from_utf8(uri)
+                    && !uri.is_empty()
+                {
+                    self.cwd = Some(uri);
                 }
             }
             _ => {}
@@ -169,6 +186,37 @@ mod tests {
             fn should_ignore_an_unknown_progress_state() {
                 let scanner = scanned(&[b"\x1b]9;4;4;0\x07", b"\x1b]9;4;7;0\x07"]);
                 assert_eq!(scanner.progress(), Some(Progress::Paused));
+            }
+        }
+
+        mod reported_cwd {
+            use super::*;
+
+            #[test]
+            fn should_be_none_until_the_shell_reports_one() {
+                assert_eq!(scanned(&[b"$ "]).reported_cwd(), None);
+            }
+
+            #[test]
+            fn should_keep_the_last_osc_7_however_it_is_chunked() {
+                let scanner = scanned(&[
+                    b"\x1b]7;file://box/first\x07$ ",
+                    b"\x1b]7;file://box/w/re",
+                    b"po\x1b\\$ ",
+                ]);
+                assert_eq!(scanner.reported_cwd(), Some("file://box/w/repo"));
+            }
+
+            #[test]
+            fn should_keep_a_semicolon_in_the_uri() {
+                let scanner = scanned(&[b"\x1b]7;file://box/a;b\x07"]);
+                assert_eq!(scanner.reported_cwd(), Some("file://box/a;b"));
+            }
+
+            #[test]
+            fn should_ignore_an_empty_report() {
+                let scanner = scanned(&[b"\x1b]7;file://box/w\x07", b"\x1b]7;\x07"]);
+                assert_eq!(scanner.reported_cwd(), Some("file://box/w"));
             }
         }
 

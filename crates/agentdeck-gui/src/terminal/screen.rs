@@ -248,7 +248,8 @@ impl Screen {
     }
 
     /// The `file://` URI of the working directory the shell last reported with OSC 7; `None`
-    /// until it reports one. A snapshot doesn't carry it, so it starts over on each attach.
+    /// until it reports one. The daemon ends each attach snapshot with the shell's last OSC 7,
+    /// so a fresh screen has it from the attach on.
     pub fn reported_cwd(&self) -> Option<&str> {
         self.cwd.0.as_deref()
     }

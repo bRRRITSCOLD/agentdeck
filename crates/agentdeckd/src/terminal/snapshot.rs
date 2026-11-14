@@ -7,6 +7,9 @@
 //! modes. It does not carry the scroll region, tab stops or the active character set, which
 //! `alacritty_terminal` keeps private: a program that relies on one it set before the attach
 //! draws the attaching client's copy differently until it sets it again.
+//!
+//! [`report_cwd`] then ends it with the shell's last OSC 7, which a `Term` doesn't keep, so a
+//! client resolving file paths has the shell's directory from the attach on.
 
 use std::fmt::Write as _;
 
@@ -73,6 +76,17 @@ pub fn encode<T>(term: &mut Term<T>) -> Vec<u8> {
         let _ = write!(out, "\x1b[{code} q");
     }
     out.into_bytes()
+}
+
+/// Ends `snapshot` with the working directory the shell last reported, `cwd`, as the OSC 7
+/// it sent (`ESC ] 7 ; <uri> ST`), so a client that reads OSC 7 from the pane's output knows it
+/// from the attach on. A `Term` ignores OSC 7, so the screen it rebuilds is the same.
+pub fn report_cwd(snapshot: &mut Vec<u8>, cwd: Option<&str>) {
+    if let Some(uri) = cwd {
+        snapshot.extend_from_slice(b"\x1b]7;");
+        snapshot.extend_from_slice(uri.as_bytes());
+        snapshot.extend_from_slice(b"\x1b\\");
+    }
 }
 
 /// The grid's rows, top to bottom, written from the top-left as a program would have written
@@ -343,6 +357,41 @@ mod tests {
             feed(&mut original, next);
             feed(&mut restored, next);
             assert_same_screen(&original, &restored);
+        }
+    }
+
+    mod report_cwd {
+        use super::*;
+
+        #[test]
+        fn should_end_the_snapshot_with_the_reported_dir() {
+            let mut term = term_with(b"$ ");
+            let mut snapshot = encode(&mut term);
+
+            report_cwd(&mut snapshot, Some("file://box/w/repo"));
+
+            assert!(snapshot.ends_with(b"\x1b]7;file://box/w/repo\x1b\\"));
+        }
+
+        #[test]
+        fn should_leave_the_snapshot_as_it_is_without_one() {
+            let mut term = term_with(b"$ ");
+            let mut snapshot = encode(&mut term);
+            let before = snapshot.clone();
+
+            report_cwd(&mut snapshot, None);
+
+            assert_eq!(snapshot, before);
+        }
+
+        #[test]
+        fn should_rebuild_the_same_screen() {
+            let mut original = term_with(b"one\r\n$ ");
+            let mut snapshot = encode(&mut original);
+
+            report_cwd(&mut snapshot, Some("file://box/w"));
+
+            assert_same_screen(&original, &term_with(&snapshot));
         }
     }
 

@@ -2182,6 +2182,28 @@ mod tests {
             }
 
             #[gpui::test]
+            fn should_resolve_against_the_dir_a_reattach_snapshot_carries(cx: &mut TestAppContext) {
+                let (harness, cx) = showing("notes.txt", cx);
+                let elsewhere = tempfile::tempdir().unwrap();
+                let file = touch(elsewhere.path(), "notes.txt");
+                touch(harness.cwd.path(), "notes.txt");
+                // The daemon ends a snapshot with the shell's last OSC 7.
+                let snapshot = format!(
+                    "\x1bcnotes.txt\x1b]7;file://{}\x1b\\",
+                    elsewhere.path().display()
+                );
+
+                harness.attached(20, 4, snapshot.as_bytes(), cx);
+                harness.draw(cx);
+                ctrl_click(&harness, 0, 2, cx);
+
+                assert_eq!(
+                    harness.started(),
+                    [["xdg-open".to_owned(), file.display().to_string()]]
+                );
+            }
+
+            #[gpui::test]
             fn should_resolve_against_the_dir_the_shell_reported(cx: &mut TestAppContext) {
                 let (harness, cx) = showing("", cx);
                 let elsewhere = tempfile::tempdir().unwrap();

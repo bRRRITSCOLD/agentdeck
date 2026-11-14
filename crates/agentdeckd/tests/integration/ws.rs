@@ -81,6 +81,41 @@ mod get_v1_ws {
         }
 
         #[tokio::test]
+        async fn should_end_the_snapshot_with_the_dir_the_shell_last_reported() {
+            let daemon = TestDaemon::start().await;
+            let place = Place::new(&daemon).await;
+            let pane = place
+                .spawn(
+                    &daemon.client,
+                    &sh("printf '\\033]7;file://box/first\\007\\033]7;file://box/w/repo\\033\\\\$ '; sleep 60"),
+                )
+                .await;
+            printed(&daemon.client, pane.id, "$ ").await;
+            let mut ws = Ws::connect(&daemon).await;
+            ws.attach(pane.id, 1).await;
+            ws.send(ClientMessage::Detach { channel: 1 }).await;
+
+            // A reattach, as after a `lagged` or a GUI restart, still carries it.
+            ws.send(ClientMessage::Attach {
+                pane: pane.id,
+                channel: 2,
+            })
+            .await;
+
+            let snapshot = ws
+                .until(|frame| match frame {
+                    Frame::Bytes(2, bytes) => Some(bytes),
+                    _ => None,
+                })
+                .await;
+            assert!(
+                snapshot.ends_with(b"\x1b]7;file://box/w/repo\x1b\\"),
+                "{:?}",
+                String::from_utf8_lossy(&snapshot)
+            );
+        }
+
+        #[tokio::test]
         async fn should_render_the_snapshot_like_the_pane() {
             let daemon = TestDaemon::start().await;
             let place = Place::new(&daemon).await;
