@@ -653,14 +653,15 @@ fn instruction_editor(
 #[cfg(test)]
 mod tests {
     use agentdeck_client::types::Task;
-    use agentdeck_core::TaskKind;
+    use agentdeck_core::{AgentState, TaskKind};
     use brrritscold_core_gpui::{Root, Theme, ThemePreference};
     use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 
     use super::*;
     use crate::api::fake::FakeApi;
     use crate::new_task::NewTask;
-    use crate::overview::fixtures::{id, task, workspace};
+    use crate::overview::PaneState;
+    use crate::overview::fixtures::{id, pane, task, workspace};
 
     fn with_status(n: u32, status: TaskStatus, ws: WorkspaceId) -> Task {
         Task {
@@ -1149,19 +1150,29 @@ mod tests {
     }
 
     #[gpui::test]
-    fn should_dot_a_row_whose_agent_comments_are_unseen(cx: &mut TestAppContext) {
+    fn should_mark_a_row_whose_agent_comments_are_unseen_before_its_agent(cx: &mut TestAppContext) {
         let (panel, cx) = open(cx);
         panel.update(cx, |p, cx| {
             let mut snapshot = snapshot();
             snapshot.tasks[0].unseen_agent_comments = 1;
+            snapshot.panes.push(PaneState {
+                task: Some(id(1)),
+                ..pane(10, snapshot.workspaces[0].id, AgentState::Idle)
+            });
             p.show(id(1), snapshot, cx);
             p.toggle(TaskStatus::Todo, cx);
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
 
+        let mark =
+            (cx.debug_bounds(format!("unseen {}", id::<TaskId>(1)).leak())).expect("task 1's mark");
+        let agent = (cx.debug_bounds(format!("panel agent {}", id::<TaskId>(1)).leak()))
+            .expect("task 1's agent mark");
+        assert_eq!(mark.size, gpui::size(px(14.), px(14.)));
+        assert!(mark.right() <= agent.left(), "{mark:?} before {agent:?}");
         assert!(
-            cx.debug_bounds(format!("unseen {}", id::<TaskId>(1)).leak())
-                .is_some()
+            agent.left() - mark.right() <= space::S2,
+            "{mark:?} next to {agent:?}"
         );
         assert!(
             cx.debug_bounds(format!("task title {}", id::<TaskId>(2)).leak())

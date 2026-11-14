@@ -445,32 +445,29 @@ fn title(row: &Row, on_open: OnOpen, cx: &App) -> gpui::Stateful<Div> {
         .child(row.title.clone())
 }
 
-/// The "new from the agent" dot after a row's title while an agent's comments on the task
-/// are unseen: an 8px dot in `primary`, a `StateDot` mark's size. Tests find it as
-/// `unseen <id>`.
-fn unseen_dot(row: &Row, cx: &App) -> Option<Div> {
+/// Penpot `TaskRow`'s `Unseen` layer, while an agent's comments on the task are unseen: a
+/// 14px lucide `MessageSquareDot` in `foreground`. A speech bubble, so it can't be read as
+/// a state mark in either mode. Tests find it as `unseen <id>`.
+fn unseen_mark(row: &Row, cx: &App) -> Option<Div> {
     let id = row.id;
     row.unseen.then(|| {
         div()
             .debug_selector(move || format!("unseen {id}"))
-            .size(space::S4)
             .flex_none()
             .flex()
-            .items_center()
-            .justify_center()
             .child(
-                div()
-                    .size(space::S2)
-                    .rounded_full()
-                    .bg(cx.theme().semantic().primary),
+                Icon::new(IconName::MessageSquareDot)
+                    .size(px(14.))
+                    .text_color(cx.theme().semantic().foreground),
             )
     })
 }
 
 /// Penpot `TaskRow` (`wide`): picker, kind icon, title, agent, PR, draft, checks, review and
 /// workspace, `space.3` apart, padded `space.2`; `layout`'s columns only. `picker` is the
-/// row's status picker; clicking the title runs `on_open`. The title is followed by a dot
-/// while the task's agent comments are unseen. Tests find a cell as `<column> <id>`.
+/// row's status picker; clicking the title runs `on_open`. The title cell ends with the
+/// [`unseen_mark`] while the task's agent comments are unseen. Tests find a cell as
+/// `<column> <id>`.
 pub fn wide(row: &Row, picker: Select, layout: Layout, on_open: OnOpen, cx: &App) -> AnyElement {
     let s = cx.theme().semantic();
     let muted = |text: SharedString, size: gpui::Rems| {
@@ -516,7 +513,7 @@ pub fn wide(row: &Row, picker: Select, layout: Layout, on_open: OnOpen, cx: &App
                 .items_center()
                 .gap(space::S1_5)
                 .child(title(row, on_open, cx))
-                .children(unseen_dot(row, cx)),
+                .children(unseen_mark(row, cx)),
         )
         .when(layout.agent, |r| r.child(agent))
         .child(cell(Columns::PR).when_some(pr, |c, pr| {
@@ -573,8 +570,9 @@ pub fn wide(row: &Row, picker: Select, layout: Layout, on_open: OnOpen, cx: &App
 /// Penpot `TaskRow` (`panel`), for the right panel's narrow column: the kind icon, the title
 /// over the PR reference and the agents' `StateDot` on top; the status picker, then the
 /// checks icon and the review badge below. Padded `space.2`, the two lines `space.1-5` apart.
-/// Clicking the title runs `on_open`; a dot follows it while the task's agent comments are
-/// unseen.
+/// Clicking the title runs `on_open`. The [`unseen_mark`] sits just before the agents' mark
+/// while the task's agent comments are unseen. Tests find the agents' mark as
+/// `panel agent <id>`.
 pub fn panel(row: &Row, picker: Select, on_open: OnOpen, cx: &App) -> AnyElement {
     let s = cx.theme().semantic();
     let kind_icon = match row.kind {
@@ -591,7 +589,7 @@ pub fn panel(row: &Row, picker: Select, on_open: OnOpen, cx: &App) -> AnyElement
         .gap(space::S1_5)
         .p(space::S2)
         .rounded(s.radius_md)
-        // Penpot `Top`: icon, Text, agent, `space.2` apart.
+        // Penpot `Top`: icon, Text, unseen, agent, `space.2` apart.
         .child(
             div()
                 .flex()
@@ -610,14 +608,7 @@ pub fn panel(row: &Row, picker: Select, on_open: OnOpen, cx: &App) -> AnyElement
                         .flex()
                         .flex_col()
                         .gap(space::S0_5)
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(space::S1_5)
-                                .child(title(row, on_open, cx))
-                                .children(unseen_dot(row, cx)),
-                        )
+                        .child(title(row, on_open, cx))
                         .when_some(pr, |text, pr| {
                             text.child(
                                 div()
@@ -628,8 +619,16 @@ pub fn panel(row: &Row, picker: Select, on_open: OnOpen, cx: &App) -> AnyElement
                             )
                         }),
                 )
+                .when_some(unseen_mark(row, cx), |top, mark| {
+                    top.child(div().flex_none().pt(px(1.5)).child(mark))
+                })
                 .when_some(row.agent.as_ref(), |top, agent| {
-                    top.child(StateDot::new().state(StateDotState::of(agent.state, None)))
+                    top.child(
+                        div()
+                            .debug_selector(move || format!("panel agent {id}"))
+                            .flex_none()
+                            .child(StateDot::new().state(StateDotState::of(agent.state, None))),
+                    )
                 }),
         )
         // Penpot `Meta`: picker, spacer, checks, review, `space.2` apart.
