@@ -110,6 +110,13 @@ impl Pr {
     }
 }
 
+/// An `updatedAt` `days` before now, for tests of the PR age cutoff. Leaked, as [`Pr`] holds
+/// `'static` strings; a test makes a handful.
+pub fn days_ago(days: i64) -> &'static str {
+    let at = chrono::Utc::now() - chrono::TimeDelta::days(days);
+    at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true).leak()
+}
+
 /// PRs fetched by number in one request, as the daemon batches them.
 pub const BATCH: usize = 25;
 

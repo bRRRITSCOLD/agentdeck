@@ -15,11 +15,12 @@ use agentdeck_core::ws::{Entity, ServerMessage};
 
 use crate::support::git::git;
 use crate::support::github::{
-    BATCH, Pr, mock_fetch, mock_list, mock_list_page, mock_search, mock_unauthorized,
+    BATCH, Pr, days_ago, mock_fetch, mock_list, mock_list_page, mock_search, mock_unauthorized,
     mock_updated_search, set_gh_token,
 };
 use crate::support::ws::{Frame, Ws};
 use crate::support::{TestDaemon, set_daemon_env};
+use tempfile::TempDir;
 
 const TOKEN: &str = "gho_test";
 
@@ -81,6 +82,25 @@ fn clone_of(dir: &Path, repo: &str, branch: &str) {
         ],
     );
     git(dir, &["branch", branch]);
+}
+
+/// Open PR `number`, last updated on GitHub `days` ago.
+fn aged(number: i64, days: i64) -> Pr {
+    Pr {
+        updated_at: days_ago(days),
+        ..Pr::open(number)
+    }
+}
+
+/// The numbers of the stored PRs, in task order.
+async fn numbers(client: &Client) -> Vec<i64> {
+    let mut numbers: Vec<i64> = pr_tasks(client)
+        .await
+        .into_iter()
+        .map(|task| task.pr.expect("the task's PR").number)
+        .collect();
+    numbers.sort_unstable();
+    numbers
 }
 
 mod post_v1_prs_sync {
@@ -580,6 +600,25 @@ mod incremental {
     }
 
     #[tokio::test]
+    async fn should_not_add_a_pr_older_than_the_cutoff_200() {
+        let github = MockServer::start_async().await;
+        let mut first = mock_list(&github, TOKEN, &[]);
+        let mut updated = mock_updated_search(&github, TOKEN, &[]);
+        let dirs = tempfile::tempdir().expect("a temp dir");
+        set_gh_token(dirs.path(), Some(TOKEN));
+        set_daemon_env(dirs.path(), &[("AGENTDECK_PR_MAX_AGE_DAYS", "90")]);
+        let daemon = TestDaemon::start_with_github(dirs, &github.url("/graphql")).await;
+        sync(&daemon.client).await;
+        first.delete();
+
+        updated.delete();
+        mock_updated_search(&github, TOKEN, &[aged(8, 400), aged(9, 1)]);
+        sync(&daemon.client).await;
+
+        assert_eq!(numbers(&daemon.client).await, [9]);
+    }
+
+    #[tokio::test]
     async fn should_move_an_inbox_pr_into_a_workspace_once_a_clone_appears_200() {
         let github = MockServer::start_async().await;
         let (daemon, _updated) = synced(&github, &[Pr::open(7)]).await;
@@ -704,6 +743,199 @@ mod full {
             assert!(Instant::now() < deadline, "no row while its details load");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+}
+
+mod max_age {
+    use super::*;
+
+    /// Temp dirs for a daemon whose `gh` prints [`TOKEN`] and whose every sync is full, with
+    /// `AGENTDECK_PR_MAX_AGE_DAYS` set to `days`.
+    fn dirs_with_cutoff(days: &str) -> TempDir {
+        let dirs = tempfile::tempdir().expect("a temp dir");
+        set_gh_token(dirs.path(), Some(TOKEN));
+        set_daemon_env(
+            dirs.path(),
+            &[
+                ("AGENTDECK_PR_FULL_SYNC_SECS", "0"),
+                ("AGENTDECK_PR_MAX_AGE_DAYS", days),
+            ],
+        );
+        dirs
+    }
+
+    /// A daemon that stored `open` with no cutoff, restarted with a 90-day one. Its
+    /// `gh` is logged out until a test logs it in, so nothing syncs before the test's own
+    /// mocks are up; the first daemon's mocks are deleted.
+    async fn restarted_with_cutoff(github: &MockServer, open: &[Pr]) -> TestDaemon {
+        let mut first = mock_list(github, TOKEN, open);
+        let daemon =
+            TestDaemon::start_with_github(dirs_with_cutoff("0"), &github.url("/graphql")).await;
+        sync(&daemon.client).await;
+        assert_eq!(pr_tasks(&daemon.client).await.len(), open.len());
+        let (_, dirs) = daemon.terminate();
+        first.delete();
+        set_gh_token(dirs.path(), None);
+        set_daemon_env(
+            dirs.path(),
+            &[
+                ("AGENTDECK_PR_FULL_SYNC_SECS", "0"),
+                ("AGENTDECK_PR_MAX_AGE_DAYS", "90"),
+            ],
+        );
+        TestDaemon::start_with_github(dirs, &github.url("/graphql")).await
+    }
+
+    /// GitHub's list of open PRs, most recently updated first, as one page.
+    fn mock_open<'a>(github: &'a MockServer, prs: &[Pr]) -> Mock<'a> {
+        mock_list_page(github, TOKEN, prs, None, None, prs.len(), Duration::ZERO)
+    }
+
+    async fn task_of(client: &Client, number: i64) -> Task {
+        pr_tasks(client)
+            .await
+            .into_iter()
+            .find(|task| task.pr.as_ref().is_some_and(|pr| pr.number == number))
+            .expect("the PR's task")
+    }
+
+    #[tokio::test]
+    async fn should_stop_paging_at_the_first_pr_older_than_the_cutoff_200() {
+        let github = MockServer::start_async().await;
+        let first = mock_list_page(
+            &github,
+            TOKEN,
+            &[aged(7, 1), aged(8, 400)],
+            None,
+            Some("c1"),
+            3,
+            Duration::ZERO,
+        );
+        let second = mock_list_page(
+            &github,
+            TOKEN,
+            &[aged(9, 500)],
+            Some("c1"),
+            None,
+            3,
+            Duration::ZERO,
+        );
+        mock_fetch(&github, &[aged(7, 1)]);
+        let old = mock_fetch(&github, &[aged(8, 400)]);
+        let daemon =
+            TestDaemon::start_with_github(dirs_with_cutoff("90"), &github.url("/graphql")).await;
+
+        sync(&daemon.client).await;
+
+        assert!(first.calls() >= 1);
+        second.assert_calls(0);
+        old.assert_calls(0);
+        assert_eq!(numbers(&daemon.client).await, [7]);
+    }
+
+    #[tokio::test]
+    async fn should_read_the_cutoff_from_config_toml_200() {
+        let github = MockServer::start_async().await;
+        mock_list(&github, TOKEN, &[aged(7, 1), aged(8, 40)]);
+        let dirs = tempfile::tempdir().expect("a temp dir");
+        set_gh_token(dirs.path(), Some(TOKEN));
+        // Empty, so the harness's no-cutoff default doesn't override the file.
+        set_daemon_env(dirs.path(), &[("AGENTDECK_PR_MAX_AGE_DAYS", "")]);
+        let config = dirs.path().join("config/agentdeck");
+        std::fs::create_dir_all(&config).expect("creating the config dir");
+        std::fs::write(
+            config.join("config.toml"),
+            "[pr_sync]\nmax_age_days = 30\n\n[some_later_section]\nkey = 1\n",
+        )
+        .expect("writing config.toml");
+        let daemon = TestDaemon::start_with_github(dirs, &github.url("/graphql")).await;
+
+        sync(&daemon.client).await;
+
+        assert_eq!(numbers(&daemon.client).await, [7]);
+    }
+
+    #[tokio::test]
+    async fn should_move_a_stored_pr_older_than_the_cutoff_to_done_200() {
+        let github = MockServer::start_async().await;
+        let daemon = restarted_with_cutoff(&github, &[aged(7, 1), aged(8, 400)]).await;
+        mock_open(&github, &[aged(7, 1), aged(8, 400)]);
+        let old = task_of(&daemon.client, 8).await;
+        let mut ws = Ws::connect(&daemon).await;
+
+        set_gh_token(daemon.root(), Some(TOKEN));
+        sync(&daemon.client).await;
+
+        ws.until(|frame| match frame {
+            Frame::Message(ServerMessage::Changed {
+                entity: Entity::Task,
+                id,
+            }) if id == old.id.to_string() => Some(()),
+            _ => None,
+        })
+        .await;
+        let old = task_of(&daemon.client, 8).await;
+        assert_eq!(old.status, TaskStatus::Done);
+        assert!(old.done_at.is_some());
+        // Nothing changed on GitHub: the PR is still open.
+        assert_eq!(old.pr.expect("the task's PR").state, PrState::Open);
+        assert_eq!(task_of(&daemon.client, 7).await.status, TaskStatus::Review);
+    }
+
+    #[tokio::test]
+    async fn should_not_fetch_a_pr_older_than_the_cutoff_as_gone_200() {
+        let github = MockServer::start_async().await;
+        let daemon = restarted_with_cutoff(&github, &[aged(7, 1), aged(8, 400)]).await;
+        // However the list leaves it out, a PR stored older than the cutoff isn't gone.
+        mock_open(&github, &[aged(7, 1)]);
+        let gone = mock_fetch(&github, &[aged(8, 400)]);
+
+        set_gh_token(daemon.root(), Some(TOKEN));
+        sync(&daemon.client).await;
+        sync(&daemon.client).await;
+
+        gone.assert_calls(0);
+    }
+
+    #[tokio::test]
+    async fn should_move_an_aged_out_task_to_done_only_once_200() {
+        let github = MockServer::start_async().await;
+        let daemon = restarted_with_cutoff(&github, &[aged(8, 400)]).await;
+        mock_open(&github, &[aged(8, 400)]);
+        set_gh_token(daemon.root(), Some(TOKEN));
+        sync(&daemon.client).await;
+        let task = task_of(&daemon.client, 8).await;
+        assert_eq!(task.status, TaskStatus::Done);
+
+        daemon
+            .client
+            .task_update()
+            .id(task.id)
+            .body_map(|patch| patch.status(Some(TaskStatus::Review)))
+            .send()
+            .await
+            .expect("update");
+        sync(&daemon.client).await;
+
+        assert_eq!(task_of(&daemon.client, 8).await.status, TaskStatus::Review);
+    }
+
+    #[tokio::test]
+    async fn should_bring_back_an_aged_out_pr_github_updates_again_200() {
+        let github = MockServer::start_async().await;
+        let daemon = restarted_with_cutoff(&github, &[aged(8, 400)]).await;
+        let mut list = mock_open(&github, &[aged(8, 400)]);
+        set_gh_token(daemon.root(), Some(TOKEN));
+        sync(&daemon.client).await;
+        assert_eq!(task_of(&daemon.client, 8).await.status, TaskStatus::Done);
+
+        list.delete();
+        let fresh = aged(8, 0);
+        mock_open(&github, std::slice::from_ref(&fresh));
+        mock_fetch(&github, &[fresh]);
+        sync(&daemon.client).await;
+
+        assert_eq!(task_of(&daemon.client, 8).await.status, TaskStatus::Review);
     }
 }
 

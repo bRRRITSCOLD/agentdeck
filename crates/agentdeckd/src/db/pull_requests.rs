@@ -1,6 +1,8 @@
 //! `pull_requests` queries: storing what PR sync saw, and the PR tasks it moves (spec §8).
 
-use agentdeck_core::{ChecksState, PrState, TaskId, TaskKind, WorkspaceId, pr_task_status};
+use agentdeck_core::{
+    ChecksState, PrState, TaskId, TaskKind, TaskStatus, WorkspaceId, pr_task_status,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::{DbError, now, tasks, text};
@@ -17,10 +19,12 @@ pub fn open(conn: &Connection) -> Result<Vec<(String, i64)>, DbError> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// `(repo, number)` of every PR stored as open whose checks are pending.
+/// `(repo, number)` of every PR stored as open whose checks are pending, but for those aged
+/// out.
 pub fn open_pending(conn: &Connection) -> Result<Vec<(String, i64)>, DbError> {
     let mut stmt = conn.prepare(
-        "SELECT repo, number FROM pull_requests WHERE state = ?1 AND checks = ?2
+        "SELECT repo, number FROM pull_requests
+         WHERE state = ?1 AND checks = ?2 AND aged_out_at IS NULL
          ORDER BY repo, number",
     )?;
     let rows = stmt.query_map(
@@ -36,9 +40,57 @@ pub fn open_prs(conn: &Connection) -> Result<Vec<RemotePr>, DbError> {
 }
 
 /// Every PR stored as open whose task is in the inbox, as last synced, so it can be matched
-/// to a workspace again without asking GitHub.
+/// to a workspace again without asking GitHub; but for those aged out, which storing would
+/// bring back.
 pub fn inbox_open(conn: &Connection) -> Result<Vec<RemotePr>, DbError> {
-    stored_where(conn, "p.state = ?1 AND t.workspace_id IS NULL")
+    stored_where(
+        conn,
+        "p.state = ?1 AND t.workspace_id IS NULL AND p.aged_out_at IS NULL",
+    )
+}
+
+/// Ages out each stored open PR of `prs` (`(repo, number)`: ones GitHub hasn't updated within
+/// the cutoff), in one transaction: its task moves to `done`, once. One already aged out is
+/// left as it is, so a status the user picks after sticks. Returns the tasks that changed.
+pub fn age_out(conn: &mut Connection, prs: &[(String, i64)]) -> Result<Vec<TaskId>, DbError> {
+    let tx = conn.transaction()?;
+    let aged_at = now();
+    let mut changed = Vec::new();
+    for (repo, number) in prs {
+        let marked = tx.execute(
+            "UPDATE pull_requests SET aged_out_at = ?3
+             WHERE repo = ?1 AND number = ?2 AND state = ?4 AND aged_out_at IS NULL",
+            params![repo, number, aged_at, PrState::Open.as_str()],
+        )?;
+        let Some(task_id) = task_for(&tx, repo, *number)?.filter(|_| marked > 0) else {
+            continue;
+        };
+        if tasks::get(&tx, task_id)?.status == TaskStatus::Done {
+            continue;
+        }
+        tasks::update(
+            &tx,
+            task_id,
+            &TaskPatch {
+                title: None,
+                body: None,
+                status: Some(TaskStatus::Done),
+                workspace_id: None,
+            },
+        )?;
+        changed.push(task_id);
+    }
+    tx.commit()?;
+    Ok(changed)
+}
+
+/// Whether task `id`'s PR is aged out.
+fn is_aged_out(conn: &Connection, id: TaskId) -> Result<bool, DbError> {
+    Ok(conn.query_row(
+        "SELECT aged_out_at IS NOT NULL FROM pull_requests WHERE task_id = ?1",
+        [id.to_string()],
+        |row| row.get(0),
+    )?)
 }
 
 /// The stored PRs matching `condition`, where `?1` is the open state, as last synced.
@@ -149,7 +201,14 @@ fn store_one(
     let task = tasks::get(conn, task_id)?;
     let before = task.pr.as_ref().ok_or(DbError::NotFound("pull request"))?;
     let after = synced(pr, synced_at);
-    let status = pr_task_status(Some(before.state), pr.state).filter(|s| *s != task.status);
+    // An aged-out PR's task is done as a closed one's is, so GitHub showing it open again
+    // moves it back to review, as a reopen does.
+    let before_state = if is_aged_out(conn, task_id)? {
+        PrState::Closed
+    } else {
+        before.state
+    };
+    let status = pr_task_status(Some(before_state), pr.state).filter(|s| *s != task.status);
     let title = Some(pr.title.clone()).filter(|title| *title != task.title);
     let workspace = workspace.filter(|_| task.workspace_id.is_none());
     let pr_changed = PullRequest {
@@ -200,7 +259,7 @@ fn synced(pr: &RemotePr, synced_at: &str) -> PullRequest {
     }
 }
 
-/// Inserts or replaces `task`'s PR row.
+/// Inserts or replaces `task`'s PR row, which is no longer aged out.
 fn write_row(
     conn: &Connection,
     task: TaskId,
@@ -214,7 +273,8 @@ fn write_row(
          ON CONFLICT (task_id) DO UPDATE SET
            url = excluded.url, state = excluded.state, draft = excluded.draft,
            head_ref = excluded.head_ref, checks = excluded.checks, review = excluded.review,
-           updated_at = excluded.updated_at, synced_at = excluded.synced_at",
+           updated_at = excluded.updated_at, synced_at = excluded.synced_at,
+           aged_out_at = NULL",
         params![
             task.to_string(),
             pr.repo,

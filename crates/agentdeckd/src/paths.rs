@@ -82,6 +82,11 @@ impl Paths {
         self.config.join("rules")
     }
 
+    /// The settings file (spec §2).
+    pub fn config_file(&self) -> PathBuf {
+        self.config.join("config.toml")
+    }
+
     /// The daemon's log file.
     pub fn log_file(&self) -> PathBuf {
         self.state.join("agentdeckd.log")
@@ -188,6 +193,10 @@ mod tests {
                 PathBuf::from("/state/agentdeck/agentdeckd.log")
             );
             assert_eq!(paths.rules_dir(), PathBuf::from("/config/agentdeck/rules"));
+            assert_eq!(
+                paths.config_file(),
+                PathBuf::from("/config/agentdeck/config.toml")
+            );
         }
     }
 }

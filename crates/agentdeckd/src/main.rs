@@ -8,6 +8,7 @@
 mod agents;
 mod api;
 mod auth;
+mod config;
 mod daemon;
 mod db;
 mod events;

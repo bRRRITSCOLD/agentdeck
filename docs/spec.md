@@ -21,7 +21,7 @@ Licence `MIT OR Apache-2.0`.
 
 - **Start:** the GUI or the CLI runs `agentdeckd` detached when it can't reach the daemon in `daemon.json`. An optional systemd user unit is `contrib/agentdeckd.service`. Only one daemon runs per user: it holds a lock on `$XDG_RUNTIME_DIR/agentdeck/lock`.
 - **Endpoint:** `127.0.0.1:<random>`. On start it writes `$XDG_RUNTIME_DIR/agentdeck/daemon.json` (mode 0600): `{ "port", "token", "pid", "version" }`. Every request, including the WebSocket upgrade, carries `Authorization: Bearer <token>`.
-- **Data:** `$XDG_DATA_HOME/agentdeck/agentdeck.db` (SQLite, WAL). Scratch workspaces live in `$XDG_DATA_HOME/agentdeck/workspaces/<slug>/`. Config is `$XDG_CONFIG_HOME/agentdeck/config.toml`.
+- **Data:** `$XDG_DATA_HOME/agentdeck/agentdeck.db` (SQLite, WAL). Scratch workspaces live in `$XDG_DATA_HOME/agentdeck/workspaces/<slug>/`. Config is `$XDG_CONFIG_HOME/agentdeck/config.toml`, read at start; it need not exist. It holds `[pr_sync] max_age_days` (§8). A missing file or key gives the default, a key the daemon doesn't know is ignored, and a file that doesn't parse is logged and every default applies, as a state rule file's is (§7).
 - **DB access:** rusqlite on one owned connection behind a `spawn_blocking` actor. Migrations are embedded SQL run by `rusqlite_migration` at start.
 - **Logging:** `tracing`, to `$XDG_STATE_HOME/agentdeck/agentdeckd.log` and stderr.
 
@@ -68,6 +68,7 @@ CREATE TABLE pull_requests (
   checks TEXT,                       -- pending|success|failure|NULL
   review TEXT,                       -- approved|changes_requested|review_required|NULL
   updated_at TEXT NOT NULL, synced_at TEXT NOT NULL,
+  aged_out_at TEXT,                  -- when PR sync aged it out (§8); NULL otherwise
   UNIQUE (repo, number)
 );
 CREATE TABLE comments (
@@ -91,7 +92,7 @@ CREATE TABLE instructions (
 
 A pane links to at most one task (`panes.task_id`). A task shows its linked agent panes by querying in the other direction.
 
-Migration `0002` replaced v1's first `notes` table (a note on exactly one of a workspace and a task, with `read_at` and `read_by_pane`): task notes became the user's comments (`read_at` → `delivered_at`, `read_by_pane` → `delivered_to_pane`, seen), workspace notes became instructions, and `notes` was dropped.
+Migration `0002` replaced v1's first `notes` table (a note on exactly one of a workspace and a task, with `read_at` and `read_by_pane`): task notes became the user's comments (`read_at` → `delivered_at`, `read_by_pane` → `delivered_to_pane`, seen), workspace notes became instructions, and `notes` was dropped. Migration `0003` added `pull_requests.aged_out_at`.
 
 v1.1 adds `channels`, `channel_members` and `messages` in their own migration.
 
@@ -225,13 +226,15 @@ min_ms = 400                   # a new state must hold this long before it is pu
 
 - The token comes from `gh auth token` at start and again after a 401; while there is none, every sync asks `gh` again. No `gh`, a `gh` that isn't logged in, or a token GitHub still rejects after that retry means `GET /v1/prs/status` reports `logged_out`, and the GUI shows a banner.
 - A sync every 120 s (the first at start), and on `POST /v1/prs/sync`, which clients call when a task is opened. One sync runs at a time. `AGENTDECK_GITHUB_API` replaces the GraphQL URL (`https://api.github.com/graphql`); tests point it at httpmock.
-  - **Full:** the first sync, and the first after an hour since the last full one (`AGENTDECK_PR_FULL_SYNC_SECS`, `0` for every sync), in two phases. First the list `viewer.pullRequests(states: OPEN)`, 100 a page, most recently updated first, with light fields only (no review, no checks); each page is stored as it arrives, a stored PR keeping its review and checks. Then every field, fetched by number, for the PRs that are new, that GitHub updated since they were stored, or whose checks are pending.
-  - **Incremental:** the rest search `is:pr author:@me updated:>=<T>`, where `T` is 10 minutes before the last good sync began, so a merged or closed PR comes back in its new state. A merged or closed PR not stored as open is skipped. Then open PRs whose checks are `pending`, which a finished check run doesn't bring into the search, are fetched by number, and inbox PRs are matched to workspaces again as stored. Nothing is found gone.
+  - **Age cutoff:** only PRs GitHub updated in the last `max_age_days` days sync: `[pr_sync] max_age_days` in `config.toml` (§2), default `90`, `0` for no cutoff. `AGENTDECK_PR_MAX_AGE_DAYS` overrides the file (tests use it); empty is the same as unset, and a value that isn't a count of days is logged and ignored. The cutoff is that many days before the sync began.
+  - **Full:** the first sync, and the first after an hour since the last full one (`AGENTDECK_PR_FULL_SYNC_SECS`, `0` for every sync), in two phases. First the list `viewer.pullRequests(states: OPEN)`, 100 a page, most recently updated first, with light fields only (no review, no checks); each page is stored as it arrives, a stored PR keeping its review and checks. The list stops at the first PR updated before the cutoff: neither it nor anything after it is stored, and no later page is read. Then every field, fetched by number, for the PRs that are new, that GitHub updated since they were stored, or whose checks are pending.
+  - **Incremental:** the rest search `is:pr author:@me updated:>=<T>`, where `T` is 10 minutes before the last good sync began, so a merged or closed PR comes back in its new state. A merged or closed PR not stored as open is skipped, and so is any PR updated before the cutoff. Then open PRs whose checks are `pending`, which a finished check run doesn't bring into the search, are fetched by number, and inbox PRs are matched to workspaces again as stored; aged-out PRs are left out of both. Nothing is found gone.
 - `POST /v1/prs/sync` answers once its sync finishes, with the same body as `GET /v1/prs/status`: `{ login: "logged_in"|"logged_out", last_synced_at, last_error, progress }`. A failed sync is still 200, with `last_error` set: `GitHub answered <status>`, plus GitHub's `message` when the body is JSON. A request that fails with a 5xx or in transit is tried up to 3 times, 1 s then 2 s apart.
 - Each result becomes a PR task, titled with the PR's title:
   - Its **workspace** is the oldest unarchived workspace whose dir holds a clone of the PR's repo with `head_ref` present as a local branch. A clone is a git repo up to 3 levels under the dir (as the dirty report searches) with any `github.com` remote (https, ssh or scp-like URL) naming the repo, compared case-insensitively. If no workspace matches, it goes to the inbox (`workspace_id` NULL). Only an inbox task is matched again on later syncs; a PR task never leaves its workspace.
   - **New PR:** a PR task created with status `review`.
   - **Merged or closed:** the task goes to `done`; reopened, back to `review`. While the PR's state holds, the task keeps whatever status it has. In a full sync, PRs that left the list are fetched by number, once; one GitHub no longer shows is stored as closed. Fetches by number go 25 to a request, 4 requests at a time.
+  - **Aged out:** in a full sync, a PR stored as open that left the list and was last updated before the cutoff is not fetched. It is aged out instead (`aged_out_at` set), once: its task goes to `done` (a `changed` event, as any status change sends) and stays findable under Show done; a status the user picks after that sticks. Nothing changes on GitHub. When GitHub next shows it within the cutoff, it is no longer aged out and its task goes back to `review`, as a reopened PR's does.
 - `checks` and `review` come from `statusCheckRollup` (`ERROR` counts as failure, `EXPECTED` as pending) and `reviewDecision`. Every task in the API carries its PR as `pr` (null for a plain task).
 - A sync stores each page as it arrives, and each task it creates or changes gets a `changed` event (§5) then. While it runs, the status's `progress` is `{ prs_done, prs, stage }` (`prs` from the search's count, `0` until the first page answers; `stage` is `listing`, then `details` while reviews and checks are fetched by number), and every change to it sends a `pr_sync` event. Clients show it: "Syncing… 100 of 271 PRs", then "Syncing details…".
 
