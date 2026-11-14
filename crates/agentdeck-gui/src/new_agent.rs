@@ -239,7 +239,6 @@ impl NewAgentDialog {
             cwd: self.folder.to_string(),
             task: self.task,
         };
-        let agent = self.agent;
         let launching = self.api.launch_agent(launch, cx);
         cx.spawn_in(window, async move |this, cx| {
             let launched = launching.await;
@@ -250,7 +249,7 @@ impl NewAgentDialog {
                         this.handle.close(window, cx);
                         cx.emit(launched);
                     }
-                    Err(err) => failed("Couldn't start the agent", &hinted(err, agent), window, cx),
+                    Err(err) => failed("Couldn't start the agent", &refusal(err), window, cx),
                 }
                 cx.notify();
             });
@@ -266,14 +265,14 @@ impl NewAgentDialog {
     }
 }
 
-/// `err`, with what to do about a missing agent CLI.
-fn hinted(err: anyhow::Error, agent: Agent) -> anyhow::Error {
-    let missing = (err.downcast_ref::<ApiError>())
-        .is_some_and(|err| err.code.as_deref() == Some("invalid_argv"));
-    if missing {
-        err.context(format!("is `{agent}` installed and on agentdeckd's PATH?"))
-    } else {
-        err
+/// `err`; an agent that can't start as the daemon's message alone, which says what to do
+/// when it isn't on the daemon's `PATH`.
+fn refusal(err: anyhow::Error) -> anyhow::Error {
+    match err.downcast_ref::<ApiError>() {
+        Some(api) if api.code.as_deref() == Some("invalid_argv") => {
+            anyhow::anyhow!(api.message.clone())
+        }
+        _ => err,
     }
 }
 
@@ -370,6 +369,7 @@ mod tests {
 
     use super::*;
     use crate::api::fake::FakeApi;
+    use crate::notice;
     use crate::overview::fixtures::{id, instruction, task, workspace};
 
     struct Harness {
@@ -513,6 +513,23 @@ mod tests {
             assert!(harness.launched.borrow().is_empty());
             assert!(harness.dialog.read_with(cx, |d, _| d.is_open()));
             cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+
+        #[gpui::test]
+        fn should_toast_only_the_daemons_message_when_the_agent_cant_start(
+            cx: &mut TestAppContext,
+        ) {
+            let (harness, cx) = open(cx);
+            let hint = "`claude` isn't on agentdeckd's PATH. Install it, or start agentdeckd \
+                        from a shell where it's found.";
+            harness.api.refuse_next("invalid_argv", hint);
+
+            start(&harness, cx);
+
+            let shown = cx.update(|_, cx| notice::shown(cx));
+            let toast = shown.last().expect("a toast");
+            assert_eq!(toast.title, "Couldn't start the agent");
+            assert_eq!(toast.description.as_deref(), Some(hint));
         }
     }
 

@@ -159,9 +159,10 @@ pub(crate) async fn pane_create(
         });
     if let Err(err) = context.terminals.spawn(pane.id, launch, rules) {
         let id = pane.id;
+        tracing::warn!("pane {id} couldn't start: {}", err.detail());
         context.db.call(move |c| db::panes::delete(c, id)).await?;
         return Err(match err {
-            SpawnError::Command(_) => client_error(
+            SpawnError::NotOnPath { .. } | SpawnError::Command(_) => client_error(
                 ClientErrorStatusCode::BAD_REQUEST,
                 "invalid_argv",
                 err.to_string(),

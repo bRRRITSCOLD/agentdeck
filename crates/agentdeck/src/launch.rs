@@ -39,13 +39,15 @@ pub async fn agent_new(client: &Client, launch: Launch<'_>) -> anyhow::Result<Pa
     };
     agentdeck_client::panes::launch_agent(client, ws_id, launch.agent, cwd, launch.task)
         .await
-        .map_err(|err| launch_error(err, launch.agent, launch.task))
+        .map_err(|err| launch_error(err, launch.task))
 }
 
-/// The daemon's refusal, with what to do about the ones a person can fix.
-fn launch_error(err: ApiError, agent: Agent, task: Option<TaskId>) -> anyhow::Error {
+/// The daemon's refusal, with what to do about the ones a person can fix. An agent that
+/// can't start is the daemon's message alone, which says what to do when it isn't on the
+/// daemon's `PATH`.
+fn launch_error(err: ApiError, task: Option<TaskId>) -> anyhow::Error {
     let hint = match err.code.as_deref() {
-        Some("invalid_argv") => Some(format!("is `{agent}` installed and on agentdeckd's PATH?")),
+        Some("invalid_argv") => return anyhow::anyhow!(err.message),
         Some("unknown_task") => task.map(|task| format!("no task {task}; see `agentdeck task ls`")),
         Some("unknown_tab") => Some("the tab was deleted while launching; try again".to_owned()),
         Some("invalid_dir") => Some("--cwd must be an existing directory".to_owned()),
@@ -72,12 +74,20 @@ mod tests {
         }
 
         #[test]
-        fn should_ask_whether_the_agent_is_installed_when_it_cant_start() {
-            let err = launch_error(api("invalid_argv"), Agent::Codex, None).to_string();
+        fn should_say_only_the_daemons_message_when_the_agent_cant_start() {
+            let refused = ApiError {
+                message: "`codex` isn't on agentdeckd's PATH. Install it, or start agentdeckd \
+                          from a shell where it's found."
+                    .into(),
+                code: Some("invalid_argv".into()),
+            };
+
+            let err = launch_error(refused, None).to_string();
 
             assert_eq!(
                 err,
-                "refused (invalid_argv): is `codex` installed and on agentdeckd's PATH?"
+                "`codex` isn't on agentdeckd's PATH. Install it, or start agentdeckd from a \
+                 shell where it's found."
             );
         }
 
@@ -85,14 +95,14 @@ mod tests {
         fn should_name_the_unknown_task() {
             let task: TaskId = "0190a1b2-c3d4-7e5f-8a9b-000000000005".parse().unwrap();
 
-            let err = launch_error(api("unknown_task"), Agent::Claude, Some(task)).to_string();
+            let err = launch_error(api("unknown_task"), Some(task)).to_string();
 
             assert!(err.contains(&format!("no task {task}")), "{err}");
         }
 
         #[test]
         fn should_pass_other_errors_through() {
-            let err = launch_error(api("unsupported_kind"), Agent::Claude, None).to_string();
+            let err = launch_error(api("unsupported_kind"), None).to_string();
 
             assert_eq!(err, "refused (unsupported_kind)");
         }
