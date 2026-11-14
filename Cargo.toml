@@ -70,6 +70,9 @@ semver = "=1.0.28"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 slog = "=2.8.2"
+# Splits `terminal.file_opener` into words as a shell would, so it never runs through `sh -c`
+# (MIT OR Apache-2.0); already in the lockfile through GPUI.
+shell-words = "=1.1.1"
 syn = { version = "=3.0.9", features = ["full"] }
 tempfile = "=3.27.0"
 thiserror = "=2.0.21"

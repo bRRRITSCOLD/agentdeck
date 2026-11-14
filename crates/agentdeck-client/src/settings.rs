@@ -83,7 +83,7 @@ pub async fn set(client: &Client, key: &str, value: Value) -> Result<Settings, A
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AppearanceSettings, PrSyncSettings, ThemePreference};
+    use crate::types::{AppearanceSettings, PrSyncSettings, TerminalSettings, ThemePreference};
 
     fn settings() -> Settings {
         Settings {
@@ -91,6 +91,9 @@ mod tests {
                 theme: ThemePreference::Dark,
             },
             pr_sync: PrSyncSettings { max_age_days: 30 },
+            terminal: TerminalSettings {
+                file_opener: "code {path}".into(),
+            },
             overridden_by_env: vec!["pr_sync.max_age_days".into()],
         }
     }
@@ -105,6 +108,7 @@ mod tests {
                 [
                     ("appearance.theme".to_owned(), json!("dark")),
                     ("pr_sync.max_age_days".to_owned(), json!(30)),
+                    ("terminal.file_opener".to_owned(), json!("code {path}")),
                 ]
             );
         }

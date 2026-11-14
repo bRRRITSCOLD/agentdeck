@@ -5,6 +5,7 @@
 //! - [`id`]: one id newtype per entity.
 //! - [`pane`], [`task`], [`pr`], [`comment`]: the text-valued columns of spec §3 as enums.
 //! - [`layout`]: a tab's split tree.
+//! - [`opener`]: the command a click on a file path in a pane runs.
 //! - [`state`]: agent state from the screen, by data-driven rules (spec §7).
 //! - [`ws`]: the `/v1/ws` WebSocket protocol (spec §5).
 //!
@@ -19,6 +20,7 @@ pub mod comment;
 pub mod daemon;
 pub mod id;
 pub mod layout;
+pub mod opener;
 pub mod pane;
 pub mod pr;
 pub mod state;

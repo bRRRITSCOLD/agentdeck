@@ -5,6 +5,8 @@
 //!   and saves it.
 //! - **GitHub:** "Sync PRs updated in the last (days)", saved on Enter or when the field loses
 //!   focus. Text that isn't a count of days shows the field's error and isn't saved.
+//! - **Terminal:** "Open file paths with", `terminal.file_opener`, saved the same way. A
+//!   command that isn't an opener ([`FileOpener::parse`]) shows the field's error instead.
 //!
 //! The window makes the view as it connects, so the saved theme applies from the start. It
 //! reads the settings again on every `changed settings`, so a change another client makes
@@ -15,8 +17,9 @@ use std::sync::Arc;
 
 use agentdeck_client::ApiError;
 use agentdeck_client::types::{
-    AppearancePatch, PrSyncPatch, Settings, SettingsPatch, ThemePreference,
+    AppearancePatch, PrSyncPatch, Settings, SettingsPatch, TerminalPatch, ThemePreference,
 };
+use agentdeck_core::opener::{FileOpener, OpenerError};
 use agentdeck_core::ws::{Entity as Changed, ServerMessage};
 use brrritscold_core_gpui::{
     ActiveTheme as _, Field, FieldDescription, FieldError, Input, InputState, Label, Select,
@@ -41,6 +44,28 @@ const SECTION_WIDTH: gpui::Pixels = px(480.);
 /// What the field shows for text that isn't a count of days.
 const NOT_DAYS: &str = "Enter a whole number of days, 0 or more.";
 
+/// What the opener field shows for a blank command.
+const NO_COMMAND: &str = "Enter a command, such as xdg-open {path}.";
+
+/// What the opener field shows for a command with an unclosed quote.
+const UNCLOSED: &str = "Close the quote in the command.";
+
+/// What the opener field shows for a command that isn't given `{path}`.
+const NO_PATH: &str = "Pass {path} to the command, as in code -g {path}:{line}.";
+
+/// The opener field's description, as Penpot words it.
+const OPENER_DESCRIPTION: &str = "Ctrl+click a file path in a pane to run this. {path} is the file and {line} its line, when the path has one (src/main.rs:42). For example: code -g {path}:{line}";
+
+/// Why the opener field can't take `command`, in the field's words; `None` when it can.
+fn opener_error(command: &str) -> Option<&'static str> {
+    match FileOpener::parse(command) {
+        Ok(_) => None,
+        Err(OpenerError::Empty) => Some(NO_COMMAND),
+        Err(OpenerError::Unsplittable(_)) => Some(UNCLOSED),
+        Err(OpenerError::NoPath) => Some(NO_PATH),
+    }
+}
+
 /// The core-gpui preference for the daemon's `appearance.theme`.
 pub fn preference(theme: ThemePreference) -> brrritscold_core_gpui::ThemePreference {
     match theme {
@@ -64,7 +89,12 @@ pub struct SettingsView {
     days: Entity<InputState>,
     /// Why the days typed weren't saved, and the text that wasn't, until it is edited.
     days_error: Option<(SharedString, SharedString)>,
+    /// "Open file paths with".
+    opener: Entity<InputState>,
+    /// Why the opener typed wasn't saved, and the text that wasn't, until it is edited.
+    opener_error: Option<(SharedString, SharedString)>,
     _days: Subscription,
+    _opener: Subscription,
     _events: Subscription,
 }
 
@@ -83,6 +113,12 @@ impl SettingsView {
             InputEvent::Change => this.edited_days(cx),
             InputEvent::Focus => {}
         });
+        let opener = cx.new(|cx| InputState::new(window, cx));
+        let _opener = cx.subscribe_in(&opener, window, |this, _, event, window, cx| match event {
+            InputEvent::PressEnter { .. } | InputEvent::Blur => this.save_opener(window, cx),
+            InputEvent::Change => this.edited_opener(cx),
+            InputEvent::Focus => {}
+        });
         let _events = cx.subscribe_in(connection, window, |this, _, event, window, cx| {
             if let DaemonEvent::Message(ServerMessage::Changed {
                 entity: Changed::Settings,
@@ -97,7 +133,10 @@ impl SettingsView {
             settings: None,
             days,
             days_error: None,
+            opener,
+            opener_error: None,
             _days,
+            _opener,
             _events,
         };
         view.reread(window, cx);
@@ -109,15 +148,23 @@ impl SettingsView {
         self.days_error.as_ref().map(|(why, _)| why)
     }
 
+    /// Why the opener typed wasn't saved, if it wasn't.
+    pub fn opener_error(&self) -> Option<&SharedString> {
+        self.opener_error.as_ref().map(|(why, _)| why)
+    }
+
     /// Drops the days field's error once its text is no longer what was refused.
     fn edited_days(&mut self, cx: &mut Context<Self>) {
         let text = self.days.read(cx).value();
-        if self
-            .days_error
-            .as_ref()
-            .is_some_and(|(_, refused)| *refused != text)
-        {
-            self.days_error = None;
+        if clear_if_edited(&mut self.days_error, &text) {
+            cx.notify();
+        }
+    }
+
+    /// Drops the opener field's error once its text is no longer what was refused.
+    fn edited_opener(&mut self, cx: &mut Context<Self>) {
+        let text = self.opener.read(cx).value();
+        if clear_if_edited(&mut self.opener_error, &text) {
             cx.notify();
         }
     }
@@ -135,16 +182,20 @@ impl SettingsView {
         .detach();
     }
 
-    /// Shows `settings` and applies their theme. The days field keeps what is being typed in
-    /// it.
+    /// Shows `settings` and applies their theme. A field keeps what is being typed in it.
     fn show(&mut self, settings: Settings, window: &mut Window, cx: &mut Context<Self>) {
         Theme::set_preference(preference(settings.appearance.theme), cx);
-        let days = self.days.clone();
-        let typing = days.read(cx).focus_handle(cx).is_focused(window);
-        if !typing {
-            let text = settings.pr_sync.max_age_days.to_string();
-            days.update(cx, |input, cx| input.set_value(text, window, cx));
+        if show_unless_typing(
+            &self.days,
+            settings.pr_sync.max_age_days.to_string(),
+            window,
+            cx,
+        ) {
             self.days_error = None;
+        }
+        let opener = settings.terminal.file_opener.clone();
+        if show_unless_typing(&self.opener, opener, window, cx) {
+            self.opener_error = None;
         }
         self.settings = Some(settings);
         cx.notify();
@@ -169,6 +220,7 @@ impl SettingsView {
         let patch = SettingsPatch {
             appearance: Some(AppearancePatch { theme: Some(theme) }),
             pr_sync: None,
+            terminal: None,
         };
         let saving = self.api.update_settings(patch, cx);
         cx.spawn_in(window, async move |this, cx| {
@@ -208,6 +260,7 @@ impl SettingsView {
             pr_sync: Some(PrSyncPatch {
                 max_age_days: Some(days),
             }),
+            terminal: None,
         };
         let saving = self.api.update_settings(patch, cx);
         cx.spawn_in(window, async move |this, cx| {
@@ -221,6 +274,51 @@ impl SettingsView {
                             this.days_error = Some((refusal.message.clone().into(), text));
                         }
                         _ => failed("Couldn't save the PR cutoff", &err, window, cx),
+                    },
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Saves the opener typed: what Enter and leaving the field do. A command that isn't an
+    /// opener shows the field's error instead; the one already saved isn't sent again.
+    pub fn save_opener(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.opener.read(cx).value();
+        if let Some(why) = opener_error(&text) {
+            self.opener_error = Some((why.into(), text));
+            cx.notify();
+            return;
+        }
+        self.opener_error = None;
+        cx.notify();
+        let saved = self
+            .settings
+            .as_ref()
+            .map(|s| s.terminal.file_opener.as_str());
+        if saved == Some(text.as_ref()) {
+            return;
+        }
+        let patch = SettingsPatch {
+            appearance: None,
+            pr_sync: None,
+            terminal: Some(TerminalPatch {
+                file_opener: Some(text.to_string()),
+            }),
+        };
+        let saving = self.api.update_settings(patch, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let saved = saving.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match saved {
+                    Ok(settings) => this.settings = Some(settings),
+                    Err(err) => match err.downcast_ref::<ApiError>() {
+                        Some(refusal) if refusal.code.as_deref() == Some("invalid_setting") => {
+                            let text = this.opener.read(cx).value();
+                            this.opener_error = Some((refusal.message.clone().into(), text));
+                        }
+                        _ => failed("Couldn't save the file opener", &err, window, cx),
                     },
                 }
                 cx.notify();
@@ -334,6 +432,50 @@ impl SettingsView {
             })
             .into_any_element()
     }
+
+    /// The file opener field.
+    fn opener_field(&self) -> gpui::AnyElement {
+        let error = self.opener_error().cloned();
+        Field::new()
+            .child(Label::new().child("Open file paths with"))
+            .child(
+                div()
+                    .debug_selector(|| "settings opener".into())
+                    .child(Input::new(&self.opener).aria_invalid(error.is_some())),
+            )
+            .child(FieldDescription::new(OPENER_DESCRIPTION))
+            .when_some(error, |field, why| {
+                field.child(
+                    div()
+                        .debug_selector(|| "settings opener error".into())
+                        .child(FieldError::new(why)),
+                )
+            })
+            .into_any_element()
+    }
+}
+
+/// Clears `error` once the field's `text` is no longer what was refused; whether it did.
+fn clear_if_edited(error: &mut Option<(SharedString, SharedString)>, text: &SharedString) -> bool {
+    if error.as_ref().is_some_and(|(_, refused)| refused != text) {
+        *error = None;
+        return true;
+    }
+    false
+}
+
+/// Puts `text` in `input` unless it is focused, so what is being typed stays; whether it did.
+fn show_unless_typing(
+    input: &Entity<InputState>,
+    text: String,
+    window: &mut Window,
+    cx: &mut Context<SettingsView>,
+) -> bool {
+    if input.read(cx).focus_handle(cx).is_focused(window) {
+        return false;
+    }
+    input.update(cx, |input, cx| input.set_value(text, window, cx));
+    true
 }
 
 impl Render for SettingsView {
@@ -342,6 +484,7 @@ impl Render for SettingsView {
         let theme = self.theme_field(cx);
         let appearance = self.section("Appearance", [theme], cx);
         let github = self.section("GitHub", [self.days_field()], cx);
+        let terminal = self.section("Terminal", [self.opener_field()], cx);
         let header = self.header(cx);
         // Penpot `Content`: Header / Sections, padded `space.6`, as the Inbox's.
         div()
@@ -358,7 +501,7 @@ impl Render for SettingsView {
             .p(space::S6)
             .bg(s.background)
             .child(header)
-            // Sections 32px apart under 8px; Terminal (#92) comes after GitHub.
+            // Sections 32px apart under 8px.
             .child(
                 div()
                     .flex()
@@ -367,7 +510,8 @@ impl Render for SettingsView {
                     .gap(space::S8)
                     .pt(space::S2)
                     .child(appearance)
-                    .child(github),
+                    .child(github)
+                    .child(terminal),
             )
     }
 }
@@ -376,7 +520,7 @@ impl Render for SettingsView {
 mod tests {
     use std::rc::Rc;
 
-    use agentdeck_client::types::{AppearanceSettings, PrSyncSettings};
+    use agentdeck_client::types::{AppearanceSettings, PrSyncSettings, TerminalSettings};
     use agentdeck_client::ws::{self, Remote};
     use brrritscold_core_gpui::{Mode, Root};
     use gpui::{TestAppContext, VisualTestContext};
@@ -469,6 +613,46 @@ mod tests {
             self.view
                 .read_with(cx, |view, _| view.days_error().map(|e| e.to_string()))
         }
+
+        fn opener_shown(&self, cx: &mut VisualTestContext) -> String {
+            cx.read(|cx| self.view.read(cx).opener.read(cx).value().to_string())
+        }
+
+        /// Focuses the opener field and types `text` over what it holds.
+        fn type_opener(&self, text: &str, cx: &mut VisualTestContext) {
+            cx.update(|window, cx| {
+                let opener = self.view.read(cx).opener.clone();
+                opener.update(cx, |input, cx| {
+                    input.focus(window, cx);
+                    input.set_value(text.to_owned(), window, cx);
+                });
+            });
+            self.settle(cx);
+        }
+
+        fn opener_error(&self, cx: &mut VisualTestContext) -> Option<String> {
+            self.view
+                .read_with(cx, |view, _| view.opener_error().map(|e| e.to_string()))
+        }
+    }
+
+    fn with_opener(command: &str) -> Settings {
+        Settings {
+            terminal: TerminalSettings {
+                file_opener: command.into(),
+            },
+            ..default_settings()
+        }
+    }
+
+    fn opener_patch(command: &str) -> SettingsPatch {
+        SettingsPatch {
+            appearance: None,
+            pr_sync: None,
+            terminal: Some(TerminalPatch {
+                file_opener: Some(command.into()),
+            }),
+        }
     }
 
     mod preference {
@@ -520,6 +704,7 @@ mod tests {
                         theme: Some(ThemePreference::Light),
                     }),
                     pr_sync: None,
+                    terminal: None,
                 }]
             );
             assert_eq!(
@@ -574,6 +759,7 @@ mod tests {
                     pr_sync: Some(PrSyncPatch {
                         max_age_days: Some(14),
                     }),
+                    terminal: None,
                 }]
             );
             assert_eq!(harness.api.settings_now().pr_sync.max_age_days, 14);
@@ -663,6 +849,118 @@ mod tests {
         }
     }
 
+    mod opener {
+        use super::*;
+
+        #[gpui::test]
+        fn should_show_the_saved_opener(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(with_opener("code -g {path}:{line}"), cx);
+
+            assert_eq!(harness.opener_shown(cx), "code -g {path}:{line}");
+            assert!(cx.debug_bounds("settings opener").is_some());
+        }
+
+        #[gpui::test]
+        fn should_save_the_opener_on_enter(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(default_settings(), cx);
+            harness.type_opener("code -g {path}:{line}", cx);
+
+            cx.simulate_keystrokes("enter");
+            harness.settle(cx);
+
+            assert_eq!(harness.patches(), [opener_patch("code -g {path}:{line}")]);
+            assert_eq!(
+                harness.api.settings_now().terminal.file_opener,
+                "code -g {path}:{line}"
+            );
+        }
+
+        #[gpui::test]
+        fn should_save_the_opener_when_the_field_loses_focus(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(default_settings(), cx);
+            harness.type_opener("kitty nvim +{line} {path}", cx);
+
+            cx.update(|window, cx| window.blur(cx));
+            harness.settle(cx);
+
+            assert_eq!(
+                harness.api.settings_now().terminal.file_opener,
+                "kitty nvim +{line} {path}"
+            );
+        }
+
+        #[gpui::test]
+        fn should_not_save_the_opener_already_saved(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(default_settings(), cx);
+            harness.type_opener(agentdeck_core::opener::DEFAULT, cx);
+
+            cx.simulate_keystrokes("enter");
+            harness.settle(cx);
+
+            assert_eq!(harness.patches(), []);
+        }
+
+        #[gpui::test]
+        fn should_show_the_fields_error_and_not_save_a_command_without_path(
+            cx: &mut TestAppContext,
+        ) {
+            let (harness, cx) = Harness::open(default_settings(), cx);
+            harness.type_opener("code -g", cx);
+
+            cx.simulate_keystrokes("enter");
+            harness.settle(cx);
+
+            assert_eq!(harness.patches(), []);
+            assert_eq!(harness.opener_error(cx).as_deref(), Some(NO_PATH));
+            assert!(cx.debug_bounds("settings opener error").is_some());
+        }
+
+        #[gpui::test]
+        fn should_clear_the_error_once_the_opener_is_edited(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(default_settings(), cx);
+            harness.type_opener("", cx);
+            cx.simulate_keystrokes("enter");
+            harness.settle(cx);
+            assert_eq!(harness.opener_error(cx).as_deref(), Some(NO_COMMAND));
+
+            cx.simulate_input("x");
+            harness.settle(cx);
+
+            assert_eq!(harness.opener_error(cx), None);
+        }
+
+        #[gpui::test]
+        fn should_show_the_daemons_refusal_under_the_field(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(default_settings(), cx);
+            harness.api.refuse_next(
+                "invalid_setting",
+                "terminal.file_opener must name a command",
+            );
+            harness.type_opener("code {path}", cx);
+
+            cx.simulate_keystrokes("enter");
+            harness.settle(cx);
+
+            assert_eq!(
+                harness.opener_error(cx).as_deref(),
+                Some("terminal.file_opener must name a command")
+            );
+        }
+
+        #[gpui::test]
+        fn should_toast_when_the_opener_cant_be_saved(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(default_settings(), cx);
+            harness.api.fail_next("connection refused");
+            harness.type_opener("code {path}", cx);
+
+            cx.simulate_keystrokes("enter");
+            harness.settle(cx);
+
+            let shown = cx.update(|_, cx| notice::shown(cx));
+            assert_eq!(shown.last().unwrap().title, "Couldn't save the file opener");
+        }
+    }
+
     mod changed {
         use super::*;
 
@@ -675,6 +973,9 @@ mod tests {
                     theme: ThemePreference::Dark,
                 },
                 pr_sync: PrSyncSettings { max_age_days: 7 },
+                terminal: TerminalSettings {
+                    file_opener: "code {path}".into(),
+                },
                 overridden_by_env: Vec::new(),
             });
 
@@ -694,6 +995,7 @@ mod tests {
                 brrritscold_core_gpui::ThemePreference::Dark
             );
             assert_eq!(harness.days_shown(cx), "7");
+            assert_eq!(harness.opener_shown(cx), "code {path}");
         }
 
         #[gpui::test]
@@ -719,17 +1021,22 @@ mod tests {
         use super::*;
 
         #[gpui::test]
-        fn should_lay_the_sections_out_480px_wide_and_32px_apart(cx: &mut TestAppContext) {
+        fn should_lay_the_three_sections_out_480px_wide_and_32px_apart(cx: &mut TestAppContext) {
             let (_harness, cx) = Harness::open(default_settings(), cx);
 
             let appearance = cx
                 .debug_bounds("settings section Appearance")
                 .expect("Appearance");
             let github = cx.debug_bounds("settings section GitHub").expect("GitHub");
+            let terminal = cx
+                .debug_bounds("settings section Terminal")
+                .expect("Terminal");
 
             assert_eq!(appearance.size.width, SECTION_WIDTH);
             assert_eq!(github.size.width, SECTION_WIDTH);
+            assert_eq!(terminal.size.width, SECTION_WIDTH);
             assert_eq!(github.top() - appearance.bottom(), space::S8);
+            assert_eq!(terminal.top() - github.bottom(), space::S8);
         }
 
         #[gpui::test]

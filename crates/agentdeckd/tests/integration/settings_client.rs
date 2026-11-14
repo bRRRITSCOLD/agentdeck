@@ -29,6 +29,18 @@ mod set {
     }
 
     #[tokio::test]
+    async fn should_set_the_file_opener_from_the_text_typed() {
+        let daemon = daemon().await;
+
+        let value = agentdeck_client::settings::parse_value("code -g {path}:{line}");
+        let settings = set(&daemon.client, "terminal.file_opener", value)
+            .await
+            .expect("set the opener");
+
+        assert_eq!(settings.terminal.file_opener, "code -g {path}:{line}");
+    }
+
+    #[tokio::test]
     async fn should_give_the_daemons_message_and_code_for_a_value_it_does_not_take() {
         let daemon = daemon().await;
 
