@@ -62,8 +62,15 @@ fn log(daemon: &TestDaemon, pane: PaneId) -> PathBuf {
 /// Every argv the pane's stub agent was started with (program name left out), oldest first.
 pub fn launches(daemon: &TestDaemon, pane: PaneId) -> Vec<Vec<String>> {
     let bytes = std::fs::read(log(daemon, pane).join("argv")).unwrap_or_default();
-    let text = String::from_utf8(bytes).expect("UTF-8 argv");
-    text.split_terminator('\u{1e}')
+    argv_records(&String::from_utf8(bytes).expect("UTF-8 argv"))
+}
+
+/// The complete records in a stub's argv file. Whatever follows the last `\036` is a launch
+/// the stub is still writing, so it is left out until its terminator lands.
+fn argv_records(text: &str) -> Vec<Vec<String>> {
+    let complete = text.rfind('\u{1e}').map_or("", |end| &text[..=end]);
+    complete
+        .split_terminator('\u{1e}')
         .map(|record| record.split_terminator('\0').map(str::to_owned).collect())
         .collect()
 }
@@ -81,4 +88,28 @@ pub fn trust_answer(daemon: &TestDaemon, pane: PaneId) -> Option<String> {
 /// The session id the pane's stub codex wrote a session file for.
 pub fn codex_session(daemon: &TestDaemon, pane: PaneId) -> Option<String> {
     std::fs::read_to_string(log(daemon, pane).join("session")).ok()
+}
+
+mod tests {
+    use super::*;
+
+    mod argv_records {
+        use super::*;
+
+        #[test]
+        fn should_leave_out_a_record_the_stub_is_still_writing() {
+            assert_eq!(
+                argv_records("a\0\u{1e}--session-id\0"),
+                vec![vec!["a".to_owned()]]
+            );
+        }
+
+        #[test]
+        fn should_give_every_terminated_record_oldest_first() {
+            assert_eq!(
+                argv_records("a\0\u{1e}\u{1e}"),
+                vec![vec!["a".to_owned()], Vec::new()]
+            );
+        }
+    }
 }

@@ -21,13 +21,14 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// A GraphQL endpoint nothing listens on.
 const UNREACHABLE: &str = "http://127.0.0.1:9/graphql";
 
-/// A stub `claude`: records its argv under `<root>/agents/<pane>/argv` (NUL-separated), sets
+/// A stub `claude`: records its argv under `<root>/agents/<pane>/argv` (NUL-separated, ended
+/// by `\036` once complete, as the redirect creates the file before anything is in it), sets
 /// Claude Code's idle title, then appends whatever is typed to `stdin` there. Stays in the
 /// foreground, so the claude rules apply.
 const STUB_CLAUDE: &str = r#"#!/bin/sh
 log="$(dirname "$0")/../agents/$AGENTDECK_PANE"
 mkdir -p "$log"
-for arg in "$@"; do printf '%s\0' "$arg"; done > "$log/argv"
+{ for arg in "$@"; do printf '%s\0' "$arg"; done; printf '\036'; } > "$log/argv"
 printf '\033]0;\342\234\263 Claude Code\007> '
 cat >> "$log/stdin"
 "#;
@@ -37,7 +38,7 @@ cat >> "$log/stdin"
 const STUB_CODEX: &str = r#"#!/bin/sh
 log="$(dirname "$0")/../agents/$AGENTDECK_PANE"
 mkdir -p "$log"
-for arg in "$@"; do printf '%s\0' "$arg"; done > "$log/argv"
+{ for arg in "$@"; do printf '%s\0' "$arg"; done; printf '\036'; } > "$log/argv"
 id=$(cat /proc/sys/kernel/random/uuid)
 dir="${CODEX_HOME:-$HOME/.codex}/sessions/2026/11/12"
 mkdir -p "$dir"
@@ -275,8 +276,14 @@ pub fn text<'a>(value: &'a Value, field: &str) -> &'a str {
 /// has started.
 pub fn agent_argv(env: &TestEnv, pane: &str) -> Option<Vec<String>> {
     let bytes = std::fs::read(env.root().join("agents").join(pane).join("argv")).ok()?;
-    let text = String::from_utf8(bytes).expect("UTF-8 argv");
-    Some(text.split_terminator('\0').map(str::to_owned).collect())
+    argv_record(&String::from_utf8(bytes).expect("UTF-8 argv"))
+}
+
+/// The arguments in a stub's argv file, or `None` until the stub has written its terminator:
+/// the file exists from the moment the redirect opens it, empty or half written.
+fn argv_record(text: &str) -> Option<Vec<String>> {
+    let args = text.strip_suffix('\u{1e}')?;
+    Some(args.split_terminator('\0').map(str::to_owned).collect())
 }
 
 /// What has been typed into the stub agent in `pane`.
@@ -349,5 +356,32 @@ pub fn eventually<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
         }
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+mod tests {
+    use super::*;
+
+    mod argv_record {
+        use super::*;
+
+        #[test]
+        fn should_be_none_while_the_stub_is_still_writing_it() {
+            assert_eq!(argv_record(""), None);
+            assert_eq!(argv_record("--session-id\0"), None);
+        }
+
+        #[test]
+        fn should_give_the_arguments_once_the_record_is_terminated() {
+            assert_eq!(
+                argv_record("--session-id\0abc\0\u{1e}"),
+                Some(vec!["--session-id".to_owned(), "abc".to_owned()])
+            );
+        }
+
+        #[test]
+        fn should_give_no_arguments_for_a_terminated_empty_record() {
+            assert_eq!(argv_record("\u{1e}"), Some(Vec::new()));
+        }
     }
 }
