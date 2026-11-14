@@ -269,6 +269,17 @@ pub struct PrSyncStatus {
     pub last_synced_at: Option<String>,
     /// Why the most recent sync failed; `None` when it succeeded or none has run.
     pub last_error: Option<String>,
+    /// How far the sync running now is; `None` while none runs.
+    pub progress: Option<PrSyncProgress>,
+}
+
+/// How far a running PR sync is through its search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PrSyncProgress {
+    /// Search pages read and stored so far.
+    pub pages_done: u32,
+    /// Search pages this sync expects, from the search's count.
+    pub pages: u32,
 }
 
 /// A terminal in a tab, running an agent CLI or a shell.

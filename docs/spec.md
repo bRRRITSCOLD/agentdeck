@@ -137,7 +137,7 @@ The message types are `agentdeck_core::ws::{ClientMessage, ServerMessage}`.
 - **Resize:** the **primary** client's size wins. The most recent client to send `primary` (the focused GUI window) is primary; until one does, or after it detaches, any client's resize applies. A resize from any other client is ignored and answered with `resize` carrying the size the pane keeps. Sending `primary` applies the size that client last asked for. Other attached clients get `resize` when the size changes; bytes after it were written at the new size.
 - **Terminal queries** (DA, cursor position, …) are answered only by the daemon's `Term`. Clients drop the replies their own `Term` generates.
 - **Backpressure:** a client more than 1 MiB behind on a channel gets `lagged`. It then re-attaches for a fresh snapshot.
-- **Data events:** `changed` tells clients to refetch an entity over REST: `workspace`, `tab`, `pane`, `task` or `note`, after it is created, changed or deleted. `state` and `exit` are sent to every client, attached or not.
+- **Data events:** `changed` tells clients to refetch an entity over REST: `workspace`, `tab`, `pane`, `task` or `note`, after it is created, changed or deleted; `pr_sync` (id `status`) means `GET /v1/prs/status`, when a PR sync begins, reads a page or ends. `state` and `exit` are sent to every client, attached or not.
 - **Errors:** a message the daemon can't act on gets `error` with a `code`: `not_found` (attach to a pane that isn't live), `not_attached` (a channel with nothing attached), `invalid_message`.
 
 ## 6. Launching agents
@@ -210,13 +210,13 @@ min_ms = 400                   # a new state must hold this long before it is pu
 - A sync every 120 s (the first at start), and on `POST /v1/prs/sync`, which clients call when a task is opened. One sync runs at a time. `AGENTDECK_GITHUB_API` replaces the GraphQL URL (`https://api.github.com/graphql`); tests point it at httpmock.
   - **Full:** the first sync, and the first after an hour since the last full one (`AGENTDECK_PR_FULL_SYNC_SECS`, `0` for every sync): the GraphQL search `is:pr is:open author:@me`.
   - **Incremental:** the rest search `is:pr author:@me updated:>=<T>`, where `T` is 10 minutes before the last good sync began, so a merged or closed PR comes back in its new state. A merged or closed PR not stored as open is skipped. Then open PRs whose checks are `pending`, which a finished check run doesn't bring into the search, are fetched by number, and inbox PRs are matched to workspaces again as stored. Nothing is found gone.
-- `POST /v1/prs/sync` answers once its sync finishes, with the same body as `GET /v1/prs/status`: `{ login: "logged_in"|"logged_out", last_synced_at, last_error }`. A failed sync is still 200, with `last_error` set: `GitHub answered <status>`, plus GitHub's `message` when the body is JSON. A request that fails with a 5xx or in transit is tried up to 3 times, 1 s then 2 s apart.
+- `POST /v1/prs/sync` answers once its sync finishes, with the same body as `GET /v1/prs/status`: `{ login: "logged_in"|"logged_out", last_synced_at, last_error, progress }`. A failed sync is still 200, with `last_error` set: `GitHub answered <status>`, plus GitHub's `message` when the body is JSON. A request that fails with a 5xx or in transit is tried up to 3 times, 1 s then 2 s apart.
 - Each result becomes a PR task, titled with the PR's title:
   - Its **workspace** is the oldest unarchived workspace whose dir holds a clone of the PR's repo with `head_ref` present as a local branch. A clone is a git repo up to 3 levels under the dir (as the dirty report searches) with any `github.com` remote (https, ssh or scp-like URL) naming the repo, compared case-insensitively. If no workspace matches, it goes to the inbox (`workspace_id` NULL). Only an inbox task is matched again on later syncs; a PR task never leaves its workspace.
   - **New PR:** a PR task created with status `review`.
   - **Merged or closed:** the task goes to `done`; reopened, back to `review`. While the PR's state holds, the task keeps whatever status it has. In a full sync, PRs that left the search are fetched by number, once, up to 50 to a request; one GitHub no longer shows is stored as closed.
 - `checks` and `review` come from `statusCheckRollup` (`ERROR` counts as failure, `EXPECTED` as pending) and `reviewDecision`. Every task in the API carries its PR as `pr` (null for a plain task).
-- Each task a sync creates or changes gets a `changed` event (§5).
+- A sync stores each search page as it arrives, and each task it creates or changes gets a `changed` event (§5) then. While it runs, the status's `progress` is `{ pages_done, pages }` (`pages` from the search's count, `0` until the first page answers), and every change to it sends a `pr_sync` event. Clients show it: "Syncing… 2 of 6".
 
 ## 9. Notes
 

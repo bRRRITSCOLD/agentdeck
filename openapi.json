@@ -672,6 +672,28 @@
         ],
         "type": "string"
       },
+      "PrSyncProgress": {
+        "description": "How far a running PR sync is through its search.",
+        "properties": {
+          "pages": {
+            "description": "Search pages this sync expects, from the search's count.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "pages_done": {
+            "description": "Search pages read and stored so far.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pages",
+          "pages_done"
+        ],
+        "type": "object"
+      },
       "PrSyncStatus": {
         "description": "`GET /v1/prs/status` and `POST /v1/prs/sync`: the `gh` login and the last sync.",
         "properties": {
@@ -692,6 +714,15 @@
               }
             ],
             "description": "The `gh` login state."
+          },
+          "progress": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PrSyncProgress"
+              }
+            ],
+            "description": "How far the sync running now is; `None` while none runs.",
+            "nullable": true
           }
         },
         "required": [

@@ -21,7 +21,7 @@ use gpui::{
 };
 
 use crate::api::Api;
-use crate::overview::Snapshot;
+use crate::overview::{PrSync, Snapshot};
 use crate::task_list::{self, Query, Row, Scope};
 use crate::task_row::{self, Table};
 use crate::workspace::failed;
@@ -129,14 +129,20 @@ impl InboxView {
         task_row::spaced(task_row::wide(row, picker, Table::Inbox, cx))
     }
 
+    /// Where PR sync stands, at `now`: how far a running sync is, whoever started it, or
+    /// "Syncing…" from the moment "Sync now" is clicked until the daemon says more.
+    pub fn sync_label(&self, now: chrono::DateTime<chrono::Utc>) -> String {
+        let sync = self.snapshot.overview().pr_sync;
+        if self.syncing && !matches!(sync, PrSync::Syncing { .. }) {
+            return "Syncing…".to_owned();
+        }
+        sync.short_label(now)
+    }
+
     /// Penpot `Header`: heading, spacer, when PRs last synced, "Sync now".
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
-        let synced = if self.syncing {
-            "Syncing…".to_owned()
-        } else {
-            (self.snapshot.overview().pr_sync).short_label(chrono::Utc::now())
-        };
+        let synced = self.sync_label(chrono::Utc::now());
         div()
             .flex()
             .flex_none()
@@ -451,6 +457,25 @@ mod tests {
 
         assert_eq!(*harness.api.syncs.lock().unwrap(), 1);
         assert_eq!(*harness.synced.borrow(), 1);
+    }
+
+    #[gpui::test]
+    fn should_say_how_far_a_sync_it_did_not_start_is(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::open(inbox(), cx);
+        let mut snapshot = inbox();
+        snapshot.pr_sync.progress = Some(agentdeck_client::types::PrSyncProgress {
+            pages_done: 1,
+            pages: 2,
+        });
+
+        cx.update(|_, cx| {
+            harness
+                .view
+                .update(cx, |view, cx| view.set_snapshot(snapshot, cx))
+        });
+
+        let label = cx.update(|_, cx| harness.view.read(cx).sync_label(chrono::Utc::now()));
+        assert_eq!(label, "Syncing… 1 of 2");
     }
 
     #[gpui::test]

@@ -378,6 +378,19 @@ pub mod types {
             Default::default()
         }
     }
+    ///How far a running PR sync is through its search.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct PrSyncProgress {
+        ///Search pages this sync expects, from the search's count.
+        pub pages: u32,
+        ///Search pages read and stored so far.
+        pub pages_done: u32,
+    }
+    impl PrSyncProgress {
+        pub fn builder() -> builder::PrSyncProgress {
+            Default::default()
+        }
+    }
     ///`GET /v1/prs/status` and `POST /v1/prs/sync`: the `gh` login and the last sync.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct PrSyncStatus {
@@ -389,6 +402,9 @@ pub mod types {
         pub last_synced_at: ::std::option::Option<::std::string::String>,
         ///The `gh` login state.
         pub login: GhLogin,
+        ///How far the sync running now is; `None` while none runs.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub progress: ::std::option::Option<PrSyncProgress>,
     }
     impl PrSyncStatus {
         pub fn builder() -> builder::PrSyncStatus {
@@ -1780,6 +1796,60 @@ pub mod types {
             }
         }
         #[derive(Clone, Debug)]
+        pub struct PrSyncProgress {
+            pages: ::std::result::Result<u32, ::std::string::String>,
+            pages_done: ::std::result::Result<u32, ::std::string::String>,
+        }
+        impl ::std::default::Default for PrSyncProgress {
+            fn default() -> Self {
+                Self {
+                    pages: Err("no value supplied for pages".to_string()),
+                    pages_done: Err("no value supplied for pages_done".to_string()),
+                }
+            }
+        }
+        impl PrSyncProgress {
+            pub fn pages<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<u32>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.pages = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for pages: {e}"));
+                self
+            }
+            pub fn pages_done<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<u32>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.pages_done = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for pages_done: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<PrSyncProgress> for super::PrSyncProgress {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: PrSyncProgress,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    pages: value.pages?,
+                    pages_done: value.pages_done?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::PrSyncProgress> for PrSyncProgress {
+            fn from(value: super::PrSyncProgress) -> Self {
+                Self {
+                    pages: Ok(value.pages),
+                    pages_done: Ok(value.pages_done),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
         pub struct PrSyncStatus {
             last_error: ::std::result::Result<
                 ::std::option::Option<::std::string::String>,
@@ -1790,6 +1860,10 @@ pub mod types {
                 ::std::string::String,
             >,
             login: ::std::result::Result<super::GhLogin, ::std::string::String>,
+            progress: ::std::result::Result<
+                ::std::option::Option<super::PrSyncProgress>,
+                ::std::string::String,
+            >,
         }
         impl ::std::default::Default for PrSyncStatus {
             fn default() -> Self {
@@ -1797,6 +1871,7 @@ pub mod types {
                     last_error: Ok(Default::default()),
                     last_synced_at: Ok(Default::default()),
                     login: Err("no value supplied for login".to_string()),
+                    progress: Ok(Default::default()),
                 }
             }
         }
@@ -1831,6 +1906,16 @@ pub mod types {
                     .map_err(|e| format!("error converting supplied value for login: {e}"));
                 self
             }
+            pub fn progress<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<super::PrSyncProgress>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.progress = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for progress: {e}"));
+                self
+            }
         }
         impl ::std::convert::TryFrom<PrSyncStatus> for super::PrSyncStatus {
             type Error = super::error::ConversionError;
@@ -1841,6 +1926,7 @@ pub mod types {
                     last_error: value.last_error?,
                     last_synced_at: value.last_synced_at?,
                     login: value.login?,
+                    progress: value.progress?,
                 })
             }
         }
@@ -1850,6 +1936,7 @@ pub mod types {
                     last_error: Ok(value.last_error),
                     last_synced_at: Ok(value.last_synced_at),
                     login: Ok(value.login),
+                    progress: Ok(value.progress),
                 }
             }
         }

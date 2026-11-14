@@ -158,6 +158,8 @@ pub enum Entity {
     Task,
     /// `/v1/notes/{id}`.
     Note,
+    /// `/v1/prs/status`: a PR sync began, read a page or ended. Its id is always `status`.
+    PrSync,
 }
 
 #[cfg(test)]
