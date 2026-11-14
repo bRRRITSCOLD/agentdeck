@@ -4,8 +4,10 @@
 use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use httpmock::prelude::*;
 use httpmock::{Mock, MockServer};
 use serde_json::{Value, json};
@@ -110,10 +112,16 @@ impl Pr {
     }
 }
 
-/// An `updatedAt` `days` before now, for tests of the PR age cutoff. Leaked, as [`Pr`] holds
-/// `'static` strings; a test makes a handful.
+/// The instant [`days_ago`] counts back from: the first time a test asks, then the same for
+/// the rest of it (nextest runs each test in its own process). Counting from the clock each
+/// time gave the same PR two `updatedAt`s once a test crossed a whole second, so a daemon that
+/// stored the first saw the second as an update and fetched it again.
+static NOW: LazyLock<DateTime<Utc>> = LazyLock::new(Utc::now);
+
+/// An `updatedAt` `days` before [`NOW`], for tests of the PR age cutoff. Leaked, as [`Pr`]
+/// holds `'static` strings; a test makes a handful.
 pub fn days_ago(days: i64) -> &'static str {
-    let at = chrono::Utc::now() - chrono::TimeDelta::days(days);
+    let at = *NOW - chrono::TimeDelta::days(days);
     at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true).leak()
 }
 
@@ -235,4 +243,22 @@ pub fn mock_unauthorized<'a>(server: &'a MockServer, token: &str) -> Mock<'a> {
         then.status(401)
             .json_body(json!({ "message": "Bad credentials" }));
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod days_ago {
+        use super::*;
+
+        #[test]
+        fn should_give_the_same_time_for_the_same_days_all_through_a_test() {
+            let first = days_ago(1);
+            // Past the next whole second, which `updatedAt` is written to.
+            std::thread::sleep(Duration::from_millis(1100));
+
+            assert_eq!(days_ago(1), first);
+        }
+    }
 }
