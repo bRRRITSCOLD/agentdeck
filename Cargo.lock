@@ -171,6 +171,8 @@ dependencies = [
  "gpui-base",
  "gpui-pre",
  "gpui-pre-platform",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]
