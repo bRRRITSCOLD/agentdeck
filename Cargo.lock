@@ -169,6 +169,7 @@ dependencies = [
  "brrritscold-core-gpui",
  "brrritscold-core-gpui-tokens",
  "chrono",
+ "futures-util",
  "gpui-base",
  "gpui-pre",
  "gpui-pre-platform",
@@ -177,6 +178,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "zbus 6.2.1",
 ]
 
 [[package]]

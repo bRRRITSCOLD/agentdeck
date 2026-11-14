@@ -73,7 +73,7 @@ fn muted(snapshot: &Snapshot, workspace: Option<WorkspaceId>) -> bool {
 }
 
 /// The alert for `pane`, now as `snapshot` holds it, having been `before`: "Claude Code is
-/// blocked" over "<task or tab> · <workspace>", when an agent pane turned `blocked` or `done`
+/// blocked" over "\<task or tab> · \<workspace>", when an agent pane turned `blocked` or `done`
 /// and its workspace isn't muted.
 pub fn pane_alert(before: AgentState, pane: &PaneState, snapshot: &Snapshot) -> Option<Alert> {
     let verb = match pane.state {
@@ -183,7 +183,7 @@ fn change(task: &Task, event: PrEvent) -> PrChange {
     }
 }
 
-/// One alert per change: "Checks failed" over "<repo> #<n> · <title>"; or, when more than 3
+/// One alert per change: "Checks failed" over "\<repo> #\<n> · \<title>"; or, when more than 3
 /// PRs changed, one "N PRs changed" over their numbers that opens the Tasks view.
 fn pr_alerts(changes: Vec<PrChange>) -> Vec<Alert> {
     let mut prs: Vec<TaskId> = changes.iter().map(|change| change.task).collect();
