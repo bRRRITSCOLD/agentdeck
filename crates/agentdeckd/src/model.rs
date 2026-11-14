@@ -273,13 +273,13 @@ pub struct PrSyncStatus {
     pub progress: Option<PrSyncProgress>,
 }
 
-/// How far a running PR sync is through its search.
+/// How far a running PR sync is through the viewer's PRs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PrSyncProgress {
-    /// Search pages read and stored so far.
-    pub pages_done: u32,
-    /// Search pages this sync expects, from the search's count.
-    pub pages: u32,
+    /// PRs read and stored so far.
+    pub prs_done: u32,
+    /// PRs this sync expects, from the search's count; `0` until the first page answers.
+    pub prs: u32,
 }
 
 /// A terminal in a tab, running an agent CLI or a shell.

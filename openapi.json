@@ -673,24 +673,24 @@
         "type": "string"
       },
       "PrSyncProgress": {
-        "description": "How far a running PR sync is through its search.",
+        "description": "How far a running PR sync is through the viewer's PRs.",
         "properties": {
-          "pages": {
-            "description": "Search pages this sync expects, from the search's count.",
+          "prs": {
+            "description": "PRs this sync expects, from the search's count; `0` until the first page answers.",
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
           },
-          "pages_done": {
-            "description": "Search pages read and stored so far.",
+          "prs_done": {
+            "description": "PRs read and stored so far.",
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
           }
         },
         "required": [
-          "pages",
-          "pages_done"
+          "prs",
+          "prs_done"
         ],
         "type": "object"
       },

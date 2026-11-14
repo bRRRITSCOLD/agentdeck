@@ -464,8 +464,8 @@ mod tests {
         let (harness, cx) = Harness::open(inbox(), cx);
         let mut snapshot = inbox();
         snapshot.pr_sync.progress = Some(agentdeck_client::types::PrSyncProgress {
-            pages_done: 1,
-            pages: 2,
+            prs_done: 50,
+            prs: 271,
         });
 
         cx.update(|_, cx| {
@@ -475,7 +475,7 @@ mod tests {
         });
 
         let label = cx.update(|_, cx| harness.view.read(cx).sync_label(chrono::Utc::now()));
-        assert_eq!(label, "Syncing… 1 of 2");
+        assert_eq!(label, "Syncing… 50 of 271 PRs");
     }
 
     #[gpui::test]

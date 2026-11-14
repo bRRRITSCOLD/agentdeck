@@ -611,10 +611,10 @@ mod progress {
             &[Pr::open(1)],
             None,
             Some("c1"),
-            51,
+            2,
             Duration::ZERO,
         );
-        mock_search_page(github, TOKEN, &[Pr::open(2)], Some("c1"), None, 51, delay);
+        mock_search_page(github, TOKEN, &[Pr::open(2)], Some("c1"), None, 2, delay);
         daemon(github, Some(TOKEN)).await
     }
 
@@ -644,8 +644,8 @@ mod progress {
         assert_eq!(
             status(&daemon.client).await.progress,
             Some(PrSyncProgress {
-                pages_done: 1,
-                pages: 2
+                prs_done: 1,
+                prs: 2
             })
         );
         let finished = sync(&daemon.client).await;

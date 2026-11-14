@@ -177,8 +177,8 @@ pub fn pr_status(status: &PrSyncStatus) -> String {
     );
     if let Some(progress) = &status.progress {
         out.push_str(&format!(
-            "syncing:   page {} of {}\n",
-            progress.pages_done, progress.pages
+            "syncing:   {} of {} PRs\n",
+            progress.prs_done, progress.prs
         ));
     }
     if let Some(error) = &status.last_error {
@@ -340,14 +340,14 @@ mod tests {
                 last_synced_at: Some("2026-11-14T10:00:00.000Z".into()),
                 login: GhLogin::LoggedIn,
                 progress: Some(PrSyncProgress {
-                    pages_done: 2,
-                    pages: 6,
+                    prs_done: 100,
+                    prs: 271,
                 }),
             });
 
             assert_eq!(
                 out,
-                "gh:        logged_in\nlast sync: 2026-11-14T10:00:00.000Z\nsyncing:   page 2 of 6\n"
+                "gh:        logged_in\nlast sync: 2026-11-14T10:00:00.000Z\nsyncing:   100 of 271 PRs\n"
             );
         }
     }
