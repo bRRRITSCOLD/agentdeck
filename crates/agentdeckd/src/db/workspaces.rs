@@ -117,7 +117,8 @@ pub fn update(
     get(conn, id)
 }
 
-/// Archives (stamping now) or unarchives. Archiving an archived workspace keeps its stamp.
+/// Archives (stamping now) or unarchives. Archiving an archived workspace keeps its stamp, and
+/// archiving is refused (`panes_running`) while any of its panes hasn't exited.
 pub fn set_archived(
     conn: &Connection,
     id: WorkspaceId,
@@ -125,6 +126,19 @@ pub fn set_archived(
 ) -> Result<Workspace, DbError> {
     get(conn, id)?;
     if archived {
+        let running: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM panes p JOIN tabs t ON t.id = p.tab_id
+             WHERE t.workspace_id = ?1 AND p.state <> 'exited'",
+            [id.to_string()],
+            |row| row.get(0),
+        )?;
+        if running > 0 {
+            let panes = if running == 1 { "pane" } else { "panes" };
+            return Err(DbError::Conflict {
+                code: "panes_running",
+                message: format!("Close its {running} running {panes} first"),
+            });
+        }
         conn.execute(
             "UPDATE workspaces SET archived_at = COALESCE(archived_at, ?2) WHERE id = ?1",
             params![id.to_string(), now()],

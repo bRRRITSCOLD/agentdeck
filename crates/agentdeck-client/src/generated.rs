@@ -3217,7 +3217,9 @@ impl Client {
     pub fn workspace_update(&self) -> builder::WorkspaceUpdate<'_> {
         builder::WorkspaceUpdate::new(self)
     }
-    ///Archives a workspace; its tasks, notes and dir are kept
+    ///Archives a workspace; its tasks, notes and dir are kept. Refused (409 `panes_running`) while
+    ///
+    ///any of its panes runs.
     ///
     ///Sends a `POST` request to `/v1/workspaces/{id}/archive`
     ///

@@ -91,7 +91,7 @@ v1.1 adds `channels`, `channel_members` and `messages` in their own migration.
 |---|---|
 | `GET /v1/health` | version, uptime |
 | `GET/POST /v1/workspaces`, `GET/PATCH /v1/workspaces/{id}` | list, create (`{name, dir?}`: no `dir` means a scratch dir), rename, mute |
-| `POST /v1/workspaces/{id}/archive`, `.../unarchive` | archive keeps the data |
+| `POST /v1/workspaces/{id}/archive`, `.../unarchive` | archive keeps the data; refused (409 `panes_running`, "Close its 2 running panes first") while any of its panes hasn't exited |
 | `GET /v1/workspaces/{id}/dirty` | each git repo under `dir` with its uncommitted files and unpushed branches |
 | `DELETE /v1/workspaces/{id}?force=` | without `force`: `409 dirty` with the dirty report. Removes the dir only if `dir_owned` |
 | `GET/POST /v1/workspaces/{id}/tabs`, `PATCH/DELETE /v1/tabs/{id}` | tabs and their layout tree, listed in `position` order |

@@ -122,7 +122,8 @@ pub(crate) async fn workspace_update(
     Ok(HttpResponseOk(workspace))
 }
 
-/// Archives a workspace; its tasks, notes and dir are kept.
+/// Archives a workspace; its tasks, notes and dir are kept. Refused (409 `panes_running`) while
+/// any of its panes runs.
 #[endpoint { method = POST, path = "/v1/workspaces/{id}/archive" }]
 pub(crate) async fn workspace_archive(
     rqctx: RequestContext<ApiContext>,

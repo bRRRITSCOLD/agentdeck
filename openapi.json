@@ -1970,6 +1970,7 @@
     },
     "/v1/workspaces/{id}/archive": {
       "post": {
+        "description": "any of its panes runs.",
         "operationId": "workspace_archive",
         "parameters": [
           {
@@ -2000,7 +2001,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Archives a workspace; its tasks, notes and dir are kept."
+        "summary": "Archives a workspace; its tasks, notes and dir are kept. Refused (409 `panes_running`) while"
       }
     },
     "/v1/workspaces/{id}/dirty": {
