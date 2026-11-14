@@ -102,12 +102,17 @@ impl When {
     }
 }
 
+/// Asked right before queued bytes are typed, under the pane's lock; `false` drops them.
+pub type Claim = Box<dyn FnOnce() -> bool + Send>;
+
 /// Input waiting for its [`When`].
 struct Queued {
     when: When,
     bytes: Vec<u8>,
-    /// Told once the bytes are typed; dropped untold if the process exits first.
+    /// Told once the bytes are typed; dropped untold if the process exits first or `claim`
+    /// says no.
     typed: Option<oneshot::Sender<()>>,
+    claim: Option<Claim>,
 }
 
 /// Why a pane couldn't start.
@@ -415,17 +420,20 @@ impl Pane {
             when,
             bytes: bytes.to_vec(),
             typed: None,
+            claim: None,
         })
     }
 
-    /// Types `bytes` into the PTY once the agent waits at its prompt ([`When::Prompt`]). The
-    /// receiver is told when they are typed; it errs if the process exits first.
-    pub fn deliver(&self, bytes: &[u8]) -> Result<oneshot::Receiver<()>, Exited> {
+    /// Types `bytes` into the PTY once the agent waits at its prompt ([`When::Prompt`]), if
+    /// `claim`, asked right before, still says yes. The receiver is told when they are typed;
+    /// it errs if the process exits first or `claim` says no.
+    pub fn deliver(&self, bytes: &[u8], claim: Claim) -> Result<oneshot::Receiver<()>, Exited> {
         let (typed, delivered) = oneshot::channel();
         self.enqueue(Queued {
             when: When::Prompt,
             bytes: bytes.to_vec(),
             typed: Some(typed),
+            claim: Some(claim),
         })?;
         Ok(delivered)
     }
@@ -445,6 +453,9 @@ impl Pane {
     }
 
     fn typed(&self, queued: Queued) {
+        if queued.claim.is_some_and(|claim| !claim()) {
+            return;
+        }
         self.write(queued.bytes);
         if let Some(typed) = queued.typed {
             let _ = typed.send(());

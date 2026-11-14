@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use agentdeck_client::Client;
 use agentdeck_client::types::{
-    Comment, InputWhen, Instruction, NewComment, NewInstruction, NewTask, PaneInput, PanePatch,
-    Task,
+    Comment, InputWhen, Instruction, NewComment, NewInstruction, NewTask, Pane, PaneInput,
+    PanePatch, Task,
 };
 use agentdeck_core::{Agent, AgentState, CommentId, PaneId, PaneKind, TaskId, WorkspaceId};
 
@@ -115,7 +115,7 @@ async fn launched(daemon: &TestDaemon, pane: PaneId, n: usize) -> Vec<Vec<String
     .await
 }
 
-async fn pane(client: &Client, id: PaneId) -> agentdeck_client::types::Pane {
+async fn pane(client: &Client, id: PaneId) -> Pane {
     client
         .pane_get()
         .id(id)
@@ -307,6 +307,96 @@ mod post_v1_panes {
 
 mod comment_delivery {
     use super::*;
+
+    /// Launches a claude pane on `task` held at the folder trust dialog, so a comment for it
+    /// waits; then trusts the folder again, so later panes start idle.
+    async fn held_agent(daemon: &TestDaemon, place: &Place, task: TaskId) -> Pane {
+        let untrusted = std::path::Path::new(&place.workspace.dir).join("untrusted");
+        std::fs::write(&untrusted, "").expect("marking the folder untrusted");
+        let pane = place
+            .launch(&daemon.client, Agent::Claude, Some(task))
+            .await;
+        in_state(&daemon.client, pane.id, AgentState::Blocked).await;
+        std::fs::remove_file(&untrusted).expect("trusting the folder");
+        pane
+    }
+
+    /// Answers `pane`'s trust dialog and returns everything typed into it once it is idle.
+    /// What was waiting for its prompt is typed as it idles; the marker typed after that
+    /// shows it all has arrived.
+    async fn typed_once_released(daemon: &TestDaemon, pane: PaneId) -> String {
+        type_now(&daemon.client, pane, "\r").await;
+        in_state(&daemon.client, pane, AgentState::Idle).await;
+        type_now(&daemon.client, pane, "marker\r").await;
+        eventually("the marker to be typed", || async {
+            let typed = typed(daemon, pane);
+            typed.ends_with("marker\n").then_some(typed)
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn should_type_a_waiting_comment_only_into_a_newer_agent_linked_meanwhile() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
+        let older = held_agent(&daemon, &place, task.id).await;
+        let waiting = comment(&daemon.client, &task, "Also check Firefox", None).await;
+        let newer = place.launch(&daemon.client, Agent::Claude, None).await;
+        in_state(&daemon.client, newer.id, AgentState::Idle).await;
+
+        link(&daemon.client, newer.id, Some(task.id)).await;
+
+        delivered_to(&daemon.client, task.id, waiting.id, newer.id).await;
+        assert_eq!(typed(&daemon, newer.id), "Also check Firefox\n");
+        assert_eq!(typed_once_released(&daemon, older.id).await, "marker\n");
+        let comment = read_comment(&daemon.client, task.id, waiting.id).await;
+        assert_eq!(comment.delivered_to_pane, Some(newer.id));
+    }
+
+    #[tokio::test]
+    async fn should_keep_a_waiting_comment_for_its_newer_agent_when_an_older_one_is_linked() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
+        let older = place.launch(&daemon.client, Agent::Claude, None).await;
+        in_state(&daemon.client, older.id, AgentState::Idle).await;
+        let newer = held_agent(&daemon, &place, task.id).await;
+        let waiting = comment(&daemon.client, &task, "Also check Firefox", None).await;
+
+        link(&daemon.client, older.id, Some(task.id)).await;
+
+        // The link types at once into an idle pane, so anything it typed precedes the marker.
+        type_now(&daemon.client, older.id, "marker\r").await;
+        eventually("the marker to be typed", || async {
+            typed(&daemon, older.id).ends_with("marker\n").then_some(())
+        })
+        .await;
+        assert_eq!(typed(&daemon, older.id), "marker\n");
+        assert_eq!(
+            typed_once_released(&daemon, newer.id).await,
+            "Also check Firefox\nmarker\n"
+        );
+        delivered_to(&daemon.client, task.id, waiting.id, newer.id).await;
+    }
+
+    #[tokio::test]
+    async fn should_not_type_a_waiting_comment_a_new_agents_launch_prompt_carried() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
+        let older = held_agent(&daemon, &place, task.id).await;
+        let waiting = comment(&daemon.client, &task, "Also check Firefox", None).await;
+
+        let newer = place
+            .launch(&daemon.client, Agent::Claude, Some(task.id))
+            .await;
+
+        let prompt = launched(&daemon, newer.id, 1).await[0].join(" ");
+        assert!(prompt.contains("Also check Firefox"), "{prompt}");
+        delivered_to(&daemon.client, task.id, waiting.id, newer.id).await;
+        assert_eq!(typed_once_released(&daemon, older.id).await, "marker\n");
+    }
 
     #[tokio::test]
     async fn should_type_the_users_comment_into_its_idle_agent_and_mark_it_delivered() {

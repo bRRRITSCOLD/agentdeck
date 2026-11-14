@@ -72,6 +72,7 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
         prs,
         settings,
         terminals: terminals.clone(),
+        claims: Default::default(),
         events,
     };
     let config = ConfigDropshot {
