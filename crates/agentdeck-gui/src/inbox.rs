@@ -27,6 +27,7 @@ use crate::api::Api;
 use crate::overview::{PrSync, Snapshot};
 use crate::task_list::{self, Query, Row, Scope};
 use crate::task_row::{self, Table};
+use crate::task_sheet::OpenTask;
 use crate::workspace::failed;
 
 /// A sync asked for in the Inbox has finished.
@@ -45,6 +46,7 @@ pub struct InboxView {
 }
 
 impl EventEmitter<Synced> for InboxView {}
+impl EventEmitter<OpenTask> for InboxView {}
 
 impl InboxView {
     /// A view that syncs and changes statuses through `api`; it shows nothing until given a
@@ -129,7 +131,8 @@ impl InboxView {
                 this.set_status(task, *status, window, cx);
             }),
         );
-        task_row::spaced(task_row::wide(row, picker, Table::Inbox, cx))
+        let open = Box::new(cx.listener(move |_, _, _, cx| cx.emit(OpenTask(task))));
+        task_row::spaced(task_row::wide(row, picker, Table::Inbox, open, cx))
     }
 
     /// Where PR sync stands, at `now`: how far a running sync is, whoever started it, or
@@ -388,6 +391,40 @@ mod tests {
 
     fn drawn(task: u32, cx: &mut VisualTestContext) -> bool {
         bounds(task, cx).is_some()
+    }
+
+    #[gpui::test]
+    fn should_ask_for_the_task_sheet_when_a_title_is_clicked(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::open(inbox(), cx);
+        let asked = Rc::new(RefCell::new(Vec::new()));
+        let seen = asked.clone();
+        let _asks = cx.update(|_, cx| {
+            cx.subscribe(&harness.view, move |_, event: &OpenTask, _| {
+                seen.borrow_mut().push(*event)
+            })
+        });
+        harness.draw(cx);
+
+        let title = format!("task title {}", id::<TaskId>(1));
+        let bounds = cx.debug_bounds(title.leak()).expect("the title shows");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+
+        assert_eq!(*asked.borrow(), [OpenTask(id(1))]);
+    }
+
+    #[gpui::test]
+    fn should_dot_a_row_whose_agent_comments_are_unseen(cx: &mut TestAppContext) {
+        let mut snapshot = inbox();
+        snapshot.tasks[1].unseen_agent_comments = 3;
+        let (harness, cx) = Harness::open(snapshot, cx);
+        harness.draw(cx);
+
+        let dotted = |task: u32, cx: &mut VisualTestContext| {
+            (cx.debug_bounds(format!("unseen {}", id::<TaskId>(task)).leak())).is_some()
+        };
+        assert!(dotted(2, cx));
+        assert!(!dotted(1, cx));
     }
 
     #[gpui::test]

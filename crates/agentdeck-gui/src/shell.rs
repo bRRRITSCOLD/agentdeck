@@ -10,7 +10,8 @@
 //! else the Inbox.
 //!
 //! The Tasks view and the right panel ask for the new task dialog with
-//! [`NewTask`], preset to the Inbox or their workspace.
+//! [`NewTask`], preset to the Inbox or their workspace. They and the Inbox ask for the task
+//! sheet with [`OpenTask`] when a task's title is clicked.
 
 use std::sync::Arc;
 
@@ -39,6 +40,7 @@ use crate::new_workspace::{Created, NewWorkspaceDialog};
 use crate::notice::{self, Notice, NoticeAction};
 use crate::right_panel::RightPanel;
 use crate::sidebar::{Selection, SidebarEvent, SidebarView};
+use crate::task_sheet::{OpenTask, TaskSheet};
 use crate::tasks::TasksView;
 use crate::title_bar::{Close, Minimize, TitleBar, ToggleMaximize};
 use crate::top_bar::{ArchiveWorkspace, DeleteWorkspace, TopBar, UnarchiveWorkspace};
@@ -65,6 +67,8 @@ pub struct Shell {
     delete_workspace: Option<Entity<DeleteWorkspaceDialog>>,
     /// The new task dialog, while connected.
     new_task: Option<Entity<NewTaskDialog>>,
+    /// The task sheet, while connected.
+    task_sheet: Option<Entity<TaskSheet>>,
     _new_workspace: Vec<Subscription>,
     /// The selected workspace.
     workspace: Option<Entity<WorkspaceView>>,
@@ -105,6 +109,7 @@ impl Shell {
             new_agent: None,
             delete_workspace: None,
             new_task: None,
+            task_sheet: None,
             _new_workspace: Vec::new(),
             workspace: None,
             tasks: None,
@@ -133,6 +138,8 @@ impl Shell {
                     let new_task = cx.new(|cx| NewTaskDialog::new(api.clone(), window, cx));
                     let panel = cx.new(|cx| RightPanel::new(api.clone(), window, cx));
                     let tasks = cx.new(|cx| TasksView::new(api.clone(), window, cx));
+                    let task_sheet =
+                        cx.new(|cx| TaskSheet::new(api.clone(), &connection, window, cx));
                     let sidebar = cx.new(|cx| SidebarView::new(api, &connection, cx));
                     self._selection =
                         Some(cx.observe_in(&sidebar, window, |shell, _, window, cx| {
@@ -178,6 +185,15 @@ impl Shell {
                         cx.subscribe_in(&panel, window, |shell, _, ask, window, cx| {
                             shell.new_task(*ask, window, cx);
                         }),
+                        cx.subscribe_in(&tasks, window, |shell, _, ask, window, cx| {
+                            shell.open_task(*ask, window, cx);
+                        }),
+                        cx.subscribe_in(&inbox, window, |shell, _, ask, window, cx| {
+                            shell.open_task(*ask, window, cx);
+                        }),
+                        cx.subscribe_in(&panel, window, |shell, _, ask, window, cx| {
+                            shell.open_task(*ask, window, cx);
+                        }),
                         cx.subscribe(&dialog, |shell, _, Created(id), cx| {
                             if let Some(sidebar) = &shell.sidebar {
                                 let selection = Selection::Workspace(*id);
@@ -190,6 +206,7 @@ impl Shell {
                     self.new_agent = Some(new_agent);
                     self.delete_workspace = Some(delete);
                     self.new_task = Some(new_task);
+                    self.task_sheet = Some(task_sheet);
                     self.tasks = Some(tasks);
                     self.panel = Some(panel);
                     self.sidebar = Some(sidebar);
@@ -208,6 +225,7 @@ impl Shell {
                 self.new_agent = None;
                 self.delete_workspace = None;
                 self.new_task = None;
+                self.task_sheet = None;
                 self.selection = None;
             }
         }
@@ -230,6 +248,10 @@ impl Shell {
         if let Some(inbox) = &self.inbox {
             let snapshot = snapshot.clone();
             inbox.update(cx, |inbox, cx| inbox.set_snapshot(snapshot, cx));
+        }
+        if let Some(sheet) = &self.task_sheet {
+            let snapshot = snapshot.clone();
+            sheet.update(cx, |sheet, cx| sheet.set_snapshot(snapshot, cx));
         }
         if let Some(tasks) = &self.tasks {
             tasks.update(cx, |tasks, cx| tasks.set_snapshot(snapshot, cx));
@@ -298,6 +320,16 @@ impl Shell {
         let snapshot = sidebar.read(cx).snapshot().clone();
         let NewTask(preset) = ask;
         dialog.update(cx, |dialog, cx| dialog.open(preset, &snapshot, window, cx));
+    }
+
+    /// Opens the task sheet on the task a view asks for.
+    fn open_task(&mut self, ask: OpenTask, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(sidebar), Some(sheet)) = (&self.sidebar, &self.task_sheet) else {
+            return;
+        };
+        let snapshot = sidebar.read(cx).snapshot().clone();
+        let OpenTask(task) = ask;
+        sheet.update(cx, |sheet, cx| sheet.open(task, snapshot, window, cx));
     }
 
     /// The selected workspace's id and name, if a workspace is selected.
@@ -474,6 +506,7 @@ impl Shell {
                 .children(self.new_agent.clone())
                 .children(self.delete_workspace.clone())
                 .children(self.new_task.clone())
+                .children(self.task_sheet.clone())
                 .into_any_element(),
         }
     }
@@ -825,6 +858,65 @@ mod tests {
                 let dialog = dialog(&shell, cx);
                 assert!(dialog.read_with(cx, |d, _| d.is_open()));
                 assert_eq!(dialog.read_with(cx, |d, _| d.workspace()), Some(id(1)));
+            }
+        }
+
+        mod task_sheet {
+            use super::*;
+
+            fn sheet(shell: &Entity<Shell>, cx: &TestAppContext) -> Entity<TaskSheet> {
+                shell.read_with(cx, |shell, _| shell.task_sheet.clone().expect("a sheet"))
+            }
+
+            /// A daemon with workspace 1 and its task 2.
+            fn daemon() -> Arc<FakeApi> {
+                let api = workspace_with_a_pane();
+                let mut snapshot = api.snapshot_now();
+                snapshot.tasks = vec![crate::overview::fixtures::task(
+                    2,
+                    agentdeck_core::TaskKind::Plain,
+                    Some(id(1)),
+                )];
+                api.set(snapshot);
+                api
+            }
+
+            #[gpui::test]
+            fn should_open_the_sheet_on_the_task_the_tasks_view_asks_for(cx: &mut TestAppContext) {
+                let connector = Rc::new(FakeConnector::default());
+                let _remote = connector.then_connect_to(daemon());
+                let shell = open(connector, cx);
+                let tasks = shell.read_with(cx, |shell, _| shell.tasks.clone().unwrap());
+
+                tasks.update(cx, |_, cx| cx.emit(OpenTask(id(2))));
+                cx.run_until_parked();
+
+                let sheet = sheet(&shell, cx);
+                assert!(sheet.read_with(cx, |s, _| s.is_open()));
+                assert_eq!(sheet.read_with(cx, |s, _| s.task()), Some(id(2)));
+            }
+
+            #[gpui::test]
+            fn should_open_the_sheet_when_the_inbox_or_the_right_panel_asks(
+                cx: &mut TestAppContext,
+            ) {
+                let connector = Rc::new(FakeConnector::default());
+                let api = daemon();
+                let _remote = connector.then_connect_to(api.clone());
+                let shell = open(connector, cx);
+                let (inbox, panel) = shell.read_with(cx, |shell, _| {
+                    (shell.inbox.clone().unwrap(), shell.panel.clone().unwrap())
+                });
+
+                inbox.update(cx, |_, cx| cx.emit(OpenTask(id(2))));
+                cx.run_until_parked();
+                panel.update(cx, |_, cx| cx.emit(OpenTask(id(2))));
+                cx.run_until_parked();
+
+                assert_eq!(
+                    *api.seen.lock().unwrap(),
+                    [id::<agentdeck_core::TaskId>(2); 2]
+                );
             }
         }
 

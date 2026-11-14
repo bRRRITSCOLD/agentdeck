@@ -256,8 +256,10 @@ impl Snapshot {
 /// Builders for snapshots in tests.
 #[cfg(test)]
 pub(crate) mod fixtures {
-    use agentdeck_client::types::{Instruction, Task, Workspace};
-    use agentdeck_core::{AgentState, PaneId, TaskKind, TaskStatus, WorkspaceId};
+    use agentdeck_client::types::{Comment, Instruction, Task, Workspace};
+    use agentdeck_core::{
+        AgentState, CommentAuthor, PaneId, TaskId, TaskKind, TaskStatus, WorkspaceId,
+    };
 
     use super::PaneState;
 
@@ -324,6 +326,22 @@ pub(crate) mod fixtures {
             title: format!("task {n}"),
             updated_at: CREATED.into(),
             workspace_id: workspace,
+        }
+    }
+
+    /// The user's comment on `task`, seen and not yet delivered.
+    pub fn comment(n: u32, task: TaskId) -> Comment {
+        Comment {
+            author: CommentAuthor::User,
+            author_agent: None,
+            author_pane: None,
+            body: format!("comment {n}"),
+            created_at: CREATED.into(),
+            delivered_at: None,
+            delivered_to_pane: None,
+            id: id(n),
+            seen_at: Some(CREATED.into()),
+            task_id: task,
         }
     }
 

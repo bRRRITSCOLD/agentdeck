@@ -229,7 +229,7 @@ pub fn group_header(
 
 /// Penpot `Checks`: an icon and, unless `icon_only` (the panel's), a word, in the checks
 /// colour (spec §11).
-fn checks(state: ChecksState, icon_only: bool, cx: &App) -> Div {
+pub fn checks(state: ChecksState, icon_only: bool, cx: &App) -> Div {
     let s = cx.theme().semantic();
     let (icon, label, color): (IconName, &str, Hsla) = match state {
         ChecksState::Success => (IconName::CircleCheck, "passing", s.success),
@@ -248,7 +248,7 @@ fn checks(state: ChecksState, icon_only: bool, cx: &App) -> Div {
 
 /// The review cell: a badge in the review colour (spec §11), or muted text while one is
 /// still required.
-fn review(state: ReviewState, cx: &App) -> AnyElement {
+pub fn review(state: ReviewState, cx: &App) -> AnyElement {
     match state {
         ReviewState::Approved => Badge::new()
             .variant(BadgeVariant::Success)
@@ -266,6 +266,13 @@ fn review(state: ReviewState, cx: &App) -> AnyElement {
     }
 }
 
+/// A status picker's items: every status, by its label.
+pub fn status_content() -> SelectContent {
+    (TaskStatus::ALL.iter()).fold(SelectContent::new(), |content, s| {
+        content.item(SelectItem::new(s.as_str(), status_label(*s)))
+    })
+}
+
 /// The status picker: core-gpui's `Select` at `sm`, listing every status. Choosing one runs
 /// `on_change` with it.
 pub fn status_picker(
@@ -273,15 +280,10 @@ pub fn status_picker(
     status: TaskStatus,
     on_change: impl Fn(&TaskStatus, &mut Window, &mut App) + 'static,
 ) -> Select {
-    let content = TaskStatus::ALL
-        .iter()
-        .fold(SelectContent::new(), |content, s| {
-            content.item(SelectItem::new(s.as_str(), status_label(*s)))
-        });
     Select::new(id)
         // Penpot's `Status` trigger is 95px whatever the status, so the column lines up.
         .trigger(SelectTrigger::new().size(SelectTriggerSize::Sm).w(px(95.)))
-        .content(content)
+        .content(status_content())
         .value(Some(status.as_str()))
         .on_value_change(move |value, window, cx| {
             if let Ok(status) = value.parse() {
@@ -290,10 +292,50 @@ pub fn status_picker(
         })
 }
 
+/// What clicking a row's title does: open the task sheet on it.
+pub type OnOpen = Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static>;
+
+/// A row's title, sm: clicking it runs `on_open`. Tests find it as `task title <id>`.
+fn title(row: &Row, on_open: OnOpen, cx: &App) -> gpui::Stateful<Div> {
+    let id = row.id;
+    div()
+        .id(SharedString::from(format!("task-title-{id}")))
+        .debug_selector(move || format!("task title {id}"))
+        .min_w_0()
+        .cursor_pointer()
+        .text_size(font_size::SM)
+        .text_color(cx.theme().semantic().foreground)
+        .on_click(on_open)
+        .child(row.title.clone())
+}
+
+/// The "new from the agent" dot after a row's title while an agent's comments on the task
+/// are unseen: an 8px dot in `primary`, a `StateDot` mark's size. Tests find it as
+/// `unseen <id>`.
+fn unseen_dot(row: &Row, cx: &App) -> Option<Div> {
+    let id = row.id;
+    row.unseen.then(|| {
+        div()
+            .debug_selector(move || format!("unseen {id}"))
+            .size(space::S4)
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .size(space::S2)
+                    .rounded_full()
+                    .bg(cx.theme().semantic().primary),
+            )
+    })
+}
+
 /// Penpot `TaskRow` (`wide`): picker, kind icon, title, agent, PR, draft, checks, review and
 /// workspace, `space.3` apart, padded `space.2`; `table`'s columns only. `picker` is the
-/// row's status picker.
-pub fn wide(row: &Row, picker: Select, table: Table, cx: &App) -> AnyElement {
+/// row's status picker; clicking the title runs `on_open`. The title is followed by a dot
+/// while the task's agent comments are unseen.
+pub fn wide(row: &Row, picker: Select, table: Table, on_open: OnOpen, cx: &App) -> AnyElement {
     let s = cx.theme().semantic();
     let muted = |text: SharedString, size: gpui::Rems| {
         div()
@@ -333,9 +375,11 @@ pub fn wide(row: &Row, picker: Select, table: Table, cx: &App) -> AnyElement {
             div()
                 .flex_1()
                 .min_w(Columns::TITLE_MIN)
-                .text_size(font_size::SM)
-                .text_color(s.foreground)
-                .child(row.title.clone()),
+                .flex()
+                .items_center()
+                .gap(space::S1_5)
+                .child(title(row, on_open, cx))
+                .children(unseen_dot(row, cx)),
         )
         .when(table.full(), |r| r.child(agent))
         .child(cell(Columns::PR).when_some(pr, |c, pr| {
@@ -381,7 +425,9 @@ pub fn wide(row: &Row, picker: Select, table: Table, cx: &App) -> AnyElement {
 /// Penpot `TaskRow` (`panel`), for the right panel's narrow column: the kind icon, the title
 /// over the PR reference and the agents' `StateDot` on top; the status picker, then the
 /// checks icon and the review badge below. Padded `space.2`, the two lines `space.1-5` apart.
-pub fn panel(row: &Row, picker: Select, cx: &App) -> AnyElement {
+/// Clicking the title runs `on_open`; a dot follows it while the task's agent comments are
+/// unseen.
+pub fn panel(row: &Row, picker: Select, on_open: OnOpen, cx: &App) -> AnyElement {
     let s = cx.theme().semantic();
     let kind_icon = match row.kind {
         TaskKind::Plain => IconName::ListTodo,
@@ -418,9 +464,11 @@ pub fn panel(row: &Row, picker: Select, cx: &App) -> AnyElement {
                         .gap(space::S0_5)
                         .child(
                             div()
-                                .text_size(font_size::SM)
-                                .text_color(s.foreground)
-                                .child(row.title.clone()),
+                                .flex()
+                                .items_center()
+                                .gap(space::S1_5)
+                                .child(title(row, on_open, cx))
+                                .children(unseen_dot(row, cx)),
                         )
                         .when_some(pr, |text, pr| {
                             text.child(

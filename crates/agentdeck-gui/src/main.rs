@@ -26,6 +26,7 @@ mod sidebar;
 mod state_dot;
 mod task_list;
 mod task_row;
+mod task_sheet;
 mod tasks;
 mod terminal;
 mod title_bar;
