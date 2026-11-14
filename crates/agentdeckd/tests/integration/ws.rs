@@ -472,6 +472,35 @@ mod get_v1_ws {
         }
 
         #[tokio::test]
+        async fn should_send_changed_when_a_workspace_is_muted() {
+            let daemon = TestDaemon::start().await;
+            let workspace = daemon
+                .client
+                .workspace_create()
+                .body_map(|new| new.name("w"))
+                .send()
+                .await
+                .expect("create a workspace")
+                .into_inner();
+            let mut ws = Ws::connect(&daemon).await;
+
+            daemon
+                .client
+                .workspace_update()
+                .id(workspace.id)
+                .body_map(|patch| patch.muted(Some(true)))
+                .send()
+                .await
+                .expect("mute");
+
+            ws.expect(ServerMessage::Changed {
+                entity: Entity::Workspace,
+                id: workspace.id.to_string(),
+            })
+            .await;
+        }
+
+        #[tokio::test]
         async fn should_send_changed_when_a_pane_is_created() {
             let daemon = TestDaemon::start().await;
             let place = Place::new(&daemon).await;

@@ -265,7 +265,7 @@ min_ms = 400                   # a new state must hold this long before it is pu
 `agentdeck` (clap) reads `daemon.json` and starts the daemon when it isn't running: no file, a pid that isn't running, or a port that refuses the connection. It starts `$AGENTDECK_DAEMON` if set, else the `agentdeckd` beside its own executable, else `agentdeckd` from `PATH`, in its own process group with no terminal, and waits up to 10 s for a `daemon.json` that answers `/v1/health`. Output is human-readable, or with `--json` the API's own objects (`ws rm` prints `{id, deleted}`, `tail` prints `{pane, output}`). A failure prints `agentdeck: <message> (<error_code>)` to stderr and exits 1; `agent new`'s `invalid_argv` prints the message alone (§6).
 
 ```
-agentdeck ws ls | new <name> [--dir PATH] | archive <ws> | rm <ws> [--force]
+agentdeck ws ls | new <name> [--dir PATH] | archive <ws> | mute <ws> | unmute <ws> | rm <ws> [--force]
 agentdeck task ls [--status S] [--ws WS] [--inbox] | add <title> [--ws WS] [--body B] | set <id> --status S | show <id>
 agentdeck comment ls --task T | add <body> --task T
 agentdeck instruction ls [--ws WS] | add <body> [--ws WS] | edit <id> <body> | rm <id>
