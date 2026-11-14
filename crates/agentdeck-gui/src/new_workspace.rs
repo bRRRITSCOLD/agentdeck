@@ -24,6 +24,7 @@ use gpui::{
 use gpui_base::input::InputEvent;
 
 use crate::api::Api;
+use crate::form_enter::form_enter;
 use crate::workspace::failed;
 
 /// The dialog made a workspace.
@@ -145,7 +146,9 @@ impl NewWorkspaceDialog {
                      problem: Option<SharedString>| {
             Field::new()
                 .child(Label::new().child(label))
-                .child(Input::new(input).aria_invalid(problem.is_some()))
+                .child(form_enter(
+                    Input::new(input).aria_invalid(problem.is_some()),
+                ))
                 .child(FieldDescription::new(description))
                 .when_some(problem, |field, why| field.child(FieldError::new(why)))
         };
@@ -381,8 +384,62 @@ mod tests {
 
             cx.simulate_input("tabs-a11y");
             cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
 
             assert_eq!(harness.made().len(), 1);
+            assert_eq!(*harness.created.borrow(), [id::<WorkspaceId>(101)]);
+            assert!(!harness.is_open(cx));
+        }
+
+        #[gpui::test]
+        fn should_stay_open_with_the_name_problem_on_enter_in_a_blank_name(
+            cx: &mut TestAppContext,
+        ) {
+            let (harness, cx) = Harness::open(cx);
+            harness.draw(cx);
+
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+
+            assert!(matches!(harness.problem(cx), Some(Problem::Name(_))));
+            assert!(harness.is_open(cx));
+            assert_eq!(harness.made(), []);
+        }
+
+        #[gpui::test]
+        fn should_stay_open_with_the_daemons_refusal_on_enter(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(cx);
+            harness.draw(cx);
+            cx.simulate_input("../x");
+            harness
+                .api
+                .refuse_next("invalid_name", "a name can't hold a /");
+
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+
+            assert_eq!(
+                harness.problem(cx),
+                Some(Problem::Name("a name can't hold a /".into()))
+            );
+            assert!(harness.is_open(cx));
+        }
+
+        #[gpui::test]
+        fn should_stay_open_on_enter_in_the_folder_without_a_name(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(cx);
+            harness.draw(cx);
+            cx.update(|window, cx| {
+                let dir = harness.dialog.read(cx).dir.clone();
+                dir.update(cx, |dir, cx| dir.focus(window, cx));
+            });
+            cx.simulate_input("/srv/ts");
+
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+
+            assert!(matches!(harness.problem(cx), Some(Problem::Name(_))));
+            assert!(harness.is_open(cx));
         }
 
         #[gpui::test]

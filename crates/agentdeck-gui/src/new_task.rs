@@ -19,10 +19,10 @@ use gpui::{
     App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
 };
-use gpui_base::actions::Confirm;
 use gpui_base::input::InputEvent;
 
 use crate::api::Api;
+use crate::form_enter::form_enter;
 use crate::overview::Snapshot;
 use crate::workspace::failed;
 
@@ -182,13 +182,9 @@ impl NewTaskDialog {
             .flex_col()
             .gap(space::S4)
             .child(
-                Field::new().child(Label::new().child("Title")).child(
-                    // The input passes Enter on as the dialog's Confirm, which would close it
-                    // whatever `create` makes of it; Enter is `create`'s alone.
-                    div()
-                        .on_action(|_: &Confirm, _, _| {})
-                        .child(Input::new(&self.title)),
-                ),
+                Field::new()
+                    .child(Label::new().child("Title"))
+                    .child(form_enter(Input::new(&self.title))),
             )
             .child(
                 Field::new()
@@ -386,6 +382,7 @@ mod tests {
 
             assert_eq!(harness.made().len(), 1);
             assert_eq!(harness.made()[0].workspace, None);
+            assert!(!harness.is_open(cx));
         }
 
         #[gpui::test]
