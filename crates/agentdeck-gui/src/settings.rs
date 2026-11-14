@@ -194,6 +194,7 @@ impl SettingsView {
             self.days_error = None;
         }
         let opener = settings.terminal.file_opener.clone();
+        crate::terminal::open::set_file_opener(&opener, cx);
         if show_unless_typing(&self.opener, opener, window, cx) {
             self.opener_error = None;
         }
@@ -858,6 +859,15 @@ mod tests {
 
             assert_eq!(harness.opener_shown(cx), "code -g {path}:{line}");
             assert!(cx.debug_bounds("settings opener").is_some());
+        }
+
+        #[gpui::test]
+        fn should_make_the_saved_opener_the_one_a_click_runs(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open(with_opener("code -g {path}:{line}"), cx);
+
+            let argv = cx.update(|_, cx| crate::terminal::open::argv("/w/a.rs", Some(2), None, cx));
+
+            assert_eq!(argv, ["code", "-g", "/w/a.rs:2"]);
         }
 
         #[gpui::test]

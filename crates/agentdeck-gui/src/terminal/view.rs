@@ -25,8 +25,14 @@
 //! the program has the mouse, which then hears nothing of that click. Only `http`, `https` and
 //! `mailto` open ([`link::openable`]). While `secondary` is held over a link, its cells are
 //! underlined and the pointer is a pointing hand.
+//!
+//! File paths are links too (spec §11): `src/main.rs:42:7` in the text, resolved against the
+//! directory the shell last reported with OSC 7, else the pane's launch dir, and a `file://`
+//! OSC 8 link for this host. Only an existing regular file is one; a click runs
+//! `terminal.file_opener` on it ([`open`]), and a failure toasts. A URL wins over a path.
 
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
+use std::path::PathBuf;
 
 use agentdeck_client::ws;
 use agentdeck_core::PaneId;
@@ -45,11 +51,39 @@ use gpui::{
 
 use super::element::{Layout, Metrics, Pointer, terminal};
 use super::input::{self, Button, Mouse};
-use super::link::{self, Link};
+use super::link;
+use super::open::{self, Opener};
 use super::palette::Palette;
+use super::path;
 use super::screen::{Copied, Frame, GridSize, Hit, Screen, SelectionKind};
 use crate::connection::{Connection, DaemonEvent};
 use crate::keymap::{self, Copy, Paste};
+use crate::notice::Notice;
+
+/// What a `secondary`-click on a link does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Target {
+    /// Opens the URI with the OS's handler.
+    Uri(String),
+    /// Runs the file opener on an existing file.
+    File {
+        /// Absolute.
+        path: PathBuf,
+        /// The line the text names.
+        line: Option<u32>,
+        /// The column the text names.
+        col: Option<u32>,
+    },
+    /// Nothing: a link with a scheme a click may not open.
+    Refused(String),
+}
+
+/// A link under the pointer: what a click does, and the cells it underlines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Hovered {
+    target: Target,
+    cells: RangeInclusive<alacritty_terminal::index::Point>,
+}
 
 /// Where the attachment stands.
 enum Attachment {
@@ -82,6 +116,9 @@ pub enum TerminalEvent {
 /// A pane's terminal.
 pub struct TerminalView {
     pane: PaneId,
+    /// The pane's launch dir, which relative paths resolve against until the shell reports
+    /// its own with OSC 7.
+    cwd: PathBuf,
     channel: Channel,
     sender: ws::Sender,
     attachment: Attachment,
@@ -100,9 +137,10 @@ pub struct TerminalView {
 }
 
 impl TerminalView {
-    /// Attaches `pane` over `connection`'s socket, through `sender`.
+    /// Attaches `pane`, launched in `cwd`, over `connection`'s socket, through `sender`.
     pub fn new(
         pane: PaneId,
+        cwd: PathBuf,
         connection: &Entity<Connection>,
         sender: ws::Sender,
         window: &mut Window,
@@ -117,6 +155,7 @@ impl TerminalView {
         let focus = cx.focus_handle();
         let view = TerminalView {
             pane,
+            cwd,
             channel,
             sender,
             attachment: Attachment::Attaching,
@@ -348,7 +387,7 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus, cx);
-        if event.modifiers.secondary(cx) && self.open_link(event.position, cx) {
+        if event.modifiers.secondary(cx) && self.open_link(event.position, window, cx) {
             self.held = None;
             return;
         }
@@ -384,24 +423,65 @@ impl TerminalView {
         self.report_press(Button::Right, event, cx);
     }
 
-    /// Opens the link at `position`, if one is there and its scheme is allowed; whether a link
-    /// was there, so the click goes no further.
-    fn open_link(&self, position: Point<Pixels>, cx: &mut App) -> bool {
-        let (Attachment::Live(screen), Some(layout)) = (&self.attachment, self.layout) else {
+    /// Opens the link at `position`, if one is there and may be opened; whether a link was
+    /// there, so the click goes no further.
+    fn open_link(&self, position: Point<Pixels>, window: &mut Window, cx: &mut App) -> bool {
+        let Some(layout) = self.layout.filter(|layout| layout.covers(position)) else {
             return false;
         };
-        if !layout.covers(position) {
-            return false;
-        }
-        let Some(link) = screen.link_at(layout.hit(position)) else {
+        let Some(link) = self.link_at(layout.hit(position)) else {
             return false;
         };
-        if link::openable(&link.uri) {
-            cx.open_url(&link.uri);
-        } else {
-            tracing::debug!(uri = link.uri, "refused to open a link with that scheme");
+        match link.target {
+            Target::Uri(uri) => cx.open_url(&uri),
+            Target::File { path, line, col } => open_file(&path, line, col, window, cx),
+            Target::Refused(uri) => {
+                tracing::debug!(uri, "refused to open a link with that scheme");
+            }
         }
         true
+    }
+
+    /// The link at the visible cell `at`: an OSC 8 hyperlink or a URL in the text, else a path
+    /// to an existing file.
+    fn link_at(&self, at: Hit) -> Option<Hovered> {
+        let Attachment::Live(screen) = &self.attachment else {
+            return None;
+        };
+        let host = path::this_host();
+        if let Some(link) = screen.link_at(at) {
+            let target = if link::openable(&link.uri) {
+                Target::Uri(link.uri)
+            } else if let Some(file) =
+                path::file_uri(&link.uri, host).filter(|file| path::is_file(file))
+            {
+                Target::File {
+                    path: file,
+                    line: None,
+                    col: None,
+                }
+            } else {
+                Target::Refused(link.uri)
+            };
+            return Some(Hovered {
+                target,
+                cells: link.cells,
+            });
+        }
+        let found = screen.path_at(at)?;
+        let cwd = screen
+            .reported_cwd()
+            .and_then(|uri| path::file_uri(uri, host))
+            .unwrap_or_else(|| self.cwd.clone());
+        let file = path::resolve(&found.path.path, &cwd, path::home().as_deref())?;
+        path::is_file(&file).then_some(Hovered {
+            target: Target::File {
+                path: file,
+                line: found.path.line,
+                col: found.path.col,
+            },
+            cells: found.cells,
+        })
     }
 
     /// A move over the terminal with no button held, which only DECSET 1003 hears of.
@@ -510,7 +590,8 @@ impl TerminalView {
         let Attachment::Live(screen) = &self.attachment else {
             return blank();
         };
-        let mut frame = screen.frame(palette, focused, self.hovered_link().as_ref());
+        let link = self.hovered_link();
+        let mut frame = screen.frame(palette, focused, link.as_ref().map(|link| &link.cells));
         frame.preedit = self
             .marked
             .as_deref()
@@ -539,11 +620,8 @@ impl TerminalView {
     }
 
     /// The link under the pointer while `secondary` is held, if any.
-    fn hovered_link(&self) -> Option<Link> {
-        let Attachment::Live(screen) = &self.attachment else {
-            return None;
-        };
-        screen.link_at(self.hovered?)
+    fn hovered_link(&self) -> Option<Hovered> {
+        self.link_at(self.hovered?)
     }
 
     /// The visible text, for tests.
@@ -653,6 +731,35 @@ impl EntityInputHandler for TerminalView {
         _: &mut Context<Self>,
     ) -> Option<usize> {
         None
+    }
+}
+
+/// Runs `terminal.file_opener` on `path` at `line` and `col`; a failure to start it toasts.
+fn open_file(
+    path: &std::path::Path,
+    line: Option<u32>,
+    col: Option<u32>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(text) = path.to_str() else {
+        tracing::debug!(?path, "not opening a path that isn't UTF-8");
+        return;
+    };
+    let argv = open::argv(text, line, col, cx);
+    let Some(Opener(spawn)) = cx.try_global::<Opener>().cloned() else {
+        tracing::warn!(?argv, "no file opener is set");
+        return;
+    };
+    if let Err(err) = spawn.spawn(&argv) {
+        let name = path
+            .file_name()
+            .map_or(text.into(), |name| name.to_string_lossy());
+        Notice::error(
+            format!("Couldn't open {name}"),
+            format!("{}: {err}", argv[0]),
+        )
+        .show(window, cx);
     }
 }
 
@@ -806,12 +913,16 @@ mod tests {
         }
     }
 
-    /// A window on a terminal for pane 1, over a connected fake daemon.
+    /// A window on a terminal for pane 1, launched in a temp dir, over a connected fake daemon,
+    /// with a fake file opener.
     struct Harness {
         remote: Remote,
         /// Keeps the socket open.
         _connection: Entity<Connection>,
         host: Entity<Host>,
+        /// The pane's launch dir.
+        cwd: tempfile::TempDir,
+        opener: std::sync::Arc<open::fake::FakeSpawn>,
     }
 
     impl Harness {
@@ -819,6 +930,9 @@ mod tests {
             cx.update(brrritscold_core_gpui::init);
             cx.update(super::super::init);
             cx.update(crate::keymap::init);
+            let opener = cx.update(open::fake::install);
+            let cwd = tempfile::tempdir().expect("a temp dir");
+            let launch_dir = cwd.path().to_path_buf();
             let connector = Rc::new(FakeConnector::default());
             let remote = connector.then_connect();
             let connector: Rc<dyn Connector> = connector;
@@ -830,8 +944,9 @@ mod tests {
             };
             let mut host = None;
             let window = cx.add_window(|window, cx| {
-                let terminal =
-                    cx.new(|cx| TerminalView::new(id(1), &connection, sender, window, cx));
+                let terminal = cx.new(|cx| {
+                    TerminalView::new(id(1), launch_dir, &connection, sender, window, cx)
+                });
                 let view = cx.new(|_| Host(Some(terminal)));
                 host = Some(view.clone());
                 Root::new(view, window, cx)
@@ -841,6 +956,8 @@ mod tests {
                 remote,
                 _connection: connection,
                 host: host.unwrap(),
+                cwd,
+                opener,
             };
             (harness, cx)
         }
@@ -880,6 +997,11 @@ mod tests {
             cx.run_until_parked();
             cx.update(|window, cx| window.draw(cx).clear(cx));
             cx.run_until_parked();
+        }
+
+        /// Every argv the file opener was asked to start.
+        fn started(&self) -> Vec<Vec<String>> {
+            self.opener.started.lock().unwrap().clone()
         }
 
         fn sent(&mut self) -> Vec<Outgoing> {
@@ -1905,6 +2027,14 @@ mod tests {
 
         const OSC_8: &[u8] = b"\x1b]8;;https://example.com\x1b\\example\x1b]8;;\x1b\\";
 
+        /// Writes the file `name` under `dir`, making its dirs; its path.
+        fn touch(dir: &std::path::Path, name: &str) -> PathBuf {
+            let file = dir.join(name);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, "x").unwrap();
+            file
+        }
+
         fn ctrl_click(harness: &Harness, line: usize, col: usize, cx: &mut VisualTestContext) {
             let at = harness.at(line, col, Side::Left, cx);
             let secondary = secondary(cx);
@@ -1984,12 +2114,166 @@ mod tests {
         #[gpui::test]
         fn should_refuse_a_scheme_it_does_not_allow(cx: &mut TestAppContext) {
             let (mut harness, cx) =
-                Harness::live(b"\x1b]8;;file:///etc/passwd\x1b\\passwd\x1b]8;;\x1b\\", cx);
+                Harness::live(b"\x1b]8;;ssh://host/x\x1b\\host\x1b]8;;\x1b\\", cx);
 
             ctrl_click(&harness, 0, 2, cx);
 
             assert_eq!(cx.opened_url(), None);
+            assert_eq!(harness.started(), Vec::<Vec<String>>::new());
             assert_eq!(harness.sent(), []);
+        }
+
+        mod files {
+            use super::*;
+
+            /// A live terminal that then prints `text`.
+            fn showing<'a>(
+                text: &str,
+                cx: &'a mut TestAppContext,
+            ) -> (Harness, &'a mut VisualTestContext) {
+                let (harness, cx) = Harness::live(b"", cx);
+                harness.deliver(Event::Output(1, text.as_bytes().to_vec()), cx);
+                harness.draw(cx);
+                (harness, cx)
+            }
+
+            #[gpui::test]
+            fn should_run_the_opener_on_an_existing_path_with_its_line_and_column(
+                cx: &mut TestAppContext,
+            ) {
+                let (mut harness, cx) = showing("at src/main.rs:42:7", cx);
+                let file = touch(harness.cwd.path(), "src/main.rs");
+                cx.update(|_, cx| open::set_file_opener("code -g {path}:{line}:{col}", cx));
+
+                ctrl_click(&harness, 0, 5, cx);
+
+                assert_eq!(
+                    harness.started(),
+                    [["code", "-g", &format!("{}:42:7", file.display())]]
+                );
+                assert_eq!(cx.opened_url(), None);
+                assert_eq!(harness.sent(), []);
+            }
+
+            #[gpui::test]
+            fn should_keep_a_path_with_spaces_in_its_dir_one_argument(cx: &mut TestAppContext) {
+                let (harness, cx) = showing("see notes.md", cx);
+                let dir = harness.cwd.path().join("my notes");
+                let file = touch(&dir, "notes.md");
+                let osc_7 = format!("\x1b]7;file://{}\x07", dir.display()).replace(' ', "%20");
+                harness.deliver(Event::Output(1, osc_7.into_bytes()), cx);
+
+                ctrl_click(&harness, 0, 6, cx);
+
+                assert_eq!(
+                    harness.started(),
+                    [["xdg-open".to_owned(), file.display().to_string()]]
+                );
+            }
+
+            #[gpui::test]
+            fn should_open_nothing_for_a_path_that_does_not_exist(cx: &mut TestAppContext) {
+                let (harness, cx) = showing("at src/missing.rs:3", cx);
+                touch(harness.cwd.path(), "src/main.rs");
+
+                ctrl_click(&harness, 0, 5, cx);
+
+                assert_eq!(harness.started(), Vec::<Vec<String>>::new());
+            }
+
+            #[gpui::test]
+            fn should_resolve_against_the_dir_the_shell_reported(cx: &mut TestAppContext) {
+                let (harness, cx) = showing("", cx);
+                let elsewhere = tempfile::tempdir().unwrap();
+                let file = touch(elsewhere.path(), "notes.txt");
+                touch(harness.cwd.path(), "other.txt");
+                let text = format!(
+                    "\x1b]7;file://{}\x1b\\notes.txt other.txt",
+                    elsewhere.path().display()
+                );
+                harness.deliver(Event::Output(1, text.into_bytes()), cx);
+                harness.draw(cx);
+
+                ctrl_click(&harness, 0, 2, cx);
+                ctrl_click(&harness, 0, 12, cx);
+
+                assert_eq!(
+                    harness.started(),
+                    [["xdg-open".to_owned(), file.display().to_string()]]
+                );
+            }
+
+            #[gpui::test]
+            fn should_open_a_file_link_for_this_host_through_the_opener(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::live(b"", cx);
+                let file = touch(harness.cwd.path(), "a b.txt");
+                let link = format!(
+                    "\x1b]8;;file://{}\x1b\\file\x1b]8;;\x1b\\",
+                    file.display().to_string().replace(' ', "%20")
+                );
+                harness.deliver(Event::Output(1, link.into_bytes()), cx);
+                harness.draw(cx);
+
+                ctrl_click(&harness, 0, 1, cx);
+
+                assert_eq!(
+                    harness.started(),
+                    [["xdg-open".to_owned(), file.display().to_string()]]
+                );
+                assert_eq!(cx.opened_url(), None);
+            }
+
+            #[gpui::test]
+            fn should_refuse_a_file_link_for_another_host(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::live(b"", cx);
+                let file = touch(harness.cwd.path(), "a.txt");
+                let link = format!(
+                    "\x1b]8;;file://elsewhere.invalid{}\x1b\\file\x1b]8;;\x1b\\",
+                    file.display()
+                );
+                harness.deliver(Event::Output(1, link.into_bytes()), cx);
+                harness.draw(cx);
+
+                ctrl_click(&harness, 0, 1, cx);
+
+                assert_eq!(harness.started(), Vec::<Vec<String>>::new());
+                assert_eq!(cx.opened_url(), None);
+            }
+
+            #[gpui::test]
+            fn should_open_the_url_when_a_url_and_a_path_both_match(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::live(
+                    b"\x1b]8;;https://example.com\x1b\\src/main.rs\x1b]8;;\x1b\\",
+                    cx,
+                );
+                touch(harness.cwd.path(), "src/main.rs");
+
+                ctrl_click(&harness, 0, 2, cx);
+
+                assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
+                assert_eq!(harness.started(), Vec::<Vec<String>>::new());
+            }
+
+            #[gpui::test]
+            fn should_toast_when_the_opener_does_not_start(cx: &mut TestAppContext) {
+                let (harness, cx) = showing("at src/main.rs", cx);
+                touch(harness.cwd.path(), "src/main.rs");
+                *harness.opener.failure.lock().unwrap() = Some("No such file".into());
+
+                ctrl_click(&harness, 0, 5, cx);
+
+                let shown = cx.update(|_, cx| crate::notice::shown(cx));
+                let notice = shown.last().expect("a toast");
+                assert_eq!(notice.title, "Couldn't open main.rs");
+                assert!(
+                    notice
+                        .description
+                        .as_ref()
+                        .is_some_and(|d| d.starts_with("xdg-open: ")),
+                    "{:?}",
+                    notice.description
+                );
+            }
         }
 
         #[gpui::test]
@@ -2103,6 +2387,32 @@ mod tests {
                 harness.draw(cx);
 
                 assert_eq!(underlined(&harness, cx), ["example"]);
+            }
+
+            #[gpui::test]
+            fn should_underline_an_existing_path_while_the_modifier_is_held(
+                cx: &mut TestAppContext,
+            ) {
+                let (harness, cx) = Harness::live(b"", cx);
+                touch(harness.cwd.path(), "src/main.rs");
+                harness.deliver(Event::Output(1, b"at src/main.rs:4. ok".to_vec()), cx);
+
+                let secondary = secondary(cx);
+                hover(&harness, 6, secondary, cx);
+
+                assert_eq!(underlined(&harness, cx), ["src/main.rs:4"]);
+                assert!(pointing(&harness, cx));
+            }
+
+            #[gpui::test]
+            fn should_not_underline_a_path_that_does_not_exist(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::live(b"at src/main.rs:4 ok", cx);
+
+                let secondary = secondary(cx);
+                hover(&harness, 6, secondary, cx);
+
+                assert_eq!(underlined(&harness, cx), Vec::<String>::new());
+                assert!(!pointing(&harness, cx));
             }
 
             #[gpui::test]

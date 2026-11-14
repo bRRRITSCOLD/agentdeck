@@ -13,8 +13,9 @@ pub struct Link {
     pub cells: RangeInclusive<Point>,
 }
 
-/// Whether a click may open `uri`: `http`, `https` and `mailto` only, so a program can't make a
-/// click run a custom URL handler or open a local file.
+/// Whether a click may open `uri` with the OS's handler: `http`, `https` and `mailto` only, so
+/// a program can't make a click run a custom URL handler. A `file://` link goes to the file
+/// opener instead (`path::file_uri`), and only for this host.
 pub fn openable(uri: &str) -> bool {
     let Some((scheme, rest)) = uri.split_once(':') else {
         return false;

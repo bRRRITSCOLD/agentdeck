@@ -77,7 +77,8 @@ impl PaneView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let terminal = cx.new(|cx| TerminalView::new(pane.id, connection, sender, window, cx));
+        let cwd = pane.cwd.clone().into();
+        let terminal = cx.new(|cx| TerminalView::new(pane.id, cwd, connection, sender, window, cx));
         let titles = cx.subscribe(&terminal, |this, _, event, cx| match event {
             TerminalEvent::Title(title) => {
                 this.live_title = Some(title.clone());
