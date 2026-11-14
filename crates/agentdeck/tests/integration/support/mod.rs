@@ -194,6 +194,24 @@ impl TestEnv {
             .unwrap_or_else(|err| panic!("agentdeck {args:?} printed no JSON ({err}):\n{stdout}"))
     }
 
+    /// Runs `agentdeck <args> --json` with extra `env`, which must succeed, and parses its
+    /// stdout.
+    pub fn json_with(&self, args: &[&str], env: &[(&str, &OsString)]) -> Value {
+        let args: Vec<&str> = args.iter().copied().chain(["--json"]).collect();
+        let run = self.run_with(&args, env);
+        assert!(
+            run.success,
+            "agentdeck {args:?} failed:\n{}{}",
+            run.stdout, run.stderr
+        );
+        serde_json::from_str(&run.stdout).unwrap_or_else(|err| {
+            panic!(
+                "agentdeck {args:?} printed no JSON ({err}):\n{}",
+                run.stdout
+            )
+        })
+    }
+
     /// Runs `agentdeck <args>`, which must fail, and returns its stderr.
     pub fn fails(&self, args: &[&str]) -> String {
         let run = self.run(args);

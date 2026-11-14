@@ -109,8 +109,8 @@ fn with_live_status(context: &ApiContext, mut pane: Pane) -> Pane {
 /// the tab's layout.
 ///
 /// `claude` and `codex` panes start with a launch prompt: the linked task's title and body,
-/// then the unread notes on the task and on the pane's workspace, which are then marked read
-/// by the pane. Claude Code starts on a session id agentdeck chooses; a Codex pane's is
+/// then every instruction for the pane's workspace and the task's comments no agent has had
+/// yet, which are then marked delivered to the pane. Claude Code starts on a session id agentdeck chooses; a Codex pane's is
 /// found once Codex writes its session file, and `session_id` is set then.
 #[endpoint { method = POST, path = "/v1/panes" }]
 pub(crate) async fn pane_create(
@@ -126,19 +126,23 @@ pub(crate) async fn pane_create(
     let (pane, workspace, prompted) = context
         .db
         .call(move |c| {
-            let (argv, session_id, notes) = match command {
+            let (argv, session_id, comments) = match command {
                 Command::Given(argv) => (argv, None, Vec::new()),
                 Command::Agent(agent) => {
                     let workspace = db::panes::workspace_for(c, &new)?;
                     let task = new.task_id.map(|id| db::tasks::get(c, id)).transpose()?;
-                    let notes = db::notes::unread_for_launch(c, workspace, new.task_id)?;
-                    let prompt = agents::launch_prompt(task.as_ref(), &notes);
+                    let instructions = db::instructions::list(c, workspace)?;
+                    let comments = match new.task_id {
+                        Some(task) => db::comments::undelivered(c, task)?,
+                        None => Vec::new(),
+                    };
+                    let prompt = agents::launch_prompt(task.as_ref(), &instructions, &comments);
                     let launch = agents::launch(agent, prompt).expect("claude and codex launch");
-                    (launch.argv, launch.session_id, notes)
+                    (launch.argv, launch.session_id, comments)
                 }
             };
             let (pane, workspace) = db::panes::create(c, &new, &argv, session_id.as_deref())?;
-            Ok((pane, workspace, notes))
+            Ok((pane, workspace, comments))
         })
         .await?;
 
@@ -166,8 +170,8 @@ pub(crate) async fn pane_create(
         });
     }
     context.events.changed(Entity::Pane, pane.id);
-    let delivered = prompted.iter().map(|note| note.id).collect();
-    delivery::mark_read(&context.db, &context.events, delivered, pane.id).await;
+    let delivered = prompted.iter().map(|comment| comment.id).collect();
+    delivery::mark_delivered(&context.db, &context.events, delivered, pane.id).await;
     if let Some((dir, before)) = codex_sessions {
         codex::watch(
             context.db.clone(),

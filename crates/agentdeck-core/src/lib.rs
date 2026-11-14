@@ -3,7 +3,7 @@
 //!
 //! - [`daemon`]: `daemon.json`, where clients find the daemon.
 //! - [`id`]: one id newtype per entity.
-//! - [`pane`], [`task`], [`pr`]: the text-valued columns of spec §3 as enums.
+//! - [`pane`], [`task`], [`pr`], [`comment`]: the text-valued columns of spec §3 as enums.
 //! - [`layout`]: a tab's split tree.
 //! - [`state`]: agent state from the screen, by data-driven rules (spec §7).
 //! - [`ws`]: the `/v1/ws` WebSocket protocol (spec §5).
@@ -15,6 +15,7 @@
 mod schema;
 mod text_enum;
 
+pub mod comment;
 pub mod daemon;
 pub mod id;
 pub mod layout;
@@ -24,8 +25,9 @@ pub mod state;
 pub mod task;
 pub mod ws;
 
+pub use comment::CommentAuthor;
 pub use daemon::DaemonInfo;
-pub use id::{NoteId, PaneId, TabId, TaskId, WorkspaceId};
+pub use id::{CommentId, InstructionId, PaneId, TabId, TaskId, WorkspaceId};
 pub use layout::{Layout, LayoutError, Ratio, SplitDirection};
 pub use pane::{Agent, PaneKind};
 pub use pr::{ChecksState, PrState, ReviewState, pr_task_status};

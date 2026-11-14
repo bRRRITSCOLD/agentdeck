@@ -149,7 +149,7 @@ pub fn update(conn: &Connection, id: TaskId, patch: &TaskPatch) -> Result<Task, 
     get(conn, id)
 }
 
-/// Deletes a task; its notes and PR row go with it, and its panes are unlinked.
+/// Deletes a task; its comments and PR row go with it, and its panes are unlinked.
 pub fn delete(conn: &Connection, id: TaskId) -> Result<(), DbError> {
     match conn.execute("DELETE FROM tasks WHERE id = ?1", [id.to_string()])? {
         0 => Err(DbError::NotFound("task")),

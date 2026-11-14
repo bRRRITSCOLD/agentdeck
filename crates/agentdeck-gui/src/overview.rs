@@ -1,11 +1,11 @@
-//! What the sidebar shows (spec §11): every workspace with its rolled-up state, unread notes
-//! and open PRs, the archived ones apart, the inbox's counts, and when PRs last synced.
+//! What the sidebar shows (spec §11): every workspace with its rolled-up state and open PRs,
+//! the archived ones apart, the inbox's counts, and when PRs last synced.
 //!
 //! A [`Snapshot`] is the daemon's data as read over REST; [`Snapshot::overview`] sums it up,
 //! a pure function the views render. Live `state` and `exit` messages patch the snapshot's
 //! pane states in place; anything else that changes is read again.
 
-use agentdeck_client::types::{Note, PrSyncStatus, Task, Workspace};
+use agentdeck_client::types::{Instruction, PrSyncStatus, Task, Workspace};
 use agentdeck_core::{Agent, AgentState, PaneId, TaskId, TaskKind, TaskStatus, WorkspaceId};
 use chrono::{DateTime, Utc};
 use gpui::SharedString;
@@ -36,8 +36,8 @@ pub struct Snapshot {
     pub panes: Vec<PaneState>,
     /// Every task.
     pub tasks: Vec<Task>,
-    /// Every note, read or not.
-    pub notes: Vec<Note>,
+    /// Every workspace's instructions.
+    pub instructions: Vec<Instruction>,
     /// PR sync's last run.
     pub pr_sync: PrSyncStatus,
 }
@@ -48,7 +48,7 @@ impl Default for Snapshot {
             workspaces: Vec::new(),
             panes: Vec::new(),
             tasks: Vec::new(),
-            notes: Vec::new(),
+            instructions: Vec::new(),
             pr_sync: PrSyncStatus {
                 last_error: None,
                 last_synced_at: None,
@@ -62,8 +62,6 @@ impl Default for Snapshot {
 /// A row's counts; a zero hides its count.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Counts {
-    /// Unread notes.
-    pub unread_notes: usize,
     /// PR tasks that aren't done.
     pub prs: usize,
 }
@@ -161,7 +159,7 @@ pub fn ago(since: chrono::TimeDelta) -> String {
 /// The sidebar's content, summed up from a [`Snapshot`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Overview {
-    /// The inbox's counts: notes on, and open PRs among, tasks with no workspace.
+    /// The inbox's counts: open PRs among tasks with no workspace.
     pub inbox: Counts,
     /// The workspaces that aren't archived, oldest first.
     pub workspaces: Vec<WorkspaceRow>,
@@ -191,24 +189,7 @@ impl Snapshot {
 
     /// The sidebar's content.
     pub fn overview(&self) -> Overview {
-        let workspace_of_task = |task_id| {
-            self.tasks
-                .iter()
-                .find(|task| task.id == task_id)
-                .map(|task| task.workspace_id)
-        };
-        // A note's workspace: its own, or its task's. `Some(None)` is an inbox task's note.
-        let note_workspace = |note: &Note| match (note.workspace_id, note.task_id) {
-            (Some(workspace), _) => Some(Some(workspace)),
-            (None, Some(task)) => workspace_of_task(task),
-            (None, None) => None,
-        };
         let counts = |workspace: Option<WorkspaceId>| Counts {
-            unread_notes: self
-                .notes
-                .iter()
-                .filter(|note| note.read_at.is_none() && note_workspace(note) == Some(workspace))
-                .count(),
             prs: self
                 .tasks
                 .iter()
@@ -275,7 +256,7 @@ impl Snapshot {
 /// Builders for snapshots in tests.
 #[cfg(test)]
 pub(crate) mod fixtures {
-    use agentdeck_client::types::{Note, Task, Workspace};
+    use agentdeck_client::types::{Instruction, Task, Workspace};
     use agentdeck_core::{AgentState, PaneId, TaskKind, TaskStatus, WorkspaceId};
 
     use super::PaneState;
@@ -345,25 +326,14 @@ pub(crate) mod fixtures {
         }
     }
 
-    /// An unread note on a workspace.
-    pub fn workspace_note(n: u32, workspace: WorkspaceId) -> Note {
-        Note {
-            body: "note".into(),
+    /// An instruction for `workspace`.
+    pub fn instruction(n: u32, workspace: WorkspaceId) -> Instruction {
+        Instruction {
+            body: "instruction".into(),
             created_at: CREATED.into(),
             id: id(n),
-            read_at: None,
-            read_by_pane: None,
-            task_id: None,
-            workspace_id: Some(workspace),
-        }
-    }
-
-    /// An unread note on a task.
-    pub fn task_note(n: u32, task: &Task) -> Note {
-        Note {
-            task_id: Some(task.id),
-            workspace_id: None,
-            ..workspace_note(n, id(0))
+            updated_at: CREATED.into(),
+            workspace_id: workspace,
         }
     }
 }
@@ -448,7 +418,7 @@ mod tests {
                 };
                 let old = archived(2, "old");
                 let snapshot = Snapshot {
-                    notes: vec![workspace_note(30, old.id)],
+                    tasks: vec![task(30, TaskKind::Pr, Some(old.id))],
                     workspaces: vec![workspace(1, "a"), old, archived(3, "older")],
                     ..Snapshot::default()
                 };
@@ -494,36 +464,6 @@ mod tests {
             use super::*;
 
             #[test]
-            fn should_leave_read_notes_out_of_the_count() {
-                let a = workspace(1, "a");
-                let read = Note {
-                    read_at: Some("2026-11-13T00:00:00Z".into()),
-                    ..workspace_note(30, a.id)
-                };
-                let snapshot = Snapshot {
-                    notes: vec![read, workspace_note(31, a.id)],
-                    workspaces: vec![a],
-                    ..Snapshot::default()
-                };
-
-                assert_eq!(snapshot.overview().workspaces[0].counts.unread_notes, 1);
-            }
-
-            #[test]
-            fn should_count_notes_on_the_workspace_and_on_its_tasks() {
-                let a = workspace(1, "a");
-                let task = task(20, TaskKind::Plain, Some(a.id));
-                let snapshot = Snapshot {
-                    notes: vec![workspace_note(30, a.id), task_note(31, &task)],
-                    tasks: vec![task],
-                    workspaces: vec![a],
-                    ..Snapshot::default()
-                };
-
-                assert_eq!(snapshot.overview().workspaces[0].counts.unread_notes, 2);
-            }
-
-            #[test]
             fn should_count_pr_tasks_that_are_not_done() {
                 let a = workspace(1, "a");
                 let done = Task {
@@ -548,19 +488,12 @@ mod tests {
                 let a = workspace(1, "a");
                 let inbox_pr = task(20, TaskKind::Pr, None);
                 let snapshot = Snapshot {
-                    notes: vec![task_note(30, &inbox_pr)],
                     tasks: vec![inbox_pr, task(21, TaskKind::Pr, Some(a.id))],
                     workspaces: vec![a],
                     ..Snapshot::default()
                 };
 
-                assert_eq!(
-                    snapshot.overview().inbox,
-                    Counts {
-                        unread_notes: 1,
-                        prs: 1
-                    }
-                );
+                assert_eq!(snapshot.overview().inbox, Counts { prs: 1 });
             }
         }
 

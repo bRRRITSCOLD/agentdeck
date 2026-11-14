@@ -1,5 +1,5 @@
-//! The Penpot part `agentdeck / Count`: a 12px icon and a number, as the sidebar shows unread
-//! notes (`StickyNote`) and open PRs (`GitPullRequest`).
+//! The Penpot part `agentdeck / Count`: a 12px icon and a number, as the sidebar shows open
+//! PRs (`GitPullRequest`).
 
 use brrritscold_core_gpui::{ActiveTheme as _, Icon, IconName};
 use brrritscold_core_gpui_tokens::primitive::{font_size, space};

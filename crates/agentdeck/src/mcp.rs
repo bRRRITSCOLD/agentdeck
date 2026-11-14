@@ -2,8 +2,8 @@
 //! the caller's workspace (`$AGENTDECK_WORKSPACE`) and pane (`$AGENTDECK_PANE`).
 
 use agentdeck_client::Client;
-use agentdeck_client::types::{NewNote, NewTask, NotePatch, TaskPatch};
-use agentdeck_core::{NoteId, PaneId, TaskId, TaskStatus, WorkspaceId};
+use agentdeck_client::types::{NewComment, NewTask, TaskPatch};
+use agentdeck_core::{PaneId, TaskId, TaskStatus, WorkspaceId};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig};
@@ -11,12 +11,9 @@ use rmcp::schemars::JsonSchema;
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
 
-use crate::commands::{self, caller_pane};
+use crate::commands::{self, caller_pane, caller_workspace};
 use agentdeck_client::ApiError;
 use agentdeck_client::daemon;
-
-/// Names the workspace an agent runs in; the tools' default workspace.
-pub const WORKSPACE_VAR: &str = "AGENTDECK_WORKSPACE";
 
 /// Serves MCP on stdin and stdout until the client closes them.
 pub async fn serve() -> anyhow::Result<()> {
@@ -41,9 +38,7 @@ struct Caller {
 impl Caller {
     fn from_env() -> Caller {
         Caller {
-            workspace: std::env::var(WORKSPACE_VAR)
-                .ok()
-                .filter(|value| !value.is_empty()),
+            workspace: caller_workspace(),
             pane: caller_pane(),
         }
     }
@@ -54,7 +49,7 @@ impl Caller {
 enum Scope<'a> {
     /// Every workspace and the inbox.
     All,
-    /// Only tasks or notes with no workspace.
+    /// Only tasks with no workspace.
     Inbox,
     /// One workspace, by id, slug or name.
     Workspace(&'a str),
@@ -131,40 +126,30 @@ struct TaskUpdate {
     workspace: Option<String>,
 }
 
-/// `notes_list`'s arguments.
+/// `task_comments`' arguments.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+struct TaskComments {
+    /// The task's id.
+    task: String,
+}
+
+/// `task_comment`'s arguments.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+struct TaskComment {
+    /// The task's id.
+    task: String,
+    /// The text: progress, what blocks you, a PR you opened, a summary when done.
+    body: String,
+}
+
+/// `instructions_list`'s arguments.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
-struct NotesList {
-    /// Only notes on this workspace (id, slug or name). Defaults to your workspace.
+struct InstructionsList {
+    /// The workspace (id, slug or name). Defaults to your workspace.
     workspace: Option<String>,
-    /// Only notes on this task.
-    task: Option<String>,
-    /// Only unread notes.
-    #[serde(default)]
-    unread: bool,
-    /// Notes everywhere, instead of only on your workspace.
-    #[serde(default)]
-    all_workspaces: bool,
-}
-
-/// `note_create`'s arguments.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[schemars(crate = "rmcp::schemars")]
-struct NoteCreate {
-    /// The message.
-    body: String,
-    /// The task to leave it on.
-    task: Option<String>,
-    /// The workspace to leave it on (id, slug or name). Defaults to your workspace when no task is given.
-    workspace: Option<String>,
-}
-
-/// A note's id.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[schemars(crate = "rmcp::schemars")]
-struct NoteRef {
-    /// The note's id.
-    id: String,
 }
 
 /// A tool failure the model can read: a bad argument or the daemon's answer.
@@ -330,57 +315,38 @@ impl Server {
         .await
     }
 
-    #[tool(
-        description = "List notes. Defaults to notes on your workspace; name a task for its \
-                          notes, or set `all_workspaces` for every note."
-    )]
-    async fn notes_list(&self, Parameters(args): Parameters<NotesList>) -> ToolResult {
+    #[tool(description = "A task's comments, oldest first: the user's and the agents'.")]
+    async fn task_comments(&self, Parameters(args): Parameters<TaskComments>) -> ToolResult {
         respond(async {
             let client = daemon::connect().await?.client;
-            let mut request = client.note_list();
-            if let Some(task) = parse_opt::<TaskId>("task id", args.task.as_deref())? {
-                request = request.task(task);
-            } else if let Scope::Workspace(reference) = scope(
-                args.workspace.as_deref(),
-                false,
-                args.all_workspaces,
-                &self.caller,
-            ) {
-                request = request.workspace(commands::workspace_id(&client, reference).await?);
-            }
-            if args.unread {
-                request = request.unread(true);
-            }
-            Ok(request.send().await.map_err(ApiError::from)?.into_inner())
+            let task: TaskId = parse("task id", &args.task)?;
+            Ok(client
+                .comment_list()
+                .id(task)
+                .send()
+                .await
+                .map_err(ApiError::from)?
+                .into_inner())
         })
         .await
     }
 
-    #[tool(description = "Leave a note on a task, or on a workspace (yours by default).")]
-    async fn note_create(&self, Parameters(args): Parameters<NoteCreate>) -> ToolResult {
+    #[tool(
+        description = "Comment on a task, as your pane's agent: progress, what blocks you, a PR \
+                          you opened, a summary when done. The user reads it; it isn't sent to \
+                          any agent."
+    )]
+    async fn task_comment(&self, Parameters(args): Parameters<TaskComment>) -> ToolResult {
         respond(async {
             let client = daemon::connect().await?.client;
-            let task_id = parse_opt::<TaskId>("task id", args.task.as_deref())?;
-            let workspace_id = match task_id {
-                Some(_) => Server::workspace(&client, args.workspace.as_deref()).await?,
-                None => {
-                    let reference = args
-                        .workspace
-                        .as_deref()
-                        .or(self.caller.workspace.as_deref());
-                    let Some(reference) = reference else {
-                        anyhow::bail!("name a task or a workspace: you aren't in a workspace");
-                    };
-                    Some(commands::workspace_id(&client, reference).await?)
-                }
-            };
-            let new = NewNote {
+            let task: TaskId = parse("task id", &args.task)?;
+            let new = NewComment {
                 body: args.body,
-                task_id,
-                workspace_id,
+                pane: self.caller.pane,
             };
             Ok(client
-                .note_create()
+                .comment_create()
+                .id(task)
                 .body(new)
                 .send()
                 .await
@@ -390,20 +356,27 @@ impl Server {
         .await
     }
 
-    #[tool(description = "Mark a note read, by your pane.")]
-    async fn note_mark_read(&self, Parameters(args): Parameters<NoteRef>) -> ToolResult {
+    #[tool(
+        description = "The standing instructions for every agent in a workspace, oldest first. \
+                          Defaults to your workspace."
+    )]
+    async fn instructions_list(
+        &self,
+        Parameters(args): Parameters<InstructionsList>,
+    ) -> ToolResult {
         respond(async {
             let client = daemon::connect().await?.client;
-            let id: NoteId = parse("note id", &args.id)?;
-            let patch = NotePatch {
-                read: Some(true),
-                read_by_pane: self.caller.pane,
-                ..NotePatch::default()
+            let reference = args
+                .workspace
+                .as_deref()
+                .or(self.caller.workspace.as_deref());
+            let Some(reference) = reference else {
+                anyhow::bail!("name a workspace: you aren't in one");
             };
+            let workspace = commands::workspace_id(&client, reference).await?;
             Ok(client
-                .note_update()
-                .id(id)
-                .body(patch)
+                .instruction_list()
+                .id(workspace)
                 .send()
                 .await
                 .map_err(ApiError::from)?
@@ -447,8 +420,8 @@ impl ServerHandler for Server {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("agentdeck", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "agentdeck's tasks, notes, workspaces and PR status. Tools default to the \
-                 workspace and pane you run in.",
+                "agentdeck's tasks, task comments, workspace instructions, workspaces and PR \
+                 status. Tools default to the workspace and pane you run in.",
             )
     }
 }
@@ -521,10 +494,10 @@ mod tests {
             assert_eq!(
                 names,
                 [
-                    "note_create",
-                    "note_mark_read",
-                    "notes_list",
+                    "instructions_list",
                     "prs_status",
+                    "task_comment",
+                    "task_comments",
                     "task_create",
                     "task_get",
                     "task_update",

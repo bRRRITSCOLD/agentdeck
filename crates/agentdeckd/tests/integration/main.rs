@@ -4,10 +4,12 @@
 
 mod agents;
 mod auth;
+mod comments;
 mod daemon;
 mod health;
-mod notes;
-mod notes_client;
+mod instructions;
+mod instructions_client;
+mod migrations;
 mod panes;
 mod panes_client;
 mod prs;

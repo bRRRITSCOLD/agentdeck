@@ -3,7 +3,8 @@
 //! Each entity's queries are plain functions over `&Connection` in its own module; handlers
 //! run them on the actor with [`Db::call`].
 
-pub mod notes;
+pub mod comments;
+pub mod instructions;
 pub mod panes;
 pub mod pull_requests;
 pub mod tabs;
@@ -21,7 +22,12 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 /// The migrations, in order. Embedded, and run to the latest at start.
-const MIGRATION_LIST: &[M<'static>] = &[M::up(include_str!("migrations/0001_init.sql"))];
+const MIGRATION_LIST: &[M<'static>] = &[
+    M::up(include_str!("migrations/0001_init.sql")),
+    M::up(include_str!(
+        "migrations/0002_comments_and_instructions.sql"
+    )),
+];
 const MIGRATIONS: Migrations<'static> = Migrations::from_slice(MIGRATION_LIST);
 
 /// A failed query, as a handler needs to tell them apart.

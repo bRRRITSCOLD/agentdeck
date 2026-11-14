@@ -355,7 +355,7 @@ impl Shell {
                         }
                     });
                     Notice::new(format!("Archived {name}"))
-                        .description("Its folder, tasks and notes are kept.")
+                        .description("Its folder, tasks and instructions are kept.")
                         .action(undo)
                         .show(window, cx);
                 }
@@ -1037,7 +1037,7 @@ mod tests {
             assert_eq!(notice.title, "Archived agentdeck");
             assert_eq!(
                 notice.description.as_deref(),
-                Some("Its folder, tasks and notes are kept.")
+                Some("Its folder, tasks and instructions are kept.")
             );
             let undo = notice.action.expect("an Undo");
             assert_eq!(undo.label, "Undo");

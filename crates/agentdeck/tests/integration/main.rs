@@ -3,9 +3,10 @@
 //! one also exercises the start path. Never runs a real agent CLI.
 
 mod agent;
+mod comment;
 mod daemon;
+mod instruction;
 mod mcp;
-mod note;
 mod pr;
 mod support;
 mod task;

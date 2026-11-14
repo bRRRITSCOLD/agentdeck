@@ -152,7 +152,7 @@ pub fn set_archived(
     get(conn, id)
 }
 
-/// Deletes the row. Its tabs, panes and notes go with it; its tasks move to the inbox.
+/// Deletes the row. Its tabs, panes and instructions go with it; its tasks move to the inbox.
 pub fn delete(conn: &Connection, id: WorkspaceId) -> Result<(), DbError> {
     match conn.execute("DELETE FROM workspaces WHERE id = ?1", [id.to_string()])? {
         0 => Err(DbError::NotFound("workspace")),
