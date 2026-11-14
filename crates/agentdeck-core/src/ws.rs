@@ -160,8 +160,11 @@ pub enum Entity {
     Comment,
     /// A workspace instruction: `/v1/workspaces/{workspace}/instructions`.
     Instruction,
-    /// `/v1/prs/status`: a PR sync began, read a page or ended. Its id is always `status`.
+    /// `/v1/prs/status`: a PR sync began, read a page or ended, or the age cutoff changed.
+    /// Its id is always `status`.
     PrSync,
+    /// `/v1/settings`: a setting changed. Its id is always `settings`.
+    Settings,
 }
 
 #[cfg(test)]
@@ -313,6 +316,13 @@ mod tests {
                         id: "abc".into(),
                     },
                     json!({"t": "changed", "entity": "instruction", "id": "abc"}),
+                ),
+                (
+                    ServerMessage::Changed {
+                        entity: Entity::Settings,
+                        id: "settings".into(),
+                    },
+                    json!({"t": "changed", "entity": "settings", "id": "settings"}),
                 ),
                 (
                     ServerMessage::Lagged { channel: 3 },

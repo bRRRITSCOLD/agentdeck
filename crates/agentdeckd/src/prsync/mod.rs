@@ -28,7 +28,7 @@ use agentdeck_core::{ChecksState, PrState, WorkspaceId};
 use chrono::{DateTime, SecondsFormat, Utc};
 use tokio::time::MissedTickBehavior;
 
-use crate::config::PrSyncConfig;
+use crate::config::Config;
 use crate::db::{self, Db};
 use crate::events::Events;
 use crate::model::{GhLogin, PrSyncProgress, PrSyncStage, PrSyncStatus};
@@ -68,8 +68,9 @@ struct Inner {
     github: Github,
     /// How often a sync is full.
     full_every: Duration,
-    /// Which open PRs sync.
-    config: PrSyncConfig,
+    /// The settings, read again at each sync: `pr_sync.max_age_days` says which open PRs
+    /// sync.
+    config: Config,
     state: Mutex<State>,
     /// Held for the length of a sync, so syncs never overlap.
     running: tokio::sync::Mutex<()>,
@@ -116,15 +117,16 @@ impl PrSync {
     /// Starts the timer, whose first sync runs now and reads the token with `gh auth token`
     /// (on the timer's task, so a slow `gh` never holds up the daemon's start). `endpoint` is
     /// the GraphQL URL; a sync is full every `full_every`; open PRs GitHub last updated more
-    /// than `config.max_age_days` ago aren't synced, and the status says how many days that
-    /// is. Must be called inside a tokio runtime.
+    /// than `pr_sync.max_age_days` ago, as `config` says when the sync begins, aren't synced,
+    /// and the status says how many days that is now. Must be called inside a tokio runtime.
     pub fn start(
         db: Db,
         events: Events,
         endpoint: String,
         full_every: Duration,
-        config: PrSyncConfig,
+        config: Config,
     ) -> anyhow::Result<PrSync> {
+        let max_age_days = config.max_age_days();
         let sync = PrSync {
             inner: Arc::new(Inner {
                 db,
@@ -139,7 +141,7 @@ impl PrSync {
                         last_synced_at: None,
                         last_error: None,
                         progress: None,
-                        max_age_days: config.max_age_days,
+                        max_age_days,
                     },
                     last_good: None,
                     last_full: None,
@@ -159,9 +161,18 @@ impl PrSync {
         Ok(sync)
     }
 
-    /// The `gh` login and the last sync.
+    /// The `gh` login, the last sync and the age cutoff as it is now.
     pub fn status(&self) -> PrSyncStatus {
-        self.state().status.clone()
+        PrSyncStatus {
+            max_age_days: self.inner.config.max_age_days(),
+            ..self.state().status.clone()
+        }
+    }
+
+    /// Tells clients the status changed when something other than a sync changed it: the age
+    /// cutoff.
+    pub fn status_changed(&self) {
+        self.inner.events.changed(Entity::PrSync, STATUS_ID);
     }
 
     /// Syncs now, after any sync already running, and returns the status it leaves.
@@ -229,7 +240,12 @@ impl PrSync {
             Arc::new(tokio::task::spawn_blocking(move || Clones::scan(&workspaces)).await?);
         let read = Read {
             since,
-            cutoff: self.inner.config.max_age().map(|max_age| began - max_age),
+            // A cutoff before the earliest time chrono holds is no cutoff.
+            cutoff: self
+                .inner
+                .config
+                .max_age()
+                .and_then(|max_age| began.checked_sub_signed(max_age)),
             clones,
         };
         match self.read(&token, &read).await {

@@ -10,7 +10,7 @@ use dropshot::{ConfigDropshot, ServerBuilder};
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::api::{ApiContext, api};
-use crate::config::{self, PrSyncConfig};
+use crate::config::{self, Config};
 use crate::db::Db;
 use crate::events::Events;
 use crate::instance::Instance;
@@ -47,8 +47,8 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
         .ok()
         .and_then(|secs| secs.parse().ok())
         .map_or(prsync::FULL_SYNC_EVERY, Duration::from_secs);
-    let pr_config = PrSyncConfig::load(
-        &paths.config_file(),
+    let settings = Config::load(
+        paths.config_file(),
         std::env::var(config::PR_MAX_AGE_VAR).ok().as_deref(),
     );
     let prs = PrSync::start(
@@ -56,7 +56,7 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
         events.clone(),
         github_api,
         full_every,
-        pr_config,
+        settings.clone(),
     )?;
     let terminals = Terminals::new(db.clone(), events.clone(), paths.rules_dir());
     terminals.run_state_timer();
@@ -70,6 +70,7 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
         started: Instant::now(),
         scratch_root: paths.scratch_workspaces(),
         prs,
+        settings,
         terminals: terminals.clone(),
         events,
     };

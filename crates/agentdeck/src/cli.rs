@@ -39,6 +39,9 @@ pub enum Command {
     /// GitHub pull request sync.
     #[command(subcommand)]
     Pr(PrCommand),
+    /// Settings, kept in config.toml; a change applies at once.
+    #[command(subcommand)]
+    Config(ConfigCommand),
     /// Print a pane's recent raw output.
     Tail {
         /// The pane's id.
@@ -210,6 +213,25 @@ pub enum PrCommand {
     Status,
 }
 
+/// `agentdeck config …`. A `<key>` is dotted: `appearance.theme`, `pr_sync.max_age_days`.
+#[derive(Debug, Subcommand)]
+pub enum ConfigCommand {
+    /// List every setting with its value.
+    Ls,
+    /// Print one setting's value.
+    Get {
+        /// The setting, as `appearance.theme`.
+        key: String,
+    },
+    /// Change a setting and save it in config.toml.
+    Set {
+        /// The setting, as `pr_sync.max_age_days`.
+        key: String,
+        /// The new value: a number, `true` or `false`, or else text.
+        value: String,
+    },
+}
+
 /// `--agent` takes the agents `agent new` launches: `claude` or `codex`.
 fn parse_launchable_agent(value: &str) -> Result<Agent, String> {
     match value.parse::<Agent>() {
@@ -325,6 +347,26 @@ mod tests {
         #[test]
         fn should_reject_an_id_that_is_not_one() {
             assert!(parse(&["instruction", "rm", "nope"]).is_err());
+        }
+    }
+
+    mod config {
+        use super::*;
+
+        #[test]
+        fn should_set_a_dotted_key_to_a_value() {
+            let cli = parse(&["config", "set", "pr_sync.max_age_days", "30"]).unwrap();
+
+            let Command::Config(ConfigCommand::Set { key, value }) = cli.command else {
+                panic!("not config set: {:?}", cli.command);
+            };
+            assert_eq!(key, "pr_sync.max_age_days");
+            assert_eq!(value, "30");
+        }
+
+        #[test]
+        fn should_require_a_value_to_set() {
+            assert!(parse(&["config", "set", "appearance.theme"]).is_err());
         }
     }
 
