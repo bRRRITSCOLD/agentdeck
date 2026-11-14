@@ -29,6 +29,64 @@ pub fn list_state() -> ListState {
     ListState::new(0, ListAlignment::Top, OVERDRAW)
 }
 
+/// Columns over `rows`, `list`'s rows, as wide as the area allows and never narrower than
+/// `table`: a narrower area scrolls them sideways together, by a sideways wheel only. The
+/// list's scrollbar sits over the area's right edge, outside that scroll, so it stays in
+/// view at any width; a hidden copy of the columns keeps it level with the list.
+pub fn table(
+    id: &'static str,
+    selector: &'static str,
+    table: Table,
+    rows: impl IntoElement,
+    list: &ListState,
+    cx: &App,
+) -> Div {
+    let scrolled = div()
+        .id(id)
+        .flex_1()
+        .min_h_0()
+        .overflow_x_scroll()
+        // Only a sideways wheel scrolls it; a vertical one is the list's.
+        .restrict_scroll_to_axis()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .min_w(table.min_width())
+                .flex()
+                .flex_col()
+                .gap(space::S4)
+                .child(columns(table, cx))
+                .child(rows),
+        );
+    // As wide as the area, not the table: the copy of the columns overflows it, unseen.
+    let scrollbar = div()
+        .absolute()
+        .inset_0()
+        .overflow_hidden()
+        .flex()
+        .flex_col()
+        .gap(space::S4)
+        .child(columns(table, cx).min_w(table.min_width()).invisible())
+        .child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .child(crate::scrollbar::vertical(list, cx).viewport_from_layout()),
+        );
+    div()
+        .debug_selector(move || selector.into())
+        .relative()
+        .flex_1()
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .child(scrolled)
+        .child(scrollbar)
+}
+
 /// Makes `list` hold `count` items, keeping its scroll position, and measures them again: a
 /// row's height follows its title, and an index may now hold a group header instead.
 pub fn relist(list: &ListState, count: usize) {
