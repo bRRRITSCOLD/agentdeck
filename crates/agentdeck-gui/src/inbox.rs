@@ -1,6 +1,8 @@
 //! The Inbox (spec §11), Penpot "Screens" → "Inbox": tasks with no workspace, mostly PRs,
 //! each with a status picker, and the PR sync's state with a "Sync now" button. Done tasks
-//! are left out. While gh is logged out, an alert over the columns says how to log in.
+//! are left out. While gh is logged out, an alert over the columns says how to log in. Under
+//! the heading, once the PR sync status is read, a line says which PRs the age cutoff leaves
+//! out.
 //!
 //! Like the Tasks view it shows the sidebar's [`Snapshot`], passed on by the window. A sync
 //! asked for here emits [`Synced`] once done, so the window can have the sidebar read again:
@@ -30,6 +32,21 @@ use crate::task_list::{self, Query, Row, Scope};
 use crate::task_row::{self, Table};
 use crate::task_sheet::OpenTask;
 use crate::workspace::failed;
+
+/// The description's first line.
+const ABOUT: &str =
+    "Tasks with no workspace. A PR lands here when no workspace has a clone of its repo.";
+
+/// Which open PRs sync, for a cutoff of `days` (`0` for none). "Settings" is plain text
+/// until the Settings screen exists.
+fn cutoff(days: u32) -> String {
+    let unit = match days {
+        0 => return "Every open PR syncs.".to_owned(),
+        1 => "day",
+        _ => "days",
+    };
+    format!("PRs not updated in the last {days} {unit} are left out; change that in Settings.")
+}
 
 /// A sync asked for in the Inbox has finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +163,15 @@ impl InboxView {
         sync.short_label(now)
     }
 
+    /// The lines under the heading: what the Inbox holds, then which PRs the age cutoff
+    /// leaves out, once the PR sync status is read.
+    pub fn description(&self) -> Vec<SharedString> {
+        let cutoff = (self.snapshot.pr_sync.as_ref()).map(|status| cutoff(status.max_age_days));
+        std::iter::once(SharedString::new_static(ABOUT))
+            .chain(cutoff.map(SharedString::from))
+            .collect()
+    }
+
     /// Penpot `Header`: heading, spacer, when PRs last synced, "Sync now".
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
@@ -167,14 +193,17 @@ impl InboxView {
                             .text_color(s.foreground)
                             .child("Inbox"),
                     )
-                    .child(
-                        div()
-                            .text_size(font_size::SM)
-                            .text_color(s.muted_foreground)
-                            .child(
-                                "Tasks with no workspace. A PR lands here when no workspace \
-                                 has a clone of its repo.",
-                            ),
+                    .children(
+                        self.description()
+                            .into_iter()
+                            .enumerate()
+                            .map(|(ix, line)| {
+                                div()
+                                    .debug_selector(move || format!("inbox description {ix}"))
+                                    .text_size(font_size::SM)
+                                    .text_color(s.muted_foreground)
+                                    .child(line)
+                            }),
                     ),
             )
             .child(div().flex_1())
@@ -254,7 +283,7 @@ impl Render for InboxView {
             .child(self.header(cx))
             // Penpot "Inbox · gh logged out": a default `Alert` over the columns.
             .when(
-                self.snapshot.pr_sync.login == GhLogin::LoggedOut,
+                (self.snapshot.pr_sync.as_ref()).is_some_and(|s| s.login == GhLogin::LoggedOut),
                 |content| {
                     content.child(
                         div()
@@ -300,7 +329,7 @@ mod tests {
 
     use super::*;
     use crate::api::fake::FakeApi;
-    use crate::overview::fixtures::{id, task, workspace};
+    use crate::overview::fixtures::{id, pr_sync, task, workspace};
 
     struct Harness {
         api: Arc<FakeApi>,
@@ -533,7 +562,7 @@ mod tests {
     fn should_say_how_far_a_sync_it_did_not_start_is(cx: &mut TestAppContext) {
         let (harness, cx) = Harness::open(inbox(), cx);
         let mut snapshot = inbox();
-        snapshot.pr_sync.progress = Some(agentdeck_client::types::PrSyncProgress {
+        pr_sync(&mut snapshot).progress = Some(agentdeck_client::types::PrSyncProgress {
             prs_done: 50,
             prs: 271,
             stage: agentdeck_client::types::PrSyncStage::Listing,
@@ -552,8 +581,8 @@ mod tests {
     /// [`inbox`] with gh logged out.
     fn logged_out() -> Snapshot {
         let mut snapshot = inbox();
-        snapshot.pr_sync.login = agentdeck_client::types::GhLogin::LoggedOut;
-        snapshot.pr_sync.last_error = Some("gh is not logged in".into());
+        pr_sync(&mut snapshot).login = agentdeck_client::types::GhLogin::LoggedOut;
+        pr_sync(&mut snapshot).last_error = Some("gh is not logged in".into());
         snapshot
     }
 
@@ -592,6 +621,90 @@ mod tests {
 
         assert_eq!(*harness.synced.borrow(), 0);
         harness.draw(cx);
+    }
+
+    mod description {
+        use super::*;
+
+        const ABOUT: &str = "Tasks with no workspace. A PR lands here when no workspace has a \
+                             clone of its repo.";
+
+        /// [`inbox`] with the PR sync status read and a cutoff of `days`.
+        fn with_cutoff(days: u32) -> Snapshot {
+            let mut snapshot = inbox();
+            pr_sync(&mut snapshot).max_age_days = days;
+            snapshot
+        }
+
+        fn description(harness: &Harness, cx: &mut VisualTestContext) -> Vec<String> {
+            harness.view.read_with(cx, |view, _| {
+                view.description().iter().map(|l| l.to_string()).collect()
+            })
+        }
+
+        #[gpui::test]
+        fn should_say_which_prs_the_cutoff_leaves_out(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(with_cutoff(90), cx);
+
+            assert_eq!(
+                description(&harness, cx),
+                [
+                    ABOUT,
+                    "PRs not updated in the last 90 days are left out; change that in Settings."
+                ]
+            );
+        }
+
+        #[gpui::test]
+        fn should_say_day_not_days_for_a_one_day_cutoff(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(with_cutoff(1), cx);
+
+            assert_eq!(
+                description(&harness, cx)[1..],
+                ["PRs not updated in the last 1 day are left out; change that in Settings."]
+            );
+        }
+
+        #[gpui::test]
+        fn should_say_every_open_pr_syncs_with_no_cutoff(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(with_cutoff(0), cx);
+
+            assert_eq!(description(&harness, cx), [ABOUT, "Every open PR syncs."]);
+        }
+
+        #[gpui::test]
+        fn should_show_only_the_first_line_before_the_status_is_read(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(inbox(), cx);
+            harness.draw(cx);
+
+            assert_eq!(description(&harness, cx), [ABOUT]);
+            assert!(cx.debug_bounds("inbox description 0").is_some());
+            assert!(cx.debug_bounds("inbox description 1").is_none());
+        }
+
+        #[gpui::test]
+        fn should_draw_the_cutoff_under_the_first_line(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(with_cutoff(90), cx);
+            harness.draw(cx);
+
+            let first = cx.debug_bounds("inbox description 0").expect("line 1");
+            let second = cx.debug_bounds("inbox description 1").expect("line 2");
+            assert!(second.origin.y >= first.bottom());
+        }
+
+        #[gpui::test]
+        fn should_say_the_cutoff_while_gh_is_logged_out(cx: &mut TestAppContext) {
+            let mut snapshot = logged_out();
+            pr_sync(&mut snapshot).max_age_days = 30;
+            let (harness, cx) = Harness::open(snapshot, cx);
+            harness.draw(cx);
+
+            assert!(cx.debug_bounds("gh banner").is_some());
+            assert_eq!(
+                description(&harness, cx)[1..],
+                ["PRs not updated in the last 30 days are left out; change that in Settings."]
+            );
+        }
     }
 
     mod scrollbar {

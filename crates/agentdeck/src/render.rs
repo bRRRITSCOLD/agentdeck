@@ -383,6 +383,7 @@ mod tests {
                 last_error: Some("gh is not logged in".into()),
                 last_synced_at: None,
                 login: GhLogin::LoggedOut,
+                max_age_days: 90,
                 progress: None,
             });
 
@@ -404,6 +405,7 @@ mod tests {
                 last_error: None,
                 last_synced_at: Some("2026-11-14T10:00:00.000Z".into()),
                 login: GhLogin::LoggedIn,
+                max_age_days: 90,
                 progress: Some(PrSyncProgress {
                     prs_done: 100,
                     prs: 271,
@@ -429,6 +431,7 @@ mod tests {
                 last_error: None,
                 last_synced_at: None,
                 login: GhLogin::LoggedIn,
+                max_age_days: 90,
                 progress: Some(PrSyncProgress {
                     prs_done: 271,
                     prs: 271,

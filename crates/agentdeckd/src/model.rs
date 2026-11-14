@@ -296,6 +296,9 @@ pub struct PrSyncStatus {
     pub last_error: Option<String>,
     /// How far the sync running now is; `None` while none runs.
     pub progress: Option<PrSyncProgress>,
+    /// How many days since GitHub last updated an open PR it may be and still sync
+    /// (`[pr_sync] max_age_days`, as the daemon read it at start); `0` for no cutoff.
+    pub max_age_days: u32,
 }
 
 /// How far a running PR sync is through the viewer's PRs.

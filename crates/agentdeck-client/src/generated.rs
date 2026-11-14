@@ -485,6 +485,8 @@ pub mod types {
         pub last_synced_at: ::std::option::Option<::std::string::String>,
         ///The `gh` login state.
         pub login: GhLogin,
+        ///How many days since GitHub last updated an open PR it may be and still sync (`[pr_sync] max_age_days`, as the daemon read it at start); `0` for no cutoff.
+        pub max_age_days: u32,
         ///How far the sync running now is; `None` while none runs.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub progress: ::std::option::Option<PrSyncProgress>,
@@ -2103,6 +2105,7 @@ pub mod types {
                 ::std::string::String,
             >,
             login: ::std::result::Result<super::GhLogin, ::std::string::String>,
+            max_age_days: ::std::result::Result<u32, ::std::string::String>,
             progress: ::std::result::Result<
                 ::std::option::Option<super::PrSyncProgress>,
                 ::std::string::String,
@@ -2114,6 +2117,7 @@ pub mod types {
                     last_error: Ok(Default::default()),
                     last_synced_at: Ok(Default::default()),
                     login: Err("no value supplied for login".to_string()),
+                    max_age_days: Err("no value supplied for max_age_days".to_string()),
                     progress: Ok(Default::default()),
                 }
             }
@@ -2149,6 +2153,16 @@ pub mod types {
                     .map_err(|e| format!("error converting supplied value for login: {e}"));
                 self
             }
+            pub fn max_age_days<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<u32>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.max_age_days = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for max_age_days: {e}"));
+                self
+            }
             pub fn progress<T>(mut self, value: T) -> Self
             where
                 T: ::std::convert::TryInto<::std::option::Option<super::PrSyncProgress>>,
@@ -2169,6 +2183,7 @@ pub mod types {
                     last_error: value.last_error?,
                     last_synced_at: value.last_synced_at?,
                     login: value.login?,
+                    max_age_days: value.max_age_days?,
                     progress: value.progress?,
                 })
             }
@@ -2179,6 +2194,7 @@ pub mod types {
                     last_error: Ok(value.last_error),
                     last_synced_at: Ok(value.last_synced_at),
                     login: Ok(value.login),
+                    max_age_days: Ok(value.max_age_days),
                     progress: Ok(value.progress),
                 }
             }

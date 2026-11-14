@@ -441,9 +441,11 @@ async fn snapshot(client: Client) -> anyhow::Result<Snapshot> {
             .map_err(ApiError::from)?
             .into_inner(),
         instructions,
-        pr_sync: (client.prs_status().send().await)
-            .map_err(ApiError::from)?
-            .into_inner(),
+        pr_sync: Some(
+            (client.prs_status().send().await)
+                .map_err(ApiError::from)?
+                .into_inner(),
+        ),
     })
 }
 
