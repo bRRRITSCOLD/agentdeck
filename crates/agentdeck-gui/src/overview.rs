@@ -1,5 +1,5 @@
 //! What the sidebar shows (spec §11): every workspace with its rolled-up state, unread notes
-//! and open PRs, the inbox's counts, and when PRs last synced.
+//! and open PRs, the archived ones apart, the inbox's counts, and when PRs last synced.
 //!
 //! A [`Snapshot`] is the daemon's data as read over REST; [`Snapshot::overview`] sums it up,
 //! a pure function the views render. Live `state` and `exit` messages patch the snapshot's
@@ -77,8 +77,10 @@ pub struct WorkspaceRow {
     pub dir: SharedString,
     /// Its panes' states, rolled up.
     pub state: AgentState,
-    /// Its counts.
+    /// Its counts; none while archived.
     pub counts: Counts,
+    /// Whether it is archived.
+    pub archived: bool,
 }
 
 /// Where PR sync stands, for the sidebar's footer.
@@ -151,8 +153,19 @@ pub struct Overview {
     pub inbox: Counts,
     /// The workspaces that aren't archived, oldest first.
     pub workspaces: Vec<WorkspaceRow>,
+    /// The archived workspaces, oldest first.
+    pub archived: Vec<WorkspaceRow>,
     /// PR sync.
     pub pr_sync: PrSync,
+}
+
+impl Overview {
+    /// The row of workspace `id`, archived or not.
+    pub fn workspace(&self, id: WorkspaceId) -> Option<&WorkspaceRow> {
+        (self.workspaces.iter())
+            .chain(&self.archived)
+            .find(|row| row.id == id)
+    }
 }
 
 impl Snapshot {
@@ -194,11 +207,9 @@ impl Snapshot {
                 })
                 .count(),
         };
-        let workspaces = self
-            .workspaces
-            .iter()
-            .filter(|workspace| workspace.archived_at.is_none())
-            .map(|workspace| WorkspaceRow {
+        let row = |workspace: &Workspace| {
+            let archived = workspace.archived_at.is_some();
+            WorkspaceRow {
                 id: workspace.id,
                 name: workspace.name.clone().into(),
                 dir: workspace.dir.clone().into(),
@@ -208,9 +219,19 @@ impl Snapshot {
                         .filter(|pane| pane.workspace == workspace.id)
                         .map(|pane| pane.state),
                 ),
-                counts: counts(Some(workspace.id)),
-            })
-            .collect();
+                counts: if archived {
+                    Counts::default()
+                } else {
+                    counts(Some(workspace.id))
+                },
+                archived,
+            }
+        };
+        let (archived, workspaces): (Vec<_>, Vec<_>) = self
+            .workspaces
+            .iter()
+            .map(row)
+            .partition(|row| row.archived);
         let synced_at = self
             .pr_sync
             .last_synced_at
@@ -228,6 +249,7 @@ impl Snapshot {
         Overview {
             inbox: counts(None),
             workspaces,
+            archived,
             pr_sync,
         }
     }
@@ -398,6 +420,55 @@ mod tests {
                     .collect();
 
                 assert_eq!(names, ["a"]);
+            }
+
+            #[test]
+            fn should_list_archived_workspaces_apart_oldest_first_with_no_counts() {
+                let archived = |n, name| Workspace {
+                    archived_at: Some("2026-11-12T01:00:00Z".into()),
+                    ..workspace(n, name)
+                };
+                let old = archived(2, "old");
+                let snapshot = Snapshot {
+                    notes: vec![workspace_note(30, old.id)],
+                    workspaces: vec![workspace(1, "a"), old, archived(3, "older")],
+                    ..Snapshot::default()
+                };
+
+                let overview = snapshot.overview();
+                let rows: Vec<_> = (overview.archived.iter())
+                    .map(|row| (row.name.to_string(), row.archived, row.counts))
+                    .collect();
+
+                assert_eq!(
+                    rows,
+                    [
+                        ("old".into(), true, Counts::default()),
+                        ("older".into(), true, Counts::default())
+                    ]
+                );
+                assert!(!overview.workspaces[0].archived);
+            }
+
+            #[test]
+            fn should_find_a_workspace_archived_or_not() {
+                let snapshot = Snapshot {
+                    workspaces: vec![
+                        workspace(1, "a"),
+                        Workspace {
+                            archived_at: Some("2026-11-12T01:00:00Z".into()),
+                            ..workspace(2, "old")
+                        },
+                    ],
+                    ..Snapshot::default()
+                };
+                let overview = snapshot.overview();
+
+                let name = |n| overview.workspace(id(n)).map(|row| row.name.to_string());
+
+                assert_eq!(name(1).as_deref(), Some("a"));
+                assert_eq!(name(2).as_deref(), Some("old"));
+                assert_eq!(name(3), None);
             }
         }
 

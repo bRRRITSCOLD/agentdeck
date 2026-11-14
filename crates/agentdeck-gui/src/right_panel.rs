@@ -193,7 +193,8 @@ impl Render for RightPanel {
             let status = group.status;
             let collapsed = self.is_collapsed(status);
             list = list.child(task_row::group_header(
-                status,
+                status.to_string(),
+                task_row::status_label(status),
                 group.rows.len(),
                 collapsed,
                 cx.listener(move |this, _, _, cx| this.toggle(status, cx)),

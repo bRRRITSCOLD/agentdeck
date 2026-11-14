@@ -1,20 +1,35 @@
 //! Penpot `Centre / TopBar`: the selected workspace's name and directory, above its tabs
 //! (spec §11).
 //!
-//! Its New agent button opens the new agent dialog and its panel button toggles the right
-//! panel, both as actions the window handles.
+//! Its New agent button opens the new agent dialog, its `…` menu archives the workspace and
+//! its panel button toggles the right panel, all as actions the window handles. An archived
+//! workspace's bar has Unarchive in place of New agent, and no menu.
 
 use std::path::Path;
 
-use brrritscold_core_gpui::{ActiveTheme as _, Button, ButtonSize, ButtonVariant, IconName};
+use brrritscold_core_gpui::{
+    ActiveTheme as _, Button, ButtonSize, ButtonVariant, DropdownMenu, DropdownMenuContent,
+    DropdownMenuItem, IconName,
+};
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
-    Styled as _, Window, div, px,
+    Action, App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
+    SharedString, Styled as _, Window, actions, div, px,
 };
 
 use crate::keymap::ToggleRightPanel;
 use crate::new_agent::NewAgent;
+
+actions!(
+    agentdeck,
+    [
+        /// Archives the workspace shown.
+        ArchiveWorkspace,
+        /// Brings the archived workspace shown back.
+        UnarchiveWorkspace,
+    ]
+);
 
 /// The bar's height. Raw in Penpot too: no sizing token is 52px.
 const HEIGHT: f32 = 52.;
@@ -34,6 +49,7 @@ pub fn shown_dir(dir: &str, home: Option<&Path>) -> String {
 pub struct TopBar {
     name: SharedString,
     dir: SharedString,
+    archived: bool,
 }
 
 impl TopBar {
@@ -42,7 +58,24 @@ impl TopBar {
         TopBar {
             name: name.into(),
             dir: dir.into(),
+            archived: false,
         }
+    }
+
+    /// The bar of an archived workspace, or of a live one.
+    pub fn archived(mut self, archived: bool) -> Self {
+        self.archived = archived;
+        self
+    }
+
+    /// Whether it heads an archived workspace.
+    pub fn is_archived(&self) -> bool {
+        self.archived
+    }
+
+    /// The workspace's name.
+    pub fn name(&self) -> &SharedString {
+        &self.name
     }
 
     /// The workspace's directory, as given.
@@ -89,20 +122,15 @@ impl RenderOnce for TopBar {
                             .child(dir),
                     ),
             )
-            // Penpot `Spacer`, `NewAgent` (outline, sm), then `TogglePanel`: ghost, icon-sm,
-            // `PanelRight`.
+            // Penpot `Spacer`, `NewAgent` (outline, sm) or, archived, `Unarchive` (outline,
+            // sm), `WorkspaceMenu`, then `TogglePanel`: ghost, icon-sm, `PanelRight`.
             .child(div().flex_1())
-            .child(
-                div().debug_selector(|| "new agent".into()).child(
-                    Button::new("new-agent")
-                        .variant(ButtonVariant::Outline)
-                        .size(ButtonSize::Sm)
-                        .label("New agent")
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(NewAgent), cx);
-                        }),
-                ),
-            )
+            .map(|bar| match self.archived {
+                false => bar
+                    .child(outline("new agent", "New agent", NewAgent))
+                    .child(menu()),
+                true => bar.child(outline("unarchive", "Unarchive", UnarchiveWorkspace)),
+            })
             .child(
                 div().debug_selector(|| "toggle panel".into()).child(
                     Button::new("toggle-panel")
@@ -115,6 +143,38 @@ impl RenderOnce for TopBar {
                 ),
             )
     }
+}
+
+/// An outline sm button reading `label` that dispatches `action`; tests find it as `name`.
+fn outline(name: &'static str, label: &'static str, action: impl Action) -> impl IntoElement {
+    div().debug_selector(move || name.into()).child(
+        Button::new(name)
+            .variant(ButtonVariant::Outline)
+            .size(ButtonSize::Sm)
+            .label(label)
+            .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx)),
+    )
+}
+
+/// Penpot `WorkspaceMenu`: a ghost icon-sm `Ellipsis` button opening the workspace's actions.
+fn menu() -> impl IntoElement {
+    let item = |label: &'static str, action: Box<dyn Action>| {
+        DropdownMenuItem::new(label)
+            .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
+    };
+    div().debug_selector(|| "workspace menu".into()).child(
+        DropdownMenu::new("workspace-menu")
+            .trigger(
+                Button::new("workspace-menu-trigger")
+                    .variant(ButtonVariant::Ghost)
+                    .size(ButtonSize::IconSm)
+                    .icon(IconName::Ellipsis),
+            )
+            .content(
+                DropdownMenuContent::new()
+                    .item(item("Archive workspace", Box::new(ArchiveWorkspace))),
+            ),
+    )
 }
 
 #[cfg(test)]
