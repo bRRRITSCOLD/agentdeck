@@ -16,8 +16,8 @@ mod link_task;
 mod new_agent;
 mod new_task;
 mod new_workspace;
-mod notifications;
 mod notice;
+mod notifications;
 mod overview;
 mod pane;
 mod pane_header;
@@ -58,6 +58,7 @@ fn main() {
         terminal::init(cx);
         terminal::open::use_processes(cx);
         keymap::init(cx);
+        notifications::init(cx);
         let connection = cx.new(|cx| Connection::new(Rc::new(DaemonConnector), cx));
         // 1440×900, the design's size, fitted to the display; or the bounds saved last time
         // while they still land on a connected display (spec §11).

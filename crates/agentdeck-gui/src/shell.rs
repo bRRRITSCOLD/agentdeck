@@ -17,11 +17,17 @@
 //! the new agent dialog on the task's workspace with [`StartAgentOn`]. Once an agent starts,
 //! the window shows its workspace and tab. A pane header's Link to task… reaches it as the
 //! workspace view's [`LinkPane`] and opens the Link to task dialog on that pane.
+//!
+//! It shows the sidebar's [`Alerts`] as OS notifications (spec §11), leaving out a pane's
+//! while the user can see it: its tab shown in the focused window. Clicking one focuses the
+//! window and shows what it is about: the pane in its tab, the task sheet on a PR task, or the
+//! Tasks view for several PRs.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use agentdeck_client::ApiError;
-use agentdeck_core::{TaskId, WorkspaceId};
+use agentdeck_core::{PaneId, TaskId, WorkspaceId};
 use brrritscold_core_gpui::{
     ActiveTheme as _, Alert, AlertAction, AlertDescription, AlertTitle, AlertVariant, Button,
     ButtonSize, ButtonVariant, IconName, Separator, SeparatorOrientation,
@@ -44,9 +50,10 @@ use crate::new_agent::{self, Launched, NewAgent, NewAgentDialog, Target};
 use crate::new_task::{NewTask, NewTaskDialog};
 use crate::new_workspace::{Created, NewWorkspaceDialog};
 use crate::notice::{self, Notice, NoticeAction};
+use crate::notifications::{self, Alert as Notification};
 use crate::right_panel::RightPanel;
 use crate::settings::SettingsView;
-use crate::sidebar::{Selection, SidebarEvent, SidebarView};
+use crate::sidebar::{Alerts, Selection, SidebarEvent, SidebarView};
 use crate::task_sheet::{OpenTask, StartAgentOn, TaskSheet};
 use crate::tasks::TasksView;
 use crate::title_bar::{Close, Minimize, TitleBar, ToggleMaximize};
@@ -101,6 +108,8 @@ pub struct Shell {
     /// Held by the shell so the title bar's actions reach its handlers while nothing inside
     /// has focus.
     focus: FocusHandle,
+    /// What each notification shown opens when clicked, by its tag.
+    alerts: HashMap<SharedString, notifications::Target>,
 }
 
 impl Shell {
@@ -117,6 +126,18 @@ impl Shell {
         .detach();
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+        // A click on a notification's body focuses the window and shows what it is about.
+        let this = cx.entity().downgrade();
+        let handle = window.window_handle();
+        cx.on_system_notification_response(move |response, cx| {
+            if response.action_id.is_some() {
+                return;
+            }
+            let _ = handle.update(cx, |_, window, cx| {
+                window.activate_window();
+                let _ = this.update(cx, |shell, cx| shell.open_alert(&response.tag, window, cx));
+            });
+        });
         let mut shell = Shell {
             connection,
             sidebar: None,
@@ -137,6 +158,7 @@ impl Shell {
             panel_open: true,
             selection: None,
             focus,
+            alerts: HashMap::new(),
         };
         shell.follow_connection(window, cx);
         shell
@@ -168,6 +190,13 @@ impl Shell {
                             shell.follow_selection(window, cx);
                         }));
                     self._new_workspace = vec![
+                        cx.subscribe_in(
+                            &sidebar,
+                            window,
+                            |shell, _, alerts: &Alerts, window, cx| {
+                                shell.notify(&alerts.0, window, cx);
+                            },
+                        ),
                         cx.subscribe_in(&sidebar, window, |shell, _, event, window, cx| {
                             let SidebarEvent::NewWorkspace = event;
                             if let Some(dialog) = &shell.new_workspace {
@@ -401,6 +430,18 @@ impl Shell {
             tab,
             pane,
         } = launched;
+        if let Some(view) = self.show_workspace(workspace, window, cx) {
+            view.update(cx, |view, cx| view.show_pane(tab, pane, window, cx));
+        }
+    }
+
+    /// Selects `workspace` if another view shows, and answers its view.
+    fn show_workspace(
+        &mut self,
+        workspace: WorkspaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<WorkspaceView>> {
         if self.selection != Some(Selection::Workspace(workspace))
             && let Some(sidebar) = &self.sidebar
         {
@@ -408,10 +449,47 @@ impl Shell {
             sidebar.update(cx, |sidebar, cx| sidebar.select(selection, cx));
             self.follow_selection(window, cx);
         }
-        if let Some(view) = &self.workspace
-            && view.read(cx).workspace() == workspace
-        {
-            view.update(cx, |view, cx| view.show_pane(tab, pane, window, cx));
+        (self.workspace.clone()).filter(|view| view.read(cx).workspace() == workspace)
+    }
+
+    /// Whether the user can see `pane`: its tab shows in the focused window.
+    fn in_view(&self, pane: PaneId, window: &Window, cx: &App) -> bool {
+        let shown = (self.workspace.as_ref()).is_some_and(|view| {
+            (view.read(cx).shown().iter()).any(|shown| shown.read(cx).id() == pane)
+        });
+        shown && window.is_window_active()
+    }
+
+    /// Shows `alerts` as OS notifications, but for a pane the user can see.
+    fn notify(&mut self, alerts: &[Notification], window: &mut Window, cx: &mut Context<Self>) {
+        for alert in alerts {
+            if let notifications::Target::Pane { pane, .. } = alert.target
+                && self.in_view(pane, window, cx)
+            {
+                continue;
+            }
+            self.alerts.insert(alert.tag.clone(), alert.target);
+            cx.show_system_notification(alert.notification());
+        }
+    }
+
+    /// Shows what the notification tagged `tag` is about.
+    fn open_alert(&mut self, tag: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = self.alerts.get(tag).copied() else {
+            return;
+        };
+        match target {
+            notifications::Target::Pane { workspace, pane } => {
+                if let Some(view) = self.show_workspace(workspace, window, cx) {
+                    view.update(cx, |view, cx| view.reveal_pane(pane, window, cx));
+                }
+            }
+            notifications::Target::Task(task) => self.open_task(OpenTask(task), window, cx),
+            notifications::Target::Tasks => {
+                if let Some(sidebar) = &self.sidebar {
+                    sidebar.update(cx, |sidebar, cx| sidebar.select(Selection::Tasks, cx));
+                }
+            }
         }
     }
 
@@ -1668,6 +1746,286 @@ mod tests {
 
                 assert_eq!(*harness.api.deleted.lock().unwrap(), [id(1)]);
                 assert_eq!(selection(&harness, cx), Some(Selection::Inbox));
+            }
+        }
+    }
+
+    mod notifications {
+        use agentdeck_client::types::{Pane, PullRequest};
+        use agentdeck_client::ws::{Event, Remote};
+        use agentdeck_core::ws::{Entity as Changed, ServerMessage};
+        use agentdeck_core::{Agent, AgentState, ChecksState, PaneKind, PrState, TaskKind};
+        use gpui::{SystemNotification, SystemNotificationResponse};
+
+        use super::*;
+        use crate::overview::PaneState;
+        use crate::overview::fixtures::{pane, tab, task};
+        use crate::pane::fixtures::shell_pane;
+
+        /// A shell over a fake daemon, in a window of its own.
+        struct Open {
+            shell: Entity<Shell>,
+            api: Arc<FakeApi>,
+            remote: Remote,
+            cx: &'static mut VisualTestContext,
+        }
+
+        impl Open {
+            fn new(api: Arc<FakeApi>, cx: &mut TestAppContext) -> Open {
+                cx.update(brrritscold_core_gpui::init);
+                cx.update(crate::terminal::init);
+                cx.update(crate::notifications::init);
+                let connector = Rc::new(FakeConnector::default());
+                let remote = connector.then_connect_to(api.clone());
+                let mut shell = None;
+                let window = cx.add_window(|window, cx| {
+                    let connection = cx.new(|cx| Connection::new(connector, cx));
+                    let view = cx.new(|cx| Shell::new(connection, window, cx));
+                    shell = Some(view.clone());
+                    Root::new(view, window, cx)
+                });
+                let mut open = Open {
+                    shell: shell.unwrap(),
+                    api,
+                    remote,
+                    cx: VisualTestContext::from_window(*window, cx).into_mut(),
+                };
+                open.cx.update(|window, _| window.activate_window());
+                open.settle();
+                open
+            }
+
+            fn settle(&mut self) {
+                self.cx.run_until_parked();
+                self.cx.update(|window, cx| window.draw(cx).clear(cx));
+                self.cx.run_until_parked();
+            }
+
+            fn send(&mut self, message: ServerMessage) {
+                self.remote
+                    .events
+                    .try_send(Event::Message(message))
+                    .unwrap();
+                self.settle();
+            }
+
+            fn turn(&mut self, pane: u32, state: AgentState) {
+                self.send(ServerMessage::State {
+                    pane: id(pane),
+                    state,
+                });
+            }
+
+            fn shown(&self) -> Vec<SystemNotification> {
+                self.cx.shown_system_notifications()
+            }
+
+            fn click(&mut self, tag: &str) {
+                self.cx
+                    .simulate_system_notification_response(SystemNotificationResponse {
+                        tag: tag.to_owned().into(),
+                        action_id: None,
+                    });
+                self.settle();
+            }
+
+            fn is_active(&mut self) -> bool {
+                self.cx.update(|window, _| window.is_window_active())
+            }
+
+            /// The workspace shown and its tab shown.
+            fn showing(&mut self) -> Option<(WorkspaceId, Option<agentdeck_core::TabId>)> {
+                self.shell.read_with(self.cx, |shell, cx| {
+                    (shell.workspace.as_ref()).map(|view| {
+                        let view = view.read(cx);
+                        (view.workspace(), view.selected())
+                    })
+                })
+            }
+        }
+
+        /// Claude Code's pane `n` in tab `tab`, as the workspace view reads it.
+        fn claude(n: u32, tab: u32) -> Pane {
+            Pane {
+                agent: Some(Agent::Claude),
+                kind: PaneKind::Agent,
+                ..shell_pane(n, id(tab))
+            }
+        }
+
+        /// `web` (id 1), shown, with Claude Code in pane 7 in its first tab (1) and pane 9 in
+        /// its second (3); `api` (id 2) with Claude Code in pane 8, in tab 2.
+        fn daemon() -> Arc<FakeApi> {
+            let agent = |n, workspace, tab: &str| PaneState {
+                agent: Some(Agent::Claude),
+                tab: tab.into(),
+                ..pane(n, id(workspace), AgentState::Working)
+            };
+            let api = Arc::new(FakeApi::with(Snapshot {
+                workspaces: vec![workspace(1, "web"), workspace(2, "api")],
+                panes: vec![
+                    agent(7, 1, "first"),
+                    agent(9, 1, "second"),
+                    agent(8, 2, "agents"),
+                ],
+                ..Snapshot::default()
+            }));
+            api.set_tabs(
+                id(1),
+                vec![tab(1, id(1), 0, Some(id(7))), tab(3, id(1), 1, Some(id(9)))],
+            );
+            api.set_tabs(id(2), vec![tab(2, id(2), 0, Some(id(8)))]);
+            api.set_panes(vec![claude(7, 1), claude(9, 3), claude(8, 2)]);
+            api
+        }
+
+        mod panes {
+            use super::*;
+
+            #[gpui::test]
+            fn should_notify_when_a_pane_in_another_workspace_turns_blocked(
+                cx: &mut TestAppContext,
+            ) {
+                let mut open = Open::new(daemon(), cx);
+
+                open.turn(8, AgentState::Blocked);
+
+                let shown = open.shown();
+                assert_eq!(shown.len(), 1, "{shown:?}");
+                assert_eq!(shown[0].title, "Claude Code is blocked");
+                assert_eq!(shown[0].body, "agents · api");
+            }
+
+            #[gpui::test]
+            fn should_notify_when_a_pane_in_a_tab_not_shown_is_done(cx: &mut TestAppContext) {
+                let mut open = Open::new(daemon(), cx);
+
+                open.turn(9, AgentState::Done);
+
+                let titles: Vec<_> = open.shown().into_iter().map(|n| n.title).collect();
+                assert_eq!(titles, ["Claude Code is done"]);
+            }
+
+            #[gpui::test]
+            fn should_not_notify_for_a_pane_in_view(cx: &mut TestAppContext) {
+                let mut open = Open::new(daemon(), cx);
+                assert!(open.is_active());
+
+                open.turn(7, AgentState::Blocked);
+
+                assert_eq!(open.shown(), []);
+            }
+
+            #[gpui::test]
+            fn should_notify_for_a_pane_in_view_while_the_window_is_inactive(
+                cx: &mut TestAppContext,
+            ) {
+                let mut open = Open::new(daemon(), cx);
+                open.cx.deactivate_window();
+
+                open.turn(7, AgentState::Blocked);
+
+                assert_eq!(open.shown().len(), 1);
+            }
+
+            #[gpui::test]
+            fn should_notify_once_per_change(cx: &mut TestAppContext) {
+                let mut open = Open::new(daemon(), cx);
+
+                open.turn(8, AgentState::Blocked);
+                open.turn(8, AgentState::Blocked);
+                open.turn(8, AgentState::Working);
+                open.turn(8, AgentState::Blocked);
+
+                assert_eq!(open.shown().len(), 2);
+            }
+
+            #[gpui::test]
+            fn should_not_notify_for_a_muted_workspace(cx: &mut TestAppContext) {
+                let api = daemon();
+                let mut snapshot = api.snapshot_now();
+                snapshot.workspaces[1].muted = true;
+                api.set(snapshot);
+                let mut open = Open::new(api, cx);
+
+                open.turn(8, AgentState::Blocked);
+
+                assert_eq!(open.shown(), []);
+            }
+        }
+
+        mod click {
+            use super::*;
+
+            #[gpui::test]
+            fn should_focus_the_window_and_show_the_panes_workspace(cx: &mut TestAppContext) {
+                let mut open = Open::new(daemon(), cx);
+                open.turn(8, AgentState::Blocked);
+                open.cx.deactivate_window();
+
+                let tag = open.shown()[0].tag.to_string();
+                open.click(&tag);
+
+                assert!(open.is_active());
+                assert_eq!(open.showing(), Some((id(2), Some(id(2)))));
+            }
+
+            #[gpui::test]
+            fn should_show_the_panes_tab(cx: &mut TestAppContext) {
+                let mut open = Open::new(daemon(), cx);
+                open.turn(9, AgentState::Blocked);
+
+                let tag = open.shown()[0].tag.to_string();
+                open.click(&tag);
+
+                assert_eq!(open.showing(), Some((id(1), Some(id(3)))));
+            }
+
+            #[gpui::test]
+            fn should_open_the_task_sheet_for_a_pr(cx: &mut TestAppContext) {
+                let checks = |checks| task_with_checks(20, checks);
+                let api = daemon();
+                let mut snapshot = api.snapshot_now();
+                snapshot.tasks = vec![checks(ChecksState::Pending)];
+                api.set(snapshot.clone());
+                let mut open = Open::new(api, cx);
+                snapshot.tasks = vec![checks(ChecksState::Failure)];
+                open.api.set(snapshot);
+                open.send(ServerMessage::Changed {
+                    entity: Changed::Task,
+                    id: id::<agentdeck_core::TaskId>(20).to_string(),
+                });
+
+                let shown = open.shown();
+                assert_eq!(shown.len(), 1, "{shown:?}");
+                assert_eq!(shown[0].title, "Checks failed");
+                open.click(&shown[0].tag);
+
+                let sheet = open.shell.read_with(open.cx, |s, _| s.task_sheet.clone());
+                let sheet = sheet.expect("the sheet");
+                sheet.read_with(open.cx, |sheet, _| {
+                    assert!(sheet.is_open());
+                    assert_eq!(sheet.task(), Some(id(20)));
+                });
+            }
+
+            /// PR task `n` in `web`, `acme/web #n`, with `checks`.
+            fn task_with_checks(n: u32, checks: ChecksState) -> agentdeck_client::types::Task {
+                agentdeck_client::types::Task {
+                    pr: Some(PullRequest {
+                        checks: Some(checks),
+                        draft: false,
+                        head_ref: "feat/x".into(),
+                        number: i64::from(n),
+                        repo: "acme/web".into(),
+                        review: None,
+                        state: PrState::Open,
+                        synced_at: "2026-11-14T00:00:00Z".into(),
+                        updated_at: "2026-11-14T00:00:00Z".into(),
+                        url: format!("https://github.com/acme/web/pull/{n}"),
+                    }),
+                    ..task(n, TaskKind::Pr, Some(id(1)))
+                }
             }
         }
     }

@@ -5,7 +5,8 @@
 //! selects Settings. The `+` asks the window for the dialog with a [`SidebarEvent`].
 //!
 //! It reads a [`Snapshot`] through the session's [`Api`] when it opens and again whenever the
-//! daemon reports a `changed`; `state` and `exit` messages patch pane states in place.
+//! daemon reports a `changed`; `state` and `exit` messages patch pane states in place. What
+//! changed that the user should hear about goes to the window as [`Alerts`] (spec §11).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,6 +28,7 @@ use gpui::{
 use crate::api::Api;
 use crate::connection::{Connection, DaemonEvent};
 use crate::count::Count;
+use crate::notifications::{self, Alert, PrBatch};
 use crate::overview::{Counts, Overview, Snapshot, WorkspaceRow};
 use crate::rereads::Rereads;
 use crate::scrollbar;
@@ -59,6 +61,12 @@ pub enum SidebarEvent {
     NewWorkspace,
 }
 
+/// What changed since the last read or `state` message that the user should hear about:
+/// agent panes turning blocked or done, and PR changes once their sync ends. The window
+/// decides which panes are out of view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Alerts(pub Vec<Alert>);
+
 /// The sidebar view.
 pub struct SidebarView {
     api: Arc<dyn Api>,
@@ -73,6 +81,8 @@ pub struct SidebarView {
     /// The last read started.
     read: Option<Task<()>>,
     rereads: Rereads,
+    /// The PR changes of a sync still running.
+    prs: PrBatch,
     _events: Subscription,
     _tick: Task<()>,
     /// Where the workspace list is scrolled to, for its scrollbar.
@@ -101,6 +111,7 @@ impl SidebarView {
             archived_open: false,
             read: None,
             rereads: Rereads::default(),
+            prs: PrBatch::default(),
             _events: events,
             _tick: tick,
             scroll: ScrollHandle::new(),
@@ -173,8 +184,16 @@ impl SidebarView {
         state: AgentState,
         cx: &mut Context<Self>,
     ) {
+        let before = (self.snapshot.panes.iter()).find(|entry| entry.pane == pane);
+        let before = before.map(|entry| entry.state);
         self.snapshot.set_state(pane, state);
         self.overview = self.snapshot.overview();
+        let now = (self.snapshot.panes.iter()).find(|entry| entry.pane == pane);
+        if let (Some(before), Some(now)) = (before, now)
+            && let Some(alert) = notifications::pane_alert(before, now, &self.snapshot)
+        {
+            cx.emit(Alerts(vec![alert]));
+        }
         cx.notify();
     }
 
@@ -189,9 +208,14 @@ impl SidebarView {
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(snapshot) => {
+                        let mut alerts = notifications::pane_alerts(&this.snapshot, &snapshot);
+                        alerts.extend(this.prs.read(&this.snapshot, &snapshot));
                         this.overview = snapshot.overview();
                         this.snapshot = snapshot;
                         this.error = None;
+                        if !alerts.is_empty() {
+                            cx.emit(Alerts(alerts));
+                        }
                     }
                     Err(err) => {
                         this.error = Some(format!("Couldn't read the daemon: {err:#}").into())
@@ -314,6 +338,8 @@ enum Lead {
 }
 
 impl EventEmitter<SidebarEvent> for SidebarView {}
+
+impl EventEmitter<Alerts> for SidebarView {}
 
 impl Render for SidebarView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -942,6 +968,80 @@ mod tests {
             });
 
             assert_eq!(state_of(&mut open, "a"), AgentState::Idle);
+        }
+    }
+
+    mod alerts {
+        use std::cell::RefCell;
+
+        use agentdeck_core::Agent;
+
+        use super::*;
+        use crate::notifications::Alert;
+
+        /// [`two_workspaces`] with pane 11, in `b`, running Claude Code.
+        fn with_an_agent() -> Snapshot {
+            let mut snapshot = two_workspaces();
+            snapshot.panes[1].agent = Some(Agent::Claude);
+            snapshot
+        }
+
+        /// Every alert the sidebar emits from now on.
+        fn heard(open: &mut Open) -> (Rc<RefCell<Vec<Alert>>>, Subscription) {
+            let heard = Rc::new(RefCell::new(Vec::new()));
+            let seen = heard.clone();
+            let subscription = open.cx.update(|_, cx| {
+                cx.subscribe(&open.sidebar, move |_, Alerts(alerts): &Alerts, _| {
+                    seen.borrow_mut().extend(alerts.iter().cloned());
+                })
+            });
+            (heard, subscription)
+        }
+
+        #[gpui::test]
+        fn should_alert_when_an_agent_pane_turns_blocked(cx: &mut TestAppContext) {
+            let mut open = open(with_an_agent(), cx);
+            let (heard, _subscription) = heard(&mut open);
+
+            open.send(ServerMessage::State {
+                pane: id(11),
+                state: AgentState::Blocked,
+            });
+
+            let titles: Vec<_> = heard.borrow().iter().map(|a| a.title.clone()).collect();
+            assert_eq!(titles, ["Claude Code is blocked"]);
+        }
+
+        #[gpui::test]
+        fn should_alert_for_a_change_a_reread_shows(cx: &mut TestAppContext) {
+            let mut open = open(with_an_agent(), cx);
+            let (heard, _subscription) = heard(&mut open);
+            let mut blocked = with_an_agent();
+            blocked.set_state(id(11), AgentState::Blocked);
+            open.api.set(blocked);
+
+            open.send(ServerMessage::Changed {
+                entity: Changed::Pane,
+                id: id::<agentdeck_core::PaneId>(11).to_string(),
+            });
+
+            assert_eq!(heard.borrow().len(), 1);
+        }
+
+        #[gpui::test]
+        fn should_not_alert_for_the_first_read(cx: &mut TestAppContext) {
+            let mut blocked = with_an_agent();
+            blocked.set_state(id(11), AgentState::Blocked);
+            let mut open = open(Snapshot::default(), cx);
+            let (heard, _subscription) = heard(&mut open);
+            open.api.set(blocked);
+
+            open.send(ServerMessage::Changed {
+                entity: Changed::Workspace,
+                id: id::<WorkspaceId>(2).to_string(),
+            });
+
+            assert_eq!(*heard.borrow(), []);
         }
     }
 

@@ -12,10 +12,16 @@
 
 use agentdeck_client::types::Task;
 use agentdeck_core::{AgentState, ChecksState, PaneId, ReviewState, TaskId, WorkspaceId};
-use gpui::{SharedString, SystemNotification};
+use gpui::{App, SharedString, SystemNotification};
 
 use crate::overview::{PaneState, Snapshot};
 use crate::task_sheet::agent_name;
+
+/// Names the app to the OS's notification server, which shows "agentdeck" on each
+/// notification. Call once, before any alert shows: without a name GPUI shows none.
+pub fn init(cx: &mut App) {
+    cx.set_app_identity("agentdeck", "agentdeck");
+}
 
 /// More PRs than this changing in one sync make one alert.
 const COALESCE_OVER: usize = 3;
@@ -167,7 +173,8 @@ fn pr_changes(before: &Snapshot, after: &Snapshot) -> Vec<PrChange> {
 
 /// `task`'s `event`, with what its alert says.
 fn change(task: &Task, event: PrEvent) -> PrChange {
-    let pr = (task.pr.as_ref()).map_or_else(String::new, |pr| format!("{} #{}", pr.repo, pr.number));
+    let pr =
+        (task.pr.as_ref()).map_or_else(String::new, |pr| format!("{} #{}", pr.repo, pr.number));
     PrChange {
         task: task.id,
         event,
@@ -297,13 +304,20 @@ mod tests {
         #[test]
         fn should_not_alert_for_other_states() {
             for state in [AgentState::Working, AgentState::Idle, AgentState::Exited] {
-                assert_eq!(pane_alerts(&web(), &with_state(web(), state)), [], "{state:?}");
+                assert_eq!(
+                    pane_alerts(&web(), &with_state(web(), state)),
+                    [],
+                    "{state:?}"
+                );
             }
         }
 
         #[test]
         fn should_not_alert_on_the_first_read() {
-            let alerts = pane_alerts(&Snapshot::default(), &with_state(web(), AgentState::Blocked));
+            let alerts = pane_alerts(
+                &Snapshot::default(),
+                &with_state(web(), AgentState::Blocked),
+            );
 
             assert_eq!(alerts, []);
         }
@@ -335,7 +349,10 @@ mod tests {
 
             let alert = pane_alert(AgentState::Working, &after.panes[0], &after);
 
-            assert_eq!(alert.map(|a| a.title), Some("Claude Code is blocked".into()));
+            assert_eq!(
+                alert.map(|a| a.title),
+                Some("Claude Code is blocked".into())
+            );
         }
     }
 
@@ -369,10 +386,7 @@ mod tests {
 
         /// `web` holding `tasks`.
         fn holding(tasks: Vec<Task>) -> Snapshot {
-            Snapshot {
-                tasks,
-                ..web()
-            }
+            Snapshot { tasks, ..web() }
         }
 
         fn pending(n: u32) -> Task {
@@ -385,7 +399,8 @@ mod tests {
 
         #[test]
         fn should_say_checks_failed_over_the_pr_and_its_title() {
-            let alerts = PrBatch::default().read(&holding(vec![pending(5)]), &holding(vec![failed(5)]));
+            let alerts =
+                PrBatch::default().read(&holding(vec![pending(5)]), &holding(vec![failed(5)]));
 
             assert_eq!(
                 alerts,
@@ -416,7 +431,8 @@ mod tests {
 
         #[test]
         fn should_not_alert_again_while_checks_stay_failed() {
-            let alerts = PrBatch::default().read(&holding(vec![failed(5)]), &holding(vec![failed(5)]));
+            let alerts =
+                PrBatch::default().read(&holding(vec![failed(5)]), &holding(vec![failed(5)]));
 
             assert_eq!(alerts, []);
         }
