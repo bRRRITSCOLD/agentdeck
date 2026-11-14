@@ -4,6 +4,7 @@
 use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use httpmock::prelude::*;
 use httpmock::{Mock, MockServer};
@@ -50,7 +51,7 @@ fn gh_token_file(root: &Path) -> PathBuf {
     root.join("gh-token")
 }
 
-/// A PR as GitHub's GraphQL API returns it, through the daemon's `pr` fragment.
+/// A PR as GitHub's GraphQL API returns it, through the daemon's fragments.
 #[derive(Clone)]
 pub struct Pr {
     pub repo: &'static str,
@@ -61,6 +62,7 @@ pub struct Pr {
     pub draft: bool,
     pub checks: Option<&'static str>,
     pub review: Option<&'static str>,
+    pub updated_at: &'static str,
 }
 
 impl Pr {
@@ -75,6 +77,7 @@ impl Pr {
             draft: false,
             checks: None,
             review: None,
+            updated_at: "2026-11-01T10:00:00Z",
         }
     }
 
@@ -82,7 +85,18 @@ impl Pr {
         format!("https://github.com/{}/pull/{}", self.repo, self.number)
     }
 
+    /// Every field, as a search or a fetch by number returns it.
     fn node(&self) -> Value {
+        let mut node = self.light_node();
+        node["reviewDecision"] = json!(self.review);
+        node["commits"] = json!({ "nodes": [ {
+            "commit": { "statusCheckRollup": self.checks.map(|state| json!({ "state": state })) }
+        } ] });
+        node
+    }
+
+    /// The light fields the list of open PRs returns: no review, no checks.
+    fn light_node(&self) -> Value {
         json!({
             "number": self.number,
             "title": self.title,
@@ -90,42 +104,78 @@ impl Pr {
             "state": self.state,
             "isDraft": self.draft,
             "headRefName": self.head_ref,
-            "updatedAt": "2026-11-01T10:00:00Z",
-            "repository": { "nameWithOwner": self.repo },
-            "reviewDecision": self.review,
-            "commits": { "nodes": [ {
-                "commit": { "statusCheckRollup": self.checks.map(|state| json!({ "state": state })) }
-            } ] }
+            "updatedAt": self.updated_at,
+            "repository": { "nameWithOwner": self.repo }
         })
     }
 }
 
-/// Any search for the viewer's PRs, full or incremental, answered with `prs` for `token`.
-pub fn mock_search<'a>(server: &'a MockServer, token: &str, prs: &[Pr]) -> Mock<'a> {
-    let nodes: Vec<Value> = prs.iter().map(Pr::node).collect();
+/// PRs fetched by number in one request, as the daemon batches them.
+pub const BATCH: usize = 25;
+
+/// Mocks that answer together for one set of PRs; [`Listing::delete`] removes them all.
+pub struct Listing<'a> {
+    /// The list of open PRs, or the search.
+    pub list: Mock<'a>,
+    /// The other mocks: the incremental search and the fetches of details by number.
+    others: Vec<Mock<'a>>,
+}
+
+impl Listing<'_> {
+    pub fn delete(&mut self) {
+        self.list.delete();
+        for mock in &mut self.others {
+            mock.delete();
+        }
+    }
+}
+
+/// The viewer's PRs, however the daemon asks: the list of open PRs (a full sync), the search
+/// (an incremental one), and their details by number, all answered with `prs` for `token`.
+pub fn mock_search<'a>(server: &'a MockServer, token: &str, prs: &[Pr]) -> Listing<'a> {
+    let mut listing = mock_list(server, token, prs);
+    listing.others.push(mock_updated_search(server, token, prs));
+    listing
+}
+
+/// The list of the viewer's open PRs, one page with `prs` for `token`, and their details by
+/// number. An incremental search doesn't match it.
+pub fn mock_list<'a>(server: &'a MockServer, token: &str, prs: &[Pr]) -> Listing<'a> {
+    let list = mock_list_page(server, token, prs, None, None, prs.len(), Duration::ZERO);
+    let others = prs
+        .chunks(BATCH)
+        .map(|batch| mock_fetch(server, batch))
+        .collect();
+    Listing { list, others }
+}
+
+/// One page of the list of the viewer's open PRs for `token`: the one after cursor `after`
+/// (`None` for the first), answered with `prs`, `total` as the list's count, and `next` as the
+/// next page's cursor, after `delay`.
+pub fn mock_list_page<'a>(
+    server: &'a MockServer,
+    token: &str,
+    prs: &[Pr],
+    after: Option<&str>,
+    next: Option<&str>,
+    total: usize,
+    delay: Duration,
+) -> Mock<'a> {
+    let nodes: Vec<Value> = prs.iter().map(Pr::light_node).collect();
     server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
             .header("authorization", format!("Bearer {token}"))
-            .body_includes("search(");
-        then.status(200).json_body(json!({
-            "data": { "search": {
-                "pageInfo": { "hasNextPage": false, "endCursor": null },
+            .body_includes("pullRequests(")
+            .json_body_includes(json!({ "variables": { "after": after } }).to_string());
+        then.status(200).delay(delay).json_body(json!({
+            "data": { "viewer": { "pullRequests": {
+                "totalCount": total,
+                "pageInfo": { "hasNextPage": next.is_some(), "endCursor": next },
                 "nodes": nodes
-            } }
+            } } }
         }));
     })
-}
-
-/// The full search for the viewer's open PRs, answered with `prs` for `token`. Unlike
-/// [`mock_search`], an incremental search doesn't match it.
-pub fn mock_full_search<'a>(server: &'a MockServer, token: &str, prs: &[Pr]) -> Mock<'a> {
-    mock_search_for(
-        server,
-        token,
-        prs,
-        json!({ "variables": { "q": "is:pr is:open author:@me" } }),
-    )
 }
 
 /// The incremental search for the viewer's PRs updated since the last sync, answered with
@@ -138,54 +188,10 @@ pub fn mock_updated_search<'a>(server: &'a MockServer, token: &str, prs: &[Pr]) 
             .header("authorization", format!("Bearer {token}"))
             .body_includes("search(")
             .body_includes("updated:>=");
-        then.status(200).json_body(search_page(nodes));
-    })
-}
-
-fn mock_search_for<'a>(server: &'a MockServer, token: &str, prs: &[Pr], body: Value) -> Mock<'a> {
-    let nodes: Vec<Value> = prs.iter().map(Pr::node).collect();
-    server.mock(|when, then| {
-        when.method(POST)
-            .path("/graphql")
-            .header("authorization", format!("Bearer {token}"))
-            .body_includes("search(")
-            .json_body_includes(body.to_string());
-        then.status(200).json_body(search_page(nodes));
-    })
-}
-
-fn search_page(nodes: Vec<Value>) -> Value {
-    json!({
-        "data": { "search": {
-            "pageInfo": { "hasNextPage": false, "endCursor": null },
-            "nodes": nodes
-        } }
-    })
-}
-
-/// One page of the full search for `token`: the one after cursor `after` (`None` for the
-/// first), answered with `prs`, `total` as the search's count, and `next` as the next page's
-/// cursor, after `delay`.
-pub fn mock_search_page<'a>(
-    server: &'a MockServer,
-    token: &str,
-    prs: &[Pr],
-    after: Option<&str>,
-    next: Option<&str>,
-    total: usize,
-    delay: std::time::Duration,
-) -> Mock<'a> {
-    let nodes: Vec<Value> = prs.iter().map(Pr::node).collect();
-    server.mock(|when, then| {
-        when.method(POST)
-            .path("/graphql")
-            .header("authorization", format!("Bearer {token}"))
-            .body_includes("search(")
-            .json_body_includes(json!({ "variables": { "after": after } }).to_string());
-        then.status(200).delay(delay).json_body(json!({
+        then.status(200).json_body(json!({
             "data": { "search": {
-                "issueCount": total,
-                "pageInfo": { "hasNextPage": next.is_some(), "endCursor": next },
+                "issueCount": nodes.len(),
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
                 "nodes": nodes
             } }
         }));

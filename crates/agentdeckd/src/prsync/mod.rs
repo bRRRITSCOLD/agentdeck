@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use agentdeck_core::ws::Entity;
-use agentdeck_core::{PrState, WorkspaceId};
+use agentdeck_core::{ChecksState, PrState, WorkspaceId};
 use chrono::{DateTime, SecondsFormat, Utc};
 use tokio::time::MissedTickBehavior;
 
@@ -226,50 +226,67 @@ impl PrSync {
         })
     }
 
-    /// Reads the search page by page, storing each as it arrives, then settles what the
-    /// search can't say.
-    ///
-    /// - Full (`since` is `None`): every open PR, then the PRs stored as open that left the
-    ///   search, fetched by number so a merge or close reaches its task; one GitHub no longer
-    ///   shows is closed.
-    /// - Incremental: the PRs updated at or after `since`, in any state, keeping a merged or
-    ///   closed one only if it's stored as open; then the stored open PRs with pending checks
-    ///   the search left out, fetched by number, and the inbox PRs it left out, matched to a
-    ///   workspace again as stored. Nothing is gone: only a full sync says so.
+    /// Reads GitHub and stores what it shows: a full read when `since` is `None`, else an
+    /// incremental one.
     async fn read(
         &self,
         token: &str,
         since: Option<DateTime<Utc>>,
         clones: &Arc<Clones>,
     ) -> Result<(), SyncError> {
+        match since {
+            None => self.read_full(token, clones).await,
+            Some(since) => self.read_since(token, since, clones).await,
+        }
+    }
+
+    /// A full read, in two phases.
+    ///
+    /// 1. The list of open PRs, light fields only, stored page by page as it arrives. A
+    ///    stored PR keeps its checks and review for now.
+    /// 2. Every field, fetched by number, for the PRs that need it: new ones, ones GitHub
+    ///    updated since they were stored, and ones whose checks are pending.
+    ///
+    /// Then the PRs stored as open that left the list are fetched by number, so a merge or
+    /// close reaches its task; one GitHub no longer shows is closed.
+    async fn read_full(&self, token: &str, clones: &Arc<Clones>) -> Result<(), SyncError> {
         let github = &self.inner.github;
         let stored = self
             .inner
             .db
-            .call(|conn| db::pull_requests::open(conn))
+            .call(|conn| db::pull_requests::open_prs(conn))
             .await?;
-        let q = match since {
-            Some(since) => {
-                github::updated_search(&since.to_rfc3339_opts(SecondsFormat::Secs, true))
-            }
-            None => github::OPEN_SEARCH.to_owned(),
-        };
         let mut seen: Vec<(String, i64)> = Vec::new();
+        let mut stale: Vec<(String, i64)> = Vec::new();
         let mut after: Option<String> = None;
-        for _ in 0..github::MAX_PAGES {
-            let page = github.search_page(token, &q, after.as_deref()).await?;
-            seen.extend(page.prs.iter().map(|pr| (pr.repo.clone(), pr.number)));
-            let prs: Vec<RemotePr> = page
-                .prs
-                .into_iter()
-                .filter(|pr| {
-                    since.is_none()
-                        || pr.state == PrState::Open
-                        || stored
-                            .iter()
-                            .any(|(repo, number)| pr.repo == *repo && pr.number == *number)
-                })
-                .collect();
+        for _ in 0..github::MAX_LIST_PAGES {
+            let page = github.list_page(token, after.as_deref()).await?;
+            let mut prs = Vec::with_capacity(page.prs.len());
+            for pr in page.prs {
+                let key = (pr.repo.clone(), pr.number);
+                match stored
+                    .iter()
+                    .find(|old| old.repo == pr.repo && old.number == pr.number)
+                {
+                    Some(old) => {
+                        if old.updated_at != pr.updated_at
+                            || old.checks == Some(ChecksState::Pending)
+                        {
+                            stale.push(key.clone());
+                        }
+                        prs.push(RemotePr {
+                            checks: old.checks,
+                            review: old.review,
+                            ..pr
+                        });
+                    }
+                    None => {
+                        stale.push(key.clone());
+                        prs.push(pr);
+                    }
+                }
+                seen.push(key);
+            }
             self.store(prs, Vec::new(), clones).await?;
             let prs_done = u32::try_from(seen.len()).unwrap_or(u32::MAX);
             self.set_progress(Some(PrSyncProgress {
@@ -282,18 +299,68 @@ impl PrSync {
             }
         }
 
-        if since.is_none() {
-            let left = missing(&stored, &seen);
-            let found = github.prs(token, &left).await?;
-            let mut prs = Vec::new();
-            let mut gone = Vec::new();
-            for (wanted, found) in left.into_iter().zip(found) {
-                match found {
-                    Some(pr) => prs.push(pr),
-                    None => gone.push(wanted),
-                }
+        let details: Vec<RemotePr> = github
+            .prs(token, &stale)
+            .await?
+            .into_iter()
+            .flatten()
+            .collect();
+        self.store(details, Vec::new(), clones).await?;
+
+        let stored: Vec<(String, i64)> =
+            stored.into_iter().map(|pr| (pr.repo, pr.number)).collect();
+        let left = missing(&stored, &seen);
+        let found = github.prs(token, &left).await?;
+        let mut prs = Vec::new();
+        let mut gone = Vec::new();
+        for (wanted, found) in left.into_iter().zip(found) {
+            match found {
+                Some(pr) => prs.push(pr),
+                None => gone.push(wanted),
             }
-            return self.store(prs, gone, clones).await;
+        }
+        self.store(prs, gone, clones).await
+    }
+
+    /// An incremental read: the PRs updated at or after `since`, in any state, keeping a
+    /// merged or closed one only if it's stored as open; then the stored open PRs with pending
+    /// checks the search left out, fetched by number, and the inbox PRs it left out, matched
+    /// to a workspace again as stored. Nothing is gone: only a full read says so.
+    async fn read_since(
+        &self,
+        token: &str,
+        since: DateTime<Utc>,
+        clones: &Arc<Clones>,
+    ) -> Result<(), SyncError> {
+        let github = &self.inner.github;
+        let stored = self
+            .inner
+            .db
+            .call(|conn| db::pull_requests::open(conn))
+            .await?;
+        let q = github::updated_search(&since.to_rfc3339_opts(SecondsFormat::Secs, true));
+        let mut seen: Vec<(String, i64)> = Vec::new();
+        let mut after: Option<String> = None;
+        for _ in 0..github::MAX_PAGES {
+            let page = github.search_page(token, &q, after.as_deref()).await?;
+            seen.extend(page.prs.iter().map(|pr| (pr.repo.clone(), pr.number)));
+            let prs: Vec<RemotePr> = page
+                .prs
+                .into_iter()
+                .filter(|pr| {
+                    pr.state == PrState::Open || stored.contains(&(pr.repo.clone(), pr.number))
+                })
+                .collect();
+            self.store(prs, Vec::new(), clones).await?;
+            let prs_done = u32::try_from(seen.len()).unwrap_or(u32::MAX);
+            self.set_progress(Some(PrSyncProgress {
+                prs_done,
+                prs: page.total.max(prs_done),
+            }));
+            match page.next {
+                Some(next) => after = Some(next),
+                None => break,
+            }
         }
 
         let pending = self

@@ -1,4 +1,5 @@
-//! GitHub's GraphQL API: the viewer's open PRs, and PRs by number in batches (spec §8).
+//! GitHub's GraphQL API (spec §8): the list of the viewer's open PRs with light fields, the
+//! search for PRs updated since a time, and PRs by number with every field, in batches.
 
 use std::time::Duration;
 
@@ -8,9 +9,6 @@ use serde_json::{Value, json};
 
 /// Where the GraphQL API lives unless `AGENTDECK_GITHUB_API` says otherwise.
 pub const DEFAULT_ENDPOINT: &str = "https://api.github.com/graphql";
-
-/// The full search spec §8 names: every open PR the token's user authored.
-pub const OPEN_SEARCH: &str = "is:pr is:open author:@me";
 
 /// The incremental search: every PR the token's user authored, in any state, that changed at
 /// or after `since` (RFC 3339).
@@ -22,8 +20,14 @@ pub fn updated_search(since: &str) -> String {
 pub const PAGE_SIZE: u32 = 50;
 pub const MAX_PAGES: u32 = 10;
 
-/// PRs fetched by number in one request.
-const BATCH_SIZE: usize = 50;
+/// Open PRs per page of the list, and how many pages one sync reads at most.
+pub const LIST_PAGE_SIZE: u32 = 100;
+pub const MAX_LIST_PAGES: u32 = 10;
+
+/// PRs fetched by number in one request, and how many such requests are in flight at once.
+/// On 2026-11-14, 271 PRs took 41 s as 50s one at a time, and 18 s as 25s four at a time.
+const BATCH_SIZE: usize = 25;
+const BATCHES_IN_FLIGHT: usize = 4;
 
 /// The waits before each retry of a request that failed for a reason that may pass: a 5xx, a
 /// failed connection, a body cut short. One try, then one more per wait.
@@ -34,6 +38,13 @@ const PR_FIELDS: &str = "fragment pr on PullRequest {
   repository { nameWithOwner }
   reviewDecision
   commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+}";
+
+/// The list's light fields: no review and no checks, the costly ones (the rollup made a
+/// 100-PR page time out).
+const LIGHT_FIELDS: &str = "fragment light on PullRequest {
+  number title url state isDraft headRefName updatedAt
+  repository { nameWithOwner }
 }";
 
 /// A pull request as GitHub reports it.
@@ -124,20 +135,58 @@ impl Github {
         parse_search(self.query(token, &query, variables).await?)
     }
 
-    /// Each of `wanted` (`(repo, number)`) by number, `BATCH_SIZE` to a request, in order;
-    /// `None` for one GitHub no longer shows to the token's user.
+    /// The page of the viewer's open PRs after cursor `after` (`None` for the first), most
+    /// recently updated first, with light fields only: `checks` and `review` are `None`.
+    pub async fn list_page(
+        &self,
+        token: &str,
+        after: Option<&str>,
+    ) -> Result<ListPage, GithubError> {
+        let query = format!(
+            "query($first: Int!, $after: String) {{
+  viewer {{
+    pullRequests(states: OPEN, first: $first, after: $after, orderBy: {{ field: UPDATED_AT, direction: DESC }}) {{
+      totalCount
+      pageInfo {{ hasNextPage endCursor }}
+      nodes {{ ...light }}
+    }}
+  }}
+}}
+{LIGHT_FIELDS}"
+        );
+        let variables = json!({ "first": LIST_PAGE_SIZE, "after": after });
+        parse_list(self.query(token, &query, variables).await?)
+    }
+
+    /// Each of `wanted` (`(repo, number)`) by number with every field, in order: `BATCH_SIZE`
+    /// to a request, `BATCHES_IN_FLIGHT` requests at once. `None` for one GitHub no longer
+    /// shows to the token's user.
     pub async fn prs(
         &self,
         token: &str,
         wanted: &[(String, i64)],
     ) -> Result<Vec<Option<RemotePr>>, GithubError> {
-        let mut prs = Vec::with_capacity(wanted.len());
-        for batch in wanted.chunks(BATCH_SIZE) {
-            let (query, variables) = batch_query(batch);
-            let data = self.query(token, &query, variables).await?;
-            prs.extend(parse_batch(data, batch.len())?);
-        }
-        Ok(prs)
+        use futures_util::{StreamExt as _, TryStreamExt as _};
+
+        let batches: Vec<Vec<(String, i64)>> =
+            wanted.chunks(BATCH_SIZE).map(<[_]>::to_vec).collect();
+        let fetches = batches.into_iter().map(|batch| self.batch(token, batch));
+        let found: Vec<Vec<Option<RemotePr>>> = futures_util::stream::iter(fetches)
+            .buffered(BATCHES_IN_FLIGHT)
+            .try_collect()
+            .await?;
+        Ok(found.into_iter().flatten().collect())
+    }
+
+    /// One request for `batch` by number.
+    async fn batch(
+        &self,
+        token: &str,
+        batch: Vec<(String, i64)>,
+    ) -> Result<Vec<Option<RemotePr>>, GithubError> {
+        let (query, variables) = batch_query(&batch);
+        let data = self.query(token, &query, variables).await?;
+        parse_batch(data, batch.len())
     }
 
     /// Posts one GraphQL query and returns its `data`, trying again after each of
@@ -245,6 +294,52 @@ pub struct SearchPage {
     pub total: u32,
 }
 
+/// One page of the list of open PRs.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ListPage {
+    /// The page's PRs, with light fields only.
+    pub prs: Vec<RemotePr>,
+    /// The cursor of the next page, if there is one.
+    pub next: Option<String>,
+    /// How many open PRs the whole list has.
+    pub total: u32,
+}
+
+fn parse_list(data: Value) -> Result<ListPage, GithubError> {
+    #[derive(Deserialize)]
+    struct Data {
+        viewer: Viewer,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Viewer {
+        pull_requests: List,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct List {
+        total_count: u32,
+        page_info: PageInfo,
+        nodes: Vec<LightNode>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PageInfo {
+        has_next_page: bool,
+        end_cursor: Option<String>,
+    }
+
+    let list = serde_json::from_value::<Data>(data)?.viewer.pull_requests;
+    Ok(ListPage {
+        prs: list.nodes.into_iter().map(RemotePr::from).collect(),
+        next: list
+            .page_info
+            .end_cursor
+            .filter(|_| list.page_info.has_next_page),
+        total: list.total_count,
+    })
+}
+
 fn parse_search(data: Value) -> Result<SearchPage, GithubError> {
     #[derive(Deserialize)]
     struct Data {
@@ -339,6 +434,37 @@ fn parse_batch(data: Value, len: usize) -> Result<Vec<Option<RemotePr>>, GithubE
         .collect()
 }
 
+/// The `light` fragment.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LightNode {
+    number: i64,
+    title: String,
+    url: String,
+    state: GqlPrState,
+    is_draft: bool,
+    head_ref_name: String,
+    updated_at: String,
+    repository: NameWithOwner,
+}
+
+impl From<LightNode> for RemotePr {
+    fn from(node: LightNode) -> RemotePr {
+        RemotePr {
+            repo: node.repository.name_with_owner,
+            number: node.number,
+            title: node.title,
+            url: node.url,
+            state: node.state.into(),
+            draft: node.is_draft,
+            head_ref: node.head_ref_name,
+            checks: None,
+            review: None,
+            updated_at: node.updated_at,
+        }
+    }
+}
+
 /// The `pr` fragment.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -390,6 +516,16 @@ enum GqlPrState {
     Closed,
 }
 
+impl From<GqlPrState> for PrState {
+    fn from(state: GqlPrState) -> PrState {
+        match state {
+            GqlPrState::Open => PrState::Open,
+            GqlPrState::Merged => PrState::Merged,
+            GqlPrState::Closed => PrState::Closed,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 enum GqlReview {
@@ -426,11 +562,7 @@ impl From<PrNode> for RemotePr {
             number: node.number,
             title: node.title,
             url: node.url,
-            state: match node.state {
-                GqlPrState::Open => PrState::Open,
-                GqlPrState::Merged => PrState::Merged,
-                GqlPrState::Closed => PrState::Closed,
-            },
+            state: node.state.into(),
             draft: node.is_draft,
             head_ref: node.head_ref_name,
             checks,
@@ -587,6 +719,31 @@ mod tests {
                 Some(ReviewState::ReviewRequired)
             );
             assert_eq!(review(Value::Null), None);
+        }
+    }
+
+    mod parse_list {
+        use super::*;
+
+        #[test]
+        fn should_read_light_fields_without_review_or_checks() {
+            let mut light = node("OPEN", json!("APPROVED"), json!({ "state": "SUCCESS" }));
+            light.as_object_mut().unwrap().remove("reviewDecision");
+            light.as_object_mut().unwrap().remove("commits");
+            let data = json!({ "viewer": { "pullRequests": {
+                "totalCount": 271,
+                "pageInfo": { "hasNextPage": true, "endCursor": "c1" },
+                "nodes": [ light ]
+            } } });
+
+            let page = parse_list(data).unwrap();
+
+            assert_eq!(page.total, 271);
+            assert_eq!(page.next.as_deref(), Some("c1"));
+            assert_eq!(page.prs.len(), 1);
+            let pr = &page.prs[0];
+            assert_eq!((pr.repo.as_str(), pr.number), ("acme/widgets", 7));
+            assert_eq!((pr.checks, pr.review), (None, None));
         }
     }
 
