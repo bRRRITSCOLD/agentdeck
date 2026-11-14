@@ -192,7 +192,7 @@ fn delivery(snapshot: &Snapshot, comment: &Comment) -> String {
 }
 
 /// The agent's name: `Claude Code`, or `Agent` for another CLI.
-fn agent_name(agent: Agent) -> &'static str {
+pub(crate) fn agent_name(agent: Agent) -> &'static str {
     (AGENTS.iter())
         .find(|(a, _)| *a == agent)
         .map_or("Agent", |(_, name)| name)

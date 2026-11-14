@@ -48,6 +48,10 @@ pub trait Api: Send + Sync {
     /// tab's last pane takes the tab with it: a layout can't be emptied again.
     fn close_pane(&self, pane: PaneAt, cx: &App) -> Task<anyhow::Result<()>>;
 
+    /// Links `pane` to `task`, or unlinks it with `None` (spec §4). A refusal is an
+    /// [`ApiError`]: `unknown_task`, or `invalid_task` for a task in another workspace or done.
+    fn link_task(&self, pane: PaneId, task: Option<TaskId>, cx: &App) -> Task<anyhow::Result<()>>;
+
     /// Makes a workspace as `request` says; its id. A refusal is an [`ApiError`] whose code
     /// names the field: `invalid_name` or `invalid_dir`.
     fn new_workspace(&self, request: Request, cx: &App) -> Task<anyhow::Result<WorkspaceId>>;
@@ -185,6 +189,14 @@ impl Api for Daemon {
             cx,
             async move { Ok(panes::close_pane(&client, pane).await?) },
         )
+    }
+
+    fn link_task(&self, pane: PaneId, task: Option<TaskId>, cx: &App) -> Task<anyhow::Result<()>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            panes::link_task(&client, pane, task).await?;
+            Ok(())
+        })
     }
 
     fn new_workspace(&self, request: Request, cx: &App) -> Task<anyhow::Result<WorkspaceId>> {
@@ -544,6 +556,8 @@ pub(crate) mod fake {
         pub launched: Mutex<Vec<Launch>>,
         /// The panes closed, in order.
         pub closed: Mutex<Vec<PaneId>>,
+        /// The links asked for: the pane and its task, or `None` to unlink it, in order.
+        pub linked: Mutex<Vec<(PaneId, Option<TaskId>)>>,
         /// The workspaces archived, in order.
         pub archived: Mutex<Vec<WorkspaceId>>,
         /// The workspaces unarchived, in order.
@@ -783,6 +797,22 @@ pub(crate) mod fake {
             }
             self.panes.lock().unwrap().retain(|p| p.id != at.pane);
             self.closed.lock().unwrap().push(at.pane);
+            Task::ready(Ok(()))
+        }
+
+        fn link_task(
+            &self,
+            pane: PaneId,
+            task: Option<TaskId>,
+            _cx: &App,
+        ) -> Task<anyhow::Result<()>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            if let Some(held) = self.panes.lock().unwrap().iter_mut().find(|p| p.id == pane) {
+                held.task_id = task;
+            }
+            self.linked.lock().unwrap().push((pane, task));
             Task::ready(Ok(()))
         }
 

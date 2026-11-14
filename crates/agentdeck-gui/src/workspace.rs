@@ -8,7 +8,8 @@
 //! It handles the tab and pane shortcuts in [`keymap`]'s workspace context, opens a tab with a
 //! shell from its `NewTab` button or shortcut, and carries out each pane menu's
 //! [`PaneRequest`], or the same request by shortcut on the focused pane. Closing a pane that is
-//! still running asks first. A workspace with no tabs when it opens gets a shell tab.
+//! still running asks first. Linking an agent pane to a task goes up to the window as
+//! [`LinkPane`], since the window holds the workspace's tasks. A workspace with no tabs when it opens gets a shell tab.
 //!
 //! An archived workspace shows only its top bar over a note saying so: it reads no tabs and
 //! attaches no terminals. The window opens a fresh view when that changes.
@@ -19,7 +20,9 @@ use std::sync::Arc;
 use agentdeck_client::types::Tab;
 use agentdeck_client::ws;
 use agentdeck_core::ws::{Entity as Changed, ServerMessage};
-use agentdeck_core::{AgentState, Layout, PaneId, SplitDirection, TabId, WorkspaceId};
+use agentdeck_core::{
+    Agent, AgentState, Layout, PaneId, PaneKind, SplitDirection, TabId, TaskId, WorkspaceId,
+};
 use brrritscold_core_gpui::{
     ActiveTheme as _, AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
     AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, Button,
@@ -29,7 +32,7 @@ use brrritscold_core_gpui::{
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, Context, Div, Entity, FocusHandle, Focusable as _,
+    AnyElement, AppContext as _, Context, Div, Entity, EventEmitter, FocusHandle, Focusable as _,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
     Subscription, Task, Window, div, relative,
 };
@@ -53,6 +56,20 @@ enum Status {
     Failed(SharedString),
     /// Showing what was read.
     Ready,
+}
+
+/// A pane's menu asked to link the agent in it to a task: the window opens the dialog,
+/// since it holds the workspace's tasks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkPane {
+    /// The pane.
+    pub pane: PaneId,
+    /// The agent running in it.
+    pub agent: Agent,
+    /// The task it is linked to now.
+    pub task: Option<TaskId>,
+    /// The title of the tab it is in.
+    pub tab: SharedString,
 }
 
 /// One workspace's tabs and panes.
@@ -208,6 +225,20 @@ impl WorkspaceView {
                 self.closing = Some(at);
                 self.close_dialog.open(window, cx);
                 cx.notify();
+            }
+            PaneRequest::LinkTask => {
+                let Some(agent) = pane.agent.filter(|_| pane.kind == PaneKind::Agent) else {
+                    return;
+                };
+                let tab = (self.read.tabs.iter())
+                    .find(|tab| tab.id == pane.tab_id)
+                    .map_or_else(SharedString::default, |tab| tab.title.clone().into());
+                cx.emit(LinkPane {
+                    pane: pane.id,
+                    agent,
+                    task: pane.task_id,
+                    tab,
+                });
             }
         }
     }
@@ -588,6 +619,8 @@ pub fn failed(
 ) {
     Notice::error(title, format!("{err:#}")).show(window, cx);
 }
+
+impl EventEmitter<LinkPane> for WorkspaceView {}
 
 impl Render for WorkspaceView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1414,6 +1447,56 @@ mod tests {
 
                 assert_eq!(harness.shown(cx), [id(7)]);
                 harness.draw(cx);
+            }
+        }
+
+        mod link_task {
+            use std::cell::RefCell;
+
+            use agentdeck_core::{Agent, PaneKind};
+
+            use super::*;
+
+            /// Asks the one pane shown, `pane`, to link, and the asks the view emitted.
+            fn ask(pane: Pane, cx: &mut TestAppContext) -> Vec<LinkPane> {
+                let (harness, cx) =
+                    Harness::open(vec![tab(1, id(1), 0, Some(id(7)))], vec![pane], cx);
+                let asked = Rc::new(RefCell::new(Vec::new()));
+                let seen = asked.clone();
+                let _asks = cx.update(|_, cx| {
+                    cx.subscribe(&harness.view, move |_, ask: &LinkPane, _| {
+                        seen.borrow_mut().push(ask.clone());
+                    })
+                });
+
+                harness.request(0, PaneRequest::LinkTask, cx);
+
+                asked.take()
+            }
+
+            #[gpui::test]
+            fn should_ask_the_window_to_link_an_agent_pane(cx: &mut TestAppContext) {
+                let pane = Pane {
+                    kind: PaneKind::Agent,
+                    agent: Some(Agent::Claude),
+                    task_id: Some(id(30)),
+                    ..shell_pane(7, id(1))
+                };
+
+                assert_eq!(
+                    ask(pane, cx),
+                    [LinkPane {
+                        pane: id(7),
+                        agent: Agent::Claude,
+                        task: Some(id(30)),
+                        tab: "tab 1".into(),
+                    }]
+                );
+            }
+
+            #[gpui::test]
+            fn should_ask_nothing_for_a_shell(cx: &mut TestAppContext) {
+                assert!(ask(shell_pane(7, id(1)), cx).is_empty());
             }
         }
 

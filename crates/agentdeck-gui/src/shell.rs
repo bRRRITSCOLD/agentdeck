@@ -14,7 +14,8 @@
 //! [`NewTask`], preset to the Inbox or their workspace. They and the Inbox ask for the task
 //! sheet with [`OpenTask`] when a task's title is clicked; the sheet's Start agent asks for
 //! the new agent dialog on the task's workspace with [`StartAgentOn`]. Once an agent starts,
-//! the window shows its workspace and tab.
+//! the window shows its workspace and tab. A pane header's Link to task… reaches it as the
+//! workspace view's [`LinkPane`] and opens the Link to task dialog on that pane.
 
 use std::sync::Arc;
 
@@ -37,6 +38,7 @@ use crate::delete_workspace::{DeleteEvent, DeleteTarget, DeleteWorkspaceDialog};
 use crate::frame;
 use crate::inbox::{InboxView, OpenSettings, Synced};
 use crate::keymap::ToggleRightPanel;
+use crate::link_task::{self, LinkTaskDialog};
 use crate::new_agent::{self, Launched, NewAgent, NewAgentDialog, Target};
 use crate::new_task::{NewTask, NewTaskDialog};
 use crate::new_workspace::{Created, NewWorkspaceDialog};
@@ -48,7 +50,7 @@ use crate::task_sheet::{OpenTask, StartAgentOn, TaskSheet};
 use crate::tasks::TasksView;
 use crate::title_bar::{Close, Minimize, TitleBar, ToggleMaximize};
 use crate::top_bar::{ArchiveWorkspace, DeleteWorkspace, TopBar, UnarchiveWorkspace};
-use crate::workspace::{WorkspaceView, failed};
+use crate::workspace::{LinkPane, WorkspaceView, failed};
 
 /// Whether `err` is the daemon refusing with `code`.
 fn is_refusal(err: &anyhow::Error, code: &str) -> bool {
@@ -73,9 +75,13 @@ pub struct Shell {
     new_task: Option<Entity<NewTaskDialog>>,
     /// The task sheet, while connected.
     task_sheet: Option<Entity<TaskSheet>>,
+    /// The Link to task dialog, while connected.
+    link_task: Option<Entity<LinkTaskDialog>>,
     _new_workspace: Vec<Subscription>,
     /// The selected workspace.
     workspace: Option<Entity<WorkspaceView>>,
+    /// Follows the selected workspace's asks to link a pane.
+    _workspace: Option<Subscription>,
     /// The Tasks view, while connected; shown while the sidebar selects Tasks.
     tasks: Option<Entity<TasksView>>,
     /// The Inbox, while connected; shown while the sidebar selects it.
@@ -117,8 +123,10 @@ impl Shell {
             delete_workspace: None,
             new_task: None,
             task_sheet: None,
+            link_task: None,
             _new_workspace: Vec::new(),
             workspace: None,
+            _workspace: None,
             tasks: None,
             inbox: None,
             settings: None,
@@ -142,6 +150,7 @@ impl Shell {
                     let dialog = cx.new(|cx| NewWorkspaceDialog::new(api.clone(), window, cx));
                     let inbox = cx.new(|_| InboxView::new(api.clone()));
                     let new_agent = cx.new(|_| NewAgentDialog::new(api.clone()));
+                    let link_task = cx.new(|_| LinkTaskDialog::new(api.clone()));
                     let delete = cx.new(|cx| DeleteWorkspaceDialog::new(api.clone(), window, cx));
                     let new_task = cx.new(|cx| NewTaskDialog::new(api.clone(), window, cx));
                     let panel = cx.new(|cx| RightPanel::new(api.clone(), window, cx));
@@ -226,6 +235,7 @@ impl Shell {
                     self.delete_workspace = Some(delete);
                     self.new_task = Some(new_task);
                     self.task_sheet = Some(task_sheet);
+                    self.link_task = Some(link_task);
                     self.tasks = Some(tasks);
                     self.settings = Some(settings);
                     self.panel = Some(panel);
@@ -239,6 +249,7 @@ impl Shell {
                 self.new_workspace = None;
                 self._new_workspace.clear();
                 self.workspace = None;
+                self._workspace = None;
                 self.tasks = None;
                 self.inbox = None;
                 self.settings = None;
@@ -247,6 +258,7 @@ impl Shell {
                 self.delete_workspace = None;
                 self.new_task = None;
                 self.task_sheet = None;
+                self.link_task = None;
                 self.selection = None;
             }
         }
@@ -302,11 +314,42 @@ impl Shell {
         }
         let (api, sender) = (session.api.clone(), session.sender.clone());
         let connection = self.connection.clone();
-        self.workspace =
-            Some(cx.new(|cx| {
-                WorkspaceView::new(selected, top_bar, api, connection, sender, window, cx)
-            }));
+        let view =
+            cx.new(|cx| WorkspaceView::new(selected, top_bar, api, connection, sender, window, cx));
+        self._workspace = Some(cx.subscribe_in(
+            &view,
+            window,
+            |shell, _, ask: &LinkPane, window, cx| shell.open_link_task(ask, window, cx),
+        ));
+        self.workspace = Some(view);
         cx.notify();
+    }
+
+    /// Opens the Link to task dialog on the pane `ask` names, in the workspace shown,
+    /// offering that workspace's tasks.
+    fn open_link_task(&mut self, ask: &LinkPane, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(sidebar), Some(dialog), Some(view)) =
+            (&self.sidebar, &self.link_task, &self.workspace)
+        else {
+            return;
+        };
+        let workspace = view.read(cx).workspace();
+        let sidebar = sidebar.read(cx);
+        let Some(row) = sidebar.overview().workspace(workspace) else {
+            return;
+        };
+        let target = link_task::Target {
+            pane: ask.pane,
+            agent: ask.agent,
+            tab: ask.tab.clone(),
+            workspace,
+            workspace_name: row.name.clone(),
+        };
+        let snapshot = sidebar.snapshot().clone();
+        let task = ask.task;
+        dialog.update(cx, |dialog, cx| {
+            dialog.open(target, task, snapshot, window, cx);
+        });
     }
 
     /// Opens the new agent dialog on the workspace shown.
@@ -565,6 +608,7 @@ impl Shell {
                 .children(self.delete_workspace.clone())
                 .children(self.new_task.clone())
                 .children(self.task_sheet.clone())
+                .children(self.link_task.clone())
                 .into_any_element(),
         }
     }
@@ -1106,6 +1150,41 @@ mod tests {
                         Some(Selection::Workspace(id(2)))
                     );
                 }
+            }
+        }
+
+        mod link_task {
+            use agentdeck_core::Agent;
+
+            use super::*;
+
+            #[gpui::test]
+            fn should_open_the_link_dialog_on_the_pane_the_workspace_asks_for(
+                cx: &mut TestAppContext,
+            ) {
+                let connector = Rc::new(FakeConnector::default());
+                let _remote = connector.then_connect_to(workspace_with_a_pane());
+                let shell = open(connector, cx);
+                let view = shell.read_with(cx, |shell, _| shell.workspace.clone().unwrap());
+
+                view.update(cx, |_, cx| {
+                    cx.emit(LinkPane {
+                        pane: id(7),
+                        agent: Agent::Claude,
+                        task: Some(id(30)),
+                        tab: "tab 1".into(),
+                    })
+                });
+                cx.run_until_parked();
+
+                let dialog = shell.read_with(cx, |shell, _| shell.link_task.clone().unwrap());
+                assert!(dialog.read_with(cx, |d, _| d.is_open()));
+                assert_eq!(dialog.read_with(cx, |d, _| d.pane()), Some(id(7)));
+                assert_eq!(dialog.read_with(cx, |d, _| d.task()), Some(id(30)));
+                assert_eq!(
+                    dialog.read_with(cx, |d, _| d.workspace_name()),
+                    Some("agentdeck".into())
+                );
             }
         }
 

@@ -2,13 +2,13 @@
 //!
 //! The header's title is the terminal's live one, then the one read over REST, then a name
 //! for what runs there. Its state follows the daemon's `state` and `exit` broadcasts between
-//! reads. Its menu asks the workspace holding it for a split or a close, as a
-//! [`PaneRequest`]: only the workspace knows the tab's layout.
+//! reads. Its menu asks the workspace holding it for a split, a close or, for an agent, a
+//! link to a task, as a [`PaneRequest`]: only the workspace knows the tab's layout.
 
 use agentdeck_client::types::Pane;
 use agentdeck_client::ws;
 use agentdeck_core::ws::ServerMessage;
-use agentdeck_core::{PaneId, SplitDirection};
+use agentdeck_core::{PaneId, PaneKind, SplitDirection};
 use brrritscold_core_gpui::{
     ActiveTheme as _, Button, ButtonSize, ButtonVariant, DropdownMenu, DropdownMenuContent,
     DropdownMenuItem, DropdownMenuItemVariant, DropdownMenuSeparator, IconName, Separator,
@@ -51,6 +51,29 @@ pub enum PaneRequest {
     Split(SplitDirection),
     /// Close it, killing what runs there.
     Close,
+    /// Link the agent in it to a task, or unlink it: agent panes only.
+    LinkTask,
+}
+
+/// The menu items before the separator and Close pane, for a pane of `kind`: the splits,
+/// then, for an agent, Link to task….
+pub fn menu_items(kind: PaneKind) -> Vec<(&'static str, IconName, PaneRequest)> {
+    let mut items = vec![
+        (
+            "Split right",
+            IconName::Columns2,
+            PaneRequest::Split(SplitDirection::Horizontal),
+        ),
+        (
+            "Split down",
+            IconName::Rows2,
+            PaneRequest::Split(SplitDirection::Vertical),
+        ),
+    ];
+    if kind == PaneKind::Agent {
+        items.push(("Link to task…", IconName::Link, PaneRequest::LinkTask));
+    }
+    items
 }
 
 /// A pane: header, rule, terminal.
@@ -158,17 +181,11 @@ impl PaneView {
                     .icon(IconName::Ellipsis),
             )
             .content(
-                DropdownMenuContent::new()
-                    .item(item(
-                        "Split right",
-                        IconName::Columns2,
-                        PaneRequest::Split(SplitDirection::Horizontal),
-                    ))
-                    .item(item(
-                        "Split down",
-                        IconName::Rows2,
-                        PaneRequest::Split(SplitDirection::Vertical),
-                    ))
+                (menu_items(self.pane.kind).into_iter())
+                    .fold(
+                        DropdownMenuContent::new(),
+                        |content, (label, icon, request)| content.item(item(label, icon, request)),
+                    )
                     .separator(DropdownMenuSeparator::new())
                     .item(
                         item("Close pane", IconName::X, PaneRequest::Close)
@@ -267,6 +284,31 @@ mod tests {
     use super::fixtures::shell_pane;
     use super::*;
     use crate::overview::fixtures::id;
+
+    mod menu_items {
+        use super::*;
+
+        fn labels(kind: PaneKind) -> Vec<&'static str> {
+            menu_items(kind)
+                .into_iter()
+                .map(|(label, ..)| label)
+                .collect()
+        }
+
+        #[test]
+        fn should_offer_link_to_task_after_the_splits_for_an_agent() {
+            assert_eq!(
+                labels(PaneKind::Agent),
+                ["Split right", "Split down", "Link to task…"]
+            );
+            assert_eq!(menu_items(PaneKind::Agent)[2].2, PaneRequest::LinkTask);
+        }
+
+        #[test]
+        fn should_offer_only_the_splits_for_a_shell() {
+            assert_eq!(labels(PaneKind::Shell), ["Split right", "Split down"]);
+        }
+    }
 
     mod shown_title {
         use super::*;

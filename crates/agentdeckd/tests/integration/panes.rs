@@ -317,21 +317,17 @@ mod patch_v1_panes_id {
             .into_inner()
     }
 
-    async fn link(
+    /// The request linking `pane` to `task`, or unlinking it, to send.
+    fn link(
         daemon: &TestDaemon,
         pane: PaneId,
         task: Option<TaskId>,
-    ) -> Result<
-        agentdeck_client::ResponseValue<agentdeck_client::types::Pane>,
-        agentdeck_client::Error<agentdeck_client::types::Error>,
-    > {
+    ) -> agentdeck_client::builder::PaneUpdate<'_> {
         daemon
             .client
             .pane_update()
             .id(pane)
             .body(PanePatch { task_id: task })
-            .send()
-            .await
     }
 
     #[tokio::test]
@@ -341,7 +337,10 @@ mod patch_v1_panes_id {
         let pane = place.spawn(&daemon.client, &sh("sleep 60")).await;
         let task = task(&daemon, Some(place.workspace.id)).await;
 
-        let response = link(&daemon, pane.id, Some(task.id)).await.expect("link");
+        let response = link(&daemon, pane.id, Some(task.id))
+            .send()
+            .await
+            .expect("link");
 
         assert_eq!(response.status().as_u16(), 200);
         assert_eq!(response.into_inner().task_id, Some(task.id));
@@ -370,7 +369,7 @@ mod patch_v1_panes_id {
             .await
             .expect("spawn");
 
-        let unlinked = link(&daemon, pane.id, None).await.expect("unlink");
+        let unlinked = link(&daemon, pane.id, None).send().await.expect("unlink");
 
         assert_eq!(unlinked.into_inner().task_id, None);
     }
@@ -384,10 +383,16 @@ mod patch_v1_panes_id {
             task(&daemon, Some(place.workspace.id)).await,
             task(&daemon, Some(place.workspace.id)).await,
         );
-        link(&daemon, pane.id, Some(old.id)).await.expect("link");
+        link(&daemon, pane.id, Some(old.id))
+            .send()
+            .await
+            .expect("link");
         let mut ws = Ws::connect(&daemon).await;
 
-        link(&daemon, pane.id, Some(new.id)).await.expect("relink");
+        link(&daemon, pane.id, Some(new.id))
+            .send()
+            .await
+            .expect("relink");
 
         for (entity, id) in [
             (Entity::Pane, pane.id.to_string()),
@@ -404,8 +409,11 @@ mod patch_v1_panes_id {
         let place = Place::new(&daemon).await;
         let pane = place.spawn(&daemon.client, &sh("sleep 60")).await;
 
-        let (status, body) =
-            error_response(link(&daemon, pane.id, Some(uuid::Uuid::now_v7().into())).await);
+        let (status, body) = error_response(
+            link(&daemon, pane.id, Some(uuid::Uuid::now_v7().into()))
+                .send()
+                .await,
+        );
 
         assert_eq!(status, 400);
         assert_eq!(body.error_code.as_deref(), Some("unknown_task"));
@@ -430,7 +438,7 @@ mod patch_v1_panes_id {
         for workspace in [Some(other.id), None] {
             let task = task(&daemon, workspace).await;
 
-            let (status, body) = error_response(link(&daemon, pane.id, Some(task.id)).await);
+            let (status, body) = error_response(link(&daemon, pane.id, Some(task.id)).send().await);
 
             assert_eq!(status, 400);
             assert_eq!(body.error_code.as_deref(), Some("invalid_task"));
@@ -455,7 +463,7 @@ mod patch_v1_panes_id {
             .await
             .expect("finish the task");
 
-        let (status, body) = error_response(link(&daemon, pane.id, Some(task.id)).await);
+        let (status, body) = error_response(link(&daemon, pane.id, Some(task.id)).send().await);
 
         assert_eq!(status, 400);
         assert_eq!(body.error_code.as_deref(), Some("invalid_task"));
@@ -465,7 +473,11 @@ mod patch_v1_panes_id {
     async fn should_answer_404_for_an_unknown_pane_404() {
         let daemon = TestDaemon::start().await;
 
-        let (status, body) = error_response(link(&daemon, uuid::Uuid::now_v7().into(), None).await);
+        let (status, body) = error_response(
+            link(&daemon, uuid::Uuid::now_v7().into(), None)
+                .send()
+                .await,
+        );
 
         assert_eq!(status, 404);
         assert_eq!(body.error_code.as_deref(), Some("not_found"));
