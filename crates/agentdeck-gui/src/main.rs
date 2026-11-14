@@ -16,6 +16,7 @@ mod link_task;
 mod new_agent;
 mod new_task;
 mod new_workspace;
+mod notifications;
 mod notice;
 mod overview;
 mod pane;
