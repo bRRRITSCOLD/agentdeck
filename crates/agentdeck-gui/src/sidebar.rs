@@ -1,8 +1,8 @@
 //! The main window's sidebar (spec §11), the `Sidebar` board of Penpot's "Main window": the
 //! brand, Inbox and Tasks, then the Workspaces header with its new workspace `+`, every
-//! workspace with its rolled-up state and open PRs, the archived ones in a foldable Archived
-//! group, and when PRs last synced at the bottom, ending in a gear that selects Settings. The
-//! `+` asks the window for the dialog with a [`SidebarEvent`].
+//! workspace with its rolled-up state, open PRs and a `BellOff` while muted, the archived ones
+//! in a foldable Archived group, and when PRs last synced at the bottom, ending in a gear that
+//! selects Settings. The `+` asks the window for the dialog with a [`SidebarEvent`].
 //!
 //! It reads a [`Snapshot`] through the session's [`Api`] when it opens and again whenever the
 //! daemon reports a `changed`; `state` and `exit` messages patch pane states in place.
@@ -217,12 +217,14 @@ impl SidebarView {
     ) -> AnyElement {
         let id = id.into();
         let name = self.debug_name(selection);
-        let has_counts = counts != Counts::default();
         let active = self.selection() == selection;
-        let archived = match selection {
-            Selection::Workspace(id) => self.overview.workspace(id).is_some_and(|w| w.archived),
-            Selection::Inbox | Selection::Tasks | Selection::Settings => false,
+        let (archived, muted) = match selection {
+            Selection::Workspace(id) => (self.overview.workspace(id))
+                .map_or((false, false), |w| (w.archived, w.muted && !w.archived)),
+            Selection::Inbox | Selection::Tasks | Selection::Settings => (false, false),
         };
+        // A muted row's bell sits with its counts, so it holds the label short of them too.
+        let has_counts = counts != Counts::default() || muted;
         let button = SidebarMenuButton::new(id.clone())
             .label(label)
             .is_active(active)
@@ -262,6 +264,7 @@ impl SidebarView {
                 )
             })
             .when(has_counts, |row| {
+                let bell = format!("muted {name}");
                 row.child(
                     div()
                         .debug_selector(move || format!("counts {name}"))
@@ -272,6 +275,17 @@ impl SidebarView {
                         .flex()
                         .items_center()
                         .gap(space::S2)
+                        // Penpot "Workspace menu": a 12px `BellOff` in `muted-foreground`
+                        // before the counts.
+                        .when(muted, |c| {
+                            c.child(
+                                div().debug_selector(move || bell).child(
+                                    Icon::new(IconName::BellOff)
+                                        .size(space::S3)
+                                        .text_color(cx.theme().semantic().muted_foreground),
+                                ),
+                            )
+                        })
                         .when(counts.prs > 0, |c| {
                             c.child(Count::new(IconName::GitPullRequest, counts.prs))
                         }),
@@ -640,6 +654,64 @@ mod tests {
             assert!(open.shows("counts a"));
             assert!(!open.shows("counts b"));
             assert!(!open.shows("counts inbox"));
+        }
+    }
+
+    mod muted {
+        use agentdeck_client::types::Workspace;
+
+        use super::*;
+
+        /// [`two_workspaces`] with `a` muted and holding an open PR.
+        fn a_muted() -> Snapshot {
+            let mut snapshot = two_workspaces();
+            snapshot.workspaces[0].muted = true;
+            let a = snapshot.workspaces[0].id;
+            snapshot.tasks = vec![task(20, TaskKind::Pr, Some(a))];
+            snapshot
+        }
+
+        #[gpui::test]
+        fn should_show_a_12px_bell_off_only_on_a_muted_row(cx: &mut TestAppContext) {
+            let mut open = open(a_muted(), cx);
+
+            let bell = open.cx.debug_bounds("muted a").expect("a's bell shows");
+            assert_eq!(bell.size.width, space::S3);
+            assert!(!open.shows("muted b"));
+        }
+
+        #[gpui::test]
+        fn should_put_the_bell_before_the_counts(cx: &mut TestAppContext) {
+            let open = open(a_muted(), cx);
+
+            let bell = open.cx.debug_bounds("muted a").expect("a's bell shows");
+            let counts = open.cx.debug_bounds("counts a").expect("a's counts show");
+            assert!(counts.contains(&bell.center()), "{bell:?} in {counts:?}");
+            assert_eq!(bell.left(), counts.left(), "first in the row's end");
+        }
+
+        #[gpui::test]
+        fn should_show_the_bell_on_a_muted_row_with_no_counts(cx: &mut TestAppContext) {
+            let mut snapshot = two_workspaces();
+            snapshot.workspaces[1].muted = true;
+            let mut open = open(snapshot, cx);
+
+            assert!(open.shows("muted b"));
+        }
+
+        #[gpui::test]
+        fn should_not_show_the_bell_on_an_archived_row(cx: &mut TestAppContext) {
+            let mut snapshot = two_workspaces();
+            snapshot.workspaces.push(Workspace {
+                archived_at: Some("2026-11-13T00:00:00Z".into()),
+                muted: true,
+                ..workspace(3, "old")
+            });
+            let mut open = open(snapshot, cx);
+            open.click("group archived");
+
+            assert!(open.shows("row old"));
+            assert!(!open.shows("muted old"));
         }
     }
 

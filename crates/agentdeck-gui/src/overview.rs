@@ -64,6 +64,8 @@ pub struct WorkspaceRow {
     pub counts: Counts,
     /// Whether it is archived.
     pub archived: bool,
+    /// Whether its notifications are muted.
+    pub muted: bool,
 }
 
 /// Where PR sync stands, for the sidebar's footer.
@@ -201,6 +203,7 @@ impl Snapshot {
                     counts(Some(workspace.id))
                 },
                 archived,
+                muted: workspace.muted,
             }
         };
         let (archived, workspaces): (Vec<_>, Vec<_>) = self

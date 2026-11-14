@@ -5,8 +5,9 @@
 //! from the start. When the compositor leaves decorations to the app, a title bar and
 //! resize edges frame it.
 //!
-//! It archives and unarchives the selected workspace when the top bar asks, toasting the
-//! outcome; an archive's toast offers Undo. The top bar's Delete workspace… opens the delete
+//! It mutes and unmutes the selected workspace's notifications when the top bar asks, toasting
+//! a failure. It archives and unarchives the selected workspace when the top bar asks, toasting
+//! the outcome; an archive's toast offers Undo. The top bar's Delete workspace… opens the delete
 //! dialog; once a workspace is deleted the selection falls back to the first workspace left,
 //! else the Inbox.
 //!
@@ -49,7 +50,9 @@ use crate::sidebar::{Selection, SidebarEvent, SidebarView};
 use crate::task_sheet::{OpenTask, StartAgentOn, TaskSheet};
 use crate::tasks::TasksView;
 use crate::title_bar::{Close, Minimize, TitleBar, ToggleMaximize};
-use crate::top_bar::{ArchiveWorkspace, DeleteWorkspace, TopBar, UnarchiveWorkspace};
+use crate::top_bar::{
+    ArchiveWorkspace, DeleteWorkspace, MuteWorkspace, TopBar, UnarchiveWorkspace, UnmuteWorkspace,
+};
 use crate::workspace::{LinkPane, WorkspaceView, failed};
 
 /// Whether `err` is the daemon refusing with `code`.
@@ -302,7 +305,9 @@ impl Shell {
             cx.notify();
             return;
         };
-        let top_bar = TopBar::new(row.name.clone(), row.dir.clone()).archived(row.archived);
+        let top_bar = TopBar::new(row.name.clone(), row.dir.clone())
+            .archived(row.archived)
+            .muted(row.muted);
         let selected = row.id;
         // Archiving or unarchiving swaps the view: an archived one holds no terminals.
         if let Some(view) = &self.workspace
@@ -499,6 +504,26 @@ impl Shell {
         .detach();
     }
 
+    /// Mutes the selected workspace's notifications, or unmutes them; a failure toasts why.
+    fn set_muted(&mut self, muted: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some((workspace, name, _)), Some(api)) = (self.selected_workspace(cx), self.api(cx))
+        else {
+            return;
+        };
+        let setting = api.set_muted(workspace, muted, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let set = setting.await;
+            let _ = this.update_in(cx, |this, window, cx| match set {
+                Ok(()) => this.refresh(cx),
+                Err(err) => {
+                    let verb = if muted { "mute" } else { "unmute" };
+                    failed(format!("Couldn't {verb} {name}"), &err, window, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Opens the Delete workspace dialog on the selected workspace.
     fn delete_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(sidebar), Some(dialog), Some(Selection::Workspace(selected))) =
@@ -632,6 +657,12 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &NewAgent, window, cx| this.new_agent(window, cx)))
             .on_action(cx.listener(|this, _: &ArchiveWorkspace, window, cx| {
                 this.archive(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &MuteWorkspace, window, cx| {
+                this.set_muted(true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &UnmuteWorkspace, window, cx| {
+                this.set_muted(false, window, cx);
             }))
             .on_action(cx.listener(|this, _: &DeleteWorkspace, window, cx| {
                 this.delete_workspace(window, cx);
@@ -1242,7 +1273,9 @@ mod tests {
         }
     }
 
-    mod archive {
+    /// A shell over a fake daemon, driven through its window, for the workspace menu's
+    /// tests.
+    mod support {
         use agentdeck_client::types::Workspace;
         use gpui::Modifiers;
 
@@ -1250,15 +1283,15 @@ mod tests {
         use crate::notice::{self, Notice};
         use crate::top_bar::ArchiveWorkspace;
 
-        struct Harness {
-            shell: Entity<Shell>,
-            api: Arc<FakeApi>,
-            _remote: agentdeck_client::ws::Remote,
+        pub struct Harness {
+            pub shell: Entity<Shell>,
+            pub api: Arc<FakeApi>,
+            pub _remote: agentdeck_client::ws::Remote,
         }
 
         impl Harness {
             /// A shell showing `api`'s workspaces, the first selected.
-            fn open(
+            pub fn open(
                 api: Arc<FakeApi>,
                 cx: &mut TestAppContext,
             ) -> (Harness, &mut VisualTestContext) {
@@ -1283,19 +1316,19 @@ mod tests {
                 (harness, cx)
             }
 
-            fn settle(&self, cx: &mut VisualTestContext) {
+            pub fn settle(&self, cx: &mut VisualTestContext) {
                 cx.run_until_parked();
                 cx.update(|window, cx| window.draw(cx).clear(cx));
                 cx.run_until_parked();
                 cx.update(|window, cx| window.draw(cx).clear(cx));
             }
 
-            fn click(&self, at: gpui::Point<gpui::Pixels>, cx: &mut VisualTestContext) {
+            pub fn click(&self, at: gpui::Point<gpui::Pixels>, cx: &mut VisualTestContext) {
                 cx.simulate_click(at, Modifiers::default());
                 self.settle(cx);
             }
 
-            fn select(&self, workspace: u32, cx: &mut VisualTestContext) {
+            pub fn select(&self, workspace: u32, cx: &mut VisualTestContext) {
                 let sidebar = self.shell.read_with(cx, |shell, _| shell.sidebar.clone());
                 sidebar.unwrap().update(cx, |sidebar, cx| {
                     sidebar.select(Selection::Workspace(id(workspace)), cx);
@@ -1303,13 +1336,13 @@ mod tests {
                 self.settle(cx);
             }
 
-            fn archive(&self, cx: &mut VisualTestContext) {
+            pub fn archive(&self, cx: &mut VisualTestContext) {
                 cx.dispatch_action(ArchiveWorkspace);
                 self.settle(cx);
             }
 
             /// Whether the sidebar has workspace `n` as archived.
-            fn is_archived(&self, n: u32, cx: &mut VisualTestContext) -> bool {
+            pub fn is_archived(&self, n: u32, cx: &mut VisualTestContext) -> bool {
                 self.shell.read_with(cx, |shell, cx| {
                     let sidebar = shell.sidebar.as_ref().unwrap().read(cx);
                     sidebar.overview().workspace(id(n)).unwrap().archived
@@ -1317,7 +1350,7 @@ mod tests {
             }
 
             /// The top bar of the workspace shown says it's archived.
-            fn shows_archived(&self, cx: &mut VisualTestContext) -> bool {
+            pub fn shows_archived(&self, cx: &mut VisualTestContext) -> bool {
                 self.shell.read_with(cx, |shell, cx| {
                     let view = shell
                         .workspace
@@ -1328,13 +1361,13 @@ mod tests {
                 })
             }
 
-            fn last_notice(&self, cx: &mut VisualTestContext) -> Notice {
+            pub fn last_notice(&self, cx: &mut VisualTestContext) -> Notice {
                 cx.update(|_, cx| notice::shown(cx).last().cloned().expect("a toast"))
             }
         }
 
         /// Workspace 1, `agentdeck`, live; workspace 2, `old`, archived.
-        fn daemon() -> Arc<FakeApi> {
+        pub fn daemon() -> Arc<FakeApi> {
             let old = Workspace {
                 archived_at: Some("2026-11-13T00:00:00Z".into()),
                 ..workspace(2, "old")
@@ -1344,6 +1377,77 @@ mod tests {
                 ..Snapshot::default()
             }))
         }
+    }
+
+    mod mute {
+        use super::support::{Harness, daemon};
+        use super::*;
+        use crate::top_bar::MuteWorkspace;
+
+        /// Opens the top bar's menu and clicks its first item.
+        fn click_first_item(harness: &Harness, cx: &mut VisualTestContext) {
+            let trigger = cx.debug_bounds("workspace menu").expect("the menu shows");
+            harness.click(trigger.center(), cx);
+            let menu = cx.debug_bounds("dropdown-menu-content").expect("it opens");
+            // The menu's 4px padding, then half a 32px row.
+            harness.click(gpui::point(menu.center().x, menu.top() + gpui::px(20.)), cx);
+        }
+
+        /// Whether the sidebar has workspace `n` as muted, and the top bar shown agrees.
+        fn is_muted(harness: &Harness, n: u32, cx: &mut VisualTestContext) -> bool {
+            harness.shell.read_with(cx, |shell, cx| {
+                let sidebar = shell.sidebar.as_ref().unwrap().read(cx);
+                let muted = sidebar.overview().workspace(id(n)).unwrap().muted;
+                let view = shell
+                    .workspace
+                    .as_ref()
+                    .expect("a workspace shows")
+                    .read(cx);
+                assert_eq!(view.top_bar().is_muted(), muted, "the top bar follows");
+                muted
+            })
+        }
+
+        #[gpui::test]
+        fn should_mute_the_selected_workspace_from_the_menus_first_item(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(), cx);
+
+            click_first_item(&harness, cx);
+
+            assert_eq!(*harness.api.muted.lock().unwrap(), [(id(1), true)]);
+            assert!(is_muted(&harness, 1, cx));
+        }
+
+        #[gpui::test]
+        fn should_unmute_a_muted_workspace_from_the_same_item(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(), cx);
+            click_first_item(&harness, cx);
+
+            click_first_item(&harness, cx);
+
+            assert_eq!(
+                *harness.api.muted.lock().unwrap(),
+                [(id(1), true), (id(1), false)]
+            );
+            assert!(!is_muted(&harness, 1, cx));
+        }
+
+        #[gpui::test]
+        fn should_toast_a_failed_mute(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(), cx);
+            harness.api.fail_next("connection refused");
+
+            cx.dispatch_action(MuteWorkspace);
+            harness.settle(cx);
+
+            assert_eq!(harness.last_notice(cx).title, "Couldn't mute agentdeck");
+            assert!(!is_muted(&harness, 1, cx));
+        }
+    }
+
+    mod archive {
+        use super::support::{Harness, daemon};
+        use super::*;
 
         #[gpui::test]
         fn should_archive_the_selected_workspace_from_the_top_bar_menu(cx: &mut TestAppContext) {
@@ -1352,8 +1456,9 @@ mod tests {
             let trigger = cx.debug_bounds("workspace menu").expect("the menu shows");
             harness.click(trigger.center(), cx);
             let menu = cx.debug_bounds("dropdown-menu-content").expect("it opens");
-            // The first item: the menu's 4px padding, then half a 32px row.
-            harness.click(gpui::point(menu.center().x, menu.top() + gpui::px(20.)), cx);
+            // The second item, after Mute notifications: the menu's 4px padding, a 32px row,
+            // then half the next.
+            harness.click(gpui::point(menu.center().x, menu.top() + gpui::px(52.)), cx);
 
             assert_eq!(*harness.api.archived.lock().unwrap(), [id(1)]);
         }
@@ -1485,7 +1590,7 @@ mod tests {
             fn should_open_from_the_top_bar_menu_after_archive(cx: &mut TestAppContext) {
                 let (harness, cx) = Harness::open(daemon(), cx);
 
-                pick_from_menu(&harness, 2, cx);
+                pick_from_menu(&harness, 3, cx);
 
                 assert!(is_open(&harness, cx));
                 assert_eq!(*harness.api.archived.lock().unwrap(), []);

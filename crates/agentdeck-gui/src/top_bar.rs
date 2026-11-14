@@ -1,9 +1,9 @@
 //! Penpot `Centre / TopBar`: the selected workspace's name and directory, above its tabs
 //! (spec §11).
 //!
-//! Its New agent button opens the new agent dialog, its `…` menu archives the workspace or
-//! opens the Delete workspace dialog, and its panel button toggles the right panel, all as
-//! actions the window handles. An archived workspace's bar has Unarchive in place of New
+//! Its New agent button opens the new agent dialog, its `…` menu mutes or unmutes the
+//! workspace's notifications, archives it or opens the Delete workspace dialog, and its panel
+//! button toggles the right panel, all as actions the window handles. An archived workspace's bar has Unarchive in place of New
 //! agent, and its menu only Delete.
 
 use std::path::Path;
@@ -31,6 +31,10 @@ actions!(
         UnarchiveWorkspace,
         /// Opens the Delete workspace dialog on the workspace shown.
         DeleteWorkspace,
+        /// Mutes the notifications of the workspace shown.
+        MuteWorkspace,
+        /// Unmutes the notifications of the workspace shown.
+        UnmuteWorkspace,
     ]
 );
 
@@ -53,6 +57,7 @@ pub struct TopBar {
     name: SharedString,
     dir: SharedString,
     archived: bool,
+    muted: bool,
 }
 
 impl TopBar {
@@ -62,6 +67,7 @@ impl TopBar {
             name: name.into(),
             dir: dir.into(),
             archived: false,
+            muted: false,
         }
     }
 
@@ -69,6 +75,18 @@ impl TopBar {
     pub fn archived(mut self, archived: bool) -> Self {
         self.archived = archived;
         self
+    }
+
+    /// The bar of a workspace whose notifications are muted, or not.
+    pub fn muted(mut self, muted: bool) -> Self {
+        self.muted = muted;
+        self
+    }
+
+    /// Whether it heads a muted workspace.
+    #[cfg(test)]
+    pub fn is_muted(&self) -> bool {
+        self.muted
     }
 
     /// Whether it heads an archived workspace.
@@ -132,7 +150,7 @@ impl RenderOnce for TopBar {
                 false => bar.child(outline("new agent", "New agent", NewAgent)),
                 true => bar.child(outline("unarchive", "Unarchive", UnarchiveWorkspace)),
             })
-            .child(menu(self.archived))
+            .child(menu(self.archived, self.muted))
             .child(
                 div().debug_selector(|| "toggle panel".into()).child(
                     Button::new("toggle-panel")
@@ -159,17 +177,22 @@ fn outline(name: &'static str, label: &'static str, action: impl Action) -> impl
 }
 
 /// Penpot `WorkspaceMenu`: a ghost icon-sm `Ellipsis` button opening the workspace's actions:
-/// Archive workspace, a separator and the destructive Delete workspace…; only Delete once the
-/// workspace is `archived`.
-fn menu(archived: bool) -> impl IntoElement {
+/// Mute notifications (Unmute notifications once `muted`), Archive workspace, a separator and
+/// the destructive Delete workspace…; only Delete once the workspace is `archived`.
+fn menu(archived: bool, muted: bool) -> impl IntoElement {
     let item = |label: &'static str, action: Box<dyn Action>| {
         DropdownMenuItem::new(label)
             .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
     };
     let delete = item("Delete workspace…", Box::new(DeleteWorkspace))
         .variant(DropdownMenuItemVariant::Destructive);
+    let mute = match muted {
+        false => item("Mute notifications", Box::new(MuteWorkspace)),
+        true => item("Unmute notifications", Box::new(UnmuteWorkspace)),
+    };
     let content = match archived {
         false => DropdownMenuContent::new()
+            .item(mute)
             .item(item("Archive workspace", Box::new(ArchiveWorkspace)))
             .separator(DropdownMenuSeparator::new())
             .item(delete),
