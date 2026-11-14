@@ -27,8 +27,8 @@ pub struct PaneState {
     pub tab: String,
 }
 
-/// The daemon's data behind the sidebar, as read over REST.
-#[derive(Debug, Clone)]
+/// The daemon's data behind the sidebar, as read over REST; empty until read.
+#[derive(Debug, Clone, Default)]
 pub struct Snapshot {
     /// Every workspace, archived ones included, oldest first.
     pub workspaces: Vec<Workspace>,
@@ -40,18 +40,6 @@ pub struct Snapshot {
     pub instructions: Vec<Instruction>,
     /// PR sync's last run and its settings; `None` until read.
     pub pr_sync: Option<PrSyncStatus>,
-}
-
-impl Default for Snapshot {
-    fn default() -> Self {
-        Snapshot {
-            workspaces: Vec::new(),
-            panes: Vec::new(),
-            tasks: Vec::new(),
-            instructions: Vec::new(),
-            pr_sync: None,
-        }
-    }
 }
 
 /// A row's counts; a zero hides its count.
