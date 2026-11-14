@@ -50,8 +50,14 @@ pub(crate) async fn comment_create(
         // The task's count of unseen agent comments went up.
         context.events.changed(Entity::Task, task);
     }
-    delivery::deliver_to_task_pane(&context.db, &context.terminals, &context.events, &comment)
-        .await;
+    delivery::deliver_to_task_pane(
+        &context.db,
+        &context.claims,
+        &context.terminals,
+        &context.events,
+        &comment,
+    )
+    .await;
     Ok(HttpResponseCreated(comment))
 }
 

@@ -123,6 +123,7 @@ pub(crate) async fn pane_create(
     let command = command(&new)?;
     let cwd = check_cwd(&new.cwd)?;
     let rules = new.agent.map_or("shell", Agent::as_str);
+    let claims = context.claims.clone();
     let (pane, workspace, prompted) = context
         .db
         .call(move |c| {
@@ -133,7 +134,7 @@ pub(crate) async fn pane_create(
                     let task = new.task_id.map(|id| db::tasks::get(c, id)).transpose()?;
                     let instructions = db::instructions::list(c, workspace)?;
                     let comments = match new.task_id {
-                        Some(task) => db::comments::undelivered(c, task)?,
+                        Some(task) => delivery::for_launch_prompt(c, &claims, task)?,
                         None => Vec::new(),
                     };
                     let prompt = agents::launch_prompt(task.as_ref(), &instructions, &comments);
@@ -160,6 +161,7 @@ pub(crate) async fn pane_create(
     if let Err(err) = context.terminals.spawn(pane.id, launch, rules) {
         let id = pane.id;
         tracing::warn!("pane {id} couldn't start: {}", err.detail());
+        delivery::launch_failed(&context.claims, &prompted);
         context.db.call(move |c| db::panes::delete(c, id)).await?;
         return Err(match err {
             SpawnError::NotOnPath { .. } | SpawnError::Command(_) => client_error(
@@ -172,7 +174,14 @@ pub(crate) async fn pane_create(
     }
     context.events.changed(Entity::Pane, pane.id);
     let delivered = prompted.iter().map(|comment| comment.id).collect();
-    delivery::mark_delivered(&context.db, &context.events, delivered, pane.id).await;
+    delivery::mark_delivered(
+        &context.db,
+        &context.claims,
+        &context.events,
+        delivered,
+        pane.id,
+    )
+    .await;
     if let Some((dir, before)) = codex_sessions {
         codex::watch(
             context.db.clone(),
@@ -222,8 +231,15 @@ pub(crate) async fn pane_update(
             context.events.changed(Entity::Task, linked);
         }
         if let Some(task) = task {
-            delivery::deliver_waiting(&context.db, &context.terminals, &context.events, task, id)
-                .await;
+            delivery::deliver_waiting(
+                &context.db,
+                &context.claims,
+                &context.terminals,
+                &context.events,
+                task,
+                id,
+            )
+            .await;
         }
     }
     Ok(HttpResponseOk(with_live_status(context, pane)))

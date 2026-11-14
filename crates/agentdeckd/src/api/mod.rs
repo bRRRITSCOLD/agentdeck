@@ -53,6 +53,8 @@ pub struct ApiContext {
     pub settings: Config,
     /// The live panes.
     pub terminals: Terminals,
+    /// Which pane each comment on its way to an agent is for.
+    pub claims: crate::agents::delivery::Claims,
     /// The events every WebSocket client gets.
     pub events: Events,
 }
