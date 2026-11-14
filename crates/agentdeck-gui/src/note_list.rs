@@ -1,12 +1,13 @@
 //! The notes the right panel lists (spec §9, §11), from the sidebar's [`Snapshot`]: those on
 //! a workspace and on its tasks, newest first, each with the line Penpot's `NoteItem` shows
-//! under it.
+//! under it, and the agent panes each can be sent to.
 
 use agentdeck_client::types::Note;
-use agentdeck_core::{NoteId, WorkspaceId};
+use agentdeck_core::{AgentState, NoteId, PaneId, WorkspaceId};
 use chrono::{DateTime, Utc};
 use gpui::SharedString;
 
+use crate::new_agent::AGENTS;
 use crate::overview::{Snapshot, ago};
 
 /// One note, as the panel shows it.
@@ -46,6 +47,46 @@ pub fn notes(snapshot: &Snapshot, workspace: WorkspaceId, now: DateTime<Utc>) ->
         .collect()
 }
 
+/// A pane a note can be sent to, from its "Send to agent" menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendTarget {
+    /// The pane.
+    pub pane: PaneId,
+    /// What its item reads: the agent, ` · `, then the linked task's title, else the tab's.
+    pub label: SharedString,
+}
+
+/// The live agent panes in `note`'s workspace (its own, or its task's), in the snapshot's
+/// order: what its "Send to agent" menu offers.
+pub fn send_targets(snapshot: &Snapshot, note: NoteId) -> Vec<SendTarget> {
+    let Some(note) = snapshot.notes.iter().find(|n| n.id == note) else {
+        return Vec::new();
+    };
+    let task_title = |task| {
+        (snapshot.tasks.iter())
+            .find(|t| t.id == task)
+            .map(|t| t.title.as_str())
+    };
+    let workspace = note.workspace_id.or_else(|| {
+        let task = note.task_id?;
+        (snapshot.tasks.iter()).find(|t| t.id == task)?.workspace_id
+    });
+    let Some(workspace) = workspace else {
+        return Vec::new();
+    };
+    (snapshot.panes.iter())
+        .filter(|p| p.workspace == workspace && p.state != AgentState::Exited)
+        .filter_map(|p| {
+            let agent = AGENTS.iter().find(|(a, _)| Some(*a) == p.agent)?.1;
+            let on = p.task.and_then(task_title).unwrap_or(&p.tab);
+            Some(SendTarget {
+                pane: p.pane,
+                label: format!("{agent} · {on}").into(),
+            })
+        })
+        .collect()
+}
+
 /// `workspace · 2 h ago`, `task · read by claude` or `workspace · read`.
 fn meta(snapshot: &Snapshot, note: &Note, now: DateTime<Utc>) -> String {
     let on = if note.task_id.is_some() {
@@ -71,7 +112,8 @@ fn meta(snapshot: &Snapshot, note: &Note, now: DateTime<Utc>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use agentdeck_core::{Agent, AgentState, TaskKind};
+    use agentdeck_client::types::Task;
+    use agentdeck_core::{Agent, TaskKind};
 
     use super::*;
     use crate::overview::PaneState;
@@ -170,5 +212,97 @@ mod tests {
         };
 
         assert_eq!(notes(&snapshot, a.id, now())[0].meta, "workspace · read");
+    }
+
+    mod send_targets {
+        use super::*;
+
+        fn agent(n: u32, ws: WorkspaceId, agent: Agent, task: Option<u32>) -> PaneState {
+            PaneState {
+                agent: Some(agent),
+                task: task.map(id),
+                tab: format!("tab {n}"),
+                ..pane(n, ws, AgentState::Working)
+            }
+        }
+
+        fn labels(snapshot: &Snapshot, note: u32) -> Vec<(PaneId, String)> {
+            (send_targets(snapshot, id(note)).into_iter())
+                .map(|t| (t.pane, t.label.to_string()))
+                .collect()
+        }
+
+        #[test]
+        fn should_offer_each_live_agent_in_the_notes_workspace_by_task_or_tab() {
+            let (a, b) = (workspace(1, "a"), workspace(2, "b"));
+            let linked = Task {
+                title: "Tabs: arrow-key navigation".into(),
+                ..task(10, TaskKind::Plain, Some(a.id))
+            };
+            let exited = PaneState {
+                state: AgentState::Exited,
+                ..agent(33, a.id, Agent::Claude, None)
+            };
+            let snapshot = Snapshot {
+                notes: vec![workspace_note(20, a.id)],
+                panes: vec![
+                    agent(30, a.id, Agent::Claude, Some(10)),
+                    pane(31, a.id, AgentState::Idle),
+                    agent(32, a.id, Agent::Codex, None),
+                    exited,
+                    agent(34, b.id, Agent::Claude, None),
+                ],
+                tasks: vec![linked],
+                workspaces: vec![a, b],
+                ..Snapshot::default()
+            };
+
+            assert_eq!(
+                labels(&snapshot, 20),
+                [
+                    (
+                        id(30),
+                        "Claude Code · Tabs: arrow-key navigation".to_owned()
+                    ),
+                    (id(32), "Codex · tab 32".to_owned()),
+                ]
+            );
+        }
+
+        #[test]
+        fn should_look_in_the_tasks_workspace_for_a_task_note() {
+            let (a, b) = (workspace(1, "a"), workspace(2, "b"));
+            let on_b = task(10, TaskKind::Plain, Some(b.id));
+            let snapshot = Snapshot {
+                notes: vec![task_note(20, &on_b)],
+                panes: vec![
+                    agent(30, a.id, Agent::Claude, None),
+                    agent(31, b.id, Agent::Claude, None),
+                ],
+                tasks: vec![on_b],
+                workspaces: vec![a, b],
+                ..Snapshot::default()
+            };
+
+            assert_eq!(
+                labels(&snapshot, 20),
+                [(id(31), "Claude Code · tab 31".to_owned())]
+            );
+        }
+
+        #[test]
+        fn should_offer_none_for_an_inbox_tasks_note() {
+            let a = workspace(1, "a");
+            let inbox = task(10, TaskKind::Plain, None);
+            let snapshot = Snapshot {
+                notes: vec![task_note(20, &inbox)],
+                panes: vec![agent(30, a.id, Agent::Claude, None)],
+                tasks: vec![inbox],
+                workspaces: vec![a],
+                ..Snapshot::default()
+            };
+
+            assert_eq!(labels(&snapshot, 20), []);
+        }
     }
 }

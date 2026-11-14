@@ -5,10 +5,11 @@
 use std::collections::BTreeSet;
 
 use agentdeck_client::daemon::Daemon;
+use agentdeck_client::notes;
 use agentdeck_client::panes::{self, pane_if_any};
 use agentdeck_client::types::{DirtyReport, NewNote, NewTask, NewWorkspace, Pane, Tab, TaskPatch};
 use agentdeck_client::{ApiError, Client};
-use agentdeck_core::{PaneId, SplitDirection, TabId, TaskId, TaskStatus, WorkspaceId};
+use agentdeck_core::{NoteId, PaneId, SplitDirection, TabId, TaskId, TaskStatus, WorkspaceId};
 use gpui::{App, Task};
 
 use crate::new_agent::{Launch, Launched};
@@ -64,6 +65,16 @@ pub trait Api: Send + Sync {
     /// first empty tab, or a new one. A refusal is an [`ApiError`]; `invalid_argv` means the
     /// agent CLI isn't installed.
     fn launch_agent(&self, launch: Launch, cx: &App) -> Task<anyhow::Result<Launched>>;
+
+    /// Types note `note`, whose text is `body`, into `pane` at once with Enter, then marks it
+    /// read by `pane` (spec §9). A note the pane didn't take stays unread.
+    fn send_note(
+        &self,
+        note: NoteId,
+        body: String,
+        pane: PaneId,
+        cx: &App,
+    ) -> Task<anyhow::Result<()>>;
 
     /// Leaves a note with `body` on `workspace`.
     fn new_note(&self, workspace: WorkspaceId, body: String, cx: &App) -> Task<anyhow::Result<()>>;
@@ -220,6 +231,19 @@ impl Api for Daemon {
         })
     }
 
+    fn send_note(
+        &self,
+        note: NoteId,
+        body: String,
+        pane: PaneId,
+        cx: &App,
+    ) -> Task<anyhow::Result<()>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            Ok(notes::send_note(&client, note, &body, pane).await?)
+        })
+    }
+
     fn new_note(&self, workspace: WorkspaceId, body: String, cx: &App) -> Task<anyhow::Result<()>> {
         let client = self.client.clone();
         runtime::spawn(cx, async move {
@@ -314,11 +338,11 @@ async fn snapshot(client: Client) -> anyhow::Result<Snapshot> {
             .await
             .map_err(ApiError::from)?
             .into_inner();
-        for pane in tabs
-            .iter()
-            .filter_map(|tab| tab.layout.as_ref())
-            .flat_map(|l| l.panes())
-        {
+        let placed = (tabs.iter()).flat_map(|tab| {
+            let panes = tab.layout.as_ref().map(|l| l.panes()).unwrap_or_default();
+            panes.into_iter().map(move |pane| (tab, pane))
+        });
+        for (tab, pane) in placed {
             if let Some(pane) = pane_if_any(&client, pane).await? {
                 panes.push(PaneState {
                     pane: pane.id,
@@ -326,6 +350,7 @@ async fn snapshot(client: Client) -> anyhow::Result<Snapshot> {
                     state: pane.state,
                     agent: pane.agent,
                     task: pane.task_id,
+                    tab: tab.title.clone(),
                 });
             }
         }
@@ -378,6 +403,8 @@ pub(crate) mod fake {
         pub syncs: Mutex<usize>,
         /// The notes left, with the workspace each is on.
         pub notes_left: Mutex<Vec<(WorkspaceId, String)>>,
+        /// The notes sent to panes: the note, its text and the pane.
+        pub sent_notes: Mutex<Vec<(NoteId, String, PaneId)>>,
         /// The agents started.
         pub launched: Mutex<Vec<Launch>>,
         /// The panes closed, in order.
@@ -656,6 +683,25 @@ pub(crate) mod fake {
             let pane: PaneId = self.make_id();
             self.launched.lock().unwrap().push(launch);
             Task::ready(Ok(Launched { tab, pane }))
+        }
+
+        fn send_note(
+            &self,
+            note: NoteId,
+            body: String,
+            pane: PaneId,
+            _cx: &App,
+        ) -> Task<anyhow::Result<()>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            let mut snapshot = self.snapshot.lock().unwrap();
+            if let Some(read) = snapshot.notes.iter_mut().find(|n| n.id == note) {
+                read.read_at = Some("2026-11-14T00:00:00Z".to_owned());
+                read.read_by_pane = Some(pane);
+            }
+            self.sent_notes.lock().unwrap().push((note, body, pane));
+            Task::ready(Ok(()))
         }
 
         fn new_note(

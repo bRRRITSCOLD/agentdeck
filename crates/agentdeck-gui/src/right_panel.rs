@@ -6,7 +6,7 @@
 //!
 //! Below the tasks come the notes on the workspace and on its tasks, newest first, and a field
 //! that leaves a note on the workspace for the next agent (Enter sends it; the notes header's
-//! `+` focuses it).
+//! `+` focuses it). Each note's `…` menu sends it to a live agent pane at once (spec §9).
 //!
 //! Like the Tasks view it shows the sidebar's [`Snapshot`], passed on by the window; a note
 //! left here comes back through the daemon's `changed`.
@@ -14,10 +14,10 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use agentdeck_core::{TaskId, TaskStatus, WorkspaceId};
+use agentdeck_core::{NoteId, PaneId, TaskId, TaskStatus, WorkspaceId};
 use brrritscold_core_gpui::{
-    ActiveTheme as _, Badge, Button, ButtonSize, ButtonVariant, Icon, IconName, Input, InputState,
-    Separator,
+    ActiveTheme as _, Badge, Button, ButtonSize, ButtonVariant, DropdownMenu, DropdownMenuContent,
+    DropdownMenuItem, DropdownMenuLabel, Icon, IconName, Input, InputState, Separator,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
@@ -30,7 +30,7 @@ use gpui_base::input::InputEvent;
 
 use crate::api::Api;
 use crate::new_task::NewTask;
-use crate::note_list::{self, NoteRow};
+use crate::note_list::{self, NoteRow, SendTarget};
 use crate::overview::Snapshot;
 use crate::task_list::{self, Group, Query, Scope};
 use crate::task_row;
@@ -99,6 +99,32 @@ impl RightPanel {
                     Err(err) => failed("Couldn't leave the note", &err, window, cx),
                 }
             });
+        })
+        .detach();
+    }
+
+    /// Sends `note` to `pane` at once and marks it read by that pane: what a "Send to agent"
+    /// item does. A failure shows a toast.
+    pub fn send_note(
+        &mut self,
+        note: NoteId,
+        pane: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(body) = (self.snapshot.notes.iter())
+            .find(|n| n.id == note)
+            .map(|n| n.body.clone())
+        else {
+            return;
+        };
+        let sending = self.api.send_note(note, body, pane, cx);
+        cx.spawn_in(window, async move |_, cx| {
+            if let Err(err) = sending.await {
+                let _ = cx.update(|window, cx| {
+                    failed("Couldn't send the note", &err, window, cx);
+                });
+            }
         })
         .detach();
     }
@@ -260,7 +286,10 @@ impl Render for RightPanel {
                     ),
                 ),
             )
-            .children(self.notes().iter().map(|note| note_item(note, cx)));
+            .children(self.notes().iter().map(|note| {
+                let targets = note_list::send_targets(&self.snapshot, note.id);
+                note_item(note, targets, cx)
+            }));
         // Penpot `RightPanel`: `card`, padded `space.3` down and `space.2` across, rows
         // `space.1` apart.
         div()
@@ -311,8 +340,9 @@ fn section_header(title: &'static str, s: &brrritscold_core_gpui_tokens::Semanti
 }
 
 /// Penpot `agentdeck / NoteItem`: the text over a meta line (sticky note, what it is on and
-/// when or by whom it was read, an `unread` badge), in a `border` box with `radius-md`.
-fn note_item(note: &NoteRow, cx: &Context<RightPanel>) -> AnyElement {
+/// when or by whom it was read, an `unread` badge, the note's menu), in a `border` box with
+/// `radius-md`.
+fn note_item(note: &NoteRow, targets: Vec<SendTarget>, cx: &Context<RightPanel>) -> AnyElement {
     let s = cx.theme().semantic();
     let id = note.id;
     div()
@@ -346,7 +376,42 @@ fn note_item(note: &NoteRow, cx: &Context<RightPanel>) -> AnyElement {
                 )
                 .child(div().min_w_0().truncate().child(note.meta.clone()))
                 .child(div().flex_1())
-                .when(note.unread, |meta| meta.child(Badge::new().label("unread"))),
+                .when(note.unread, |meta| meta.child(Badge::new().label("unread")))
+                .child(note_menu(id, targets, cx)),
+        )
+        .into_any_element()
+}
+
+/// Penpot "Send to agent": a ghost icon-xs `Ellipsis` opening a `DropdownMenu` with the label
+/// "Send to agent", then an item per live agent pane `targets` names; with none, one
+/// disabled "No agent is running here".
+fn note_menu(note: NoteId, targets: Vec<SendTarget>, cx: &Context<RightPanel>) -> AnyElement {
+    let panel = cx.entity().downgrade();
+    let content = DropdownMenuContent::new().label(DropdownMenuLabel::new("Send to agent"));
+    let content = if targets.is_empty() {
+        content.item(DropdownMenuItem::new("No agent is running here").disabled(true))
+    } else {
+        targets.into_iter().fold(content, |content, target| {
+            let panel = panel.clone();
+            let pane = target.pane;
+            content.item(
+                DropdownMenuItem::new(target.label).on_click(move |_, window, cx| {
+                    let _ = panel.update(cx, |panel, cx| panel.send_note(note, pane, window, cx));
+                }),
+            )
+        })
+    };
+    div()
+        .debug_selector(move || format!("note menu {note}"))
+        .child(
+            DropdownMenu::new(SharedString::from(format!("note-menu-{note}")))
+                .trigger(
+                    Button::new(SharedString::from(format!("note-menu-trigger-{note}")))
+                        .variant(ButtonVariant::Ghost)
+                        .size(ButtonSize::IconXs)
+                        .icon(IconName::Ellipsis),
+                )
+                .content(content),
         )
         .into_any_element()
 }
@@ -429,6 +494,8 @@ mod tests {
     }
 
     mod notes {
+        use agentdeck_core::NoteId;
+
         use super::*;
         use crate::overview::fixtures::workspace_note;
 
@@ -445,6 +512,57 @@ mod tests {
                 panel.read_with(cx, |p, _| p.notes().into_iter().map(|n| n.id).collect());
             assert_eq!(notes, [id(30)]);
             cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+
+        /// [`open_with_api`], showing a note on workspace 1.
+        fn with_a_note(
+            cx: &mut TestAppContext,
+        ) -> (Entity<RightPanel>, Arc<FakeApi>, &mut VisualTestContext) {
+            let (panel, api, cx) = open_with_api(cx);
+            panel.update(cx, |p, cx| {
+                let mut snapshot = snapshot();
+                snapshot.notes = vec![workspace_note(30, id(1))];
+                p.show(id(1), snapshot, cx);
+            });
+            (panel, api, cx)
+        }
+
+        #[gpui::test]
+        fn should_end_each_notes_meta_row_with_its_menu(cx: &mut TestAppContext) {
+            let (_, _, cx) = with_a_note(cx);
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+
+            let selector = format!("note menu {}", id::<NoteId>(30));
+            assert!(cx.debug_bounds(selector.leak()).is_some());
+        }
+
+        #[gpui::test]
+        fn should_send_the_note_to_the_pane_picked(cx: &mut TestAppContext) {
+            let (panel, api, cx) = with_a_note(cx);
+
+            cx.update(|window, cx| {
+                panel.update(cx, |p, cx| p.send_note(id(30), id(40), window, cx));
+            });
+            cx.run_until_parked();
+
+            assert_eq!(
+                *api.sent_notes.lock().unwrap(),
+                [(id(30), "note".to_owned(), id(40))]
+            );
+        }
+
+        #[gpui::test]
+        fn should_toast_when_the_note_cant_be_sent(cx: &mut TestAppContext) {
+            let (panel, api, cx) = with_a_note(cx);
+            api.fail_next("pane not found");
+
+            cx.update(|window, cx| {
+                panel.update(cx, |p, cx| p.send_note(id(30), id(40), window, cx));
+            });
+            cx.run_until_parked();
+
+            let shown = cx.update(|_, cx| crate::notice::shown(cx));
+            assert_eq!(shown.last().unwrap().title, "Couldn't send the note");
         }
 
         #[gpui::test]
