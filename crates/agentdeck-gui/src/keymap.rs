@@ -20,6 +20,10 @@ pub const WORKSPACE: &str = "Workspace";
 /// The key context a terminal sets; copy and paste only apply inside it.
 pub const TERMINAL: &str = "Terminal";
 
+/// The key context an instruction being edited sets: Ctrl+Enter in its textarea saves
+/// ([`Submit`]) and Escape cancels ([`CancelEdit`]), where Enter inserts a newline.
+pub const INSTRUCTION_EDITOR: &str = "InstructionEditor";
+
 actions!(
     agentdeck,
     [
@@ -47,6 +51,10 @@ actions!(
         Copy,
         /// Pastes the clipboard into the terminal.
         Paste,
+        /// Saves or sends what a textarea holds: Ctrl+Enter where Enter is a newline.
+        Submit,
+        /// Drops an edit, leaving the text as it was.
+        CancelEdit,
     ]
 );
 
@@ -63,13 +71,16 @@ pub fn init(cx: &mut App) {
 }
 
 fn bindings(cx: &App) -> Vec<KeyBinding> {
-    let context = |name| {
+    let context = |name: &str| {
         Some(Rc::new(
             KeyBindingContextPredicate::parse(name).expect("a context name parses"),
         ))
     };
     let workspace = context(WORKSPACE);
     let terminal = context(TERMINAL);
+    // Bound on the textarea itself and loaded after core-gpui's, so they win over its own
+    // `ctrl-enter` (a newline) and `escape`.
+    let instruction_editor = context(&format!("{INSTRUCTION_EDITOR} > Input"));
     let mut table: Vec<(String, Box<dyn Action>, _)> = vec![
         ("secondary-shift-q".into(), Box::new(Quit), None),
         ("ctrl-pagedown".into(), Box::new(NextTab), workspace.clone()),
@@ -117,6 +128,12 @@ fn bindings(cx: &App) -> Vec<KeyBinding> {
         ),
         ("secondary-shift-c".into(), Box::new(Copy), terminal.clone()),
         ("secondary-shift-v".into(), Box::new(Paste), terminal),
+        (
+            "secondary-enter".into(),
+            Box::new(Submit),
+            instruction_editor.clone(),
+        ),
+        ("escape".into(), Box::new(CancelEdit), instruction_editor),
     ];
     table.extend((1..=9).map(|n| {
         let action: Box<dyn Action> = Box::new(SelectTab(n - 1));

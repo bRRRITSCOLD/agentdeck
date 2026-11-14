@@ -8,10 +8,12 @@ use agentdeck_client::daemon::Daemon;
 use agentdeck_client::instructions;
 use agentdeck_client::panes::{self, pane_if_any};
 use agentdeck_client::types::{
-    DirtyReport, NewInstruction, NewTask, NewWorkspace, Pane, Tab, TaskPatch,
+    DirtyReport, InstructionPatch, NewInstruction, NewTask, NewWorkspace, Pane, Tab, TaskPatch,
 };
 use agentdeck_client::{ApiError, Client};
-use agentdeck_core::{PaneId, SplitDirection, TabId, TaskId, TaskStatus, WorkspaceId};
+use agentdeck_core::{
+    InstructionId, PaneId, SplitDirection, TabId, TaskId, TaskStatus, WorkspaceId,
+};
 use gpui::{App, Task};
 
 use crate::new_agent::{Launch, Launched};
@@ -79,6 +81,17 @@ pub trait Api: Send + Sync {
         body: String,
         cx: &App,
     ) -> Task<anyhow::Result<()>>;
+
+    /// Replaces `instruction`'s text with `body`.
+    fn edit_instruction(
+        &self,
+        instruction: InstructionId,
+        body: String,
+        cx: &App,
+    ) -> Task<anyhow::Result<()>>;
+
+    /// Deletes `instruction`.
+    fn delete_instruction(&self, instruction: InstructionId, cx: &App) -> Task<anyhow::Result<()>>;
 
     /// Archives `workspace`, keeping its dir, tasks and instructions. A refusal is an [`ApiError`];
     /// `panes_running` means a pane of it still runs.
@@ -258,6 +271,34 @@ impl Api for Daemon {
         })
     }
 
+    fn edit_instruction(
+        &self,
+        instruction: InstructionId,
+        body: String,
+        cx: &App,
+    ) -> Task<anyhow::Result<()>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            let patch = InstructionPatch { body: Some(body) };
+            (client
+                .instruction_update()
+                .id(instruction)
+                .body(patch)
+                .send()
+                .await)
+                .map_err(ApiError::from)?;
+            Ok(())
+        })
+    }
+
+    fn delete_instruction(&self, instruction: InstructionId, cx: &App) -> Task<anyhow::Result<()>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            (client.instruction_delete().id(instruction).send().await).map_err(ApiError::from)?;
+            Ok(())
+        })
+    }
+
     fn archive_workspace(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<()>> {
         let client = self.client.clone();
         runtime::spawn(cx, async move {
@@ -405,6 +446,10 @@ pub(crate) mod fake {
         pub instructions_added: Mutex<Vec<(WorkspaceId, String)>>,
         /// The instructions sent to panes: the text and the pane.
         pub sent_instructions: Mutex<Vec<(String, PaneId)>>,
+        /// The instructions edited, with the new text, in order.
+        pub edited_instructions: Mutex<Vec<(InstructionId, String)>>,
+        /// The instructions deleted, in order.
+        pub deleted_instructions: Mutex<Vec<InstructionId>>,
         /// The agents started.
         pub launched: Mutex<Vec<Launch>>,
         /// The panes closed, in order.
@@ -711,6 +756,36 @@ pub(crate) mod fake {
                 .lock()
                 .unwrap()
                 .push((workspace, body));
+            Task::ready(Ok(()))
+        }
+
+        fn edit_instruction(
+            &self,
+            instruction: InstructionId,
+            body: String,
+            _cx: &App,
+        ) -> Task<anyhow::Result<()>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            let mut snapshot = self.snapshot.lock().unwrap();
+            if let Some(held) = (snapshot.instructions.iter_mut()).find(|i| i.id == instruction) {
+                held.body = body.clone();
+            }
+            (self.edited_instructions.lock().unwrap()).push((instruction, body));
+            Task::ready(Ok(()))
+        }
+
+        fn delete_instruction(
+            &self,
+            instruction: InstructionId,
+            _cx: &App,
+        ) -> Task<anyhow::Result<()>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            (self.snapshot.lock().unwrap().instructions).retain(|i| i.id != instruction);
+            (self.deleted_instructions.lock().unwrap()).push(instruction);
             Task::ready(Ok(()))
         }
 
