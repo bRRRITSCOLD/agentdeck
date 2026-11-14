@@ -2,7 +2,7 @@
 //!
 //! gpui-base's single-line input emits `PressEnter` and passes Enter on, and the core-gpui
 //! `Dialog` it sits in takes that as its `Confirm` and closes, whatever the form's Enter
-//! handler made of it: https://github.com/bRRRITSCOLD/rust-packages/issues/49. Until the
+//! handler made of it: <https://github.com/bRRRITSCOLD/rust-packages/issues/49>. Until the
 //! dialog lets an app decide, each input is wrapped in [`form_enter`].
 
 use gpui::{Div, InteractiveElement as _, IntoElement, ParentElement as _, div};
