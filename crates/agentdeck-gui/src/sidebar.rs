@@ -1,8 +1,8 @@
 //! The main window's sidebar (spec §11), the `Sidebar` board of Penpot's "Main window": the
 //! brand, Inbox and Tasks, then the Workspaces header with its new workspace `+`, every
 //! workspace with its rolled-up state and open PRs, the archived ones in a foldable Archived
-//! group, and when PRs last synced at the bottom. The `+` asks the window for the dialog with
-//! a [`SidebarEvent`].
+//! group, and when PRs last synced at the bottom, ending in a gear that selects Settings. The
+//! `+` asks the window for the dialog with a [`SidebarEvent`].
 //!
 //! It reads a [`Snapshot`] through the session's [`Api`] when it opens and again whenever the
 //! daemon reports a `changed`; `state` and `exit` messages patch pane states in place.
@@ -48,6 +48,8 @@ pub enum Selection {
     Tasks,
     /// One workspace.
     Workspace(WorkspaceId),
+    /// The settings, from the footer's gear; no row is highlighted.
+    Settings,
 }
 
 /// What the sidebar asks of the window.
@@ -112,7 +114,7 @@ impl SidebarView {
     pub fn selection(&self) -> Selection {
         let exists = |picked: &Selection| match picked {
             Selection::Workspace(id) => self.overview.workspace(*id).is_some(),
-            Selection::Inbox | Selection::Tasks => true,
+            Selection::Inbox | Selection::Tasks | Selection::Settings => true,
         };
         self.picked.filter(exists).unwrap_or_else(|| {
             self.overview
@@ -126,7 +128,7 @@ impl SidebarView {
     fn archived_shown(&self) -> bool {
         let selected_archived = match self.selection() {
             Selection::Workspace(id) => self.overview.workspace(id).is_some_and(|w| w.archived),
-            Selection::Inbox | Selection::Tasks => false,
+            Selection::Inbox | Selection::Tasks | Selection::Settings => false,
         };
         self.archived_open || selected_archived
     }
@@ -219,7 +221,7 @@ impl SidebarView {
         let active = self.selection() == selection;
         let archived = match selection {
             Selection::Workspace(id) => self.overview.workspace(id).is_some_and(|w| w.archived),
-            Selection::Inbox | Selection::Tasks => false,
+            Selection::Inbox | Selection::Tasks | Selection::Settings => false,
         };
         let button = SidebarMenuButton::new(id.clone())
             .label(label)
@@ -283,6 +285,7 @@ impl SidebarView {
         match selection {
             Selection::Inbox => "inbox".into(),
             Selection::Tasks => "tasks".into(),
+            Selection::Settings => "settings".into(),
             Selection::Workspace(id) => {
                 (self.overview.workspace(id)).map_or_else(|| id.to_string(), |w| w.name.to_string())
             }
@@ -431,7 +434,7 @@ impl Render for SidebarView {
                     .children(workspaces),
             )
             .child(scrollbar::vertical(&self.scroll, cx))
-            // Penpot `Footer`.
+            // Penpot `Footer`: the sync line, then the Settings gear pushed to the end.
             .child(
                 small()
                     .debug_selector(|| "footer".into())
@@ -442,7 +445,22 @@ impl Render for SidebarView {
                             .size(space::S3)
                             .text_color(s.foreground),
                     )
-                    .child(footer),
+                    .child(div().min_w_0().truncate().child(footer))
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .flex_none()
+                            .debug_selector(|| "settings".into())
+                            .child(
+                                Button::new("settings")
+                                    .variant(ButtonVariant::Ghost)
+                                    .size(ButtonSize::IconXs)
+                                    .icon(IconName::Settings2)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.select(Selection::Settings, cx);
+                                    })),
+                            ),
+                    ),
             )
     }
 }
@@ -651,6 +669,35 @@ mod tests {
 
             open.click("row tasks");
             assert_eq!(open.selection(), Selection::Tasks);
+        }
+
+        #[gpui::test]
+        fn should_select_settings_from_the_gear_at_the_footers_end(cx: &mut TestAppContext) {
+            let mut open = open(two_workspaces(), cx);
+
+            let footer = open.cx.debug_bounds("footer").expect("footer");
+            let gear = open.cx.debug_bounds("settings").expect("the gear");
+            assert!(footer.contains(&gear.center()), "{gear:?} in {footer:?}");
+            assert!(
+                footer.right() - gear.right() <= space::S2,
+                "{gear:?} at the end of {footer:?}"
+            );
+            open.click("settings");
+
+            assert_eq!(open.selection(), Selection::Settings);
+        }
+
+        #[gpui::test]
+        fn should_keep_settings_selected_when_the_workspaces_change(cx: &mut TestAppContext) {
+            let mut open = open(two_workspaces(), cx);
+            open.click("settings");
+
+            open.send(ServerMessage::Changed {
+                entity: Changed::Workspace,
+                id: id::<WorkspaceId>(2).to_string(),
+            });
+
+            assert_eq!(open.selection(), Selection::Settings);
         }
 
         #[gpui::test]
