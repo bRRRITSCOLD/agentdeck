@@ -33,7 +33,7 @@ use crate::api::Api;
 use crate::connection::{Connection, Status};
 use crate::delete_workspace::{DeleteEvent, DeleteTarget, DeleteWorkspaceDialog};
 use crate::frame;
-use crate::inbox::{InboxView, Synced};
+use crate::inbox::{InboxView, OpenSettings, Synced};
 use crate::keymap::ToggleRightPanel;
 use crate::new_agent::{self, Launched, NewAgent, NewAgentDialog, Target};
 use crate::new_task::{NewTask, NewTaskDialog};
@@ -198,6 +198,12 @@ impl Shell {
                         }),
                         cx.subscribe_in(&inbox, window, |shell, _, ask, window, cx| {
                             shell.open_task(*ask, window, cx);
+                        }),
+                        cx.subscribe(&inbox, |shell, _, _: &OpenSettings, cx| {
+                            if let Some(sidebar) = &shell.sidebar {
+                                let settings = Selection::Settings;
+                                sidebar.update(cx, |sidebar, cx| sidebar.select(settings, cx));
+                            }
                         }),
                         cx.subscribe_in(&panel, window, |shell, _, ask, window, cx| {
                             shell.open_task(*ask, window, cx);
@@ -796,6 +802,21 @@ mod tests {
                     assert!(shell.settings.is_some());
                 });
                 assert_eq!(shown_workspace(&shell, cx), None);
+            }
+
+            #[gpui::test]
+            fn should_show_settings_when_the_inbox_asks(cx: &mut TestAppContext) {
+                let connector = Rc::new(FakeConnector::default());
+                let _remote = connector.then_connect_to(workspace_with_a_pane());
+                let shell = open(connector, cx);
+                let inbox = shell.read_with(cx, |shell, _| shell.inbox.clone().unwrap());
+
+                inbox.update(cx, |_, cx| cx.emit(OpenSettings));
+                cx.run_until_parked();
+
+                shell.read_with(cx, |shell, _| {
+                    assert_eq!(shell.selection, Some(Selection::Settings));
+                });
             }
 
             #[gpui::test]

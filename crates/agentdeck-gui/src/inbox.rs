@@ -2,7 +2,7 @@
 //! each with a status picker, and the PR sync's state with a "Sync now" button. Done tasks
 //! are left out. While gh is logged out, an alert over the columns says how to log in. Under
 //! the heading, once the PR sync status is read, a line says which PRs the age cutoff leaves
-//! out.
+//! out, its "Settings" a link that asks the window for Settings with [`OpenSettings`].
 //!
 //! Like the Tasks view it shows the sidebar's [`Snapshot`], passed on by the window. A sync
 //! asked for here emits [`Synced`] once done, so the window can have the sidebar read again:
@@ -21,7 +21,8 @@ use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Context, EventEmitter, InteractiveElement as _, IntoElement, ListState,
-    ParentElement as _, Pixels, Render, SharedString, Styled as _, Window, div, list,
+    ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Window, div, list,
 };
 
 use crate::api::Api;
@@ -35,8 +36,10 @@ use crate::workspace::failed;
 const ABOUT: &str =
     "Tasks with no workspace. A PR lands here when no workspace has a clone of its repo.";
 
-/// Which open PRs sync, for a cutoff of `days` (`0` for none). "Settings" is plain text
-/// until the Settings screen exists.
+/// The end of a cutoff line that names Settings; its "Settings" is drawn as a link.
+const SETTINGS_TAIL: &str = "Settings.";
+
+/// Which open PRs sync, for a cutoff of `days` (`0` for none).
 fn cutoff(days: u32) -> String {
     let unit = match days {
         0 => return "Every open PR syncs.".to_owned(),
@@ -49,6 +52,10 @@ fn cutoff(days: u32) -> String {
 /// A sync asked for in the Inbox has finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Synced;
+
+/// The cutoff line's "Settings" was clicked: show Settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenSettings;
 
 /// The Inbox view.
 pub struct InboxView {
@@ -65,6 +72,7 @@ pub struct InboxView {
 
 impl EventEmitter<Synced> for InboxView {}
 impl EventEmitter<OpenTask> for InboxView {}
+impl EventEmitter<OpenSettings> for InboxView {}
 
 impl InboxView {
     /// A view that syncs and changes statuses through `api`; it shows nothing until given a
@@ -211,11 +219,18 @@ impl InboxView {
                             .into_iter()
                             .enumerate()
                             .map(|(ix, line)| {
-                                div()
+                                let line_div = div()
                                     .debug_selector(move || format!("inbox description {ix}"))
                                     .text_size(font_size::SM)
-                                    .text_color(s.muted_foreground)
-                                    .child(line)
+                                    .text_color(s.muted_foreground);
+                                match line.strip_suffix(SETTINGS_TAIL) {
+                                    Some(lead) => line_div
+                                        .flex()
+                                        .child(SharedString::from(lead.to_owned()))
+                                        .child(settings_link(cx))
+                                        .child("."),
+                                    None => line_div.child(line),
+                                }
                             }),
                     ),
             )
@@ -236,6 +251,20 @@ impl InboxView {
                 ),
             )
     }
+}
+
+/// "Settings", styled as core-gpui's link button (`primary`, underlined on hover), asking for
+/// Settings when clicked.
+fn settings_link(cx: &mut Context<InboxView>) -> impl IntoElement {
+    let s = cx.theme().semantic();
+    div()
+        .id("inbox-settings-link")
+        .debug_selector(|| "inbox settings link".into())
+        .text_color(s.primary)
+        .cursor_pointer()
+        .hover(|style| style.underline())
+        .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenSettings)))
+        .child("Settings")
 }
 
 impl Render for InboxView {
@@ -685,6 +714,36 @@ mod tests {
             assert_eq!(description(&harness, cx), [ABOUT]);
             assert!(cx.debug_bounds("inbox description 0").is_some());
             assert!(cx.debug_bounds("inbox description 1").is_none());
+        }
+
+        #[gpui::test]
+        fn should_ask_for_settings_when_its_link_is_clicked(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(with_cutoff(90), cx);
+            let asked = Rc::new(RefCell::new(0));
+            let seen = asked.clone();
+            let _asks = cx.update(|_, cx| {
+                cx.subscribe(&harness.view, move |_, _: &OpenSettings, _| {
+                    *seen.borrow_mut() += 1;
+                })
+            });
+            harness.draw(cx);
+
+            let line = cx.debug_bounds("inbox description 1").expect("line 2");
+            let link = cx.debug_bounds("inbox settings link").expect("the link");
+            assert!(line.contains(&link.center()), "{link:?} in {line:?}");
+            cx.simulate_click(link.center(), Modifiers::default());
+            cx.run_until_parked();
+
+            assert_eq!(*asked.borrow(), 1);
+        }
+
+        #[gpui::test]
+        fn should_link_nothing_when_every_open_pr_syncs(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(with_cutoff(0), cx);
+            harness.draw(cx);
+
+            assert!(cx.debug_bounds("inbox description 1").is_some());
+            assert!(cx.debug_bounds("inbox settings link").is_none());
         }
 
         #[gpui::test]
