@@ -176,8 +176,8 @@ impl PrSync {
             .await?)
     }
 
-    /// The open PRs the search finds, then each of the `stored` open PRs that left the search,
-    /// fetched by number so a merge or close reaches its task. Also returns the stored PRs
+    /// The open PRs the search finds, then the `stored` open PRs that left the search, fetched
+    /// by number in batches so a merge or close reaches its task. Also returns the stored PRs
     /// GitHub no longer shows at all.
     async fn fetch(
         &self,
@@ -186,17 +186,20 @@ impl PrSync {
     ) -> Result<(Vec<RemotePr>, Vec<(String, i64)>), GithubError> {
         let github = &self.inner.github;
         let mut prs = github.open_prs(token).await?;
+        let left: Vec<(String, i64)> = stored
+            .iter()
+            .filter(|(repo, number)| {
+                !prs.iter()
+                    .any(|pr| pr.repo == *repo && pr.number == *number)
+            })
+            .cloned()
+            .collect();
+        let found = github.prs(token, &left).await?;
         let mut gone = Vec::new();
-        for (repo, number) in stored {
-            if prs
-                .iter()
-                .any(|pr| pr.repo == *repo && pr.number == *number)
-            {
-                continue;
-            }
-            match github.pr(token, repo, *number).await? {
+        for (wanted, found) in left.into_iter().zip(found) {
+            match found {
                 Some(pr) => prs.push(pr),
-                None => gone.push((repo.clone(), *number)),
+                None => gone.push(wanted),
             }
         }
         Ok((prs, gone))

@@ -212,7 +212,7 @@ min_ms = 400                   # a new state must hold this long before it is pu
 - Each result becomes a PR task, titled with the PR's title:
   - Its **workspace** is the oldest unarchived workspace whose dir holds a clone of the PR's repo with `head_ref` present as a local branch. A clone is a git repo up to 3 levels under the dir (as the dirty report searches) with any `github.com` remote (https, ssh or scp-like URL) naming the repo, compared case-insensitively. If no workspace matches, it goes to the inbox (`workspace_id` NULL). Only an inbox task is matched again on later syncs; a PR task never leaves its workspace.
   - **New PR:** a PR task created with status `review`.
-  - **Merged or closed:** the task goes to `done`; reopened, back to `review`. While the PR's state holds, the task keeps whatever status it has. PRs that left the search are fetched by number, once; one GitHub no longer shows is stored as closed.
+  - **Merged or closed:** the task goes to `done`; reopened, back to `review`. While the PR's state holds, the task keeps whatever status it has. PRs that left the search are fetched by number, once, up to 50 to a request; one GitHub no longer shows is stored as closed.
 - `checks` and `review` come from `statusCheckRollup` (`ERROR` counts as failure, `EXPECTED` as pending) and `reviewDecision`. Every task in the API carries its PR as `pr` (null for a plain task).
 - Each task a sync creates or changes gets a `changed` event (§5).
 

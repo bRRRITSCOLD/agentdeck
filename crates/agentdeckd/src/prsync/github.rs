@@ -1,4 +1,4 @@
-//! GitHub's GraphQL API: the viewer's open PRs, and one PR by number (spec §8).
+//! GitHub's GraphQL API: the viewer's open PRs, and PRs by number in batches (spec §8).
 
 use std::time::Duration;
 
@@ -15,6 +15,9 @@ const SEARCH: &str = "is:pr is:open author:@me";
 /// Search results per page, and how many pages one sync reads at most.
 const PAGE_SIZE: u32 = 50;
 const MAX_PAGES: usize = 10;
+
+/// PRs fetched by number in one request.
+const BATCH_SIZE: usize = 50;
 
 const PR_FIELDS: &str = "fragment pr on PullRequest {
   number title url state isDraft headRefName updatedAt
@@ -116,25 +119,20 @@ impl Github {
         Ok(prs)
     }
 
-    /// One PR by repo and number; `None` when GitHub no longer shows it to the token's user.
-    pub async fn pr(
+    /// Each of `wanted` (`(repo, number)`) by number, `BATCH_SIZE` to a request, in order;
+    /// `None` for one GitHub no longer shows to the token's user.
+    pub async fn prs(
         &self,
         token: &str,
-        repo: &str,
-        number: i64,
-    ) -> Result<Option<RemotePr>, GithubError> {
-        let Some((owner, name)) = repo.split_once('/') else {
-            return Ok(None);
-        };
-        let query = format!(
-            "query($owner: String!, $name: String!, $number: Int!) {{
-  repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ ...pr }} }}
-}}
-{PR_FIELDS}"
-        );
-        let variables = json!({ "owner": owner, "name": name, "number": number });
-        let data = self.query(token, &query, variables).await?;
-        parse_pr(data)
+        wanted: &[(String, i64)],
+    ) -> Result<Vec<Option<RemotePr>>, GithubError> {
+        let mut prs = Vec::with_capacity(wanted.len());
+        for batch in wanted.chunks(BATCH_SIZE) {
+            let (query, variables) = batch_query(batch);
+            let data = self.query(token, &query, variables).await?;
+            prs.extend(parse_batch(data, batch.len())?);
+        }
+        Ok(prs)
     }
 
     /// Posts one GraphQL query and returns its `data`.
@@ -241,22 +239,53 @@ fn parse_search(data: Value) -> Result<SearchPage, GithubError> {
     })
 }
 
-fn parse_pr(data: Value) -> Result<Option<RemotePr>, GithubError> {
-    #[derive(Deserialize)]
-    struct Data {
-        repository: Option<Repository>,
+/// The query fetching `batch` by number: PR `i` as alias `p<i>`, its owner, name and number
+/// in variables `o<i>`, `r<i>` and `n<i>`. A repo that isn't `owner/name` is asked for under
+/// an empty owner, which GitHub doesn't show.
+fn batch_query(batch: &[(String, i64)]) -> (String, Value) {
+    let mut params = Vec::with_capacity(batch.len());
+    let mut fields = Vec::with_capacity(batch.len());
+    let mut variables = serde_json::Map::new();
+    for (i, (repo, number)) in batch.iter().enumerate() {
+        let (owner, name) = repo.split_once('/').unwrap_or(("", repo));
+        params.push(format!("$o{i}: String!, $r{i}: String!, $n{i}: Int!"));
+        fields.push(format!(
+            "  p{i}: repository(owner: $o{i}, name: $r{i}) {{ pullRequest(number: $n{i}) {{ ...pr }} }}"
+        ));
+        variables.insert(format!("o{i}"), owner.into());
+        variables.insert(format!("r{i}"), name.into());
+        variables.insert(format!("n{i}"), (*number).into());
     }
+    let query = format!(
+        "query({}) {{\n{}\n}}\n{PR_FIELDS}",
+        params.join(", "),
+        fields.join("\n")
+    );
+    (query, Value::Object(variables))
+}
+
+/// The `len` PRs of a batch's `data`, in order; `None` for each GitHub doesn't show.
+fn parse_batch(data: Value, len: usize) -> Result<Vec<Option<RemotePr>>, GithubError> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Repository {
         pull_request: Option<PrNode>,
     }
 
-    let data: Data = serde_json::from_value(data)?;
-    Ok(data
-        .repository
-        .and_then(|repo| repo.pull_request)
-        .map(RemotePr::from))
+    let Value::Object(mut data) = data else {
+        return Err(GithubError::Shape(serde::de::Error::custom(
+            "a batch's data isn't an object",
+        )));
+    };
+    (0..len)
+        .map(|i| {
+            let repository: Option<Repository> =
+                serde_json::from_value(data.remove(&format!("p{i}")).unwrap_or(Value::Null))?;
+            Ok(repository
+                .and_then(|repo| repo.pull_request)
+                .map(RemotePr::from))
+        })
+        .collect()
 }
 
 /// The `pr` fragment.
@@ -502,23 +531,51 @@ mod tests {
         }
     }
 
-    mod parse_pr {
+    mod parse_batch {
         use super::*;
 
         #[test]
-        fn should_read_a_merged_pr() {
+        fn should_read_each_pr_in_order() {
             let data = json!({
-                "repository": { "pullRequest": node("MERGED", Value::Null, Value::Null) }
+                "p0": { "pullRequest": node("MERGED", Value::Null, Value::Null) },
+                "p1": { "pullRequest": node("OPEN", Value::Null, Value::Null) }
             });
 
-            let pr = parse_pr(data).unwrap().expect("a PR");
+            let prs = parse_batch(data, 2).unwrap();
 
-            assert_eq!(pr.state, PrState::Merged);
+            let states: Vec<_> = prs
+                .iter()
+                .map(|pr| pr.as_ref().map(|pr| pr.state))
+                .collect();
+            assert_eq!(states, [Some(PrState::Merged), Some(PrState::Open)]);
         }
 
         #[test]
-        fn should_be_none_when_the_repo_is_gone() {
-            assert_eq!(parse_pr(json!({ "repository": null })).unwrap(), None);
+        fn should_be_none_where_the_repo_or_the_pr_is_gone() {
+            let data = json!({ "p0": null, "p1": { "pullRequest": null } });
+
+            assert_eq!(parse_batch(data, 3).unwrap(), [None, None, None]);
+        }
+    }
+
+    mod batch_query {
+        use super::*;
+
+        #[test]
+        fn should_ask_for_each_pr_under_its_own_alias_and_variables() {
+            let (query, variables) =
+                batch_query(&[("acme/widgets".into(), 7), ("acme/gadgets".into(), 9)]);
+
+            assert!(query.contains(
+                "p1: repository(owner: $o1, name: $r1) { pullRequest(number: $n1) { ...pr } }"
+            ));
+            assert_eq!(
+                variables,
+                json!({
+                    "o0": "acme", "r0": "widgets", "n0": 7,
+                    "o1": "acme", "r1": "gadgets", "n1": 9
+                })
+            );
         }
     }
 
