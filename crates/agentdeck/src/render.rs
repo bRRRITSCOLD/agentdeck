@@ -206,7 +206,11 @@ pub fn dirty(report: &DirtyReport) -> String {
             out.push_str(&format!("  uncommitted: {file}\n"));
         }
         for branch in &repo.unpushed_branches {
-            out.push_str(&format!("  unpushed:    {branch}\n"));
+            let commits = match branch.commits {
+                1 => "1 commit".to_owned(),
+                n => format!("{n} commits"),
+            };
+            out.push_str(&format!("  unpushed:    {} ({commits})\n", branch.name));
         }
     }
     out
@@ -214,7 +218,7 @@ pub fn dirty(report: &DirtyReport) -> String {
 
 #[cfg(test)]
 mod tests {
-    use agentdeck_client::types::{DirtyRepo, GhLogin};
+    use agentdeck_client::types::{DirtyRepo, GhLogin, UnpushedBranch};
     use agentdeck_core::{Agent, TaskKind, TaskStatus};
 
     use super::*;
@@ -445,13 +449,23 @@ mod tests {
                 repos: vec![DirtyRepo {
                     path: "/work/web".into(),
                     uncommitted: vec![" M src/main.rs".into()],
-                    unpushed_branches: vec!["feat/x".into()],
+                    unpushed_branches: vec![
+                        UnpushedBranch {
+                            name: "feat/x".into(),
+                            commits: 2,
+                        },
+                        UnpushedBranch {
+                            name: "fix/y".into(),
+                            commits: 1,
+                        },
+                    ],
                 }],
             });
 
             assert_eq!(
                 out,
-                "/work/web\n  uncommitted:  M src/main.rs\n  unpushed:    feat/x\n"
+                "/work/web\n  uncommitted:  M src/main.rs\n  unpushed:    feat/x (2 commits)\n  \
+                 unpushed:    fix/y (1 commit)\n"
             );
         }
     }

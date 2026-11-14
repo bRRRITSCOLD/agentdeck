@@ -8,7 +8,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use agentdeck_client::types::{DirtyRepo, DirtyReport};
+use agentdeck_client::types::{DirtyRepo, DirtyReport, UnpushedBranch};
 use agentdeck_core::WorkspaceId;
 use brrritscold_core_gpui::{
     ActiveTheme as _, Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonVariant,
@@ -282,13 +282,19 @@ fn repo_card(repo: &DirtyRepo, dir: &str, cx: &App) -> AnyElement {
                 uncommitted_line(&repo.uncommitted),
             ))
         })
-        // The report names the branches but not how many commits each holds:
-        // https://github.com/bRRRITSCOLD/agentdeck/issues/76
         .children(
             (repo.unpushed_branches.iter())
-                .map(|branch| line(IconName::GitBranch, format!("{branch}: not pushed"))),
+                .map(|branch| line(IconName::GitBranch, branch_line(branch))),
         )
         .into_any_element()
+}
+
+/// "feat/tabs: 2 commits not pushed": a branch and how many of its commits are on no remote.
+pub fn branch_line(branch: &UnpushedBranch) -> String {
+    match branch.commits {
+        1 => format!("{}: 1 commit not pushed", branch.name),
+        n => format!("{}: {n} commits not pushed", branch.name),
+    }
 }
 
 /// The alert's title for `repos` dirty repos.
@@ -492,12 +498,18 @@ mod tests {
                         "packages/core-react/src/tabs.stories.tsx".into(),
                         "packages/core-react/src/tabs.keyboard.test.tsx".into(),
                     ],
-                    unpushed_branches: vec!["feat/tabs-keyboard".into()],
+                    unpushed_branches: vec![UnpushedBranch {
+                        name: "feat/tabs-keyboard".into(),
+                        commits: 2,
+                    }],
                 },
                 DirtyRepo {
                     path: "/w/tabs-a11y/rust-packages".into(),
                     uncommitted: vec![],
-                    unpushed_branches: vec!["fix/tab-focus-ring".into()],
+                    unpushed_branches: vec![UnpushedBranch {
+                        name: "fix/tab-focus-ring".into(),
+                        commits: 1,
+                    }],
                 },
             ],
         }
@@ -812,6 +824,33 @@ mod tests {
         fn should_be_the_folders_name_for_the_workspace_dir_itself() {
             assert_eq!(repo_name("/w/x", "/w/x"), "x");
             assert_eq!(repo_name("/w/x/", "/w/x"), "x");
+        }
+    }
+
+    mod branch_line {
+        use super::*;
+
+        fn branch(name: &str, commits: u32) -> UnpushedBranch {
+            UnpushedBranch {
+                name: name.into(),
+                commits,
+            }
+        }
+
+        #[test]
+        fn should_say_how_many_commits_are_not_pushed() {
+            assert_eq!(
+                branch_line(&branch("feat/tabs-keyboard", 2)),
+                "feat/tabs-keyboard: 2 commits not pushed"
+            );
+        }
+
+        #[test]
+        fn should_speak_of_one_commit_in_the_singular() {
+            assert_eq!(
+                branch_line(&branch("fix/tab-focus-ring", 1)),
+                "fix/tab-focus-ring: 1 commit not pushed"
+            );
         }
     }
 
