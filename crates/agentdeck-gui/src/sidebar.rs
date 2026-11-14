@@ -20,8 +20,8 @@ use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Context, ElementId, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Task, Window, div, px,
+    ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Task, Window, div, px,
 };
 
 use crate::api::Api;
@@ -29,6 +29,7 @@ use crate::connection::{Connection, DaemonEvent};
 use crate::count::Count;
 use crate::overview::{Counts, Overview, Snapshot, WorkspaceRow};
 use crate::rereads::Rereads;
+use crate::scrollbar;
 use crate::state_dot::{StateDot, StateDotState};
 use crate::task_row;
 
@@ -72,6 +73,8 @@ pub struct SidebarView {
     rereads: Rereads,
     _events: Subscription,
     _tick: Task<()>,
+    /// Where the workspace list is scrolled to, for its scrollbar.
+    scroll: ScrollHandle,
 }
 
 impl SidebarView {
@@ -98,6 +101,7 @@ impl SidebarView {
             rereads: Rereads::default(),
             _events: events,
             _tick: tick,
+            scroll: ScrollHandle::new(),
         };
         sidebar.reread(cx);
         sidebar
@@ -416,14 +420,17 @@ impl Render for SidebarView {
             .child(
                 div()
                     .id("workspaces")
+                    .debug_selector(|| "workspaces".into())
                     .flex()
                     .flex_col()
                     .flex_1()
                     .min_h_0()
                     .gap(space::S1)
                     .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
                     .children(workspaces),
             )
+            .child(scrollbar::vertical(&self.scroll, cx))
             // Penpot `Footer`.
             .child(
                 small()
@@ -816,6 +823,31 @@ mod tests {
             });
 
             assert_eq!(state_of(&mut open, "a"), AgentState::Idle);
+        }
+    }
+
+    mod scrollbar {
+        use super::*;
+        use crate::scrollbar::testing::thumb;
+
+        #[gpui::test]
+        fn should_show_a_scrollbar_when_the_list_overflows(cx: &mut TestAppContext) {
+            let crowded = Snapshot {
+                workspaces: (1..=60).map(|n| workspace(n, &format!("w{n}"))).collect(),
+                ..Snapshot::default()
+            };
+            let open = open(crowded, cx);
+
+            let list = open.cx.debug_bounds("workspaces").expect("the list");
+            assert!(thumb(list, open.cx).is_some());
+        }
+
+        #[gpui::test]
+        fn should_hide_the_scrollbar_when_everything_fits(cx: &mut TestAppContext) {
+            let open = open(two_workspaces(), cx);
+
+            let list = open.cx.debug_bounds("workspaces").expect("the list");
+            assert_eq!(thumb(list, open.cx), None);
         }
     }
 }
