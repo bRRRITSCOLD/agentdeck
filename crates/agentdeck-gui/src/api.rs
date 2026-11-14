@@ -6,12 +6,13 @@ use std::collections::BTreeSet;
 
 use agentdeck_client::daemon::Daemon;
 use agentdeck_client::panes::{self, pane_if_any};
-use agentdeck_client::types::{DirtyReport, NewNote, NewWorkspace, Pane, Tab, TaskPatch};
+use agentdeck_client::types::{DirtyReport, NewNote, NewTask, NewWorkspace, Pane, Tab, TaskPatch};
 use agentdeck_client::{ApiError, Client};
 use agentdeck_core::{PaneId, SplitDirection, TabId, TaskId, TaskStatus, WorkspaceId};
 use gpui::{App, Task};
 
 use crate::new_agent::{Launch, Launched};
+use crate::new_task;
 use crate::new_workspace::Request;
 use crate::overview::{PaneState, Snapshot};
 use crate::runtime;
@@ -44,6 +45,9 @@ pub trait Api: Send + Sync {
     /// Makes a workspace as `request` says; its id. A refusal is an [`ApiError`] whose code
     /// names the field: `invalid_name` or `invalid_dir`.
     fn new_workspace(&self, request: Request, cx: &App) -> Task<anyhow::Result<WorkspaceId>>;
+
+    /// Makes a `todo` task as `request` says; its id.
+    fn new_task(&self, request: new_task::Request, cx: &App) -> Task<anyhow::Result<TaskId>>;
 
     /// Moves `task` to `status`.
     fn set_task_status(
@@ -151,6 +155,25 @@ impl Api for Daemon {
                 .send()
                 .await
                 .map_err(ApiError::from)?;
+            Ok(made.id)
+        })
+    }
+
+    fn new_task(&self, request: new_task::Request, cx: &App) -> Task<anyhow::Result<TaskId>> {
+        let client = self.client.clone();
+        let new_task::Request {
+            title,
+            body,
+            workspace,
+        } = request;
+        runtime::spawn(cx, async move {
+            let task = NewTask {
+                body: (!body.is_empty()).then_some(body),
+                status: Some(TaskStatus::Todo),
+                title,
+                workspace_id: workspace,
+            };
+            let made = (client.task_create().body(task).send().await).map_err(ApiError::from)?;
             Ok(made.id)
         })
     }
@@ -349,6 +372,8 @@ pub(crate) mod fake {
         failure: Mutex<Option<anyhow::Error>>,
         /// The workspaces asked for, in order.
         pub made_workspaces: Mutex<Vec<Request>>,
+        /// The tasks asked for, in order.
+        pub made_tasks: Mutex<Vec<new_task::Request>>,
         /// How many PR syncs were asked for.
         pub syncs: Mutex<usize>,
         /// The notes left, with the workspace each is on.
@@ -579,6 +604,23 @@ pub(crate) mod fake {
             };
             self.snapshot.lock().unwrap().workspaces.push(made);
             self.made_workspaces.lock().unwrap().push(request);
+            Task::ready(Ok(id))
+        }
+
+        fn new_task(&self, request: new_task::Request, _cx: &App) -> Task<anyhow::Result<TaskId>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            let id: TaskId = self.make_id();
+            let made = agentdeck_client::types::Task {
+                id,
+                title: request.title.clone(),
+                body: request.body.clone(),
+                workspace_id: request.workspace,
+                ..crate::overview::fixtures::task(0, agentdeck_core::TaskKind::Plain, None)
+            };
+            self.snapshot.lock().unwrap().tasks.push(made);
+            self.made_tasks.lock().unwrap().push(request);
             Task::ready(Ok(id))
         }
 

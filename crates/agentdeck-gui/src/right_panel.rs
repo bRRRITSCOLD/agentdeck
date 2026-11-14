@@ -1,7 +1,8 @@
 //! The right panel (spec §11), Penpot "Main window" `RightPanel`: the selected workspace's
 //! tasks and PRs, grouped by status, each with a status picker. Done tasks hide behind
 //! "Show N done". The top bar's panel button toggles it, through
-//! [`ToggleRightPanel`](crate::keymap::ToggleRightPanel), which the window handles.
+//! [`ToggleRightPanel`](crate::keymap::ToggleRightPanel), which the window handles. The
+//! Tasks & PRs `+` asks the window for the new task dialog on the workspace ([`NewTask`]).
 //!
 //! Below the tasks come the notes on the workspace and on its tasks, newest first, and a field
 //! that leaves a note on the workspace for the next agent (Enter sends it; the notes header's
@@ -21,13 +22,14 @@ use brrritscold_core_gpui::{
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, px,
+    AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, px,
 };
 use gpui_base::input::InputEvent;
 
 use crate::api::Api;
+use crate::new_task::NewTask;
 use crate::note_list::{self, NoteRow};
 use crate::overview::Snapshot;
 use crate::task_list::{self, Group, Query, Scope};
@@ -51,6 +53,8 @@ pub struct RightPanel {
     sending: bool,
     _new_note: Subscription,
 }
+
+impl EventEmitter<NewTask> for RightPanel {}
 
 impl RightPanel {
     /// A panel that changes statuses through `api`; it lists nothing until given a
@@ -269,7 +273,19 @@ impl Render for RightPanel {
             .py(space::S3)
             .px(space::S2)
             .bg(s.card)
-            .child(section_header("Tasks & PRs", s))
+            .child(
+                section_header("Tasks & PRs", s).child(
+                    div().debug_selector(|| "add task".into()).child(
+                        Button::new("add-task")
+                            .variant(ButtonVariant::Ghost)
+                            .size(ButtonSize::IconXs)
+                            .icon(IconName::Plus)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                cx.emit(NewTask(this.workspace));
+                            })),
+                    ),
+                ),
+            )
             .child(list)
             // Penpot `NewNote`.
             .child(div().flex_none().child(Input::new(&self.new_note)))
@@ -344,6 +360,7 @@ mod tests {
 
     use super::*;
     use crate::api::fake::FakeApi;
+    use crate::new_task::NewTask;
     use crate::overview::fixtures::{id, task, workspace};
 
     fn with_status(n: u32, status: TaskStatus, ws: WorkspaceId) -> Task {
@@ -479,6 +496,25 @@ mod tests {
         });
         assert_eq!(rows, [id(1), id(2)]);
         assert!(panel.read_with(cx, |p, _| p.is_collapsed(TaskStatus::Todo)));
+    }
+
+    #[gpui::test]
+    fn should_ask_for_the_new_task_dialog_on_its_workspace_from_the_plus(cx: &mut TestAppContext) {
+        let (panel, cx) = open(cx);
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = asked.clone();
+        let _asks = cx.update(|_, cx| {
+            cx.subscribe(&panel, move |_, event: &NewTask, _| {
+                seen.borrow_mut().push(*event)
+            })
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let plus = cx.debug_bounds("add task").expect("the Tasks & PRs +");
+        cx.simulate_click(plus.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        assert_eq!(*asked.borrow(), [NewTask(Some(id(1)))]);
     }
 
     #[gpui::test]

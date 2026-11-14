@@ -1,6 +1,7 @@
 //! The Tasks view (spec §11), Penpot "Screens" → "Tasks": every task, grouped by status, each
 //! row with a status picker. Done tasks are hidden until "Show done" is on; the filter keeps
-//! rows whose title, PR or workspace contains it. A group header folds its group.
+//! rows whose title, PR or workspace contains it. A group header folds its group. "New task"
+//! asks the window for the new task dialog on the Inbox ([`NewTask`]).
 //!
 //! It shows the sidebar's [`Snapshot`], which the window passes on as it changes, so it reads
 //! nothing itself. A status picked is sent at once; the daemon's `changed` brings it back.
@@ -11,17 +12,18 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use agentdeck_core::{TaskId, TaskStatus};
-use brrritscold_core_gpui::{ActiveTheme as _, Input, InputState, Label, Switch};
+use brrritscold_core_gpui::{ActiveTheme as _, Button, Input, InputState, Label, Switch};
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ListState,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, list, px,
+    AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
+    IntoElement, ListState, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, list, px,
 };
 use gpui_base::input::InputEvent;
 
 use crate::api::Api;
+use crate::new_task::NewTask;
 use crate::overview::Snapshot;
 use crate::task_list::{self, Group, Query, Row, Scope};
 use crate::task_row::{self, Table};
@@ -54,6 +56,8 @@ pub struct TasksView {
     list: ListState,
     _filter: Subscription,
 }
+
+impl EventEmitter<NewTask> for TasksView {}
 
 impl TasksView {
     /// A view that changes statuses through `api`; it shows nothing until given a snapshot.
@@ -194,7 +198,7 @@ impl TasksView {
         }
     }
 
-    /// Penpot `Header`: heading, spacer, filter, "Show done", `space.3` apart.
+    /// Penpot `Header`: heading, spacer, filter, "Show done", "New task", `space.3` apart.
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
         let show_done = cx.listener(|this, checked: &bool, _, cx| this.set_show_done(*checked, cx));
@@ -241,6 +245,13 @@ impl TasksView {
                             .on_change(move |checked, window, cx| show_done(&checked, window, cx)),
                     )
                     .child(Label::new().child("Show done")),
+            )
+            .child(
+                div().debug_selector(|| "new task".into()).child(
+                    Button::new("new-task")
+                        .label("New task")
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(NewTask(None)))),
+                ),
             )
     }
 }
@@ -316,6 +327,7 @@ mod tests {
 
     use super::*;
     use crate::api::fake::FakeApi;
+    use crate::new_task::NewTask;
     use crate::overview::PaneState;
     use crate::overview::fixtures::{id, pane, task, workspace};
 
@@ -423,6 +435,22 @@ mod tests {
 
     fn drawn(task: u32, cx: &mut VisualTestContext) -> bool {
         (cx.debug_bounds(format!("task {}", id::<TaskId>(task)).leak())).is_some()
+    }
+
+    #[gpui::test]
+    fn should_ask_for_the_new_task_dialog_on_the_inbox(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::open(board(), cx);
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = asked.clone();
+        let _asks = cx.update(|_, cx| {
+            cx.subscribe(&harness.view, move |_, event: &NewTask, _| {
+                seen.borrow_mut().push(*event)
+            })
+        });
+
+        harness.click("new task", cx);
+
+        assert_eq!(*asked.borrow(), [NewTask(None)]);
     }
 
     #[gpui::test]

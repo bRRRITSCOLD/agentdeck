@@ -8,6 +8,9 @@
 //! outcome; an archive's toast offers Undo. The top bar's Delete workspace… opens the delete
 //! dialog; once a workspace is deleted the selection falls back to the first workspace left,
 //! else the Inbox.
+//!
+//! The Tasks view and the right panel ask for the new task dialog with
+//! [`NewTask`], preset to the Inbox or their workspace.
 
 use std::sync::Arc;
 
@@ -31,6 +34,7 @@ use crate::frame;
 use crate::inbox::{InboxView, Synced};
 use crate::keymap::ToggleRightPanel;
 use crate::new_agent::{self, Launched, NewAgent, NewAgentDialog, Target};
+use crate::new_task::{NewTask, NewTaskDialog};
 use crate::new_workspace::{Created, NewWorkspaceDialog};
 use crate::notice::{self, Notice, NoticeAction};
 use crate::right_panel::RightPanel;
@@ -59,6 +63,8 @@ pub struct Shell {
     new_agent: Option<Entity<NewAgentDialog>>,
     /// The Delete workspace dialog, while connected.
     delete_workspace: Option<Entity<DeleteWorkspaceDialog>>,
+    /// The new task dialog, while connected.
+    new_task: Option<Entity<NewTaskDialog>>,
     _new_workspace: Vec<Subscription>,
     /// The selected workspace.
     workspace: Option<Entity<WorkspaceView>>,
@@ -98,6 +104,7 @@ impl Shell {
             new_workspace: None,
             new_agent: None,
             delete_workspace: None,
+            new_task: None,
             _new_workspace: Vec::new(),
             workspace: None,
             tasks: None,
@@ -120,11 +127,12 @@ impl Shell {
                     let api = session.api.clone();
                     let connection = self.connection.clone();
                     let dialog = cx.new(|cx| NewWorkspaceDialog::new(api.clone(), window, cx));
-                    self.tasks = Some(cx.new(|cx| TasksView::new(api.clone(), window, cx)));
                     let inbox = cx.new(|_| InboxView::new(api.clone()));
                     let new_agent = cx.new(|_| NewAgentDialog::new(api.clone()));
                     let delete = cx.new(|cx| DeleteWorkspaceDialog::new(api.clone(), window, cx));
-                    self.panel = Some(cx.new(|cx| RightPanel::new(api.clone(), window, cx)));
+                    let new_task = cx.new(|cx| NewTaskDialog::new(api.clone(), window, cx));
+                    let panel = cx.new(|cx| RightPanel::new(api.clone(), window, cx));
+                    let tasks = cx.new(|cx| TasksView::new(api.clone(), window, cx));
                     let sidebar = cx.new(|cx| SidebarView::new(api, &connection, cx));
                     self._selection =
                         Some(cx.observe_in(&sidebar, window, |shell, _, window, cx| {
@@ -164,6 +172,12 @@ impl Shell {
                                 DeleteEvent::Deleted(_) => shell.refresh(cx),
                             }
                         }),
+                        cx.subscribe_in(&tasks, window, |shell, _, ask, window, cx| {
+                            shell.new_task(*ask, window, cx);
+                        }),
+                        cx.subscribe_in(&panel, window, |shell, _, ask, window, cx| {
+                            shell.new_task(*ask, window, cx);
+                        }),
                         cx.subscribe(&dialog, |shell, _, Created(id), cx| {
                             if let Some(sidebar) = &shell.sidebar {
                                 let selection = Selection::Workspace(*id);
@@ -175,6 +189,9 @@ impl Shell {
                     self.inbox = Some(inbox);
                     self.new_agent = Some(new_agent);
                     self.delete_workspace = Some(delete);
+                    self.new_task = Some(new_task);
+                    self.tasks = Some(tasks);
+                    self.panel = Some(panel);
                     self.sidebar = Some(sidebar);
                     self.follow_selection(window, cx);
                 }
@@ -190,6 +207,7 @@ impl Shell {
                 self.panel = None;
                 self.new_agent = None;
                 self.delete_workspace = None;
+                self.new_task = None;
                 self.selection = None;
             }
         }
@@ -270,6 +288,16 @@ impl Shell {
         dialog.update(cx, |dialog, cx| {
             dialog.open(target, folders, snapshot, window, cx)
         });
+    }
+
+    /// Opens the new task dialog as a view asks, offering the workspaces the sidebar holds.
+    fn new_task(&mut self, ask: NewTask, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(sidebar), Some(dialog)) = (&self.sidebar, &self.new_task) else {
+            return;
+        };
+        let snapshot = sidebar.read(cx).snapshot().clone();
+        let NewTask(preset) = ask;
+        dialog.update(cx, |dialog, cx| dialog.open(preset, &snapshot, window, cx));
     }
 
     /// The selected workspace's id and name, if a workspace is selected.
@@ -445,6 +473,7 @@ impl Shell {
                 .children(self.new_workspace.clone())
                 .children(self.new_agent.clone())
                 .children(self.delete_workspace.clone())
+                .children(self.new_task.clone())
                 .into_any_element(),
         }
     }
@@ -753,6 +782,49 @@ mod tests {
                 cx.run_until_parked();
 
                 assert_eq!(shown_workspace(&shell, cx), Some(id(101)));
+            }
+        }
+
+        mod new_task {
+            use super::*;
+            use crate::new_task::{NewTask, NewTaskDialog};
+
+            fn dialog(shell: &Entity<Shell>, cx: &TestAppContext) -> Entity<NewTaskDialog> {
+                shell.read_with(cx, |shell, _| shell.new_task.clone().unwrap())
+            }
+
+            #[gpui::test]
+            fn should_open_the_dialog_on_the_inbox_when_the_tasks_view_asks(
+                cx: &mut TestAppContext,
+            ) {
+                let connector = Rc::new(FakeConnector::default());
+                let _remote = connector.then_connect_to(workspace_with_a_pane());
+                let shell = open(connector, cx);
+                let tasks = shell.read_with(cx, |shell, _| shell.tasks.clone().unwrap());
+
+                tasks.update(cx, |_, cx| cx.emit(NewTask(None)));
+                cx.run_until_parked();
+
+                let dialog = dialog(&shell, cx);
+                assert!(dialog.read_with(cx, |d, _| d.is_open()));
+                assert_eq!(dialog.read_with(cx, |d, _| d.workspace()), None);
+            }
+
+            #[gpui::test]
+            fn should_open_the_dialog_on_the_workspace_when_the_right_panel_asks(
+                cx: &mut TestAppContext,
+            ) {
+                let connector = Rc::new(FakeConnector::default());
+                let _remote = connector.then_connect_to(workspace_with_a_pane());
+                let shell = open(connector, cx);
+                let panel = shell.read_with(cx, |shell, _| shell.panel.clone().unwrap());
+
+                panel.update(cx, |_, cx| cx.emit(NewTask(Some(id(1)))));
+                cx.run_until_parked();
+
+                let dialog = dialog(&shell, cx);
+                assert!(dialog.read_with(cx, |d, _| d.is_open()));
+                assert_eq!(dialog.read_with(cx, |d, _| d.workspace()), Some(id(1)));
             }
         }
 
