@@ -178,6 +178,9 @@ impl From<DbError> for HttpError {
             DbError::Invalid { code, .. } => {
                 client_error(ClientErrorStatusCode::BAD_REQUEST, code, message)
             }
+            DbError::Conflict { code, .. } => {
+                client_error(ClientErrorStatusCode::CONFLICT, code, message)
+            }
             DbError::Sql(_) | DbError::Io(_) | DbError::Closed => {
                 HttpError::for_internal_error(message)
             }

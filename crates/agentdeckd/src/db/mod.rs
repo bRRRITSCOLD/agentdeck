@@ -38,6 +38,13 @@ pub enum DbError {
         /// What was wrong.
         message: String,
     },
+    /// The request is allowed, but not in the entity's current state (409).
+    Conflict {
+        /// The `error_code` the response carries.
+        code: &'static str,
+        /// What stands in the way.
+        message: String,
+    },
     /// SQLite failed.
     Sql(rusqlite::Error),
     /// Something outside SQLite failed, such as creating a scratch dir.
@@ -51,7 +58,9 @@ impl fmt::Display for DbError {
         match self {
             DbError::NotFound(entity) => write!(f, "{entity} not found"),
             DbError::UnknownReference(entity) => write!(f, "no such {entity}"),
-            DbError::Invalid { message, .. } => f.write_str(message),
+            DbError::Invalid { message, .. } | DbError::Conflict { message, .. } => {
+                f.write_str(message)
+            }
             DbError::Sql(err) => write!(f, "database error: {err}"),
             DbError::Io(err) => write!(f, "io error: {err}"),
             DbError::Closed => f.write_str("the database actor has stopped"),

@@ -6,6 +6,9 @@ use agentdeck_client::Client;
 use agentdeck_client::types::{NewWorkspace, Workspace};
 
 use crate::support::git::{clone_with_pushed_commit, git, init_with_commit};
+use agentdeck_core::AgentState;
+
+use crate::support::terminal::{Place, in_state, sh};
 use crate::support::{TestDaemon, error_response};
 
 async fn create(client: &Client, name: &str, dir: Option<&Path>) -> Workspace {
@@ -266,6 +269,60 @@ mod post_v1_workspaces_id_archive {
 
         assert!(workspace.archived_at.is_some());
         assert!(Path::new(&workspace.dir).is_dir());
+    }
+
+    #[tokio::test]
+    async fn should_refuse_while_a_pane_runs_409() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        for _ in 0..2 {
+            daemon
+                .client
+                .pane_create()
+                .body(place.new_pane(&sh("sleep 60")))
+                .send()
+                .await
+                .expect("spawn");
+        }
+
+        let (status, body) = error_response(
+            daemon
+                .client
+                .workspace_archive()
+                .id(place.workspace.id)
+                .send()
+                .await,
+        );
+
+        assert_eq!(status, 409);
+        assert_eq!(body.error_code.as_deref(), Some("panes_running"));
+        assert_eq!(body.message, "Close its 2 running panes first");
+    }
+
+    #[tokio::test]
+    async fn should_archive_once_its_panes_have_exited_200() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let pane = daemon
+            .client
+            .pane_create()
+            .body(place.new_pane(&sh("true")))
+            .send()
+            .await
+            .expect("spawn")
+            .into_inner();
+        in_state(&daemon.client, pane.id, AgentState::Exited).await;
+
+        let workspace = daemon
+            .client
+            .workspace_archive()
+            .id(place.workspace.id)
+            .send()
+            .await
+            .expect("archive")
+            .into_inner();
+
+        assert!(workspace.archived_at.is_some());
     }
 
     #[tokio::test]
