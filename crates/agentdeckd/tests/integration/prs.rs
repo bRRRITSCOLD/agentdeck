@@ -11,10 +11,13 @@ use httpmock::MockServer;
 
 use agentdeck_core::ws::{Entity, ServerMessage};
 
-use crate::support::TestDaemon;
 use crate::support::git::git;
-use crate::support::github::{Pr, mock_fetch, mock_search, mock_unauthorized, set_gh_token};
+use crate::support::github::{
+    Pr, mock_fetch, mock_full_search, mock_search, mock_unauthorized, mock_updated_search,
+    set_gh_token,
+};
 use crate::support::ws::{Frame, Ws};
+use crate::support::{TestDaemon, set_daemon_env};
 
 const TOKEN: &str = "gho_test";
 
@@ -22,6 +25,14 @@ const TOKEN: &str = "gho_test";
 async fn daemon(server: &MockServer, token: Option<&str>) -> TestDaemon {
     let dirs = tempfile::tempdir().expect("a temp dir");
     set_gh_token(dirs.path(), token);
+    TestDaemon::start_with_github(dirs, &server.url("/graphql")).await
+}
+
+/// A daemon like [`daemon`] whose every sync is a full one, as the first sync is.
+async fn full_daemon(server: &MockServer, token: Option<&str>) -> TestDaemon {
+    let dirs = tempfile::tempdir().expect("a temp dir");
+    set_gh_token(dirs.path(), token);
+    set_daemon_env(dirs.path(), &[("AGENTDECK_PR_FULL_SYNC_SECS", "0")]);
     TestDaemon::start_with_github(dirs, &server.url("/graphql")).await
 }
 
@@ -237,7 +248,7 @@ mod post_v1_prs_sync {
     async fn should_move_a_pr_that_merged_out_of_the_search_to_done_200() {
         let github = MockServer::start_async().await;
         let mut search = mock_search(&github, TOKEN, &[Pr::open(7)]);
-        let daemon = daemon(&github, Some(TOKEN)).await;
+        let daemon = full_daemon(&github, Some(TOKEN)).await;
         sync(&daemon.client).await;
 
         search.delete();
@@ -265,7 +276,7 @@ mod post_v1_prs_sync {
         let github = MockServer::start_async().await;
         let open: Vec<Pr> = (1..=120).map(Pr::open).collect();
         let mut search = mock_search(&github, TOKEN, &open);
-        let daemon = daemon(&github, Some(TOKEN)).await;
+        let daemon = full_daemon(&github, Some(TOKEN)).await;
         sync(&daemon.client).await;
 
         search.delete();
@@ -295,7 +306,7 @@ mod post_v1_prs_sync {
     async fn should_close_a_pr_github_no_longer_shows_200() {
         let github = MockServer::start_async().await;
         let mut search = mock_search(&github, TOKEN, &[Pr::open(7)]);
-        let daemon = daemon(&github, Some(TOKEN)).await;
+        let daemon = full_daemon(&github, Some(TOKEN)).await;
         sync(&daemon.client).await;
 
         search.delete();
@@ -402,6 +413,133 @@ mod post_v1_prs_sync {
         );
         assert_eq!(status.last_synced_at, synced.last_synced_at);
         assert_eq!(pr_tasks(&daemon.client).await.len(), 1);
+    }
+}
+
+mod incremental {
+    use super::*;
+
+    /// A daemon past its first, full sync, whose GitHub shows `open` in the full search and
+    /// nothing in the incremental one until a test says otherwise.
+    async fn synced(github: &MockServer, open: &[Pr]) -> TestDaemon {
+        mock_full_search(github, TOKEN, open);
+        let daemon = daemon(github, Some(TOKEN)).await;
+        sync(&daemon.client).await;
+        daemon
+    }
+
+    #[tokio::test]
+    async fn should_ask_only_for_prs_updated_since_the_last_sync_200() {
+        let github = MockServer::start_async().await;
+        let full = mock_full_search(&github, TOKEN, &[Pr::open(7)]);
+        let updated = mock_updated_search(&github, TOKEN, &[]);
+        let daemon = daemon(&github, Some(TOKEN)).await;
+
+        sync(&daemon.client).await;
+        sync(&daemon.client).await;
+
+        full.assert_calls(1);
+        assert!(updated.calls() >= 1);
+        assert_eq!(pr_tasks(&daemon.client).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn should_move_a_pr_merged_since_the_last_sync_to_done_without_a_fetch_200() {
+        let github = MockServer::start_async().await;
+        let mut updated = mock_updated_search(&github, TOKEN, &[]);
+        let fetch = github.mock(|when, then| {
+            when.body_includes("pullRequest(");
+            then.status(500);
+        });
+        let daemon = synced(&github, &[Pr::open(7)]).await;
+
+        updated.delete();
+        mock_updated_search(
+            &github,
+            TOKEN,
+            &[Pr {
+                state: "MERGED",
+                ..Pr::open(7)
+            }],
+        );
+        sync(&daemon.client).await;
+
+        let task = pr_tasks(&daemon.client).await.remove(0);
+        assert_eq!(task.status, TaskStatus::Done);
+        fetch.assert_calls(0);
+    }
+
+    #[tokio::test]
+    async fn should_not_store_a_closed_pr_it_never_saw_open_200() {
+        let github = MockServer::start_async().await;
+        let mut updated = mock_updated_search(&github, TOKEN, &[]);
+        let daemon = synced(&github, &[Pr::open(7)]).await;
+
+        updated.delete();
+        mock_updated_search(
+            &github,
+            TOKEN,
+            &[Pr {
+                state: "MERGED",
+                ..Pr::open(9)
+            }],
+        );
+        sync(&daemon.client).await;
+
+        let numbers: Vec<i64> = pr_tasks(&daemon.client)
+            .await
+            .into_iter()
+            .map(|task| task.pr.expect("the task's PR").number)
+            .collect();
+        assert_eq!(numbers, [7]);
+    }
+
+    #[tokio::test]
+    async fn should_refresh_pending_checks_the_search_leaves_out_200() {
+        let github = MockServer::start_async().await;
+        mock_updated_search(&github, TOKEN, &[]);
+        let fetch = mock_fetch(
+            &github,
+            &[Pr {
+                checks: Some("SUCCESS"),
+                ..Pr::open(7)
+            }],
+        );
+        let daemon = synced(
+            &github,
+            &[Pr {
+                checks: Some("PENDING"),
+                ..Pr::open(7)
+            }],
+        )
+        .await;
+
+        sync(&daemon.client).await;
+
+        let pr = pr_tasks(&daemon.client)
+            .await
+            .remove(0)
+            .pr
+            .expect("the task's PR");
+        assert_eq!(pr.checks, Some(ChecksState::Success));
+        assert!(fetch.calls() >= 1);
+    }
+
+    #[tokio::test]
+    async fn should_move_an_inbox_pr_into_a_workspace_once_a_clone_appears_200() {
+        let github = MockServer::start_async().await;
+        mock_updated_search(&github, TOKEN, &[]);
+        let daemon = synced(&github, &[Pr::open(7)]).await;
+        let dir = daemon.new_dir("ws");
+        let workspace = attach(&daemon.client, &dir).await;
+
+        clone_of(&dir.join("widgets"), "acme/widgets", "feat/sync");
+        sync(&daemon.client).await;
+
+        assert_eq!(
+            pr_tasks(&daemon.client).await[0].workspace_id,
+            Some(workspace.id)
+        );
     }
 }
 

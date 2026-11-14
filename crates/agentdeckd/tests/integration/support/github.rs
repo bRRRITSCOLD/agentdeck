@@ -100,7 +100,7 @@ impl Pr {
     }
 }
 
-/// The search for the viewer's open PRs, answered with `prs` for `token`.
+/// Any search for the viewer's PRs, full or incremental, answered with `prs` for `token`.
 pub fn mock_search<'a>(server: &'a MockServer, token: &str, prs: &[Pr]) -> Mock<'a> {
     let nodes: Vec<Value> = prs.iter().map(Pr::node).collect();
     server.mock(|when, then| {
@@ -114,6 +114,52 @@ pub fn mock_search<'a>(server: &'a MockServer, token: &str, prs: &[Pr]) -> Mock<
                 "nodes": nodes
             } }
         }));
+    })
+}
+
+/// The full search for the viewer's open PRs, answered with `prs` for `token`. Unlike
+/// [`mock_search`], an incremental search doesn't match it.
+pub fn mock_full_search<'a>(server: &'a MockServer, token: &str, prs: &[Pr]) -> Mock<'a> {
+    mock_search_for(
+        server,
+        token,
+        prs,
+        json!({ "variables": { "q": "is:pr is:open author:@me" } }),
+    )
+}
+
+/// The incremental search for the viewer's PRs updated since the last sync, answered with
+/// `prs` for `token`.
+pub fn mock_updated_search<'a>(server: &'a MockServer, token: &str, prs: &[Pr]) -> Mock<'a> {
+    let nodes: Vec<Value> = prs.iter().map(Pr::node).collect();
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .header("authorization", format!("Bearer {token}"))
+            .body_includes("search(")
+            .body_includes("updated:>=");
+        then.status(200).json_body(search_page(nodes));
+    })
+}
+
+fn mock_search_for<'a>(server: &'a MockServer, token: &str, prs: &[Pr], body: Value) -> Mock<'a> {
+    let nodes: Vec<Value> = prs.iter().map(Pr::node).collect();
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .header("authorization", format!("Bearer {token}"))
+            .body_includes("search(")
+            .json_body_includes(body.to_string());
+        then.status(200).json_body(search_page(nodes));
+    })
+}
+
+fn search_page(nodes: Vec<Value>) -> Value {
+    json!({
+        "data": { "search": {
+            "pageInfo": { "hasNextPage": false, "endCursor": null },
+            "nodes": nodes
+        } }
     })
 }
 
