@@ -164,17 +164,30 @@ version = "0.1.0"
 dependencies = [
  "agentdeck-client",
  "agentdeck-core",
+ "agentdeck-notify",
  "alacritty_terminal",
  "anyhow",
  "brrritscold-core-gpui",
  "brrritscold-core-gpui-tokens",
  "chrono",
- "futures-util",
  "gpui-base",
  "gpui-pre",
  "gpui-pre-platform",
  "serde",
  "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "agentdeck-notify"
+version = "0.1.0"
+dependencies = [
+ "futures-channel",
+ "futures-util",
+ "gpui-pre",
+ "gpui-pre-platform",
  "tempfile",
  "tokio",
  "tracing",

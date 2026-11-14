@@ -29,6 +29,7 @@ cargo xtask client          # then regenerate agentdeck-client from it
 | `agentdeck-gui` | bin | the GPUI app, on `brrritscold-core-gpui` |
 | `agentdeck-client` | lib | the generated HTTP client |
 | `agentdeck-core` | lib | GPUI-free domain types |
+| `agentdeck-notify` | lib | the GUI's desktop notifications, over one D-Bus connection |
 | `xtask` | bin | workspace tasks |
 
 Licensed under either of [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your option.

@@ -1,0 +1,33 @@
+[package]
+name = "agentdeck-notify"
+description = "The GUI's desktop notifications: the freedesktop notifications D-Bus API over one shared session-bus connection, with clicks handed to GPUI's foreground."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The request queue between `show` and the one task that owns the connection.
+futures-channel.workspace = true
+futures-util.workspace = true
+gpui.workspace = true
+# A notification the server refused, or a session bus that can't be reached.
+tracing.workspace = true
+# The notification server's D-Bus API, over the zbus GPUI's Linux platform already pulls in
+# through notify-rust, on zbus's own runtime (no tokio).
+zbus.workspace = true
+
+[dev-dependencies]
+# The contract test's fake notification server reads its D-Bus messages as a stream.
+futures-util.workspace = true
+# The contract test's app side: GPUI's headless platform, which really runs the foreground.
+gpui-platform.workspace = true
+tempfile.workspace = true
+# The contract test's fake notification server runs on a tokio runtime; the crate itself
+# never does.
+tokio.workspace = true
+
+[lints]
+workspace = true

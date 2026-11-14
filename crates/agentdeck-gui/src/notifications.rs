@@ -9,19 +9,17 @@
 //!
 //! A muted workspace's panes and PR tasks never alert; an Inbox task has no workspace to mute.
 //! Only what both reads hold can change, so the first read alerts nothing.
+//!
+//! The shell shows them through an `agentdeck_notify::Notifier`: the desktop's notification
+//! server over one shared D-Bus connection, or, in the unit tier, `fake::FakeNotifier`.
 
 use agentdeck_client::types::Task;
 use agentdeck_core::{AgentState, ChecksState, PaneId, ReviewState, TaskId, WorkspaceId};
-use gpui::{App, SharedString, SystemNotification};
+use agentdeck_notify::Notification;
+use gpui::SharedString;
 
 use crate::overview::{PaneState, Snapshot};
 use crate::task_sheet::agent_name;
-
-/// Names the app to the OS's notification server, which shows "agentdeck" on each
-/// notification. Call once, before any alert shows: without a name GPUI shows none.
-pub fn init(cx: &mut App) {
-    cx.set_app_identity("agentdeck", "agentdeck");
-}
 
 /// More PRs than this changing in one sync make one alert.
 const COALESCE_OVER: usize = 3;
@@ -57,12 +55,11 @@ pub struct Alert {
 
 impl Alert {
     /// The OS notification: no buttons, since a click on its body is the one action.
-    pub fn notification(&self) -> SystemNotification {
-        SystemNotification {
+    pub fn notification(&self) -> Notification {
+        Notification {
             tag: self.tag.clone(),
             title: self.title.clone(),
             body: self.body.clone(),
-            actions: Vec::new(),
         }
     }
 }
@@ -225,6 +222,49 @@ impl PrBatch {
             return Vec::new();
         }
         pr_alerts(std::mem::take(&mut self.changes))
+    }
+}
+
+/// The unit tier's [`Notifier`](agentdeck_notify::Notifier), held to its contract by
+/// `agentdeck-notify`'s integration tests of the real one.
+#[cfg(test)]
+pub(crate) mod fake {
+    use std::cell::RefCell;
+
+    use agentdeck_notify::{ClickHandler, Notification, Notifier};
+    use gpui::App;
+
+    /// Records what it shows; [`click`](FakeNotifier::click) stands in for the user.
+    #[derive(Default)]
+    pub struct FakeNotifier {
+        shown: RefCell<Vec<Notification>>,
+        on_click: RefCell<Option<ClickHandler>>,
+    }
+
+    impl FakeNotifier {
+        /// Everything shown, in order.
+        pub fn shown(&self) -> Vec<Notification> {
+            self.shown.borrow().clone()
+        }
+
+        /// Clicks the body of the notification tagged `tag`, which must have been shown.
+        pub fn click(&self, tag: &str, cx: &mut App) {
+            let shown = self.shown.borrow().iter().any(|n| n.tag == tag);
+            assert!(shown, "no notification tagged {tag} was shown");
+            let mut handler = (self.on_click.borrow_mut().take()).expect("a click handler");
+            handler(tag.to_owned().into(), cx);
+            self.on_click.borrow_mut().get_or_insert(handler);
+        }
+    }
+
+    impl Notifier for FakeNotifier {
+        fn show(&self, notification: Notification) {
+            self.shown.borrow_mut().push(notification);
+        }
+
+        fn on_click(&self, handler: ClickHandler) {
+            *self.on_click.borrow_mut() = Some(handler);
+        }
     }
 }
 

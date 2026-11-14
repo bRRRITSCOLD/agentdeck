@@ -11,6 +11,8 @@ publish.workspace = true
 [dependencies]
 agentdeck-client.workspace = true
 agentdeck-core.workspace = true
+# Desktop notifications over one shared session-bus connection (spec §11).
+agentdeck-notify.workspace = true
 # The terminal model each attached pane is fed into; our own renderer draws it (spec §11).
 alacritty_terminal.workspace = true
 anyhow.workspace = true
@@ -30,14 +32,8 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-# The notification contract test's fake notification server reads its D-Bus messages as a
-# stream.
-futures-util.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
-# The notification contract test's fake notification server, on a private bus. GPUI's Linux
-# platform already speaks D-Bus through this zbus (via notify-rust), so it adds no crate.
-zbus = { workspace = true }
 
 [lints]
 workspace = true

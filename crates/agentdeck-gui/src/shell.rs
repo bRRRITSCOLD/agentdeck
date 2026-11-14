@@ -24,10 +24,12 @@
 //! Tasks view for several PRs.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use agentdeck_client::ApiError;
 use agentdeck_core::{PaneId, TaskId, WorkspaceId};
+use agentdeck_notify::Notifier;
 use brrritscold_core_gpui::{
     ActiveTheme as _, Alert, AlertAction, AlertDescription, AlertTitle, AlertVariant, Button,
     ButtonSize, ButtonVariant, IconName, Separator, SeparatorOrientation,
@@ -108,14 +110,18 @@ pub struct Shell {
     /// Held by the shell so the title bar's actions reach its handlers while nothing inside
     /// has focus.
     focus: FocusHandle,
+    /// Shows the alerts as OS notifications.
+    notifier: Rc<dyn Notifier>,
     /// What each notification shown opens when clicked, by its tag.
     alerts: HashMap<SharedString, notifications::Target>,
 }
 
 impl Shell {
-    /// A shell that follows `connection`, focused in `window`.
+    /// A shell that follows `connection`, focused in `window`, showing its alerts through
+    /// `notifier`.
     pub fn new(
         connection: Entity<Connection>,
+        notifier: Rc<dyn Notifier>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -129,15 +135,12 @@ impl Shell {
         // A click on a notification's body focuses the window and shows what it is about.
         let this = cx.entity().downgrade();
         let handle = window.window_handle();
-        cx.on_system_notification_response(move |response, cx| {
-            if response.action_id.is_some() {
-                return;
-            }
+        notifier.on_click(Box::new(move |tag, cx| {
             let _ = handle.update(cx, |_, window, cx| {
                 window.activate_window();
-                let _ = this.update(cx, |shell, cx| shell.open_alert(&response.tag, window, cx));
+                let _ = this.update(cx, |shell, cx| shell.open_alert(&tag, window, cx));
             });
-        });
+        }));
         let mut shell = Shell {
             connection,
             sidebar: None,
@@ -158,6 +161,7 @@ impl Shell {
             panel_open: true,
             selection: None,
             focus,
+            notifier,
             alerts: HashMap::new(),
         };
         shell.follow_connection(window, cx);
@@ -469,7 +473,7 @@ impl Shell {
                 continue;
             }
             self.alerts.insert(alert.tag.clone(), alert.target);
-            cx.show_system_notification(alert.notification());
+            self.notifier.show(alert.notification());
         }
     }
 
@@ -783,6 +787,7 @@ mod tests {
     use crate::api::fake::FakeApi;
     use crate::connection::Connector;
     use crate::connection::fake::FakeConnector;
+    use crate::notifications::fake::FakeNotifier;
     use crate::overview::Snapshot;
     use crate::overview::fixtures::{id, tab, workspace};
 
@@ -802,7 +807,8 @@ mod tests {
         cx.update(crate::terminal::init);
         let window = cx.add_window(|window, cx| {
             let connection = cx.new(|cx| Connection::new(connector, cx));
-            let shell = cx.new(|cx| Shell::new(connection, window, cx));
+            let shell =
+                cx.new(|cx| Shell::new(connection, Rc::new(FakeNotifier::default()), window, cx));
             Root::new(shell, window, cx)
         });
         let cx = &mut VisualTestContext::from_window(*window, cx);
@@ -862,7 +868,8 @@ mod tests {
             let mut shell = None;
             cx.add_window(|window, cx| {
                 let connection = cx.new(|cx| Connection::new(connector, cx));
-                let view = cx.new(|cx| Shell::new(connection, window, cx));
+                let view = cx
+                    .new(|cx| Shell::new(connection, Rc::new(FakeNotifier::default()), window, cx));
                 shell = Some(view.clone());
                 Root::new(view, window, cx)
             });
@@ -1380,7 +1387,9 @@ mod tests {
                 let mut shell = None;
                 let window = cx.add_window(|window, cx| {
                     let connection = cx.new(|cx| Connection::new(connector, cx));
-                    let view = cx.new(|cx| Shell::new(connection, window, cx));
+                    let view = cx.new(|cx| {
+                        Shell::new(connection, Rc::new(FakeNotifier::default()), window, cx)
+                    });
                     shell = Some(view.clone());
                     Root::new(view, window, cx)
                 });
@@ -1755,7 +1764,6 @@ mod tests {
         use agentdeck_client::ws::{Event, Remote};
         use agentdeck_core::ws::{Entity as Changed, ServerMessage};
         use agentdeck_core::{Agent, AgentState, ChecksState, PaneKind, PrState, TaskKind};
-        use gpui::{SystemNotification, SystemNotificationResponse};
 
         use super::*;
         use crate::overview::PaneState;
@@ -1766,6 +1774,7 @@ mod tests {
         struct Open {
             shell: Entity<Shell>,
             api: Arc<FakeApi>,
+            notifier: Rc<FakeNotifier>,
             remote: Remote,
             cx: &'static mut VisualTestContext,
         }
@@ -1774,19 +1783,20 @@ mod tests {
             fn new(api: Arc<FakeApi>, cx: &mut TestAppContext) -> Open {
                 cx.update(brrritscold_core_gpui::init);
                 cx.update(crate::terminal::init);
-                cx.update(crate::notifications::init);
+                let notifier = Rc::new(FakeNotifier::default());
                 let connector = Rc::new(FakeConnector::default());
                 let remote = connector.then_connect_to(api.clone());
                 let mut shell = None;
                 let window = cx.add_window(|window, cx| {
                     let connection = cx.new(|cx| Connection::new(connector, cx));
-                    let view = cx.new(|cx| Shell::new(connection, window, cx));
+                    let view = cx.new(|cx| Shell::new(connection, notifier.clone(), window, cx));
                     shell = Some(view.clone());
                     Root::new(view, window, cx)
                 });
                 let mut open = Open {
                     shell: shell.unwrap(),
                     api,
+                    notifier,
                     remote,
                     cx: VisualTestContext::from_window(*window, cx).into_mut(),
                 };
@@ -1816,16 +1826,12 @@ mod tests {
                 });
             }
 
-            fn shown(&self) -> Vec<SystemNotification> {
-                self.cx.shown_system_notifications()
+            fn shown(&self) -> Vec<agentdeck_notify::Notification> {
+                self.notifier.shown()
             }
 
             fn click(&mut self, tag: &str) {
-                self.cx
-                    .simulate_system_notification_response(SystemNotificationResponse {
-                        tag: tag.to_owned().into(),
-                        action_id: None,
-                    });
+                self.cx.cx.update(|cx| self.notifier.click(tag, cx));
                 self.settle();
             }
 
@@ -2039,7 +2045,8 @@ mod tests {
             cx.update(brrritscold_core_gpui::init);
             let window = cx.add_window(|window, cx| {
                 let connection = cx.new(|cx| Connection::new(Rc::new(Pending), cx));
-                let shell = cx.new(|cx| Shell::new(connection, window, cx));
+                let shell = cx
+                    .new(|cx| Shell::new(connection, Rc::new(FakeNotifier::default()), window, cx));
                 Root::new(shell, window, cx)
             });
             let handle = window.into();
