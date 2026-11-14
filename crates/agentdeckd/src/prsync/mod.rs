@@ -28,7 +28,7 @@ use tokio::time::MissedTickBehavior;
 
 use crate::db::{self, Db};
 use crate::events::Events;
-use crate::model::{GhLogin, PrSyncProgress, PrSyncStatus};
+use crate::model::{GhLogin, PrSyncProgress, PrSyncStage, PrSyncStatus};
 use github::{Github, GithubError, RemotePr};
 use matching::Clones;
 
@@ -161,6 +161,7 @@ impl PrSync {
         self.set_progress(Some(PrSyncProgress {
             prs_done: 0,
             prs: 0,
+            stage: PrSyncStage::Listing,
         }));
         let result = self.sync_once().await;
         {
@@ -189,6 +190,15 @@ impl PrSync {
     fn set_progress(&self, progress: Option<PrSyncProgress>) {
         self.state().status.progress = progress;
         self.inner.events.changed(Entity::PrSync, STATUS_ID);
+    }
+
+    /// Records that the running sync has read its last page and is fetching details.
+    fn details_stage(&self) {
+        let progress = self.state().status.progress;
+        self.set_progress(progress.map(|progress| PrSyncProgress {
+            stage: PrSyncStage::Details,
+            ..progress
+        }));
     }
 
     /// When this sync's incremental search should reach back to; `None` when it is full.
@@ -292,6 +302,7 @@ impl PrSync {
             self.set_progress(Some(PrSyncProgress {
                 prs_done,
                 prs: page.total.max(prs_done),
+                stage: PrSyncStage::Listing,
             }));
             match page.next {
                 Some(next) => after = Some(next),
@@ -299,6 +310,7 @@ impl PrSync {
             }
         }
 
+        self.details_stage();
         let details: Vec<RemotePr> = github
             .prs(token, &stale)
             .await?
@@ -356,6 +368,7 @@ impl PrSync {
             self.set_progress(Some(PrSyncProgress {
                 prs_done,
                 prs: page.total.max(prs_done),
+                stage: PrSyncStage::Listing,
             }));
             match page.next {
                 Some(next) => after = Some(next),
@@ -369,6 +382,9 @@ impl PrSync {
             .call(|conn| db::pull_requests::open_pending(conn))
             .await?;
         let pending = missing(&pending, &seen);
+        if !pending.is_empty() {
+            self.details_stage();
+        }
         let mut prs: Vec<RemotePr> = github
             .prs(token, &pending)
             .await?

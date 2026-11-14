@@ -1,6 +1,8 @@
 //! Human-readable output. `--json` prints the API's own objects instead.
 
-use agentdeck_client::types::{DirtyReport, Note, Pane, PrSyncStatus, Task, Workspace};
+use agentdeck_client::types::{
+    DirtyReport, Note, Pane, PrSyncStage, PrSyncStatus, Task, Workspace,
+};
 
 /// Left-aligned columns two spaces apart, under a header row; `empty` when there are no rows.
 fn table<const N: usize>(headers: [&str; N], rows: &[[String; N]], empty: &str) -> String {
@@ -175,11 +177,15 @@ pub fn pr_status(status: &PrSyncStatus) -> String {
         status.login,
         status.last_synced_at.as_deref().unwrap_or("never"),
     );
-    if let Some(progress) = &status.progress {
-        out.push_str(&format!(
+    match &status.progress {
+        Some(progress) if progress.stage == PrSyncStage::Details => {
+            out.push_str("syncing:   PR details\n");
+        }
+        Some(progress) => out.push_str(&format!(
             "syncing:   {} of {} PRs\n",
             progress.prs_done, progress.prs
-        ));
+        )),
+        None => {}
     }
     if let Some(error) = &status.last_error {
         out.push_str(&format!("last error: {error}\n"));
@@ -329,7 +335,7 @@ mod tests {
     }
 
     mod pr_status_syncing {
-        use agentdeck_client::types::PrSyncProgress;
+        use agentdeck_client::types::{PrSyncProgress, PrSyncStage};
 
         use super::*;
 
@@ -342,6 +348,7 @@ mod tests {
                 progress: Some(PrSyncProgress {
                     prs_done: 100,
                     prs: 271,
+                    stage: PrSyncStage::Listing,
                 }),
             });
 
@@ -349,6 +356,28 @@ mod tests {
                 out,
                 "gh:        logged_in\nlast sync: 2026-11-14T10:00:00.000Z\nsyncing:   100 of 271 PRs\n"
             );
+        }
+    }
+
+    mod pr_status_details {
+        use agentdeck_client::types::{PrSyncProgress, PrSyncStage};
+
+        use super::*;
+
+        #[test]
+        fn should_say_it_is_fetching_details() {
+            let out = pr_status(&PrSyncStatus {
+                last_error: None,
+                last_synced_at: None,
+                login: GhLogin::LoggedIn,
+                progress: Some(PrSyncProgress {
+                    prs_done: 271,
+                    prs: 271,
+                    stage: PrSyncStage::Details,
+                }),
+            });
+
+            assert!(out.contains("syncing:   PR details\n"), "{out}");
         }
     }
 

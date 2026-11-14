@@ -466,6 +466,7 @@ mod tests {
         snapshot.pr_sync.progress = Some(agentdeck_client::types::PrSyncProgress {
             prs_done: 50,
             prs: 271,
+            stage: agentdeck_client::types::PrSyncStage::Listing,
         });
 
         cx.update(|_, cx| {

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use agentdeck_client::Client;
 use agentdeck_client::types::{
-    GhLogin, NewWorkspace, PrSyncProgress, PrSyncStatus, Task, Workspace,
+    GhLogin, NewWorkspace, PrSyncProgress, PrSyncStage, PrSyncStatus, Task, Workspace,
 };
 use agentdeck_core::{ChecksState, PrState, ReviewState, TaskKind, TaskStatus};
 use httpmock::{Mock, MockServer};
@@ -643,6 +643,43 @@ mod full {
     }
 
     #[tokio::test]
+    async fn should_say_it_is_fetching_details_once_the_list_is_read() {
+        let github = MockServer::start_async().await;
+        mock_list_page(
+            &github,
+            TOKEN,
+            &[Pr::open(7)],
+            None,
+            None,
+            1,
+            Duration::ZERO,
+        );
+        github.mock(|when, then| {
+            when.body_includes("pullRequest(");
+            then.status(200)
+                .delay(Duration::from_secs(5))
+                .json_body(serde_json::json!({ "data": {} }));
+        });
+        let daemon = daemon(&github, Some(TOKEN)).await;
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let status = daemon
+                .client
+                .prs_status()
+                .send()
+                .await
+                .expect("status")
+                .into_inner();
+            if status.progress.as_ref().map(|p| p.stage) == Some(PrSyncStage::Details) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "never said details: {status:?}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test]
     async fn should_list_a_new_pr_before_its_details_arrive() {
         let github = MockServer::start_async().await;
         mock_list_page(
@@ -716,7 +753,8 @@ mod progress {
             status(&daemon.client).await.progress,
             Some(PrSyncProgress {
                 prs_done: 1,
-                prs: 2
+                prs: 2,
+                stage: PrSyncStage::Listing,
             })
         );
         let finished = sync(&daemon.client).await;
