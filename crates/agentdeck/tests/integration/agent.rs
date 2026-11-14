@@ -108,21 +108,29 @@ mod agent_new {
     }
 
     #[test]
-    fn should_prompt_with_the_task_and_mark_its_notes_read_by_the_pane() {
+    fn should_prompt_with_the_task_instructions_and_comments_and_mark_them_delivered() {
         let env = TestEnv::new();
         env.workspace("web");
         let task = env.json(&["task", "add", "Fix the flaky test", "--ws", "web"]);
         let task_id = text(&task, "id");
-        env.ok(&["note", "add", "it fails on CI only", "--task", task_id]);
+        env.ok(&[
+            "instruction",
+            "add",
+            "Push only after 20 green runs",
+            "--ws",
+            "web",
+        ]);
+        env.ok(&["comment", "add", "it fails on CI only", "--task", task_id]);
 
         let pane = env.json(&["agent", "new", "--ws", "web", "--task", task_id]);
 
         assert_eq!(pane["task_id"], task["id"]);
         let prompt = started(&env, text(&pane, "id")).join(" ");
         assert!(prompt.contains("Fix the flaky test"), "{prompt}");
+        assert!(prompt.contains("Push only after 20 green runs"), "{prompt}");
         assert!(prompt.contains("it fails on CI only"), "{prompt}");
-        let notes = env.json(&["note", "ls", "--task", task_id]);
-        assert_eq!(notes[0]["read_by_pane"], pane["id"]);
+        let comments = env.json(&["comment", "ls", "--task", task_id]);
+        assert_eq!(comments[0]["delivered_to_pane"], pane["id"]);
     }
 
     #[test]

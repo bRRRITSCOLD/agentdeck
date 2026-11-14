@@ -2,8 +2,8 @@
 //! tree are `agentdeck-core`'s, so the client shares them.
 
 use agentdeck_core::{
-    Agent, AgentState, ChecksState, Layout, NoteId, PaneId, PaneKind, PrState, ReviewState, TabId,
-    TaskId, TaskKind, TaskStatus, WorkspaceId,
+    Agent, AgentState, ChecksState, CommentAuthor, CommentId, InstructionId, Layout, PaneId,
+    PaneKind, PrState, ReviewState, TabId, TaskId, TaskKind, TaskStatus, WorkspaceId,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -132,6 +132,8 @@ pub struct Task {
     pub done_at: Option<String>,
     /// The pull request behind a PR task; `None` for a plain task.
     pub pr: Option<PullRequest>,
+    /// Agents' comments on the task the user hasn't seen yet.
+    pub unseen_agent_comments: u32,
 }
 
 /// The GitHub pull request behind a PR task, as PR sync last saw it (spec §8).
@@ -198,56 +200,70 @@ pub struct TaskFilter {
     pub inbox: Option<bool>,
 }
 
-/// A message left on a workspace or a task for agents.
+/// A comment in a task's thread (spec §9). The user's comments are delivered to the task's
+/// agent; an agent's are a record and never delivered.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct Note {
-    /// The note's id.
-    pub id: NoteId,
-    /// The message.
+pub struct Comment {
+    /// The comment's id.
+    pub id: CommentId,
+    /// The task it's on.
+    pub task_id: TaskId,
+    /// The text.
     pub body: String,
-    /// The workspace it's on; exactly one of this and `task_id` is set.
-    pub workspace_id: Option<WorkspaceId>,
-    /// The task it's on; exactly one of this and `workspace_id` is set.
-    pub task_id: Option<TaskId>,
-    /// When the note was created.
+    /// Who wrote it: the user, or an agent from its pane.
+    pub author: CommentAuthor,
+    /// The agent that wrote it, when that is `claude` or `codex`.
+    pub author_agent: Option<Agent>,
+    /// The pane it was written from; `None` for the user's, and once the pane is gone.
+    pub author_pane: Option<PaneId>,
+    /// When it was written.
     pub created_at: String,
-    /// When the note was delivered or marked read.
-    pub read_at: Option<String>,
-    /// The pane it was delivered to, if a pane read it.
-    pub read_by_pane: Option<PaneId>,
+    /// When it was delivered to an agent; always `None` for an agent's comment.
+    pub delivered_at: Option<String>,
+    /// The pane it was delivered to.
+    pub delivered_to_pane: Option<PaneId>,
+    /// When the user saw it; `None` while an agent's comment is new to the user. The user's
+    /// own comments are seen when written.
+    pub seen_at: Option<String>,
 }
 
-/// `POST /v1/notes`: exactly one of `workspace_id` and `task_id`.
+/// `POST /v1/tasks/{id}/comments`.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct NewNote {
-    /// The message.
+pub struct NewComment {
+    /// The text.
     pub body: String,
-    /// The workspace to leave it on.
-    pub workspace_id: Option<WorkspaceId>,
-    /// The task to leave it on.
-    pub task_id: Option<TaskId>,
+    /// The pane writing it: the comment is then that pane's agent's. Without it, the user's.
+    pub pane: Option<PaneId>,
 }
 
-/// `PATCH /v1/notes/{id}`: the fields to change.
+/// Standing context for every agent in a workspace (spec §9): it goes into every launch
+/// prompt there and stays until deleted.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct Instruction {
+    /// The instruction's id.
+    pub id: InstructionId,
+    /// The workspace it's for.
+    pub workspace_id: WorkspaceId,
+    /// The text.
+    pub body: String,
+    /// When it was added.
+    pub created_at: String,
+    /// When its text last changed.
+    pub updated_at: String,
+}
+
+/// `POST /v1/workspaces/{id}/instructions`.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct NewInstruction {
+    /// The text.
+    pub body: String,
+}
+
+/// `PATCH /v1/instructions/{id}`: the fields to change.
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
-pub struct NotePatch {
-    /// A new message.
+pub struct InstructionPatch {
+    /// A new text.
     pub body: Option<String>,
-    /// `true` marks the note read now, `false` marks it unread.
-    pub read: Option<bool>,
-    /// The pane that read it; recorded only with `read: true`.
-    pub read_by_pane: Option<PaneId>,
-}
-
-/// `GET /v1/notes` filters; they combine with AND.
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
-pub struct NoteFilter {
-    /// Only notes on this workspace.
-    pub workspace: Option<WorkspaceId>,
-    /// Only notes on this task.
-    pub task: Option<TaskId>,
-    /// `true`: only unread notes; `false`: only read ones.
-    pub unread: Option<bool>,
 }
 
 /// Whether `gh auth token` gives the daemon a GitHub token.

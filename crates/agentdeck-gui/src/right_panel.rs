@@ -4,23 +4,25 @@
 //! [`ToggleRightPanel`](crate::keymap::ToggleRightPanel), which the window handles. The
 //! Tasks & PRs `+` asks the window for the new task dialog on the workspace ([`NewTask`]).
 //!
-//! Below the tasks come the notes on the workspace and on its tasks, newest first, and a field
-//! that leaves a note on the workspace for the next agent (Enter sends it; the notes header's
-//! `+` focuses it). Each note's `…` menu sends it to a live agent pane at once (spec §9).
+//! Below the tasks come the workspace's instructions, newest first, and a field that adds one
+//! for every agent in the workspace (Enter sends it; the Instructions header's `+` focuses
+//! it). Each instruction's `…` menu sends it to a live agent pane at once (spec §9).
 //!
-//! Like the Tasks view it shows the sidebar's [`Snapshot`], passed on by the window; a note
-//! left here comes back through the daemon's `changed`.
+//! Interim (issue #84): these are the old note cards and field, reworded, until the
+//! Instructions panel's own design lands.
+//!
+//! Like the Tasks view it shows the sidebar's [`Snapshot`], passed on by the window; an
+//! instruction added here comes back through the daemon's `changed`.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use agentdeck_core::{NoteId, PaneId, TaskId, TaskStatus, WorkspaceId};
+use agentdeck_core::{InstructionId, PaneId, TaskId, TaskStatus, WorkspaceId};
 use brrritscold_core_gpui::{
-    ActiveTheme as _, Badge, Button, ButtonSize, ButtonVariant, DropdownMenu, DropdownMenuContent,
+    ActiveTheme as _, Button, ButtonSize, ButtonVariant, DropdownMenu, DropdownMenuContent,
     DropdownMenuItem, DropdownMenuLabel, Icon, IconName, Input, InputState, Separator,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
-use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
@@ -29,8 +31,8 @@ use gpui::{
 use gpui_base::input::InputEvent;
 
 use crate::api::Api;
+use crate::instruction_list::{self, InstructionRow, SendTarget};
 use crate::new_task::NewTask;
-use crate::note_list::{self, NoteRow, SendTarget};
 use crate::overview::Snapshot;
 use crate::task_list::{self, Group, Query, Scope};
 use crate::task_row;
@@ -47,11 +49,11 @@ pub struct RightPanel {
     show_done: bool,
     /// The statuses whose group is folded; Todo starts folded, as Penpot draws it.
     collapsed: HashSet<TaskStatus>,
-    /// Penpot `NewNote`: the note to leave.
-    new_note: Entity<InputState>,
-    /// Whether the note typed is being sent; another Enter waits for it.
+    /// The instruction to add (Penpot `NewNote` for now).
+    new_instruction: Entity<InputState>,
+    /// Whether the instruction typed is being sent; another Enter waits for it.
     sending: bool,
-    _new_note: Subscription,
+    _new_instruction: Subscription,
 }
 
 impl EventEmitter<NewTask> for RightPanel {}
@@ -60,79 +62,83 @@ impl RightPanel {
     /// A panel that changes statuses through `api`; it lists nothing until given a
     /// workspace and a snapshot.
     pub fn new(api: Arc<dyn Api>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let new_note = cx
-            .new(|cx| InputState::new(window, cx).placeholder("Leave a note for the next agent…"));
-        let _new_note = cx.subscribe_in(&new_note, window, |this, _, event, window, cx| {
-            if let InputEvent::PressEnter { .. } = event {
-                this.leave_note(window, cx);
-            }
+        let new_instruction = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Add an instruction for agents here…")
         });
+        let _new_instruction =
+            cx.subscribe_in(&new_instruction, window, |this, _, event, window, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    this.add_instruction(window, cx);
+                }
+            });
         RightPanel {
             api,
             snapshot: Snapshot::default(),
             workspace: None,
             show_done: false,
             collapsed: HashSet::from([TaskStatus::Todo]),
-            new_note,
+            new_instruction,
             sending: false,
-            _new_note,
+            _new_instruction,
         }
     }
 
-    /// Leaves the note typed on the workspace, then empties the field; a failure keeps the
-    /// text and shows a toast.
-    pub fn leave_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let body = self.new_note.read(cx).value().trim().to_owned();
+    /// Adds the instruction typed to the workspace, then empties the field; a failure keeps
+    /// the text and shows a toast.
+    pub fn add_instruction(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let body = self.new_instruction.read(cx).value().trim().to_owned();
         let Some(workspace) = self.workspace.filter(|_| !body.is_empty() && !self.sending) else {
             return;
         };
         self.sending = true;
-        let leaving = self.api.new_note(workspace, body, cx);
+        let adding = self.api.new_instruction(workspace, body, cx);
         cx.spawn_in(window, async move |this, cx| {
-            let left = leaving.await;
+            let added = adding.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.sending = false;
-                match left {
+                match added {
                     Ok(()) => this
-                        .new_note
+                        .new_instruction
                         .update(cx, |input, cx| input.set_value("", window, cx)),
-                    Err(err) => failed("Couldn't leave the note", &err, window, cx),
+                    Err(err) => failed("Couldn't add the instruction", &err, window, cx),
                 }
             });
         })
         .detach();
     }
 
-    /// Sends `note` to `pane` at once and marks it read by that pane: what a "Send to agent"
-    /// item does. A failure shows a toast.
-    pub fn send_note(
+    /// Types `instruction` into `pane` at once: what a "Send to agent" item does. A failure
+    /// shows a toast.
+    pub fn send_instruction(
         &mut self,
-        note: NoteId,
+        instruction: InstructionId,
         pane: PaneId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(body) = (self.snapshot.notes.iter())
-            .find(|n| n.id == note)
-            .map(|n| n.body.clone())
+        let Some(body) = (self.snapshot.instructions.iter())
+            .find(|i| i.id == instruction)
+            .map(|i| i.body.clone())
         else {
             return;
         };
-        let sending = self.api.send_note(note, body, pane, cx);
+        let sending = self.api.send_instruction(body, pane, cx);
         cx.spawn_in(window, async move |_, cx| {
             if let Err(err) = sending.await {
                 let _ = cx.update(|window, cx| {
-                    failed("Couldn't send the note", &err, window, cx);
+                    failed("Couldn't send the instruction", &err, window, cx);
                 });
             }
         })
         .detach();
     }
 
-    /// The notes listed.
-    pub fn notes(&self) -> Vec<NoteRow> {
+    /// The instructions listed.
+    pub fn instructions(&self) -> Vec<InstructionRow> {
         match self.workspace {
-            Some(workspace) => note_list::notes(&self.snapshot, workspace, chrono::Utc::now()),
+            Some(workspace) => {
+                instruction_list::instructions(&self.snapshot, workspace, chrono::Utc::now())
+            }
             None => Vec::new(),
         }
     }
@@ -268,27 +274,27 @@ impl Render for RightPanel {
                 ),
             );
         }
-        // Then Separator, the notes header with its `+`, and each note.
+        // Then Separator, the Instructions header with its `+`, and each instruction.
         let s = cx.theme().semantic();
         list = list
             .child(Separator::new().my(space::S1))
             .child(
-                section_header("Notes", s).child(
-                    div().debug_selector(|| "add note".into()).child(
-                        Button::new("add-note")
+                section_header("Instructions", s).child(
+                    div().debug_selector(|| "add instruction".into()).child(
+                        Button::new("add-instruction")
                             .variant(ButtonVariant::Ghost)
                             .size(ButtonSize::IconXs)
                             .icon(IconName::Plus)
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.new_note
+                                this.new_instruction
                                     .update(cx, |input, cx| input.focus(window, cx));
                             })),
                     ),
                 ),
             )
-            .children(self.notes().iter().map(|note| {
-                let targets = note_list::send_targets(&self.snapshot, note.id);
-                note_item(note, targets, cx)
+            .children(self.instructions().iter().map(|instruction| {
+                let targets = instruction_list::send_targets(&self.snapshot, instruction.id);
+                instruction_item(instruction, targets, cx)
             }));
         // Penpot `RightPanel`: `card`, padded `space.3` down and `space.2` across, rows
         // `space.1` apart.
@@ -316,13 +322,13 @@ impl Render for RightPanel {
                 ),
             )
             .child(list)
-            // Penpot `NewNote`.
-            .child(div().flex_none().child(Input::new(&self.new_note)))
+            // Penpot `NewNote`, for now.
+            .child(div().flex_none().child(Input::new(&self.new_instruction)))
     }
 }
 
-/// Penpot's "Tasks & PRs header" and "Notes header": sm medium, 32px, padded `space.1` /
-/// `space.2`, its children after a spacer.
+/// Penpot's "Tasks & PRs header" and "Notes header" (titled Instructions for now): sm
+/// medium, 32px, padded `space.1` / `space.2`, its children after a spacer.
 fn section_header(title: &'static str, s: &brrritscold_core_gpui_tokens::Semantic) -> gpui::Div {
     div()
         .flex()
@@ -339,14 +345,17 @@ fn section_header(title: &'static str, s: &brrritscold_core_gpui_tokens::Semanti
         .child(div().flex_1())
 }
 
-/// Penpot `agentdeck / NoteItem`: the text over a meta line (sticky note, what it is on and
-/// when or by whom it was read, an `unread` badge, the note's menu), in a `border` box with
-/// `radius-md`.
-fn note_item(note: &NoteRow, targets: Vec<SendTarget>, cx: &Context<RightPanel>) -> AnyElement {
+/// Penpot `agentdeck / NoteItem`, for now: the text over a meta line (sticky note, when it
+/// was added, the instruction's menu), in a `border` box with `radius-md`.
+fn instruction_item(
+    instruction: &InstructionRow,
+    targets: Vec<SendTarget>,
+    cx: &Context<RightPanel>,
+) -> AnyElement {
     let s = cx.theme().semantic();
-    let id = note.id;
+    let id = instruction.id;
     div()
-        .debug_selector(move || format!("note {id}"))
+        .debug_selector(move || format!("instruction {id}"))
         .flex()
         .flex_col()
         .flex_none()
@@ -360,7 +369,7 @@ fn note_item(note: &NoteRow, targets: Vec<SendTarget>, cx: &Context<RightPanel>)
             div()
                 .text_size(font_size::SM)
                 .text_color(s.foreground)
-                .child(note.body.clone()),
+                .child(instruction.body.clone()),
         )
         .child(
             div()
@@ -374,10 +383,9 @@ fn note_item(note: &NoteRow, targets: Vec<SendTarget>, cx: &Context<RightPanel>)
                         .size(space::S3)
                         .text_color(s.foreground),
                 )
-                .child(div().min_w_0().truncate().child(note.meta.clone()))
+                .child(div().min_w_0().truncate().child(instruction.meta.clone()))
                 .child(div().flex_1())
-                .when(note.unread, |meta| meta.child(Badge::new().label("unread")))
-                .child(note_menu(id, targets, cx)),
+                .child(instruction_menu(id, targets, cx)),
         )
         .into_any_element()
 }
@@ -385,7 +393,11 @@ fn note_item(note: &NoteRow, targets: Vec<SendTarget>, cx: &Context<RightPanel>)
 /// Penpot "Send to agent": a ghost icon-xs `Ellipsis` opening a `DropdownMenu` with the label
 /// "Send to agent", then an item per live agent pane `targets` names; with none, one
 /// disabled "No agent is running here".
-fn note_menu(note: NoteId, targets: Vec<SendTarget>, cx: &Context<RightPanel>) -> AnyElement {
+fn instruction_menu(
+    instruction: InstructionId,
+    targets: Vec<SendTarget>,
+    cx: &Context<RightPanel>,
+) -> AnyElement {
     let panel = cx.entity().downgrade();
     let content = DropdownMenuContent::new().label(DropdownMenuLabel::new("Send to agent"));
     let content = if targets.is_empty() {
@@ -396,22 +408,28 @@ fn note_menu(note: NoteId, targets: Vec<SendTarget>, cx: &Context<RightPanel>) -
             let pane = target.pane;
             content.item(
                 DropdownMenuItem::new(target.label).on_click(move |_, window, cx| {
-                    let _ = panel.update(cx, |panel, cx| panel.send_note(note, pane, window, cx));
+                    let _ = panel.update(cx, |panel, cx| {
+                        panel.send_instruction(instruction, pane, window, cx)
+                    });
                 }),
             )
         })
     };
     div()
-        .debug_selector(move || format!("note menu {note}"))
+        .debug_selector(move || format!("instruction menu {instruction}"))
         .child(
-            DropdownMenu::new(SharedString::from(format!("note-menu-{note}")))
-                .trigger(
-                    Button::new(SharedString::from(format!("note-menu-trigger-{note}")))
-                        .variant(ButtonVariant::Ghost)
-                        .size(ButtonSize::IconXs)
-                        .icon(IconName::Ellipsis),
-                )
-                .content(content),
+            DropdownMenu::new(SharedString::from(format!(
+                "instruction-menu-{instruction}"
+            )))
+            .trigger(
+                Button::new(SharedString::from(format!(
+                    "instruction-menu-trigger-{instruction}"
+                )))
+                .variant(ButtonVariant::Ghost)
+                .size(ButtonSize::IconXs)
+                .icon(IconName::Ellipsis),
+            )
+            .content(content),
         )
         .into_any_element()
 }
@@ -476,10 +494,10 @@ mod tests {
         (panel.unwrap(), fake, cx)
     }
 
-    /// Types `text` into the note field and presses Enter.
-    fn leave(panel: &Entity<RightPanel>, text: &str, cx: &mut VisualTestContext) {
+    /// Types `text` into the instruction field and presses Enter.
+    fn add(panel: &Entity<RightPanel>, text: &str, cx: &mut VisualTestContext) {
         cx.update(|window, cx| {
-            let input = panel.read(cx).new_note.clone();
+            let input = panel.read(cx).new_instruction.clone();
             input.update(cx, |input, cx| {
                 input.set_value(text.to_owned(), window, cx);
                 input.focus(window, cx);
@@ -490,109 +508,110 @@ mod tests {
     }
 
     fn typed(panel: &Entity<RightPanel>, cx: &mut VisualTestContext) -> String {
-        panel.read_with(cx, |p, cx| p.new_note.read(cx).value().to_string())
+        panel.read_with(cx, |p, cx| p.new_instruction.read(cx).value().to_string())
     }
 
-    mod notes {
-        use agentdeck_core::NoteId;
+    mod instructions {
+        use agentdeck_core::InstructionId;
 
         use super::*;
-        use crate::overview::fixtures::workspace_note;
+        use crate::overview::fixtures::instruction;
 
         #[gpui::test]
-        fn should_list_the_workspaces_notes(cx: &mut TestAppContext) {
+        fn should_list_the_workspaces_instructions(cx: &mut TestAppContext) {
             let (panel, cx) = open(cx);
             panel.update(cx, |p, cx| {
                 let mut snapshot = snapshot();
-                snapshot.notes = vec![workspace_note(30, id(1)), workspace_note(31, id(2))];
+                snapshot.instructions = vec![instruction(30, id(1)), instruction(31, id(2))];
                 p.show(id(1), snapshot, cx);
             });
 
-            let notes: Vec<_> =
-                panel.read_with(cx, |p, _| p.notes().into_iter().map(|n| n.id).collect());
-            assert_eq!(notes, [id(30)]);
+            let listed: Vec<_> = panel.read_with(cx, |p, _| {
+                p.instructions().into_iter().map(|i| i.id).collect()
+            });
+            assert_eq!(listed, [id(30)]);
             cx.update(|window, cx| window.draw(cx).clear(cx));
         }
 
-        /// [`open_with_api`], showing a note on workspace 1.
-        fn with_a_note(
+        /// [`open_with_api`], showing an instruction for workspace 1.
+        fn with_an_instruction(
             cx: &mut TestAppContext,
         ) -> (Entity<RightPanel>, Arc<FakeApi>, &mut VisualTestContext) {
             let (panel, api, cx) = open_with_api(cx);
             panel.update(cx, |p, cx| {
                 let mut snapshot = snapshot();
-                snapshot.notes = vec![workspace_note(30, id(1))];
+                snapshot.instructions = vec![instruction(30, id(1))];
                 p.show(id(1), snapshot, cx);
             });
             (panel, api, cx)
         }
 
         #[gpui::test]
-        fn should_end_each_notes_meta_row_with_its_menu(cx: &mut TestAppContext) {
-            let (_, _, cx) = with_a_note(cx);
+        fn should_end_each_instructions_meta_row_with_its_menu(cx: &mut TestAppContext) {
+            let (_, _, cx) = with_an_instruction(cx);
             cx.update(|window, cx| window.draw(cx).clear(cx));
 
-            let selector = format!("note menu {}", id::<NoteId>(30));
+            let selector = format!("instruction menu {}", id::<InstructionId>(30));
             assert!(cx.debug_bounds(selector.leak()).is_some());
         }
 
         #[gpui::test]
-        fn should_send_the_note_to_the_pane_picked(cx: &mut TestAppContext) {
-            let (panel, api, cx) = with_a_note(cx);
+        fn should_send_the_instruction_to_the_pane_picked(cx: &mut TestAppContext) {
+            let (panel, api, cx) = with_an_instruction(cx);
 
             cx.update(|window, cx| {
-                panel.update(cx, |p, cx| p.send_note(id(30), id(40), window, cx));
+                panel.update(cx, |p, cx| p.send_instruction(id(30), id(40), window, cx));
             });
             cx.run_until_parked();
 
             assert_eq!(
-                *api.sent_notes.lock().unwrap(),
-                [(id(30), "note".to_owned(), id(40))]
+                *api.sent_instructions.lock().unwrap(),
+                [("instruction".to_owned(), id(40))]
             );
         }
 
         #[gpui::test]
-        fn should_toast_when_the_note_cant_be_sent(cx: &mut TestAppContext) {
-            let (panel, api, cx) = with_a_note(cx);
+        fn should_toast_when_the_instruction_cant_be_sent(cx: &mut TestAppContext) {
+            let (panel, api, cx) = with_an_instruction(cx);
             api.fail_next("pane not found");
 
             cx.update(|window, cx| {
-                panel.update(cx, |p, cx| p.send_note(id(30), id(40), window, cx));
+                panel.update(cx, |p, cx| p.send_instruction(id(30), id(40), window, cx));
             });
             cx.run_until_parked();
 
             let shown = cx.update(|_, cx| crate::notice::shown(cx));
-            assert_eq!(shown.last().unwrap().title, "Couldn't send the note");
+            assert_eq!(shown.last().unwrap().title, "Couldn't send the instruction");
         }
 
         #[gpui::test]
-        fn should_leave_the_note_typed_on_enter_and_empty_the_field(cx: &mut TestAppContext) {
+        fn should_add_the_instruction_typed_on_enter_and_empty_the_field(cx: &mut TestAppContext) {
             let (panel, api, cx) = open_with_api(cx);
 
-            leave(&panel, "  Push after 20 green runs ", cx);
+            add(&panel, "  Push after 20 green runs ", cx);
 
             assert_eq!(
-                *api.notes_left.lock().unwrap(),
+                *api.instructions_added.lock().unwrap(),
                 [(id(1), "Push after 20 green runs".to_owned())]
             );
             assert_eq!(typed(&panel, cx), "");
         }
 
         #[gpui::test]
-        fn should_leave_nothing_for_a_blank_field(cx: &mut TestAppContext) {
+        fn should_add_nothing_for_a_blank_field(cx: &mut TestAppContext) {
             let (panel, api, cx) = open_with_api(cx);
 
-            leave(&panel, "   ", cx);
+            add(&panel, "   ", cx);
 
-            assert!(api.notes_left.lock().unwrap().is_empty());
+            assert!(api.instructions_added.lock().unwrap().is_empty());
         }
 
         #[gpui::test]
-        fn should_keep_the_text_when_the_note_cant_be_left(cx: &mut TestAppContext) {
+        fn should_keep_the_text_when_the_instruction_cant_be_added(cx: &mut TestAppContext) {
             let (panel, api, cx) = open_with_api(cx);
             api.fail_next("refused");
 
-            leave(&panel, "keep me", cx);
+            add(&panel, "keep me", cx);
 
             assert_eq!(typed(&panel, cx), "keep me");
         }

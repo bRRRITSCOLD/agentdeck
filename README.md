@@ -1,6 +1,6 @@
 # agentdeck
 
-An agent workspace GUI for Linux. Agents run as real CLIs (Claude Code, Codex, any command) in terminals grouped into free-form workspaces. agentdeck adds tasks that survive across sessions, tracking for your GitHub PRs, notes you leave for agents, and (in v1.1) channels between agents.
+An agent workspace GUI for Linux. Agents run as real CLIs (Claude Code, Codex, any command) in terminals grouped into free-form workspaces. agentdeck adds tasks that survive across sessions, tracking for your GitHub PRs, comment threads on tasks between you and their agents, standing instructions for every agent in a workspace, and (in v1.1) channels between agents.
 
 It is three programs in one Cargo workspace:
 

@@ -1,12 +1,15 @@
 //! Agent panes (spec §6, §9): launching `claude` and `codex` with a session and a launch
-//! prompt, delivering task notes to a live agent, and resuming panes after a restart. The
+//! prompt, delivering the user's task comments to a live agent, and resuming panes after a
+//! restart. The
 //! agents are the stubs in `support::agents`; no test runs a real agent CLI.
 
 use std::time::Duration;
 
 use agentdeck_client::Client;
-use agentdeck_client::types::{InputWhen, NewNote, NewTask, Note, PaneInput, Task};
-use agentdeck_core::{Agent, AgentState, NoteId, PaneId, PaneKind, WorkspaceId};
+use agentdeck_client::types::{
+    Comment, InputWhen, Instruction, NewComment, NewInstruction, NewTask, PaneInput, Task,
+};
+use agentdeck_core::{Agent, AgentState, CommentId, PaneId, PaneKind, TaskId, WorkspaceId};
 
 use crate::support::agents::{codex_session, launches, trust_answer, typed};
 use crate::support::terminal::{Place, eventually, in_state, printed, sh};
@@ -27,43 +30,54 @@ async fn task(client: &Client, workspace: WorkspaceId, title: &str, body: &str) 
         .into_inner()
 }
 
-async fn note(
-    client: &Client,
-    workspace: Option<WorkspaceId>,
-    task: Option<&Task>,
-    body: &str,
-) -> Note {
+async fn instruction(client: &Client, workspace: WorkspaceId, body: &str) -> Instruction {
     client
-        .note_create()
-        .body(NewNote {
+        .instruction_create()
+        .id(workspace)
+        .body(NewInstruction { body: body.into() })
+        .send()
+        .await
+        .expect("add an instruction")
+        .into_inner()
+}
+
+/// Adds a comment to `task`: the user's, or with `pane` that pane's agent's.
+async fn comment(client: &Client, task: &Task, body: &str, pane: Option<PaneId>) -> Comment {
+    client
+        .comment_create()
+        .id(task.id)
+        .body(NewComment {
             body: body.into(),
-            workspace_id: workspace,
-            task_id: task.map(|task| task.id),
+            pane,
         })
         .send()
         .await
-        .expect("create a note")
+        .expect("add a comment")
         .into_inner()
 }
 
-async fn read_note(client: &Client, id: NoteId) -> Note {
+async fn read_comment(client: &Client, task: TaskId, id: CommentId) -> Comment {
     client
-        .note_list()
+        .comment_list()
+        .id(task)
         .send()
         .await
-        .expect("list notes")
+        .expect("list comments")
         .into_inner()
         .into_iter()
-        .find(|note| note.id == id)
-        .expect("the note")
+        .find(|comment| comment.id == id)
+        .expect("the comment")
 }
 
-/// Waits until note `id` is marked read by `pane`.
-async fn read_by(client: &Client, id: NoteId, pane: PaneId) -> Note {
-    eventually(&format!("note {id} to be read by the pane"), || async {
-        let note = read_note(client, id).await;
-        (note.read_by_pane == Some(pane)).then_some(note)
-    })
+/// Waits until comment `id` on `task` is delivered to `pane`.
+async fn delivered_to(client: &Client, task: TaskId, id: CommentId, pane: PaneId) -> Comment {
+    eventually(
+        &format!("comment {id} to be delivered to the pane"),
+        || async {
+            let comment = read_comment(client, task, id).await;
+            (comment.delivered_to_pane == Some(pane)).then_some(comment)
+        },
+    )
     .await
 }
 
@@ -132,7 +146,7 @@ mod post_v1_panes {
         }
 
         #[tokio::test]
-        async fn should_carry_the_task_and_its_unread_notes_in_the_launch_prompt_201() {
+        async fn should_carry_the_task_instructions_and_new_comments_in_the_launch_prompt_201() {
             let daemon = TestDaemon::start().await;
             let place = Place::new(&daemon).await;
             let ws = place.workspace.id;
@@ -143,10 +157,11 @@ mod post_v1_panes {
                 "It fails on Safari.",
             )
             .await;
-            let on_ws = note(&daemon.client, Some(ws), None, "Use the staging DB").await;
-            let on_task = note(&daemon.client, None, Some(&task), "Repro in issue 7").await;
+            instruction(&daemon.client, ws, "Use the staging DB").await;
+            instruction(&daemon.client, ws, "Push only after 20 green runs").await;
+            let from_you = comment(&daemon.client, &task, "Repro in issue 7", None).await;
             let other = Place::new(&daemon).await;
-            let elsewhere = note(&daemon.client, Some(other.workspace.id), None, "Not you").await;
+            instruction(&daemon.client, other.workspace.id, "Not you").await;
 
             let pane = place
                 .launch(&daemon.client, Agent::Claude, Some(task.id))
@@ -154,32 +169,50 @@ mod post_v1_panes {
 
             let session = pane.session_id.clone().expect("a session id");
             let prompt = "Task: Fix the login bug\n\nIt fails on Safari.\n\n\
-                          Notes left for you:\n- Use the staging DB\n- Repro in issue 7";
+                          Instructions for this workspace:\n  - Use the staging DB\n  \
+                          - Push only after 20 green runs\n\
+                          Comments since your last session:\n  - Repro in issue 7";
             assert_eq!(pane.argv, ["claude", "--session-id", &session, prompt]);
             assert_eq!(
                 launched(&daemon, pane.id, 1).await,
                 [["--session-id", session.as_str(), prompt]]
             );
-            read_by(&daemon.client, on_ws.id, pane.id).await;
-            read_by(&daemon.client, on_task.id, pane.id).await;
-            assert_eq!(read_note(&daemon.client, elsewhere.id).await.read_at, None);
+            delivered_to(&daemon.client, task.id, from_you.id, pane.id).await;
         }
 
         #[tokio::test]
-        async fn should_leave_out_notes_already_read_201() {
+        async fn should_leave_out_delivered_and_agent_comments_but_keep_instructions_201() {
             let daemon = TestDaemon::start().await;
             let place = Place::new(&daemon).await;
             let ws = place.workspace.id;
-            let first = place.launch(&daemon.client, Agent::Claude, None).await;
-            let delivered = note(&daemon.client, Some(ws), None, "For the first").await;
-            // A workspace note waits for the next launch: the live pane doesn't get it.
-            let second = place.launch(&daemon.client, Agent::Claude, None).await;
-            read_by(&daemon.client, delivered.id, second.id).await;
+            let task = task(&daemon.client, ws, "Fix it", "").await;
+            instruction(&daemon.client, ws, "Use the staging DB").await;
+            let first = place
+                .launch(&daemon.client, Agent::Claude, Some(task.id))
+                .await;
+            in_state(&daemon.client, first.id, AgentState::Idle).await;
+            let delivered = comment(&daemon.client, &task, "For the first", None).await;
+            delivered_to(&daemon.client, task.id, delivered.id, first.id).await;
+            comment(&daemon.client, &task, "PR opened", Some(first.id)).await;
 
-            let third = place.launch(&daemon.client, Agent::Claude, None).await;
+            let second = place
+                .launch(&daemon.client, Agent::Claude, Some(task.id))
+                .await;
 
-            assert_eq!(third.argv.len(), 3, "no launch prompt: {:?}", third.argv);
-            assert!(typed(&daemon, first.id).is_empty());
+            assert_eq!(
+                second.argv[3],
+                "Task: Fix it\n\nInstructions for this workspace:\n  - Use the staging DB"
+            );
+        }
+
+        #[tokio::test]
+        async fn should_start_without_a_prompt_with_no_task_or_instructions_201() {
+            let daemon = TestDaemon::start().await;
+            let place = Place::new(&daemon).await;
+
+            let pane = place.launch(&daemon.client, Agent::Claude, None).await;
+
+            assert_eq!(pane.argv.len(), 3, "no launch prompt: {:?}", pane.argv);
         }
 
         #[tokio::test]
@@ -260,11 +293,11 @@ mod post_v1_panes {
     }
 }
 
-mod note_delivery {
+mod comment_delivery {
     use super::*;
 
     #[tokio::test]
-    async fn should_type_a_task_note_into_its_idle_agent_and_mark_it_read() {
+    async fn should_type_the_users_comment_into_its_idle_agent_and_mark_it_delivered() {
         let daemon = TestDaemon::start().await;
         let place = Place::new(&daemon).await;
         let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
@@ -273,14 +306,56 @@ mod note_delivery {
             .await;
         in_state(&daemon.client, pane.id, AgentState::Idle).await;
 
-        let created = note(&daemon.client, None, Some(&task), "Also check Firefox").await;
+        let created = comment(&daemon.client, &task, "Also check Firefox", None).await;
 
-        assert_eq!(created.read_at, None);
-        eventually("the note to be typed", || async {
+        assert_eq!(created.delivered_at, None);
+        eventually("the comment to be typed", || async {
             (typed(&daemon, pane.id) == "Also check Firefox\n").then_some(())
         })
         .await;
-        read_by(&daemon.client, created.id, pane.id).await;
+        let delivered = delivered_to(&daemon.client, task.id, created.id, pane.id).await;
+        assert!(delivered.delivered_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn should_go_to_the_newest_live_agent_on_the_task() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
+        let older = place
+            .launch(&daemon.client, Agent::Claude, Some(task.id))
+            .await;
+        let newer = place
+            .launch(&daemon.client, Agent::Claude, Some(task.id))
+            .await;
+        in_state(&daemon.client, newer.id, AgentState::Idle).await;
+
+        let created = comment(&daemon.client, &task, "Also check Firefox", None).await;
+
+        delivered_to(&daemon.client, task.id, created.id, newer.id).await;
+        assert_eq!(typed(&daemon, older.id), "");
+    }
+
+    #[tokio::test]
+    async fn should_never_deliver_an_agents_comment() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
+        let pane = place
+            .launch(&daemon.client, Agent::Claude, Some(task.id))
+            .await;
+        in_state(&daemon.client, pane.id, AgentState::Idle).await;
+
+        let created = comment(&daemon.client, &task, "PR opened", Some(pane.id)).await;
+        // Long past the 400 ms a state takes to settle: an idle agent would have had it.
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+
+        assert_eq!(typed(&daemon, pane.id), "");
+        let comment = read_comment(&daemon.client, task.id, created.id).await;
+        assert_eq!(
+            (comment.delivered_at, comment.delivered_to_pane),
+            (None, None)
+        );
     }
 
     #[tokio::test]
@@ -298,8 +373,8 @@ mod note_delivery {
             .await;
         in_state(&daemon.client, pane.id, AgentState::Blocked).await;
 
-        let created = note(&daemon.client, None, Some(&task), "Also check Firefox").await;
-        // Long past the 400 ms a state takes to settle: the note is still held.
+        let created = comment(&daemon.client, &task, "Also check Firefox", None).await;
+        // Long past the 400 ms a state takes to settle: the comment is still held.
         tokio::time::sleep(Duration::from_millis(1_500)).await;
 
         assert_eq!(
@@ -307,11 +382,12 @@ mod note_delivery {
             None,
             "the dialog was answered"
         );
-        assert_eq!(read_note(&daemon.client, created.id).await.read_at, None);
+        let held = read_comment(&daemon.client, task.id, created.id).await;
+        assert_eq!(held.delivered_at, None);
 
-        // The user answers it; then the agent idles and the note goes in.
+        // The user answers it; then the agent idles and the comment goes in.
         type_now(&daemon.client, pane.id, "\r").await;
-        read_by(&daemon.client, created.id, pane.id).await;
+        delivered_to(&daemon.client, task.id, created.id, pane.id).await;
         assert_eq!(trust_answer(&daemon, pane.id).as_deref(), Some("\n"));
         assert_eq!(typed(&daemon, pane.id), "Also check Firefox\n");
     }

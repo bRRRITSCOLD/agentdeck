@@ -93,7 +93,7 @@ pub(crate) async fn task_update(
     Ok(HttpResponseOk(task))
 }
 
-/// Deletes a task and its notes.
+/// Deletes a task and its comments.
 #[endpoint { method = DELETE, path = "/v1/tasks/{id}" }]
 pub(crate) async fn task_delete(
     rqctx: RequestContext<ApiContext>,

@@ -5,11 +5,13 @@
 use std::collections::BTreeSet;
 
 use agentdeck_client::daemon::Daemon;
-use agentdeck_client::notes;
+use agentdeck_client::instructions;
 use agentdeck_client::panes::{self, pane_if_any};
-use agentdeck_client::types::{DirtyReport, NewNote, NewTask, NewWorkspace, Pane, Tab, TaskPatch};
+use agentdeck_client::types::{
+    DirtyReport, NewInstruction, NewTask, NewWorkspace, Pane, Tab, TaskPatch,
+};
 use agentdeck_client::{ApiError, Client};
-use agentdeck_core::{NoteId, PaneId, SplitDirection, TabId, TaskId, TaskStatus, WorkspaceId};
+use agentdeck_core::{PaneId, SplitDirection, TabId, TaskId, TaskStatus, WorkspaceId};
 use gpui::{App, Task};
 
 use crate::new_agent::{Launch, Launched};
@@ -66,20 +68,19 @@ pub trait Api: Send + Sync {
     /// agent CLI isn't installed.
     fn launch_agent(&self, launch: Launch, cx: &App) -> Task<anyhow::Result<Launched>>;
 
-    /// Types note `note`, whose text is `body`, into `pane` at once with Enter, then marks it
-    /// read by `pane` (spec §9). A note the pane didn't take stays unread.
-    fn send_note(
+    /// Types an instruction's `body` into `pane` at once with Enter (spec §9). The
+    /// instruction stays as it is.
+    fn send_instruction(&self, body: String, pane: PaneId, cx: &App) -> Task<anyhow::Result<()>>;
+
+    /// Adds an instruction with `body` to `workspace`.
+    fn new_instruction(
         &self,
-        note: NoteId,
+        workspace: WorkspaceId,
         body: String,
-        pane: PaneId,
         cx: &App,
     ) -> Task<anyhow::Result<()>>;
 
-    /// Leaves a note with `body` on `workspace`.
-    fn new_note(&self, workspace: WorkspaceId, body: String, cx: &App) -> Task<anyhow::Result<()>>;
-
-    /// Archives `workspace`, keeping its dir, tasks and notes. A refusal is an [`ApiError`];
+    /// Archives `workspace`, keeping its dir, tasks and instructions. A refusal is an [`ApiError`];
     /// `panes_running` means a pane of it still runs.
     fn archive_workspace(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<()>>;
 
@@ -89,7 +90,7 @@ pub trait Api: Send + Sync {
     /// The git repos under `workspace`'s dir that hold work on no remote.
     fn dirty(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<DirtyReport>>;
 
-    /// Deletes `workspace`, dirty or not: its tasks move to the Inbox, its notes go, and so
+    /// Deletes `workspace`, dirty or not: its tasks move to the Inbox, its instructions go, and so
     /// does its dir when agentdeck made it. Only call it once the user has seen the dirty
     /// report.
     fn delete_workspace(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<()>>;
@@ -231,30 +232,25 @@ impl Api for Daemon {
         })
     }
 
-    fn send_note(
+    fn send_instruction(&self, body: String, pane: PaneId, cx: &App) -> Task<anyhow::Result<()>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            Ok(instructions::send_instruction(&client, &body, pane).await?)
+        })
+    }
+
+    fn new_instruction(
         &self,
-        note: NoteId,
+        workspace: WorkspaceId,
         body: String,
-        pane: PaneId,
         cx: &App,
     ) -> Task<anyhow::Result<()>> {
         let client = self.client.clone();
         runtime::spawn(cx, async move {
-            Ok(notes::send_note(&client, note, &body, pane).await?)
-        })
-    }
-
-    fn new_note(&self, workspace: WorkspaceId, body: String, cx: &App) -> Task<anyhow::Result<()>> {
-        let client = self.client.clone();
-        runtime::spawn(cx, async move {
-            let note = NewNote {
-                body,
-                task_id: None,
-                workspace_id: Some(workspace),
-            };
             client
-                .note_create()
-                .body(note)
+                .instruction_create()
+                .id(workspace)
+                .body(NewInstruction { body })
                 .send()
                 .await
                 .map_err(ApiError::from)?;
@@ -324,7 +320,7 @@ async fn panes(client: Client, workspace: WorkspaceId) -> anyhow::Result<Workspa
 }
 
 /// Reads a [`Snapshot`]: the workspaces, then each live one's tabs and the panes in their
-/// layouts, then the tasks, unread notes and PR sync status.
+/// layouts, then the tasks, every workspace's instructions and PR sync status.
 async fn snapshot(client: Client) -> anyhow::Result<Snapshot> {
     let workspaces = (client.workspace_list().send().await)
         .map_err(ApiError::from)?
@@ -355,15 +351,19 @@ async fn snapshot(client: Client) -> anyhow::Result<Snapshot> {
             }
         }
     }
+    let mut instructions = Vec::new();
+    for workspace in &workspaces {
+        let listed =
+            (client.instruction_list().id(workspace.id).send().await).map_err(ApiError::from)?;
+        instructions.extend(listed.into_inner());
+    }
     Ok(Snapshot {
         workspaces,
         panes,
         tasks: (client.task_list().send().await)
             .map_err(ApiError::from)?
             .into_inner(),
-        notes: (client.note_list().send().await)
-            .map_err(ApiError::from)?
-            .into_inner(),
+        instructions,
         pr_sync: (client.prs_status().send().await)
             .map_err(ApiError::from)?
             .into_inner(),
@@ -401,10 +401,10 @@ pub(crate) mod fake {
         pub made_tasks: Mutex<Vec<new_task::Request>>,
         /// How many PR syncs were asked for.
         pub syncs: Mutex<usize>,
-        /// The notes left, with the workspace each is on.
-        pub notes_left: Mutex<Vec<(WorkspaceId, String)>>,
-        /// The notes sent to panes: the note, its text and the pane.
-        pub sent_notes: Mutex<Vec<(NoteId, String, PaneId)>>,
+        /// The instructions added, with the workspace each is for.
+        pub instructions_added: Mutex<Vec<(WorkspaceId, String)>>,
+        /// The instructions sent to panes: the text and the pane.
+        pub sent_instructions: Mutex<Vec<(String, PaneId)>>,
         /// The agents started.
         pub launched: Mutex<Vec<Launch>>,
         /// The panes closed, in order.
@@ -685,9 +685,8 @@ pub(crate) mod fake {
             Task::ready(Ok(Launched { tab, pane }))
         }
 
-        fn send_note(
+        fn send_instruction(
             &self,
-            note: NoteId,
             body: String,
             pane: PaneId,
             _cx: &App,
@@ -695,16 +694,11 @@ pub(crate) mod fake {
             if let Some(err) = self.failure() {
                 return Task::ready(Err(err));
             }
-            let mut snapshot = self.snapshot.lock().unwrap();
-            if let Some(read) = snapshot.notes.iter_mut().find(|n| n.id == note) {
-                read.read_at = Some("2026-11-14T00:00:00Z".to_owned());
-                read.read_by_pane = Some(pane);
-            }
-            self.sent_notes.lock().unwrap().push((note, body, pane));
+            self.sent_instructions.lock().unwrap().push((body, pane));
             Task::ready(Ok(()))
         }
 
-        fn new_note(
+        fn new_instruction(
             &self,
             workspace: WorkspaceId,
             body: String,
@@ -713,7 +707,10 @@ pub(crate) mod fake {
             if let Some(err) = self.failure() {
                 return Task::ready(Err(err));
             }
-            self.notes_left.lock().unwrap().push((workspace, body));
+            self.instructions_added
+                .lock()
+                .unwrap()
+                .push((workspace, body));
             Task::ready(Ok(()))
         }
 
@@ -755,7 +752,9 @@ pub(crate) mod fake {
                     task.workspace_id = None;
                 }
             }
-            snapshot.notes.retain(|n| n.workspace_id != Some(workspace));
+            snapshot
+                .instructions
+                .retain(|i| i.workspace_id != workspace);
             self.deleted.lock().unwrap().push(workspace);
             Task::ready(Ok(()))
         }

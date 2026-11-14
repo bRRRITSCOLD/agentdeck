@@ -1,8 +1,9 @@
 //! Launching agents (spec §6, §9): the argv each agent CLI starts and resumes with, and the
-//! launch prompt that carries a pane's task and the notes waiting for it.
+//! launch prompt that carries a pane's task, its workspace's instructions and the task's
+//! comments waiting for it.
 //!
 //! - [`codex`]: finding the session id a Codex pane's CLI chose.
-//! - [`delivery`]: typing a new task note into the task's live agent pane.
+//! - [`delivery`]: typing the user's new task comment into the task's live agent pane.
 //! - [`resume`]: re-spawning the panes that were alive when the daemon last stopped.
 
 pub mod codex;
@@ -12,7 +13,7 @@ pub mod resume;
 use agentdeck_core::Agent;
 use uuid::Uuid;
 
-use crate::model::{Note, Task};
+use crate::model::{Comment, Instruction, Task};
 
 /// How agentdeck starts an agent CLI.
 #[derive(Debug, PartialEq, Eq)]
@@ -23,10 +24,15 @@ pub struct AgentLaunch {
     pub session_id: Option<String>,
 }
 
-/// The launch prompt for an agent pane: the linked task's title and body, then every note
-/// waiting for the pane. `None` when there is neither. It never starts with `-`, so the CLI
+/// The launch prompt for an agent pane (spec §6): the linked task's title and body, then
+/// every instruction for the pane's workspace and the task's comments no agent has had yet,
+/// oldest first. `None` when there is none of them. It never starts with `-`, so the CLI
 /// can't read it as a flag.
-pub fn launch_prompt(task: Option<&Task>, notes: &[Note]) -> Option<String> {
+pub fn launch_prompt(
+    task: Option<&Task>,
+    instructions: &[Instruction],
+    comments: &[Comment],
+) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(task) = task {
         parts.push(format!("Task: {}", task.title));
@@ -34,14 +40,32 @@ pub fn launch_prompt(task: Option<&Task>, notes: &[Note]) -> Option<String> {
             parts.push(task.body.trim().to_owned());
         }
     }
-    if !notes.is_empty() {
-        let list: Vec<String> = notes
-            .iter()
-            .map(|note| format!("- {}", note.body.trim().replace('\n', "\n  ")))
-            .collect();
-        parts.push(format!("Notes left for you:\n{}", list.join("\n")));
+    let blocks: Vec<String> = [
+        (
+            "Instructions for this workspace:",
+            bullets(instructions.iter().map(|i| &i.body)),
+        ),
+        (
+            "Comments since your last session:",
+            bullets(comments.iter().map(|c| &c.body)),
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, list)| !list.is_empty())
+    .map(|(heading, list)| format!("{heading}\n{list}"))
+    .collect();
+    if !blocks.is_empty() {
+        parts.push(blocks.join("\n"));
     }
     (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
+/// One `  - <text>` line per item, continuation lines indented under the text.
+fn bullets<'a>(items: impl Iterator<Item = &'a String>) -> String {
+    items
+        .map(|text| format!("  - {}", text.trim().replace('\n', "\n    ")))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// How a new pane of `agent` starts, with `prompt` as its first prompt. Claude Code starts on
@@ -75,7 +99,7 @@ pub fn resume_argv(agent: Option<Agent>, session_id: Option<&str>) -> Option<Vec
 
 #[cfg(test)]
 mod tests {
-    use agentdeck_core::{TaskKind, TaskStatus};
+    use agentdeck_core::{CommentAuthor, TaskKind, TaskStatus};
 
     use super::*;
 
@@ -91,18 +115,32 @@ mod tests {
             updated_at: String::new(),
             done_at: None,
             pr: None,
+            unseen_agent_comments: 0,
         }
     }
 
-    fn note(body: &str) -> Note {
-        Note {
+    fn instruction(body: &str) -> Instruction {
+        Instruction {
             id: uuid::Uuid::now_v7().into(),
+            workspace_id: uuid::Uuid::now_v7().into(),
             body: body.into(),
-            workspace_id: Some(uuid::Uuid::now_v7().into()),
-            task_id: None,
             created_at: String::new(),
-            read_at: None,
-            read_by_pane: None,
+            updated_at: String::new(),
+        }
+    }
+
+    fn comment(body: &str) -> Comment {
+        Comment {
+            id: uuid::Uuid::now_v7().into(),
+            task_id: uuid::Uuid::now_v7().into(),
+            body: body.into(),
+            author: CommentAuthor::User,
+            author_agent: None,
+            author_pane: None,
+            created_at: String::new(),
+            delivered_at: None,
+            delivered_to_pane: None,
+            seen_at: None,
         }
     }
 
@@ -110,8 +148,8 @@ mod tests {
         use super::*;
 
         #[test]
-        fn should_be_none_without_a_task_or_notes() {
-            assert_eq!(launch_prompt(None, &[]), None);
+        fn should_be_none_without_a_task_or_instructions() {
+            assert_eq!(launch_prompt(None, &[], &[]), None);
         }
 
         #[test]
@@ -119,7 +157,7 @@ mod tests {
             let task = task("Fix the login bug", "It fails on Safari.\n");
 
             assert_eq!(
-                launch_prompt(Some(&task), &[]).unwrap(),
+                launch_prompt(Some(&task), &[], &[]).unwrap(),
                 "Task: Fix the login bug\n\nIt fails on Safari."
             );
         }
@@ -129,27 +167,40 @@ mod tests {
             let task = task("Fix the login bug", "  ");
 
             assert_eq!(
-                launch_prompt(Some(&task), &[]).unwrap(),
+                launch_prompt(Some(&task), &[], &[]).unwrap(),
                 "Task: Fix the login bug"
             );
         }
 
         #[test]
-        fn should_list_the_notes_after_the_task_in_order() {
-            let task = task("Fix the login bug", "");
-            let notes = [note("Use the staging DB"), note("Two\nlines")];
+        fn should_list_the_instructions_then_the_comments_after_the_task() {
+            let task = task("Fix the login bug", "It fails on Safari.");
+            let instructions = [instruction("Use the staging DB"), instruction("Two\nlines")];
+            let comments = [comment("Repro in issue 7")];
 
             assert_eq!(
-                launch_prompt(Some(&task), &notes).unwrap(),
-                "Task: Fix the login bug\n\nNotes left for you:\n- Use the staging DB\n- Two\n  lines"
+                launch_prompt(Some(&task), &instructions, &comments).unwrap(),
+                "Task: Fix the login bug\n\nIt fails on Safari.\n\n\
+                 Instructions for this workspace:\n  - Use the staging DB\n  - Two\n    lines\n\
+                 Comments since your last session:\n  - Repro in issue 7"
             );
         }
 
         #[test]
-        fn should_carry_notes_alone_when_there_is_no_task() {
+        fn should_leave_out_an_empty_block() {
+            let task = task("Fix the login bug", "");
+
             assert_eq!(
-                launch_prompt(None, &[note("hello")]).unwrap(),
-                "Notes left for you:\n- hello"
+                launch_prompt(Some(&task), &[], &[comment("Also Firefox")]).unwrap(),
+                "Task: Fix the login bug\n\nComments since your last session:\n  - Also Firefox"
+            );
+        }
+
+        #[test]
+        fn should_carry_instructions_alone_when_there_is_no_task() {
+            assert_eq!(
+                launch_prompt(None, &[instruction("hello")], &[]).unwrap(),
+                "Instructions for this workspace:\n  - hello"
             );
         }
 
@@ -157,7 +208,11 @@ mod tests {
         fn should_never_start_with_a_dash() {
             let task = task("--dangerously-skip-permissions", "");
 
-            assert!(!launch_prompt(Some(&task), &[]).unwrap().starts_with('-'));
+            assert!(
+                !launch_prompt(Some(&task), &[], &[])
+                    .unwrap()
+                    .starts_with('-')
+            );
         }
     }
 

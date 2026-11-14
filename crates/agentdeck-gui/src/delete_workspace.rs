@@ -67,7 +67,7 @@ pub struct DeleteWorkspaceDialog {
     api: Arc<dyn Api>,
     handle: DialogHandle,
     target: Option<DeleteTarget>,
-    /// How many tasks move to the Inbox and how many notes go.
+    /// How many tasks move to the Inbox and how many instructions go.
     moves: (usize, usize),
     dirty: Dirty,
     confirm: Entity<InputState>,
@@ -118,10 +118,10 @@ impl DeleteWorkspaceDialog {
         let tasks = (snapshot.tasks.iter())
             .filter(|t| t.workspace_id == Some(workspace))
             .count();
-        let notes = (snapshot.notes.iter())
-            .filter(|n| n.workspace_id == Some(workspace))
+        let instructions = (snapshot.instructions.iter())
+            .filter(|i| i.workspace_id == workspace)
             .count();
-        self.moves = (tasks, notes);
+        self.moves = (tasks, instructions);
         self.confirm.update(cx, |input, cx| {
             input.set_value("", window, cx);
             input.set_placeholder(target.name.clone(), window, cx);
@@ -298,19 +298,20 @@ pub fn alert_title(repos: usize) -> String {
     }
 }
 
-/// What deleting does to the workspace's `tasks` and `notes`; nothing when it has neither.
-pub fn moves_line(tasks: usize, notes: usize) -> Option<String> {
+/// What deleting does to the workspace's `tasks` and `instructions`; nothing when it has
+/// neither.
+pub fn moves_line(tasks: usize, instructions: usize) -> Option<String> {
     let tasks = match tasks {
         0 => None,
         1 => Some("Its 1 task moves to the Inbox.".to_owned()),
         n => Some(format!("Its {n} tasks move to the Inbox.")),
     };
-    let notes = match notes {
+    let instructions = match instructions {
         0 => None,
-        1 => Some("Its 1 note is deleted.".to_owned()),
-        n => Some(format!("Its {n} notes are deleted.")),
+        1 => Some("Its 1 instruction is deleted.".to_owned()),
+        n => Some(format!("Its {n} instructions are deleted.")),
     };
-    let parts: Vec<String> = tasks.into_iter().chain(notes).collect();
+    let parts: Vec<String> = tasks.into_iter().chain(instructions).collect();
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
@@ -446,7 +447,7 @@ mod tests {
     use super::*;
     use crate::api::fake::FakeApi;
     use crate::notice;
-    use crate::overview::fixtures::{id, task, workspace, workspace_note};
+    use crate::overview::fixtures::{id, instruction, task, workspace};
 
     struct Harness {
         api: Arc<FakeApi>,
@@ -455,7 +456,7 @@ mod tests {
         _events: Subscription,
     }
 
-    /// Workspace 1, `tabs-a11y` in `/w/tabs-a11y`, with two tasks and a note.
+    /// Workspace 1, `tabs-a11y` in `/w/tabs-a11y`, with two tasks and an instruction.
     fn snapshot() -> Snapshot {
         let ws = workspace(1, "tabs-a11y");
         Snapshot {
@@ -464,7 +465,7 @@ mod tests {
                 task(11, TaskKind::Pr, Some(ws.id)),
                 task(12, TaskKind::Plain, None),
             ],
-            notes: vec![workspace_note(20, ws.id)],
+            instructions: vec![instruction(20, ws.id)],
             workspaces: vec![ws],
             ..Snapshot::default()
         }
@@ -739,18 +740,18 @@ mod tests {
         use super::*;
 
         #[test]
-        fn should_say_where_the_tasks_go_and_that_the_notes_go() {
+        fn should_say_where_the_tasks_go_and_that_the_instructions_go() {
             assert_eq!(
                 moves_line(4, 2).as_deref(),
-                Some("Its 4 tasks move to the Inbox. Its 2 notes are deleted.")
+                Some("Its 4 tasks move to the Inbox. Its 2 instructions are deleted.")
             );
         }
 
         #[test]
-        fn should_speak_of_one_task_or_note_in_the_singular() {
+        fn should_speak_of_one_task_or_instruction_in_the_singular() {
             assert_eq!(
                 moves_line(1, 1).as_deref(),
-                Some("Its 1 task moves to the Inbox. Its 1 note is deleted.")
+                Some("Its 1 task moves to the Inbox. Its 1 instruction is deleted.")
             );
         }
 
@@ -762,13 +763,13 @@ mod tests {
             );
             assert_eq!(
                 moves_line(0, 2).as_deref(),
-                Some("Its 2 notes are deleted.")
+                Some("Its 2 instructions are deleted.")
             );
             assert_eq!(moves_line(0, 0), None);
         }
 
         #[gpui::test]
-        fn should_count_the_workspaces_own_tasks_and_notes(cx: &mut TestAppContext) {
+        fn should_count_the_workspaces_own_tasks_and_instructions(cx: &mut TestAppContext) {
             let (harness, cx) = Harness::new(Arc::new(FakeApi::with(snapshot())), cx);
 
             harness.open(cx);

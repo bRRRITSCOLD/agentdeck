@@ -1026,7 +1026,7 @@ mod tests {
                 .set_tabs(id(1), vec![tab(1, id(1), 0, Some(id(8)))]);
             harness.api.set_panes(vec![shell_pane(8, id(1))]);
 
-            harness.changed(Changed::Note, cx);
+            harness.changed(Changed::Instruction, cx);
 
             assert_eq!(harness.shown(cx), [id(7)]);
         }

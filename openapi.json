@@ -50,6 +50,99 @@
         ],
         "type": "string"
       },
+      "Comment": {
+        "description": "A comment in a task's thread (spec §9). The user's comments are delivered to the task's agent; an agent's are a record and never delivered.",
+        "properties": {
+          "author": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CommentAuthor"
+              }
+            ],
+            "description": "Who wrote it: the user, or an agent from its pane."
+          },
+          "author_agent": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Agent"
+              }
+            ],
+            "description": "The agent that wrote it, when that is `claude` or `codex`.",
+            "nullable": true
+          },
+          "author_pane": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PaneId"
+              }
+            ],
+            "description": "The pane it was written from; `None` for the user's, and once the pane is gone.",
+            "nullable": true
+          },
+          "body": {
+            "description": "The text.",
+            "type": "string"
+          },
+          "created_at": {
+            "description": "When it was written.",
+            "type": "string"
+          },
+          "delivered_at": {
+            "description": "When it was delivered to an agent; always `None` for an agent's comment.",
+            "nullable": true,
+            "type": "string"
+          },
+          "delivered_to_pane": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PaneId"
+              }
+            ],
+            "description": "The pane it was delivered to.",
+            "nullable": true
+          },
+          "id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CommentId"
+              }
+            ],
+            "description": "The comment's id."
+          },
+          "seen_at": {
+            "description": "When the user saw it; `None` while an agent's comment is new to the user. The user's own comments are seen when written.",
+            "nullable": true,
+            "type": "string"
+          },
+          "task_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TaskId"
+              }
+            ],
+            "description": "The task it's on."
+          }
+        },
+        "required": [
+          "author",
+          "body",
+          "created_at",
+          "id",
+          "task_id"
+        ],
+        "type": "object"
+      },
+      "CommentAuthor": {
+        "enum": [
+          "user",
+          "agent"
+        ],
+        "type": "string"
+      },
+      "CommentId": {
+        "format": "uuid",
+        "type": "string"
+      },
       "DeleteWorkspaceError": {
         "description": "`DELETE /v1/workspaces/{id}`'s error: dropshot's error body, plus the dirty report when `error_code` is `dirty` (409).",
         "properties": {
@@ -212,6 +305,62 @@
           }
         ]
       },
+      "Instruction": {
+        "description": "Standing context for every agent in a workspace (spec §9): it goes into every launch prompt there and stays until deleted.",
+        "properties": {
+          "body": {
+            "description": "The text.",
+            "type": "string"
+          },
+          "created_at": {
+            "description": "When it was added.",
+            "type": "string"
+          },
+          "id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/InstructionId"
+              }
+            ],
+            "description": "The instruction's id."
+          },
+          "updated_at": {
+            "description": "When its text last changed.",
+            "type": "string"
+          },
+          "workspace_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ],
+            "description": "The workspace it's for."
+          }
+        },
+        "required": [
+          "body",
+          "created_at",
+          "id",
+          "updated_at",
+          "workspace_id"
+        ],
+        "type": "object"
+      },
+      "InstructionId": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "InstructionPatch": {
+        "description": "`PATCH /v1/instructions/{id}`: the fields to change.",
+        "properties": {
+          "body": {
+            "description": "A new text.",
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "Layout": {
         "anyOf": [
           {
@@ -283,30 +432,34 @@
         ],
         "description": "A tab's split tree. Every pane appears once; [`Layout::split`] keeps it that way."
       },
-      "NewNote": {
-        "description": "`POST /v1/notes`: exactly one of `workspace_id` and `task_id`.",
+      "NewComment": {
+        "description": "`POST /v1/tasks/{id}/comments`.",
         "properties": {
           "body": {
-            "description": "The message.",
+            "description": "The text.",
             "type": "string"
           },
-          "task_id": {
+          "pane": {
             "allOf": [
               {
-                "$ref": "#/components/schemas/TaskId"
+                "$ref": "#/components/schemas/PaneId"
               }
             ],
-            "description": "The task to leave it on.",
+            "description": "The pane writing it: the comment is then that pane's agent's. Without it, the user's.",
             "nullable": true
-          },
-          "workspace_id": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/WorkspaceId"
-              }
-            ],
-            "description": "The workspace to leave it on.",
-            "nullable": true
+          }
+        },
+        "required": [
+          "body"
+        ],
+        "type": "object"
+      },
+      "NewInstruction": {
+        "description": "`POST /v1/workspaces/{id}/instructions`.",
+        "properties": {
+          "body": {
+            "description": "The text.",
+            "type": "string"
           }
         },
         "required": [
@@ -445,94 +598,6 @@
         "required": [
           "name"
         ],
-        "type": "object"
-      },
-      "Note": {
-        "description": "A message left on a workspace or a task for agents.",
-        "properties": {
-          "body": {
-            "description": "The message.",
-            "type": "string"
-          },
-          "created_at": {
-            "description": "When the note was created.",
-            "type": "string"
-          },
-          "id": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/NoteId"
-              }
-            ],
-            "description": "The note's id."
-          },
-          "read_at": {
-            "description": "When the note was delivered or marked read.",
-            "nullable": true,
-            "type": "string"
-          },
-          "read_by_pane": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/PaneId"
-              }
-            ],
-            "description": "The pane it was delivered to, if a pane read it.",
-            "nullable": true
-          },
-          "task_id": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/TaskId"
-              }
-            ],
-            "description": "The task it's on; exactly one of this and `workspace_id` is set.",
-            "nullable": true
-          },
-          "workspace_id": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/WorkspaceId"
-              }
-            ],
-            "description": "The workspace it's on; exactly one of this and `task_id` is set.",
-            "nullable": true
-          }
-        },
-        "required": [
-          "body",
-          "created_at",
-          "id"
-        ],
-        "type": "object"
-      },
-      "NoteId": {
-        "format": "uuid",
-        "type": "string"
-      },
-      "NotePatch": {
-        "description": "`PATCH /v1/notes/{id}`: the fields to change.",
-        "properties": {
-          "body": {
-            "description": "A new message.",
-            "nullable": true,
-            "type": "string"
-          },
-          "read": {
-            "description": "`true` marks the note read now, `false` marks it unread.",
-            "nullable": true,
-            "type": "boolean"
-          },
-          "read_by_pane": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/PaneId"
-              }
-            ],
-            "description": "The pane that read it; recorded only with `read: true`.",
-            "nullable": true
-          }
-        },
         "type": "object"
       },
       "Pane": {
@@ -973,6 +1038,12 @@
             "description": "The title.",
             "type": "string"
           },
+          "unseen_agent_comments": {
+            "description": "Agents' comments on the task the user hasn't seen yet.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "updated_at": {
             "description": "When the task last changed.",
             "type": "string"
@@ -994,6 +1065,7 @@
           "kind",
           "status",
           "title",
+          "unseen_agent_comments",
           "updated_at"
         ],
         "type": "object"
@@ -1133,6 +1205,34 @@
   },
   "openapi": "3.0.3",
   "paths": {
+    "/v1/comments/{id}": {
+      "delete": {
+        "operationId": "comment_delete",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/CommentId"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "successful deletion"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Deletes a comment."
+      }
+    },
     "/v1/health": {
       "get": {
         "operationId": "health",
@@ -1157,97 +1257,9 @@
         "summary": "The daemon's version and uptime."
       }
     },
-    "/v1/notes": {
-      "get": {
-        "operationId": "note_list",
-        "parameters": [
-          {
-            "description": "Only notes on this task.",
-            "in": "query",
-            "name": "task",
-            "schema": {
-              "$ref": "#/components/schemas/TaskId"
-            }
-          },
-          {
-            "description": "`true`: only unread notes; `false`: only read ones.",
-            "in": "query",
-            "name": "unread",
-            "schema": {
-              "nullable": true,
-              "type": "boolean"
-            }
-          },
-          {
-            "description": "Only notes on this workspace.",
-            "in": "query",
-            "name": "workspace",
-            "schema": {
-              "$ref": "#/components/schemas/WorkspaceId"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/Note"
-                  },
-                  "title": "Array_of_Note",
-                  "type": "array"
-                }
-              }
-            },
-            "description": "successful operation"
-          },
-          "4XX": {
-            "$ref": "#/components/responses/Error"
-          },
-          "5XX": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "The notes matching every filter given, oldest first."
-      },
-      "post": {
-        "description": "into the newest such pane once it is idle or done, and marked read then (spec §9).",
-        "operationId": "note_create",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/NewNote"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Note"
-                }
-              }
-            },
-            "description": "successful creation"
-          },
-          "4XX": {
-            "$ref": "#/components/responses/Error"
-          },
-          "5XX": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "Leaves a note on a workspace or a task. A note on a task with a live agent pane is typed"
-      }
-    },
-    "/v1/notes/{id}": {
+    "/v1/instructions/{id}": {
       "delete": {
-        "operationId": "note_delete",
+        "operationId": "instruction_delete",
         "parameters": [
           {
             "description": "The entity's id.",
@@ -1255,7 +1267,7 @@
             "name": "id",
             "required": true,
             "schema": {
-              "$ref": "#/components/schemas/NoteId"
+              "$ref": "#/components/schemas/InstructionId"
             }
           }
         ],
@@ -1270,10 +1282,10 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Deletes a note."
+        "summary": "Deletes an instruction."
       },
       "patch": {
-        "operationId": "note_update",
+        "operationId": "instruction_update",
         "parameters": [
           {
             "description": "The entity's id.",
@@ -1281,7 +1293,7 @@
             "name": "id",
             "required": true,
             "schema": {
-              "$ref": "#/components/schemas/NoteId"
+              "$ref": "#/components/schemas/InstructionId"
             }
           }
         ],
@@ -1289,7 +1301,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/NotePatch"
+                "$ref": "#/components/schemas/InstructionPatch"
               }
             }
           },
@@ -1300,7 +1312,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Note"
+                  "$ref": "#/components/schemas/Instruction"
                 }
               }
             },
@@ -1313,12 +1325,12 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Edits a note, or marks it read or unread."
+        "summary": "Edits an instruction."
       }
     },
     "/v1/panes": {
       "post": {
-        "description": "the tab's layout.\n\n`claude` and `codex` panes start with a launch prompt: the linked task's title and body, then the unread notes on the task and on the pane's workspace, which are then marked read by the pane. Claude Code starts on a session id agentdeck chooses; a Codex pane's is found once Codex writes its session file, and `session_id` is set then.",
+        "description": "the tab's layout.\n\n`claude` and `codex` panes start with a launch prompt: the linked task's title and body, then every instruction for the pane's workspace and the task's comments no agent has had yet, which are then marked delivered to the pane. Claude Code starts on a session id agentdeck chooses; a Codex pane's is found once Codex writes its session file, and `session_id` is set then.",
         "operationId": "pane_create",
         "requestBody": {
           "content": {
@@ -1743,7 +1755,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Deletes a task and its notes."
+        "summary": "Deletes a task and its comments."
       },
       "get": {
         "operationId": "task_get",
@@ -1820,6 +1832,118 @@
           }
         },
         "summary": "Changes a task's title, body, status or workspace."
+      }
+    },
+    "/v1/tasks/{id}/comments": {
+      "get": {
+        "operationId": "comment_list",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/TaskId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Comment"
+                  },
+                  "title": "Array_of_Comment",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "A task's comments, oldest first."
+      },
+      "post": {
+        "description": "Without it, it is the user's: typed into the task's newest live agent pane once that pane is idle or done, or else carried by the task's next launch prompt (spec §9).",
+        "operationId": "comment_create",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/TaskId"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewComment"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Comment"
+                }
+              }
+            },
+            "description": "successful creation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Adds a comment to a task. With `pane`, it is that pane's agent's and is never delivered."
+      }
+    },
+    "/v1/tasks/{id}/comments/seen": {
+      "post": {
+        "description": "opens the task, which clears its \"new from agent\" dot.",
+        "operationId": "comment_seen",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/TaskId"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Marks every agent comment on a task seen by the user: the GUI does this when the user"
       }
     },
     "/v1/workspaces": {
@@ -2029,7 +2153,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Archives a workspace; its tasks, notes and dir are kept. Refused (409 `panes_running`) while"
+        "summary": "Archives a workspace; its tasks, instructions and dir are kept. Refused (409 `panes_running`) while"
       }
     },
     "/v1/workspaces/{id}/dirty": {
@@ -2065,6 +2189,88 @@
           }
         },
         "summary": "Each git repo under the workspace's dir with uncommitted files or unpushed branches."
+      }
+    },
+    "/v1/workspaces/{id}/instructions": {
+      "get": {
+        "operationId": "instruction_list",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/WorkspaceId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Instruction"
+                  },
+                  "title": "Array_of_Instruction",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "A workspace's instructions, oldest first."
+      },
+      "post": {
+        "operationId": "instruction_create",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/WorkspaceId"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewInstruction"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Instruction"
+                }
+              }
+            },
+            "description": "successful creation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Adds an instruction to a workspace. Every launch prompt there carries it from now on."
       }
     },
     "/v1/workspaces/{id}/tabs": {

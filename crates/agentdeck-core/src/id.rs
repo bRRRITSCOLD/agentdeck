@@ -72,8 +72,12 @@ id!(
     TaskId
 );
 id!(
-    /// A note's id (`notes.id`).
-    NoteId
+    /// A task comment's id (`comments.id`).
+    CommentId
+);
+id!(
+    /// A workspace instruction's id (`instructions.id`).
+    InstructionId
 );
 
 #[cfg(test)]

@@ -7,6 +7,40 @@ use progenitor_client::{ClientHooks, OperationInfo, RequestBuilderExt, encode_pa
 /// Types used as operation parameters and responses.
 #[allow(clippy::all)]
 pub mod types {
+    ///A comment in a task's thread (spec §9). The user's comments are delivered to the task's agent; an agent's are a record and never delivered.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct Comment {
+        ///Who wrote it: the user, or an agent from its pane.
+        pub author: agentdeck_core::CommentAuthor,
+        ///The agent that wrote it, when that is `claude` or `codex`.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub author_agent: ::std::option::Option<agentdeck_core::Agent>,
+        ///The pane it was written from; `None` for the user's, and once the pane is gone.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub author_pane: ::std::option::Option<agentdeck_core::PaneId>,
+        ///The text.
+        pub body: ::std::string::String,
+        ///When it was written.
+        pub created_at: ::std::string::String,
+        ///When it was delivered to an agent; always `None` for an agent's comment.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub delivered_at: ::std::option::Option<::std::string::String>,
+        ///The pane it was delivered to.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub delivered_to_pane: ::std::option::Option<agentdeck_core::PaneId>,
+        ///The comment's id.
+        pub id: agentdeck_core::CommentId,
+        ///When the user saw it; `None` while an agent's comment is new to the user. The user's own comments are seen when written.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub seen_at: ::std::option::Option<::std::string::String>,
+        ///The task it's on.
+        pub task_id: agentdeck_core::TaskId,
+    }
+    impl Comment {
+        pub fn builder() -> builder::Comment {
+            Default::default()
+        }
+    }
     ///`DELETE /v1/workspaces/{id}`'s error: dropshot's error body, plus the dirty report when `error_code` is `dirty` (409).
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct DeleteWorkspaceError {
@@ -193,20 +227,59 @@ pub mod types {
             value.parse()
         }
     }
-    ///`POST /v1/notes`: exactly one of `workspace_id` and `task_id`.
+    ///Standing context for every agent in a workspace (spec §9): it goes into every launch prompt there and stays until deleted.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
-    pub struct NewNote {
-        ///The message.
+    pub struct Instruction {
+        ///The text.
         pub body: ::std::string::String,
-        ///The task to leave it on.
-        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub task_id: ::std::option::Option<agentdeck_core::TaskId>,
-        ///The workspace to leave it on.
-        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub workspace_id: ::std::option::Option<agentdeck_core::WorkspaceId>,
+        ///When it was added.
+        pub created_at: ::std::string::String,
+        ///The instruction's id.
+        pub id: agentdeck_core::InstructionId,
+        ///When its text last changed.
+        pub updated_at: ::std::string::String,
+        ///The workspace it's for.
+        pub workspace_id: agentdeck_core::WorkspaceId,
     }
-    impl NewNote {
-        pub fn builder() -> builder::NewNote {
+    impl Instruction {
+        pub fn builder() -> builder::Instruction {
+            Default::default()
+        }
+    }
+    ///`PATCH /v1/instructions/{id}`: the fields to change.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
+    pub struct InstructionPatch {
+        ///A new text.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub body: ::std::option::Option<::std::string::String>,
+    }
+    impl InstructionPatch {
+        pub fn builder() -> builder::InstructionPatch {
+            Default::default()
+        }
+    }
+    ///`POST /v1/tasks/{id}/comments`.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct NewComment {
+        ///The text.
+        pub body: ::std::string::String,
+        ///The pane writing it: the comment is then that pane's agent's. Without it, the user's.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub pane: ::std::option::Option<agentdeck_core::PaneId>,
+    }
+    impl NewComment {
+        pub fn builder() -> builder::NewComment {
+            Default::default()
+        }
+    }
+    ///`POST /v1/workspaces/{id}/instructions`.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct NewInstruction {
+        ///The text.
+        pub body: ::std::string::String,
+    }
+    impl NewInstruction {
+        pub fn builder() -> builder::NewInstruction {
             Default::default()
         }
     }
@@ -279,51 +352,6 @@ pub mod types {
     }
     impl NewWorkspace {
         pub fn builder() -> builder::NewWorkspace {
-            Default::default()
-        }
-    }
-    ///A message left on a workspace or a task for agents.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
-    pub struct Note {
-        ///The message.
-        pub body: ::std::string::String,
-        ///When the note was created.
-        pub created_at: ::std::string::String,
-        ///The note's id.
-        pub id: agentdeck_core::NoteId,
-        ///When the note was delivered or marked read.
-        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub read_at: ::std::option::Option<::std::string::String>,
-        ///The pane it was delivered to, if a pane read it.
-        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub read_by_pane: ::std::option::Option<agentdeck_core::PaneId>,
-        ///The task it's on; exactly one of this and `workspace_id` is set.
-        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub task_id: ::std::option::Option<agentdeck_core::TaskId>,
-        ///The workspace it's on; exactly one of this and `task_id` is set.
-        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub workspace_id: ::std::option::Option<agentdeck_core::WorkspaceId>,
-    }
-    impl Note {
-        pub fn builder() -> builder::Note {
-            Default::default()
-        }
-    }
-    ///`PATCH /v1/notes/{id}`: the fields to change.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
-    pub struct NotePatch {
-        ///A new message.
-        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub body: ::std::option::Option<::std::string::String>,
-        ///`true` marks the note read now, `false` marks it unread.
-        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub read: ::std::option::Option<bool>,
-        ///The pane that read it; recorded only with `read: true`.
-        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub read_by_pane: ::std::option::Option<agentdeck_core::PaneId>,
-    }
-    impl NotePatch {
-        pub fn builder() -> builder::NotePatch {
             Default::default()
         }
     }
@@ -556,6 +584,8 @@ pub mod types {
         pub status: agentdeck_core::TaskStatus,
         ///The title.
         pub title: ::std::string::String,
+        ///Agents' comments on the task the user hasn't seen yet.
+        pub unseen_agent_comments: u32,
         ///When the task last changed.
         pub updated_at: ::std::string::String,
         ///The linked workspace; `None` puts the task in the inbox.
@@ -631,6 +661,187 @@ pub mod types {
     }
     /// Types for composing complex structures.
     pub mod builder {
+        #[derive(Clone, Debug)]
+        pub struct Comment {
+            author: ::std::result::Result<agentdeck_core::CommentAuthor, ::std::string::String>,
+            author_agent: ::std::result::Result<
+                ::std::option::Option<agentdeck_core::Agent>,
+                ::std::string::String,
+            >,
+            author_pane: ::std::result::Result<
+                ::std::option::Option<agentdeck_core::PaneId>,
+                ::std::string::String,
+            >,
+            body: ::std::result::Result<::std::string::String, ::std::string::String>,
+            created_at: ::std::result::Result<::std::string::String, ::std::string::String>,
+            delivered_at: ::std::result::Result<
+                ::std::option::Option<::std::string::String>,
+                ::std::string::String,
+            >,
+            delivered_to_pane: ::std::result::Result<
+                ::std::option::Option<agentdeck_core::PaneId>,
+                ::std::string::String,
+            >,
+            id: ::std::result::Result<agentdeck_core::CommentId, ::std::string::String>,
+            seen_at: ::std::result::Result<
+                ::std::option::Option<::std::string::String>,
+                ::std::string::String,
+            >,
+            task_id: ::std::result::Result<agentdeck_core::TaskId, ::std::string::String>,
+        }
+        impl ::std::default::Default for Comment {
+            fn default() -> Self {
+                Self {
+                    author: Err("no value supplied for author".to_string()),
+                    author_agent: Ok(Default::default()),
+                    author_pane: Ok(Default::default()),
+                    body: Err("no value supplied for body".to_string()),
+                    created_at: Err("no value supplied for created_at".to_string()),
+                    delivered_at: Ok(Default::default()),
+                    delivered_to_pane: Ok(Default::default()),
+                    id: Err("no value supplied for id".to_string()),
+                    seen_at: Ok(Default::default()),
+                    task_id: Err("no value supplied for task_id".to_string()),
+                }
+            }
+        }
+        impl Comment {
+            pub fn author<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<agentdeck_core::CommentAuthor>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.author = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for author: {e}"));
+                self
+            }
+            pub fn author_agent<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::Agent>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.author_agent = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for author_agent: {e}"));
+                self
+            }
+            pub fn author_pane<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::PaneId>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.author_pane = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for author_pane: {e}"));
+                self
+            }
+            pub fn body<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::string::String>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.body = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for body: {e}"));
+                self
+            }
+            pub fn created_at<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::string::String>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.created_at = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for created_at: {e}"));
+                self
+            }
+            pub fn delivered_at<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<::std::string::String>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.delivered_at = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for delivered_at: {e}"));
+                self
+            }
+            pub fn delivered_to_pane<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::PaneId>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.delivered_to_pane = value.try_into().map_err(|e| {
+                    format!("error converting supplied value for delivered_to_pane: {e}")
+                });
+                self
+            }
+            pub fn id<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<agentdeck_core::CommentId>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.id = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for id: {e}"));
+                self
+            }
+            pub fn seen_at<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<::std::string::String>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.seen_at = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for seen_at: {e}"));
+                self
+            }
+            pub fn task_id<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<agentdeck_core::TaskId>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.task_id = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for task_id: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<Comment> for super::Comment {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: Comment,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    author: value.author?,
+                    author_agent: value.author_agent?,
+                    author_pane: value.author_pane?,
+                    body: value.body?,
+                    created_at: value.created_at?,
+                    delivered_at: value.delivered_at?,
+                    delivered_to_pane: value.delivered_to_pane?,
+                    id: value.id?,
+                    seen_at: value.seen_at?,
+                    task_id: value.task_id?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::Comment> for Comment {
+            fn from(value: super::Comment) -> Self {
+                Self {
+                    author: Ok(value.author),
+                    author_agent: Ok(value.author_agent),
+                    author_pane: Ok(value.author_pane),
+                    body: Ok(value.body),
+                    created_at: Ok(value.created_at),
+                    delivered_at: Ok(value.delivered_at),
+                    delivered_to_pane: Ok(value.delivered_to_pane),
+                    id: Ok(value.id),
+                    seen_at: Ok(value.seen_at),
+                    task_id: Ok(value.task_id),
+                }
+            }
+        }
         #[derive(Clone, Debug)]
         pub struct DeleteWorkspaceError {
             dirty: ::std::result::Result<
@@ -985,27 +1196,25 @@ pub mod types {
             }
         }
         #[derive(Clone, Debug)]
-        pub struct NewNote {
+        pub struct Instruction {
             body: ::std::result::Result<::std::string::String, ::std::string::String>,
-            task_id: ::std::result::Result<
-                ::std::option::Option<agentdeck_core::TaskId>,
-                ::std::string::String,
-            >,
-            workspace_id: ::std::result::Result<
-                ::std::option::Option<agentdeck_core::WorkspaceId>,
-                ::std::string::String,
-            >,
+            created_at: ::std::result::Result<::std::string::String, ::std::string::String>,
+            id: ::std::result::Result<agentdeck_core::InstructionId, ::std::string::String>,
+            updated_at: ::std::result::Result<::std::string::String, ::std::string::String>,
+            workspace_id: ::std::result::Result<agentdeck_core::WorkspaceId, ::std::string::String>,
         }
-        impl ::std::default::Default for NewNote {
+        impl ::std::default::Default for Instruction {
             fn default() -> Self {
                 Self {
                     body: Err("no value supplied for body".to_string()),
-                    task_id: Ok(Default::default()),
-                    workspace_id: Ok(Default::default()),
+                    created_at: Err("no value supplied for created_at".to_string()),
+                    id: Err("no value supplied for id".to_string()),
+                    updated_at: Err("no value supplied for updated_at".to_string()),
+                    workspace_id: Err("no value supplied for workspace_id".to_string()),
                 }
             }
         }
-        impl NewNote {
+        impl Instruction {
             pub fn body<T>(mut self, value: T) -> Self
             where
                 T: ::std::convert::TryInto<::std::string::String>,
@@ -1016,19 +1225,39 @@ pub mod types {
                     .map_err(|e| format!("error converting supplied value for body: {e}"));
                 self
             }
-            pub fn task_id<T>(mut self, value: T) -> Self
+            pub fn created_at<T>(mut self, value: T) -> Self
             where
-                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::TaskId>>,
+                T: ::std::convert::TryInto<::std::string::String>,
                 T::Error: ::std::fmt::Display,
             {
-                self.task_id = value
+                self.created_at = value
                     .try_into()
-                    .map_err(|e| format!("error converting supplied value for task_id: {e}"));
+                    .map_err(|e| format!("error converting supplied value for created_at: {e}"));
+                self
+            }
+            pub fn id<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<agentdeck_core::InstructionId>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.id = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for id: {e}"));
+                self
+            }
+            pub fn updated_at<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::string::String>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.updated_at = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for updated_at: {e}"));
                 self
             }
             pub fn workspace_id<T>(mut self, value: T) -> Self
             where
-                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::WorkspaceId>>,
+                T: ::std::convert::TryInto<agentdeck_core::WorkspaceId>,
                 T::Error: ::std::fmt::Display,
             {
                 self.workspace_id = value
@@ -1037,24 +1266,164 @@ pub mod types {
                 self
             }
         }
-        impl ::std::convert::TryFrom<NewNote> for super::NewNote {
+        impl ::std::convert::TryFrom<Instruction> for super::Instruction {
             type Error = super::error::ConversionError;
             fn try_from(
-                value: NewNote,
+                value: Instruction,
             ) -> ::std::result::Result<Self, super::error::ConversionError> {
                 Ok(Self {
                     body: value.body?,
-                    task_id: value.task_id?,
+                    created_at: value.created_at?,
+                    id: value.id?,
+                    updated_at: value.updated_at?,
                     workspace_id: value.workspace_id?,
                 })
             }
         }
-        impl ::std::convert::From<super::NewNote> for NewNote {
-            fn from(value: super::NewNote) -> Self {
+        impl ::std::convert::From<super::Instruction> for Instruction {
+            fn from(value: super::Instruction) -> Self {
                 Self {
                     body: Ok(value.body),
-                    task_id: Ok(value.task_id),
+                    created_at: Ok(value.created_at),
+                    id: Ok(value.id),
+                    updated_at: Ok(value.updated_at),
                     workspace_id: Ok(value.workspace_id),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
+        pub struct InstructionPatch {
+            body: ::std::result::Result<
+                ::std::option::Option<::std::string::String>,
+                ::std::string::String,
+            >,
+        }
+        impl ::std::default::Default for InstructionPatch {
+            fn default() -> Self {
+                Self {
+                    body: Ok(Default::default()),
+                }
+            }
+        }
+        impl InstructionPatch {
+            pub fn body<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<::std::string::String>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.body = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for body: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<InstructionPatch> for super::InstructionPatch {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: InstructionPatch,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self { body: value.body? })
+            }
+        }
+        impl ::std::convert::From<super::InstructionPatch> for InstructionPatch {
+            fn from(value: super::InstructionPatch) -> Self {
+                Self {
+                    body: Ok(value.body),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
+        pub struct NewComment {
+            body: ::std::result::Result<::std::string::String, ::std::string::String>,
+            pane: ::std::result::Result<
+                ::std::option::Option<agentdeck_core::PaneId>,
+                ::std::string::String,
+            >,
+        }
+        impl ::std::default::Default for NewComment {
+            fn default() -> Self {
+                Self {
+                    body: Err("no value supplied for body".to_string()),
+                    pane: Ok(Default::default()),
+                }
+            }
+        }
+        impl NewComment {
+            pub fn body<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::string::String>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.body = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for body: {e}"));
+                self
+            }
+            pub fn pane<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::PaneId>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.pane = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for pane: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<NewComment> for super::NewComment {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: NewComment,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    body: value.body?,
+                    pane: value.pane?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::NewComment> for NewComment {
+            fn from(value: super::NewComment) -> Self {
+                Self {
+                    body: Ok(value.body),
+                    pane: Ok(value.pane),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
+        pub struct NewInstruction {
+            body: ::std::result::Result<::std::string::String, ::std::string::String>,
+        }
+        impl ::std::default::Default for NewInstruction {
+            fn default() -> Self {
+                Self {
+                    body: Err("no value supplied for body".to_string()),
+                }
+            }
+        }
+        impl NewInstruction {
+            pub fn body<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::string::String>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.body = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for body: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<NewInstruction> for super::NewInstruction {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: NewInstruction,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self { body: value.body? })
+            }
+        }
+        impl ::std::convert::From<super::NewInstruction> for NewInstruction {
+            fn from(value: super::NewInstruction) -> Self {
+                Self {
+                    body: Ok(value.body),
                 }
             }
         }
@@ -1381,214 +1750,6 @@ pub mod types {
                 Self {
                     dir: Ok(value.dir),
                     name: Ok(value.name),
-                }
-            }
-        }
-        #[derive(Clone, Debug)]
-        pub struct Note {
-            body: ::std::result::Result<::std::string::String, ::std::string::String>,
-            created_at: ::std::result::Result<::std::string::String, ::std::string::String>,
-            id: ::std::result::Result<agentdeck_core::NoteId, ::std::string::String>,
-            read_at: ::std::result::Result<
-                ::std::option::Option<::std::string::String>,
-                ::std::string::String,
-            >,
-            read_by_pane: ::std::result::Result<
-                ::std::option::Option<agentdeck_core::PaneId>,
-                ::std::string::String,
-            >,
-            task_id: ::std::result::Result<
-                ::std::option::Option<agentdeck_core::TaskId>,
-                ::std::string::String,
-            >,
-            workspace_id: ::std::result::Result<
-                ::std::option::Option<agentdeck_core::WorkspaceId>,
-                ::std::string::String,
-            >,
-        }
-        impl ::std::default::Default for Note {
-            fn default() -> Self {
-                Self {
-                    body: Err("no value supplied for body".to_string()),
-                    created_at: Err("no value supplied for created_at".to_string()),
-                    id: Err("no value supplied for id".to_string()),
-                    read_at: Ok(Default::default()),
-                    read_by_pane: Ok(Default::default()),
-                    task_id: Ok(Default::default()),
-                    workspace_id: Ok(Default::default()),
-                }
-            }
-        }
-        impl Note {
-            pub fn body<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::string::String>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.body = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for body: {e}"));
-                self
-            }
-            pub fn created_at<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::string::String>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.created_at = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for created_at: {e}"));
-                self
-            }
-            pub fn id<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<agentdeck_core::NoteId>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.id = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for id: {e}"));
-                self
-            }
-            pub fn read_at<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::option::Option<::std::string::String>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.read_at = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for read_at: {e}"));
-                self
-            }
-            pub fn read_by_pane<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::PaneId>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.read_by_pane = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for read_by_pane: {e}"));
-                self
-            }
-            pub fn task_id<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::TaskId>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.task_id = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for task_id: {e}"));
-                self
-            }
-            pub fn workspace_id<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::WorkspaceId>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.workspace_id = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for workspace_id: {e}"));
-                self
-            }
-        }
-        impl ::std::convert::TryFrom<Note> for super::Note {
-            type Error = super::error::ConversionError;
-            fn try_from(value: Note) -> ::std::result::Result<Self, super::error::ConversionError> {
-                Ok(Self {
-                    body: value.body?,
-                    created_at: value.created_at?,
-                    id: value.id?,
-                    read_at: value.read_at?,
-                    read_by_pane: value.read_by_pane?,
-                    task_id: value.task_id?,
-                    workspace_id: value.workspace_id?,
-                })
-            }
-        }
-        impl ::std::convert::From<super::Note> for Note {
-            fn from(value: super::Note) -> Self {
-                Self {
-                    body: Ok(value.body),
-                    created_at: Ok(value.created_at),
-                    id: Ok(value.id),
-                    read_at: Ok(value.read_at),
-                    read_by_pane: Ok(value.read_by_pane),
-                    task_id: Ok(value.task_id),
-                    workspace_id: Ok(value.workspace_id),
-                }
-            }
-        }
-        #[derive(Clone, Debug)]
-        pub struct NotePatch {
-            body: ::std::result::Result<
-                ::std::option::Option<::std::string::String>,
-                ::std::string::String,
-            >,
-            read: ::std::result::Result<::std::option::Option<bool>, ::std::string::String>,
-            read_by_pane: ::std::result::Result<
-                ::std::option::Option<agentdeck_core::PaneId>,
-                ::std::string::String,
-            >,
-        }
-        impl ::std::default::Default for NotePatch {
-            fn default() -> Self {
-                Self {
-                    body: Ok(Default::default()),
-                    read: Ok(Default::default()),
-                    read_by_pane: Ok(Default::default()),
-                }
-            }
-        }
-        impl NotePatch {
-            pub fn body<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::option::Option<::std::string::String>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.body = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for body: {e}"));
-                self
-            }
-            pub fn read<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::option::Option<bool>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.read = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for read: {e}"));
-                self
-            }
-            pub fn read_by_pane<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::PaneId>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.read_by_pane = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for read_by_pane: {e}"));
-                self
-            }
-        }
-        impl ::std::convert::TryFrom<NotePatch> for super::NotePatch {
-            type Error = super::error::ConversionError;
-            fn try_from(
-                value: NotePatch,
-            ) -> ::std::result::Result<Self, super::error::ConversionError> {
-                Ok(Self {
-                    body: value.body?,
-                    read: value.read?,
-                    read_by_pane: value.read_by_pane?,
-                })
-            }
-        }
-        impl ::std::convert::From<super::NotePatch> for NotePatch {
-            fn from(value: super::NotePatch) -> Self {
-                Self {
-                    body: Ok(value.body),
-                    read: Ok(value.read),
-                    read_by_pane: Ok(value.read_by_pane),
                 }
             }
         }
@@ -2368,6 +2529,7 @@ pub mod types {
             >,
             status: ::std::result::Result<agentdeck_core::TaskStatus, ::std::string::String>,
             title: ::std::result::Result<::std::string::String, ::std::string::String>,
+            unseen_agent_comments: ::std::result::Result<u32, ::std::string::String>,
             updated_at: ::std::result::Result<::std::string::String, ::std::string::String>,
             workspace_id: ::std::result::Result<
                 ::std::option::Option<agentdeck_core::WorkspaceId>,
@@ -2385,6 +2547,9 @@ pub mod types {
                     pr: Ok(Default::default()),
                     status: Err("no value supplied for status".to_string()),
                     title: Err("no value supplied for title".to_string()),
+                    unseen_agent_comments: Err(
+                        "no value supplied for unseen_agent_comments".to_string()
+                    ),
                     updated_at: Err("no value supplied for updated_at".to_string()),
                     workspace_id: Ok(Default::default()),
                 }
@@ -2471,6 +2636,16 @@ pub mod types {
                     .map_err(|e| format!("error converting supplied value for title: {e}"));
                 self
             }
+            pub fn unseen_agent_comments<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<u32>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.unseen_agent_comments = value.try_into().map_err(|e| {
+                    format!("error converting supplied value for unseen_agent_comments: {e}")
+                });
+                self
+            }
             pub fn updated_at<T>(mut self, value: T) -> Self
             where
                 T: ::std::convert::TryInto<::std::string::String>,
@@ -2504,6 +2679,7 @@ pub mod types {
                     pr: value.pr?,
                     status: value.status?,
                     title: value.title?,
+                    unseen_agent_comments: value.unseen_agent_comments?,
                     updated_at: value.updated_at?,
                     workspace_id: value.workspace_id?,
                 })
@@ -2520,6 +2696,7 @@ pub mod types {
                     pr: Ok(value.pr),
                     status: Ok(value.status),
                     title: Ok(value.title),
+                    unseen_agent_comments: Ok(value.unseen_agent_comments),
                     updated_at: Ok(value.updated_at),
                     workspace_id: Ok(value.workspace_id),
                 }
@@ -2908,6 +3085,21 @@ impl ClientInfo<()> for Client {
 }
 impl ClientHooks<()> for &Client {}
 impl Client {
+    ///Deletes a comment
+    ///
+    ///Sends a `DELETE` request to `/v1/comments/{id}`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///```ignore
+    ///let response = client.comment_delete()
+    ///    .id(id)
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn comment_delete(&self) -> builder::CommentDelete<'_> {
+        builder::CommentDelete::new(self)
+    }
     ///The daemon's version and uptime
     ///
     ///Sends a `GET` request to `/v1/health`
@@ -2920,77 +3112,43 @@ impl Client {
     pub fn health(&self) -> builder::Health<'_> {
         builder::Health::new(self)
     }
-    ///The notes matching every filter given, oldest first
+    ///Deletes an instruction
     ///
-    ///Sends a `GET` request to `/v1/notes`
-    ///
-    ///Arguments:
-    ///- `task`: Only notes on this task.
-    ///- `unread`: `true`: only unread notes; `false`: only read ones.
-    ///- `workspace`: Only notes on this workspace.
-    ///```ignore
-    ///let response = client.note_list()
-    ///    .task(task)
-    ///    .unread(unread)
-    ///    .workspace(workspace)
-    ///    .send()
-    ///    .await;
-    ///```
-    pub fn note_list(&self) -> builder::NoteList<'_> {
-        builder::NoteList::new(self)
-    }
-    ///Leaves a note on a workspace or a task. A note on a task with a live agent pane is typed
-    ///
-    ///into the newest such pane once it is idle or done, and marked read then (spec §9).
-    ///
-    ///Sends a `POST` request to `/v1/notes`
-    ///
-    ///```ignore
-    ///let response = client.note_create()
-    ///    .body(body)
-    ///    .send()
-    ///    .await;
-    ///```
-    pub fn note_create(&self) -> builder::NoteCreate<'_> {
-        builder::NoteCreate::new(self)
-    }
-    ///Deletes a note
-    ///
-    ///Sends a `DELETE` request to `/v1/notes/{id}`
+    ///Sends a `DELETE` request to `/v1/instructions/{id}`
     ///
     ///Arguments:
     ///- `id`: The entity's id.
     ///```ignore
-    ///let response = client.note_delete()
+    ///let response = client.instruction_delete()
     ///    .id(id)
     ///    .send()
     ///    .await;
     ///```
-    pub fn note_delete(&self) -> builder::NoteDelete<'_> {
-        builder::NoteDelete::new(self)
+    pub fn instruction_delete(&self) -> builder::InstructionDelete<'_> {
+        builder::InstructionDelete::new(self)
     }
-    ///Edits a note, or marks it read or unread
+    ///Edits an instruction
     ///
-    ///Sends a `PATCH` request to `/v1/notes/{id}`
+    ///Sends a `PATCH` request to `/v1/instructions/{id}`
     ///
     ///Arguments:
     ///- `id`: The entity's id.
     ///- `body`
     ///```ignore
-    ///let response = client.note_update()
+    ///let response = client.instruction_update()
     ///    .id(id)
     ///    .body(body)
     ///    .send()
     ///    .await;
     ///```
-    pub fn note_update(&self) -> builder::NoteUpdate<'_> {
-        builder::NoteUpdate::new(self)
+    pub fn instruction_update(&self) -> builder::InstructionUpdate<'_> {
+        builder::InstructionUpdate::new(self)
     }
     ///Spawns a pane in a tab and starts its process (spec §6). The caller places the pane in
     ///
     ///the tab's layout.
     ///
-    ///`claude` and `codex` panes start with a launch prompt: the linked task's title and body, then the unread notes on the task and on the pane's workspace, which are then marked read by the pane. Claude Code starts on a session id agentdeck chooses; a Codex pane's is found once Codex writes its session file, and `session_id` is set then.
+    ///`claude` and `codex` panes start with a launch prompt: the linked task's title and body, then every instruction for the pane's workspace and the task's comments no agent has had yet, which are then marked delivered to the pane. Claude Code starts on a session id agentdeck chooses; a Codex pane's is found once Codex writes its session file, and `session_id` is set then.
     ///
     ///Sends a `POST` request to `/v1/panes`
     ///
@@ -3178,7 +3336,7 @@ impl Client {
     pub fn task_get(&self) -> builder::TaskGet<'_> {
         builder::TaskGet::new(self)
     }
-    ///Deletes a task and its notes
+    ///Deletes a task and its comments
     ///
     ///Sends a `DELETE` request to `/v1/tasks/{id}`
     ///
@@ -3209,6 +3367,57 @@ impl Client {
     ///```
     pub fn task_update(&self) -> builder::TaskUpdate<'_> {
         builder::TaskUpdate::new(self)
+    }
+    ///A task's comments, oldest first
+    ///
+    ///Sends a `GET` request to `/v1/tasks/{id}/comments`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///```ignore
+    ///let response = client.comment_list()
+    ///    .id(id)
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn comment_list(&self) -> builder::CommentList<'_> {
+        builder::CommentList::new(self)
+    }
+    ///Adds a comment to a task. With `pane`, it is that pane's agent's and is never delivered
+    ///
+    ///Without it, it is the user's: typed into the task's newest live agent pane once that pane is idle or done, or else carried by the task's next launch prompt (spec §9).
+    ///
+    ///Sends a `POST` request to `/v1/tasks/{id}/comments`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///- `body`
+    ///```ignore
+    ///let response = client.comment_create()
+    ///    .id(id)
+    ///    .body(body)
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn comment_create(&self) -> builder::CommentCreate<'_> {
+        builder::CommentCreate::new(self)
+    }
+    ///Marks every agent comment on a task seen by the user: the GUI does this when the user
+    ///
+    ///opens the task, which clears its "new from agent" dot.
+    ///
+    ///Sends a `POST` request to `/v1/tasks/{id}/comments/seen`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///```ignore
+    ///let response = client.comment_seen()
+    ///    .id(id)
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn comment_seen(&self) -> builder::CommentSeen<'_> {
+        builder::CommentSeen::new(self)
     }
     ///Every workspace, archived ones included, oldest first
     ///
@@ -3286,7 +3495,7 @@ impl Client {
     pub fn workspace_update(&self) -> builder::WorkspaceUpdate<'_> {
         builder::WorkspaceUpdate::new(self)
     }
-    ///Archives a workspace; its tasks, notes and dir are kept. Refused (409 `panes_running`) while
+    ///Archives a workspace; its tasks, instructions and dir are kept. Refused (409 `panes_running`) while
     ///
     ///any of its panes runs.
     ///
@@ -3317,6 +3526,38 @@ impl Client {
     ///```
     pub fn workspace_dirty(&self) -> builder::WorkspaceDirty<'_> {
         builder::WorkspaceDirty::new(self)
+    }
+    ///A workspace's instructions, oldest first
+    ///
+    ///Sends a `GET` request to `/v1/workspaces/{id}/instructions`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///```ignore
+    ///let response = client.instruction_list()
+    ///    .id(id)
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn instruction_list(&self) -> builder::InstructionList<'_> {
+        builder::InstructionList::new(self)
+    }
+    ///Adds an instruction to a workspace. Every launch prompt there carries it from now on
+    ///
+    ///Sends a `POST` request to `/v1/workspaces/{id}/instructions`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///- `body`
+    ///```ignore
+    ///let response = client.instruction_create()
+    ///    .id(id)
+    ///    .body(body)
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn instruction_create(&self) -> builder::InstructionCreate<'_> {
+        builder::InstructionCreate::new(self)
     }
     ///A workspace's tabs, in position order
     ///
@@ -3375,6 +3616,73 @@ pub mod builder {
         ByteStream, ClientHooks, ClientInfo, Error, OperationInfo, RequestBuilderExt,
         ResponseValue, encode_path,
     };
+    ///Builder for [`Client::comment_delete`]
+    ///
+    ///[`Client::comment_delete`]: super::Client::comment_delete
+    #[derive(Debug, Clone)]
+    pub struct CommentDelete<'a> {
+        client: &'a super::Client,
+        id: Result<agentdeck_core::CommentId, String>,
+    }
+    impl<'a> CommentDelete<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self {
+                client: client,
+                id: Err("id was not initialized".to_string()),
+            }
+        }
+        pub fn id<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<agentdeck_core::CommentId>,
+        {
+            self.id = value.try_into().map_err(|_| {
+                "conversion to `agentdeck_core :: CommentId` for id failed".to_string()
+            });
+            self
+        }
+        ///Sends a `DELETE` request to `/v1/comments/{id}`
+        pub async fn send(self) -> Result<ResponseValue<()>, Error<types::Error>> {
+            let Self { client, id } = self;
+            let id = id.map_err(Error::InvalidRequest)?;
+            let url = format!(
+                "{}/v1/comments/{}",
+                client.baseurl,
+                encode_path(&id.to_string()),
+            );
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .delete(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "comment_delete",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                204u16 => Ok(ResponseValue::empty(response)),
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
     ///Builder for [`Client::health`]
     ///
     ///[`Client::health`]: super::Client::health
@@ -3424,188 +3732,15 @@ pub mod builder {
             }
         }
     }
-    ///Builder for [`Client::note_list`]
+    ///Builder for [`Client::instruction_delete`]
     ///
-    ///[`Client::note_list`]: super::Client::note_list
+    ///[`Client::instruction_delete`]: super::Client::instruction_delete
     #[derive(Debug, Clone)]
-    pub struct NoteList<'a> {
+    pub struct InstructionDelete<'a> {
         client: &'a super::Client,
-        task: Result<Option<agentdeck_core::TaskId>, String>,
-        unread: Result<Option<bool>, String>,
-        workspace: Result<Option<agentdeck_core::WorkspaceId>, String>,
+        id: Result<agentdeck_core::InstructionId, String>,
     }
-    impl<'a> NoteList<'a> {
-        pub fn new(client: &'a super::Client) -> Self {
-            Self {
-                client: client,
-                task: Ok(None),
-                unread: Ok(None),
-                workspace: Ok(None),
-            }
-        }
-        pub fn task<V>(mut self, value: V) -> Self
-        where
-            V: std::convert::TryInto<agentdeck_core::TaskId>,
-        {
-            self.task = value.try_into().map(Some).map_err(|_| {
-                "conversion to `agentdeck_core :: TaskId` for task failed".to_string()
-            });
-            self
-        }
-        pub fn unread<V>(mut self, value: V) -> Self
-        where
-            V: std::convert::TryInto<bool>,
-        {
-            self.unread = value
-                .try_into()
-                .map(Some)
-                .map_err(|_| "conversion to `bool` for unread failed".to_string());
-            self
-        }
-        pub fn workspace<V>(mut self, value: V) -> Self
-        where
-            V: std::convert::TryInto<agentdeck_core::WorkspaceId>,
-        {
-            self.workspace = value.try_into().map(Some).map_err(|_| {
-                "conversion to `agentdeck_core :: WorkspaceId` for workspace failed".to_string()
-            });
-            self
-        }
-        ///Sends a `GET` request to `/v1/notes`
-        pub async fn send(
-            self,
-        ) -> Result<ResponseValue<::std::vec::Vec<types::Note>>, Error<types::Error>> {
-            let Self {
-                client,
-                task,
-                unread,
-                workspace,
-            } = self;
-            let task = task.map_err(Error::InvalidRequest)?;
-            let unread = unread.map_err(Error::InvalidRequest)?;
-            let workspace = workspace.map_err(Error::InvalidRequest)?;
-            let url = format!("{}/v1/notes", client.baseurl,);
-            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
-            header_map.append(
-                ::reqwest::header::HeaderName::from_static("api-version"),
-                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
-            );
-            #[allow(unused_mut)]
-            let mut request = client
-                .client
-                .get(url)
-                .header(
-                    ::reqwest::header::ACCEPT,
-                    ::reqwest::header::HeaderValue::from_static("application/json"),
-                )
-                .query(&progenitor_client::QueryParam::new("task", &task))
-                .query(&progenitor_client::QueryParam::new("unread", &unread))
-                .query(&progenitor_client::QueryParam::new("workspace", &workspace))
-                .headers(header_map)
-                .build()?;
-            let info = OperationInfo {
-                operation_id: "note_list",
-            };
-            client.pre(&mut request, &info).await?;
-            let result = client.exec(request, &info).await;
-            client.post(&result, &info).await?;
-            let response = result?;
-            match response.status().as_u16() {
-                200u16 => ResponseValue::from_response(response).await,
-                400u16..=499u16 => Err(Error::ErrorResponse(
-                    ResponseValue::from_response(response).await?,
-                )),
-                500u16..=599u16 => Err(Error::ErrorResponse(
-                    ResponseValue::from_response(response).await?,
-                )),
-                _ => Err(Error::UnexpectedResponse(response)),
-            }
-        }
-    }
-    ///Builder for [`Client::note_create`]
-    ///
-    ///[`Client::note_create`]: super::Client::note_create
-    #[derive(Debug, Clone)]
-    pub struct NoteCreate<'a> {
-        client: &'a super::Client,
-        body: Result<types::builder::NewNote, String>,
-    }
-    impl<'a> NoteCreate<'a> {
-        pub fn new(client: &'a super::Client) -> Self {
-            Self {
-                client: client,
-                body: Ok(::std::default::Default::default()),
-            }
-        }
-        pub fn body<V>(mut self, value: V) -> Self
-        where
-            V: std::convert::TryInto<types::NewNote>,
-            <V as std::convert::TryInto<types::NewNote>>::Error: std::fmt::Display,
-        {
-            self.body = value
-                .try_into()
-                .map(From::from)
-                .map_err(|s| format!("conversion to `NewNote` for body failed: {}", s));
-            self
-        }
-        pub fn body_map<F>(mut self, f: F) -> Self
-        where
-            F: std::ops::FnOnce(types::builder::NewNote) -> types::builder::NewNote,
-        {
-            self.body = self.body.map(f);
-            self
-        }
-        ///Sends a `POST` request to `/v1/notes`
-        pub async fn send(self) -> Result<ResponseValue<types::Note>, Error<types::Error>> {
-            let Self { client, body } = self;
-            let body = body
-                .and_then(|v| types::NewNote::try_from(v).map_err(|e| e.to_string()))
-                .map_err(Error::InvalidRequest)?;
-            let url = format!("{}/v1/notes", client.baseurl,);
-            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
-            header_map.append(
-                ::reqwest::header::HeaderName::from_static("api-version"),
-                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
-            );
-            #[allow(unused_mut)]
-            let mut request = client
-                .client
-                .post(url)
-                .header(
-                    ::reqwest::header::ACCEPT,
-                    ::reqwest::header::HeaderValue::from_static("application/json"),
-                )
-                .json(&body)
-                .headers(header_map)
-                .build()?;
-            let info = OperationInfo {
-                operation_id: "note_create",
-            };
-            client.pre(&mut request, &info).await?;
-            let result = client.exec(request, &info).await;
-            client.post(&result, &info).await?;
-            let response = result?;
-            match response.status().as_u16() {
-                201u16 => ResponseValue::from_response(response).await,
-                400u16..=499u16 => Err(Error::ErrorResponse(
-                    ResponseValue::from_response(response).await?,
-                )),
-                500u16..=599u16 => Err(Error::ErrorResponse(
-                    ResponseValue::from_response(response).await?,
-                )),
-                _ => Err(Error::UnexpectedResponse(response)),
-            }
-        }
-    }
-    ///Builder for [`Client::note_delete`]
-    ///
-    ///[`Client::note_delete`]: super::Client::note_delete
-    #[derive(Debug, Clone)]
-    pub struct NoteDelete<'a> {
-        client: &'a super::Client,
-        id: Result<agentdeck_core::NoteId, String>,
-    }
-    impl<'a> NoteDelete<'a> {
+    impl<'a> InstructionDelete<'a> {
         pub fn new(client: &'a super::Client) -> Self {
             Self {
                 client: client,
@@ -3614,19 +3749,19 @@ pub mod builder {
         }
         pub fn id<V>(mut self, value: V) -> Self
         where
-            V: std::convert::TryInto<agentdeck_core::NoteId>,
+            V: std::convert::TryInto<agentdeck_core::InstructionId>,
         {
-            self.id = value
-                .try_into()
-                .map_err(|_| "conversion to `agentdeck_core :: NoteId` for id failed".to_string());
+            self.id = value.try_into().map_err(|_| {
+                "conversion to `agentdeck_core :: InstructionId` for id failed".to_string()
+            });
             self
         }
-        ///Sends a `DELETE` request to `/v1/notes/{id}`
+        ///Sends a `DELETE` request to `/v1/instructions/{id}`
         pub async fn send(self) -> Result<ResponseValue<()>, Error<types::Error>> {
             let Self { client, id } = self;
             let id = id.map_err(Error::InvalidRequest)?;
             let url = format!(
-                "{}/v1/notes/{}",
+                "{}/v1/instructions/{}",
                 client.baseurl,
                 encode_path(&id.to_string()),
             );
@@ -3646,7 +3781,7 @@ pub mod builder {
                 .headers(header_map)
                 .build()?;
             let info = OperationInfo {
-                operation_id: "note_delete",
+                operation_id: "instruction_delete",
             };
             client.pre(&mut request, &info).await?;
             let result = client.exec(request, &info).await;
@@ -3664,16 +3799,16 @@ pub mod builder {
             }
         }
     }
-    ///Builder for [`Client::note_update`]
+    ///Builder for [`Client::instruction_update`]
     ///
-    ///[`Client::note_update`]: super::Client::note_update
+    ///[`Client::instruction_update`]: super::Client::instruction_update
     #[derive(Debug, Clone)]
-    pub struct NoteUpdate<'a> {
+    pub struct InstructionUpdate<'a> {
         client: &'a super::Client,
-        id: Result<agentdeck_core::NoteId, String>,
-        body: Result<types::builder::NotePatch, String>,
+        id: Result<agentdeck_core::InstructionId, String>,
+        body: Result<types::builder::InstructionPatch, String>,
     }
-    impl<'a> NoteUpdate<'a> {
+    impl<'a> InstructionUpdate<'a> {
         pub fn new(client: &'a super::Client) -> Self {
             Self {
                 client: client,
@@ -3683,40 +3818,42 @@ pub mod builder {
         }
         pub fn id<V>(mut self, value: V) -> Self
         where
-            V: std::convert::TryInto<agentdeck_core::NoteId>,
+            V: std::convert::TryInto<agentdeck_core::InstructionId>,
         {
-            self.id = value
-                .try_into()
-                .map_err(|_| "conversion to `agentdeck_core :: NoteId` for id failed".to_string());
+            self.id = value.try_into().map_err(|_| {
+                "conversion to `agentdeck_core :: InstructionId` for id failed".to_string()
+            });
             self
         }
         pub fn body<V>(mut self, value: V) -> Self
         where
-            V: std::convert::TryInto<types::NotePatch>,
-            <V as std::convert::TryInto<types::NotePatch>>::Error: std::fmt::Display,
+            V: std::convert::TryInto<types::InstructionPatch>,
+            <V as std::convert::TryInto<types::InstructionPatch>>::Error: std::fmt::Display,
         {
             self.body = value
                 .try_into()
                 .map(From::from)
-                .map_err(|s| format!("conversion to `NotePatch` for body failed: {}", s));
+                .map_err(|s| format!("conversion to `InstructionPatch` for body failed: {}", s));
             self
         }
         pub fn body_map<F>(mut self, f: F) -> Self
         where
-            F: std::ops::FnOnce(types::builder::NotePatch) -> types::builder::NotePatch,
+            F: std::ops::FnOnce(
+                    types::builder::InstructionPatch,
+                ) -> types::builder::InstructionPatch,
         {
             self.body = self.body.map(f);
             self
         }
-        ///Sends a `PATCH` request to `/v1/notes/{id}`
-        pub async fn send(self) -> Result<ResponseValue<types::Note>, Error<types::Error>> {
+        ///Sends a `PATCH` request to `/v1/instructions/{id}`
+        pub async fn send(self) -> Result<ResponseValue<types::Instruction>, Error<types::Error>> {
             let Self { client, id, body } = self;
             let id = id.map_err(Error::InvalidRequest)?;
             let body = body
-                .and_then(|v| types::NotePatch::try_from(v).map_err(|e| e.to_string()))
+                .and_then(|v| types::InstructionPatch::try_from(v).map_err(|e| e.to_string()))
                 .map_err(Error::InvalidRequest)?;
             let url = format!(
-                "{}/v1/notes/{}",
+                "{}/v1/instructions/{}",
                 client.baseurl,
                 encode_path(&id.to_string()),
             );
@@ -3737,7 +3874,7 @@ pub mod builder {
                 .headers(header_map)
                 .build()?;
             let info = OperationInfo {
-                operation_id: "note_update",
+                operation_id: "instruction_update",
             };
             client.pre(&mut request, &info).await?;
             let result = client.exec(request, &info).await;
@@ -4802,6 +4939,233 @@ pub mod builder {
             }
         }
     }
+    ///Builder for [`Client::comment_list`]
+    ///
+    ///[`Client::comment_list`]: super::Client::comment_list
+    #[derive(Debug, Clone)]
+    pub struct CommentList<'a> {
+        client: &'a super::Client,
+        id: Result<agentdeck_core::TaskId, String>,
+    }
+    impl<'a> CommentList<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self {
+                client: client,
+                id: Err("id was not initialized".to_string()),
+            }
+        }
+        pub fn id<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<agentdeck_core::TaskId>,
+        {
+            self.id = value
+                .try_into()
+                .map_err(|_| "conversion to `agentdeck_core :: TaskId` for id failed".to_string());
+            self
+        }
+        ///Sends a `GET` request to `/v1/tasks/{id}/comments`
+        pub async fn send(
+            self,
+        ) -> Result<ResponseValue<::std::vec::Vec<types::Comment>>, Error<types::Error>> {
+            let Self { client, id } = self;
+            let id = id.map_err(Error::InvalidRequest)?;
+            let url = format!(
+                "{}/v1/tasks/{}/comments",
+                client.baseurl,
+                encode_path(&id.to_string()),
+            );
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .get(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "comment_list",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                200u16 => ResponseValue::from_response(response).await,
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::comment_create`]
+    ///
+    ///[`Client::comment_create`]: super::Client::comment_create
+    #[derive(Debug, Clone)]
+    pub struct CommentCreate<'a> {
+        client: &'a super::Client,
+        id: Result<agentdeck_core::TaskId, String>,
+        body: Result<types::builder::NewComment, String>,
+    }
+    impl<'a> CommentCreate<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self {
+                client: client,
+                id: Err("id was not initialized".to_string()),
+                body: Ok(::std::default::Default::default()),
+            }
+        }
+        pub fn id<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<agentdeck_core::TaskId>,
+        {
+            self.id = value
+                .try_into()
+                .map_err(|_| "conversion to `agentdeck_core :: TaskId` for id failed".to_string());
+            self
+        }
+        pub fn body<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<types::NewComment>,
+            <V as std::convert::TryInto<types::NewComment>>::Error: std::fmt::Display,
+        {
+            self.body = value
+                .try_into()
+                .map(From::from)
+                .map_err(|s| format!("conversion to `NewComment` for body failed: {}", s));
+            self
+        }
+        pub fn body_map<F>(mut self, f: F) -> Self
+        where
+            F: std::ops::FnOnce(types::builder::NewComment) -> types::builder::NewComment,
+        {
+            self.body = self.body.map(f);
+            self
+        }
+        ///Sends a `POST` request to `/v1/tasks/{id}/comments`
+        pub async fn send(self) -> Result<ResponseValue<types::Comment>, Error<types::Error>> {
+            let Self { client, id, body } = self;
+            let id = id.map_err(Error::InvalidRequest)?;
+            let body = body
+                .and_then(|v| types::NewComment::try_from(v).map_err(|e| e.to_string()))
+                .map_err(Error::InvalidRequest)?;
+            let url = format!(
+                "{}/v1/tasks/{}/comments",
+                client.baseurl,
+                encode_path(&id.to_string()),
+            );
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .post(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .json(&body)
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "comment_create",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                201u16 => ResponseValue::from_response(response).await,
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::comment_seen`]
+    ///
+    ///[`Client::comment_seen`]: super::Client::comment_seen
+    #[derive(Debug, Clone)]
+    pub struct CommentSeen<'a> {
+        client: &'a super::Client,
+        id: Result<agentdeck_core::TaskId, String>,
+    }
+    impl<'a> CommentSeen<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self {
+                client: client,
+                id: Err("id was not initialized".to_string()),
+            }
+        }
+        pub fn id<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<agentdeck_core::TaskId>,
+        {
+            self.id = value
+                .try_into()
+                .map_err(|_| "conversion to `agentdeck_core :: TaskId` for id failed".to_string());
+            self
+        }
+        ///Sends a `POST` request to `/v1/tasks/{id}/comments/seen`
+        pub async fn send(self) -> Result<ResponseValue<()>, Error<types::Error>> {
+            let Self { client, id } = self;
+            let id = id.map_err(Error::InvalidRequest)?;
+            let url = format!(
+                "{}/v1/tasks/{}/comments/seen",
+                client.baseurl,
+                encode_path(&id.to_string()),
+            );
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .post(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "comment_seen",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                204u16 => Ok(ResponseValue::empty(response)),
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
     ///Builder for [`Client::workspace_list`]
     ///
     ///[`Client::workspace_list`]: super::Client::workspace_list
@@ -5291,6 +5655,167 @@ pub mod builder {
             let response = result?;
             match response.status().as_u16() {
                 200u16 => ResponseValue::from_response(response).await,
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::instruction_list`]
+    ///
+    ///[`Client::instruction_list`]: super::Client::instruction_list
+    #[derive(Debug, Clone)]
+    pub struct InstructionList<'a> {
+        client: &'a super::Client,
+        id: Result<agentdeck_core::WorkspaceId, String>,
+    }
+    impl<'a> InstructionList<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self {
+                client: client,
+                id: Err("id was not initialized".to_string()),
+            }
+        }
+        pub fn id<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<agentdeck_core::WorkspaceId>,
+        {
+            self.id = value.try_into().map_err(|_| {
+                "conversion to `agentdeck_core :: WorkspaceId` for id failed".to_string()
+            });
+            self
+        }
+        ///Sends a `GET` request to `/v1/workspaces/{id}/instructions`
+        pub async fn send(
+            self,
+        ) -> Result<ResponseValue<::std::vec::Vec<types::Instruction>>, Error<types::Error>>
+        {
+            let Self { client, id } = self;
+            let id = id.map_err(Error::InvalidRequest)?;
+            let url = format!(
+                "{}/v1/workspaces/{}/instructions",
+                client.baseurl,
+                encode_path(&id.to_string()),
+            );
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .get(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "instruction_list",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                200u16 => ResponseValue::from_response(response).await,
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::instruction_create`]
+    ///
+    ///[`Client::instruction_create`]: super::Client::instruction_create
+    #[derive(Debug, Clone)]
+    pub struct InstructionCreate<'a> {
+        client: &'a super::Client,
+        id: Result<agentdeck_core::WorkspaceId, String>,
+        body: Result<types::builder::NewInstruction, String>,
+    }
+    impl<'a> InstructionCreate<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self {
+                client: client,
+                id: Err("id was not initialized".to_string()),
+                body: Ok(::std::default::Default::default()),
+            }
+        }
+        pub fn id<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<agentdeck_core::WorkspaceId>,
+        {
+            self.id = value.try_into().map_err(|_| {
+                "conversion to `agentdeck_core :: WorkspaceId` for id failed".to_string()
+            });
+            self
+        }
+        pub fn body<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<types::NewInstruction>,
+            <V as std::convert::TryInto<types::NewInstruction>>::Error: std::fmt::Display,
+        {
+            self.body = value
+                .try_into()
+                .map(From::from)
+                .map_err(|s| format!("conversion to `NewInstruction` for body failed: {}", s));
+            self
+        }
+        pub fn body_map<F>(mut self, f: F) -> Self
+        where
+            F: std::ops::FnOnce(types::builder::NewInstruction) -> types::builder::NewInstruction,
+        {
+            self.body = self.body.map(f);
+            self
+        }
+        ///Sends a `POST` request to `/v1/workspaces/{id}/instructions`
+        pub async fn send(self) -> Result<ResponseValue<types::Instruction>, Error<types::Error>> {
+            let Self { client, id, body } = self;
+            let id = id.map_err(Error::InvalidRequest)?;
+            let body = body
+                .and_then(|v| types::NewInstruction::try_from(v).map_err(|e| e.to_string()))
+                .map_err(Error::InvalidRequest)?;
+            let url = format!(
+                "{}/v1/workspaces/{}/instructions",
+                client.baseurl,
+                encode_path(&id.to_string()),
+            );
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .post(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .json(&body)
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "instruction_create",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                201u16 => ResponseValue::from_response(response).await,
                 400u16..=499u16 => Err(Error::ErrorResponse(
                     ResponseValue::from_response(response).await?,
                 )),

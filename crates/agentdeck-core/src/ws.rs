@@ -156,8 +156,10 @@ pub enum Entity {
     Pane,
     /// `/v1/tasks/{id}`.
     Task,
-    /// `/v1/notes/{id}`.
-    Note,
+    /// A task comment: `/v1/tasks/{task}/comments`.
+    Comment,
+    /// A workspace instruction: `/v1/workspaces/{workspace}/instructions`.
+    Instruction,
     /// `/v1/prs/status`: a PR sync began, read a page or ended. Its id is always `status`.
     PrSync,
 }
@@ -297,6 +299,20 @@ mod tests {
                         id: "abc".into(),
                     },
                     json!({"t": "changed", "entity": "task", "id": "abc"}),
+                ),
+                (
+                    ServerMessage::Changed {
+                        entity: Entity::Comment,
+                        id: "abc".into(),
+                    },
+                    json!({"t": "changed", "entity": "comment", "id": "abc"}),
+                ),
+                (
+                    ServerMessage::Changed {
+                        entity: Entity::Instruction,
+                        id: "abc".into(),
+                    },
+                    json!({"t": "changed", "entity": "instruction", "id": "abc"}),
                 ),
                 (
                     ServerMessage::Lagged { channel: 3 },

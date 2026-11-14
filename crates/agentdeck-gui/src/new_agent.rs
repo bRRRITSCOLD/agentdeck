@@ -98,20 +98,22 @@ pub fn repos_in(root: &str) -> Vec<String> {
         .collect()
 }
 
-/// The task field's description: what the launch prompt carries (spec §6), from the task's
-/// title and the unread notes on it and on the workspace.
-pub fn prompt_hint(task: bool, unread_notes: usize) -> String {
-    let notes = match unread_notes {
+/// The task field's description: what the launch prompt carries (spec §6), from whether a
+/// task is picked (its title, body and new comments go in) and the workspace's instructions.
+pub fn prompt_hint(task: bool, instructions: usize) -> String {
+    let instructions = match instructions {
         0 => None,
-        1 => Some("1 unread note".to_owned()),
-        n => Some(format!("{n} unread notes")),
+        1 => Some("1 instruction".to_owned()),
+        n => Some(format!("{n} instructions")),
     };
-    match (task, notes) {
-        (true, Some(notes)) => format!("The launch prompt carries the task title and {notes}."),
-        (true, None) => "The launch prompt carries the task title.".to_owned(),
-        (false, Some(notes)) => format!("The launch prompt carries {notes}."),
+    match (task, instructions) {
+        (true, Some(instructions)) => {
+            format!("The launch prompt carries the task, its new comments and {instructions}.")
+        }
+        (true, None) => "The launch prompt carries the task and its new comments.".to_owned(),
+        (false, Some(instructions)) => format!("The launch prompt carries {instructions}."),
         (false, None) => {
-            "No task and no unread notes, so the agent starts without a prompt.".to_owned()
+            "No task and no instructions, so the agent starts without a prompt.".to_owned()
         }
     }
 }
@@ -214,16 +216,13 @@ impl NewAgentDialog {
             .collect()
     }
 
-    /// Unread notes on the workspace and, with one picked, on the task.
-    fn unread_notes(&self) -> usize {
+    /// The workspace's instructions, which every launch prompt there carries.
+    fn instructions(&self) -> usize {
         let Some(target) = &self.target else {
             return 0;
         };
-        (self.snapshot.notes.iter())
-            .filter(|n| n.read_at.is_none())
-            .filter(|n| {
-                n.workspace_id == Some(target.id) || (n.task_id.is_some() && n.task_id == self.task)
-            })
+        (self.snapshot.instructions.iter())
+            .filter(|i| i.workspace_id == target.id)
             .count()
     }
 
@@ -315,7 +314,7 @@ impl Render for NewAgentDialog {
             .on_value_change(cx.listener(|this, value: &SharedString, _, cx| {
                 this.set_task(value.parse().ok(), cx);
             }));
-        let hint = prompt_hint(self.task.is_some(), self.unread_notes());
+        let hint = prompt_hint(self.task.is_some(), self.instructions());
         Dialog::new("new-agent")
             .handle(self.handle.clone())
             .content(
@@ -371,7 +370,7 @@ mod tests {
 
     use super::*;
     use crate::api::fake::FakeApi;
-    use crate::overview::fixtures::{id, task, workspace, workspace_note};
+    use crate::overview::fixtures::{id, instruction, task, workspace};
 
     struct Harness {
         api: Arc<FakeApi>,
@@ -381,7 +380,7 @@ mod tests {
     }
 
     /// A dialog opened on workspace 1 (`/w/tabs`, with repo `ts-packages`), whose tasks are
-    /// 10 (todo) and 11 (done), with an unread note on the workspace.
+    /// 10 (todo) and 11 (done), with an instruction for the workspace.
     fn open(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
         cx.update(brrritscold_core_gpui::init);
         let api = Arc::new(FakeApi::default());
@@ -410,7 +409,7 @@ mod tests {
                     ..task(11, TaskKind::Plain, Some(ws.id))
                 },
             ],
-            notes: vec![workspace_note(20, ws.id)],
+            instructions: vec![instruction(20, ws.id)],
             workspaces: vec![ws],
             ..Snapshot::default()
         };
@@ -497,10 +496,10 @@ mod tests {
         }
 
         #[gpui::test]
-        fn should_count_the_workspaces_unread_notes_for_the_prompt(cx: &mut TestAppContext) {
+        fn should_count_the_workspaces_instructions_for_the_prompt(cx: &mut TestAppContext) {
             let (harness, cx) = open(cx);
 
-            assert_eq!(harness.dialog.read_with(cx, |d, _| d.unread_notes()), 1);
+            assert_eq!(harness.dialog.read_with(cx, |d, _| d.instructions()), 1);
             cx.update(|window, cx| window.draw(cx).clear(cx));
         }
 
@@ -538,18 +537,18 @@ mod tests {
         use super::*;
 
         #[test]
-        fn should_say_the_task_title_and_how_many_notes() {
+        fn should_say_the_task_and_how_many_instructions() {
             assert_eq!(
                 prompt_hint(true, 2),
-                "The launch prompt carries the task title and 2 unread notes."
+                "The launch prompt carries the task, its new comments and 2 instructions."
             );
             assert_eq!(
                 prompt_hint(true, 0),
-                "The launch prompt carries the task title."
+                "The launch prompt carries the task and its new comments."
             );
             assert_eq!(
                 prompt_hint(false, 1),
-                "The launch prompt carries 1 unread note."
+                "The launch prompt carries 1 instruction."
             );
         }
 
@@ -557,7 +556,7 @@ mod tests {
         fn should_say_when_there_is_no_prompt() {
             assert_eq!(
                 prompt_hint(false, 0),
-                "No task and no unread notes, so the agent starts without a prompt."
+                "No task and no instructions, so the agent starts without a prompt."
             );
         }
     }

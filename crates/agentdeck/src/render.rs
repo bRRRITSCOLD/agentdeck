@@ -1,8 +1,9 @@
 //! Human-readable output. `--json` prints the API's own objects instead.
 
 use agentdeck_client::types::{
-    DirtyReport, Note, Pane, PrSyncStage, PrSyncStatus, Task, Workspace,
+    Comment, DirtyReport, Instruction, Pane, PrSyncStage, PrSyncStatus, Task, Workspace,
 };
+use agentdeck_core::CommentAuthor;
 
 /// Left-aligned columns two spaces apart, under a header row; `empty` when there are no rows.
 fn table<const N: usize>(headers: [&str; N], rows: &[[String; N]], empty: &str) -> String {
@@ -126,48 +127,51 @@ pub fn pane(pane: &Pane) -> String {
     out
 }
 
-/// Where a note is: `ws <id>` or `task <id>`.
-fn note_target(note: &Note) -> String {
-    match (note.workspace_id, note.task_id) {
-        (Some(ws), _) => format!("ws {ws}"),
-        (None, Some(task)) => format!("task {task}"),
-        (None, None) => String::new(),
-    }
-}
-
-/// `agentdeck note ls`.
-pub fn notes(notes: &[Note]) -> String {
-    let rows: Vec<[String; 4]> = notes
+/// `agentdeck comment ls`: who wrote each, whether one of yours has reached an agent, and
+/// its first line.
+pub fn comments(comments: &[Comment]) -> String {
+    let rows: Vec<[String; 4]> = comments
         .iter()
-        .map(|note| {
-            let read = if note.read_at.is_some() {
-                "read"
-            } else {
-                "unread"
+        .map(|comment| {
+            let (from, status) = match comment.author {
+                CommentAuthor::User => {
+                    let status = if comment.delivered_at.is_some() {
+                        "delivered"
+                    } else {
+                        "waiting"
+                    };
+                    ("you", status)
+                }
+                CommentAuthor::Agent => (comment.author_agent.map_or("agent", |a| a.as_str()), ""),
             };
             [
-                note.id.to_string(),
-                read.to_owned(),
-                note_target(note),
-                first_line(&note.body),
+                comment.id.to_string(),
+                from.to_owned(),
+                status.to_owned(),
+                first_line(&comment.body),
             ]
         })
         .collect();
-    table(["ID", "READ", "ON", "BODY"], &rows, "no notes")
+    table(["ID", "FROM", "STATUS", "BODY"], &rows, "no comments")
 }
 
-/// A note after `note add`.
-pub fn note_created(note: &Note) -> String {
-    format!("{}  {}\n", note.id, note_target(note))
+/// A comment after `comment add`.
+pub fn comment_created(comment: &Comment) -> String {
+    format!("{}  task {}\n", comment.id, comment.task_id)
 }
 
-/// `agentdeck note read`: the message itself.
-pub fn note_body(note: &Note) -> String {
-    let mut body = note.body.clone();
-    if !body.ends_with('\n') {
-        body.push('\n');
-    }
-    body
+/// `agentdeck instruction ls`.
+pub fn instructions(instructions: &[Instruction]) -> String {
+    let rows: Vec<[String; 2]> = instructions
+        .iter()
+        .map(|instruction| [instruction.id.to_string(), first_line(&instruction.body)])
+        .collect();
+    table(["ID", "BODY"], &rows, "no instructions")
+}
+
+/// An instruction after `instruction add` or `edit`.
+pub fn instruction_saved(instruction: &Instruction) -> String {
+    format!("{}  ws {}\n", instruction.id, instruction.workspace_id)
 }
 
 /// `agentdeck pr sync` and `pr status`.
@@ -211,7 +215,7 @@ pub fn dirty(report: &DirtyReport) -> String {
 #[cfg(test)]
 mod tests {
     use agentdeck_client::types::{DirtyRepo, GhLogin};
-    use agentdeck_core::{TaskKind, TaskStatus};
+    use agentdeck_core::{Agent, TaskKind, TaskStatus};
 
     use super::*;
 
@@ -236,6 +240,7 @@ mod tests {
             id: "0190a1b2-c3d4-7e5f-8a9b-000000000002".parse().unwrap(),
             kind: TaskKind::Plain,
             pr: None,
+            unseen_agent_comments: 0,
             status: TaskStatus::Doing,
             title: title.into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
@@ -292,26 +297,76 @@ mod tests {
         }
     }
 
-    mod notes {
+    mod comments {
         use super::*;
+
+        fn comment(author: CommentAuthor, agent: Option<Agent>, delivered: bool) -> Comment {
+            Comment {
+                author,
+                author_agent: agent,
+                author_pane: None,
+                body: "first\nsecond".into(),
+                created_at: "2026-01-01T00:00:00Z".into(),
+                delivered_at: delivered.then(|| "2026-01-01T01:00:00Z".into()),
+                delivered_to_pane: None,
+                id: "0190a1b2-c3d4-7e5f-8a9b-000000000003".parse().unwrap(),
+                seen_at: None,
+                task_id: "0190a1b2-c3d4-7e5f-8a9b-000000000001".parse().unwrap(),
+            }
+        }
+
+        #[test]
+        fn should_say_who_wrote_it_and_whether_an_agent_has_it() {
+            let out = comments(&[
+                comment(CommentAuthor::User, None, false),
+                comment(CommentAuthor::User, None, true),
+                comment(CommentAuthor::Agent, Some(Agent::Codex), false),
+                comment(CommentAuthor::Agent, None, false),
+            ]);
+
+            let lines: Vec<&str> = out.lines().collect();
+            assert!(lines[0].starts_with("ID"), "{out}");
+            assert!(lines[1].contains("you    waiting"), "{out}");
+            assert!(lines[2].contains("you    delivered"), "{out}");
+            assert!(lines[3].contains("codex"), "{out}");
+            assert!(!lines[3].contains("waiting"), "{out}");
+            assert!(lines[4].contains("agent"), "{out}");
+        }
 
         #[test]
         fn should_show_only_the_first_line_of_a_body() {
-            let note = Note {
+            let out = comments(&[comment(CommentAuthor::User, None, false)]);
+
+            assert!(out.contains("first …"), "{out}");
+            assert!(!out.contains("second"), "{out}");
+        }
+
+        #[test]
+        fn should_say_when_there_are_none() {
+            assert_eq!(comments(&[]), "no comments\n");
+        }
+    }
+
+    mod instructions {
+        use super::*;
+
+        #[test]
+        fn should_list_each_id_and_first_line() {
+            let instruction = Instruction {
                 body: "first\nsecond".into(),
                 created_at: "2026-01-01T00:00:00Z".into(),
                 id: "0190a1b2-c3d4-7e5f-8a9b-000000000003".parse().unwrap(),
-                read_at: None,
-                read_by_pane: None,
-                task_id: None,
-                workspace_id: Some("0190a1b2-c3d4-7e5f-8a9b-000000000001".parse().unwrap()),
+                updated_at: "2026-01-01T00:00:00Z".into(),
+                workspace_id: "0190a1b2-c3d4-7e5f-8a9b-000000000001".parse().unwrap(),
             };
 
-            let out = notes(&[note]);
+            let out = instructions(&[instruction]);
 
-            assert!(out.contains("unread"), "{out}");
-            assert!(out.contains("first …"), "{out}");
-            assert!(!out.contains("second"), "{out}");
+            assert_eq!(
+                out,
+                "ID                                    BODY\n\
+                 0190a1b2-c3d4-7e5f-8a9b-000000000003  first …\n"
+            );
         }
     }
 

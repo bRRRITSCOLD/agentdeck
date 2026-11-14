@@ -28,10 +28,10 @@ mod agentdeck_mcp {
         assert_eq!(
             names,
             [
-                "note_create",
-                "note_mark_read",
-                "notes_list",
+                "instructions_list",
                 "prs_status",
+                "task_comment",
+                "task_comments",
                 "task_create",
                 "task_get",
                 "task_update",
@@ -92,26 +92,61 @@ mod agentdeck_mcp {
         }
 
         #[test]
-        fn should_leave_list_and_mark_notes_read_as_the_callers_pane() {
+        fn should_comment_on_a_task_as_the_callers_pane_and_list_its_comments() {
             let env = TestEnv::new();
             let ws = env.workspace("web");
-            let pane = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
+            let task = env.json(&["task", "add", "Fix the build", "--ws", "web"]);
+            env.ok(&[
+                "comment",
+                "add",
+                "look at the logs",
+                "--task",
+                text(&task, "id"),
+            ]);
+            let pane = env.json(&["agent", "new", "--ws", "web"]);
             let mut mcp = McpClient::start(
                 &env,
                 &[
                     ("AGENTDECK_WORKSPACE", text(&ws, "id")),
-                    ("AGENTDECK_PANE", pane),
+                    ("AGENTDECK_PANE", text(&pane, "id")),
                 ],
             );
             mcp.initialize();
 
-            let note = mcp.call_ok("note_create", json!({ "body": "ping" }));
-            let unread = mcp.call_ok("notes_list", json!({ "unread": true }));
-            let read = mcp.call_ok("note_mark_read", json!({ "id": note["id"] }));
+            let comment = mcp.call_ok(
+                "task_comment",
+                json!({ "task": task["id"], "body": "PR opened" }),
+            );
+            let thread = mcp.call_ok("task_comments", json!({ "task": task["id"] }));
 
-            assert_eq!(note["workspace_id"], ws["id"]);
-            assert_eq!(unread.as_array().unwrap().len(), 1, "{unread}");
-            assert_eq!(read["read_by_pane"], pane);
+            assert_eq!(comment["author"], "agent");
+            assert_eq!(comment["author_agent"], "claude");
+            assert_eq!(comment["author_pane"], pane["id"]);
+            let bodies: Vec<&str> = thread
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| text(c, "body"))
+                .collect();
+            assert_eq!(bodies, ["look at the logs", "PR opened"]);
+        }
+
+        #[test]
+        fn should_list_the_callers_workspace_instructions() {
+            let env = TestEnv::new();
+            let ws = env.workspace("web");
+            env.workspace("api");
+            env.ok(&["instruction", "add", "Use the staging DB", "--ws", "web"]);
+            env.ok(&["instruction", "add", "Not yours", "--ws", "api"]);
+            let mut mcp = McpClient::start(&env, &[("AGENTDECK_WORKSPACE", text(&ws, "id"))]);
+            mcp.initialize();
+
+            let mine = mcp.call_ok("instructions_list", json!({}));
+            let theirs = mcp.call_ok("instructions_list", json!({ "workspace": "api" }));
+
+            assert_eq!(mine.as_array().unwrap().len(), 1, "{mine}");
+            assert_eq!(text(&mine[0], "body"), "Use the staging DB");
+            assert_eq!(text(&theirs[0], "body"), "Not yours");
         }
     }
 
@@ -140,12 +175,12 @@ mod agentdeck_mcp {
         }
 
         #[test]
-        fn should_refuse_a_note_with_nowhere_to_go() {
+        fn should_ask_for_a_workspace_outside_one() {
             let env = TestEnv::new();
             let mut mcp = McpClient::start(&env, &[]);
             mcp.initialize();
 
-            let result = mcp.call("note_create", json!({ "body": "lost" }));
+            let result = mcp.call("instructions_list", json!({}));
 
             assert_eq!(result["isError"], true, "{result}");
         }

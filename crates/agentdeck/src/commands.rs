@@ -4,7 +4,8 @@ use std::path::Path;
 
 use agentdeck_client::Client;
 use agentdeck_client::types::{
-    InputWhen, NewNote, NewTask, NewWorkspace, NotePatch, PaneInput, TaskPatch,
+    InputWhen, InstructionPatch, NewComment, NewInstruction, NewTask, NewWorkspace, PaneInput,
+    TaskPatch,
 };
 use agentdeck_core::{PaneId, WorkspaceId};
 use anyhow::Context;
@@ -12,12 +13,18 @@ use futures_util::TryStreamExt;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::cli::{AgentCommand, Command, NoteCommand, PrCommand, TaskCommand, WsCommand};
+use crate::cli::{
+    AgentCommand, Command, CommentCommand, InstructionCommand, PrCommand, TaskCommand, WsCommand,
+};
 use crate::{launch, render, resolve};
 use agentdeck_client::ApiError;
 
-/// Names the pane an agent runs in; `note read` records it as the reader.
+/// Names the pane an agent runs in; a comment added from it is that pane's agent's.
 pub const PANE_VAR: &str = "AGENTDECK_PANE";
+
+/// Names the workspace an agent runs in; the default workspace for instructions and the MCP
+/// tools.
+pub const WORKSPACE_VAR: &str = "AGENTDECK_WORKSPACE";
 
 /// What a command prints: `json` with `--json`, else `human`.
 pub struct Output {
@@ -41,7 +48,8 @@ pub async fn run(client: &Client, command: Command) -> anyhow::Result<Output> {
     match command {
         Command::Ws(command) => ws(client, command).await,
         Command::Task(command) => task(client, command).await,
-        Command::Note(command) => note(client, command).await,
+        Command::Comment(command) => comment(client, command).await,
+        Command::Instruction(command) => instruction(client, command).await,
         Command::Agent(command) => agent(client, command).await,
         Command::Pr(command) => pr(client, command).await,
         Command::Tail { pane, bytes } => tail(client, pane, bytes).await,
@@ -193,51 +201,97 @@ async fn task(client: &Client, command: TaskCommand) -> anyhow::Result<Output> {
     }
 }
 
-async fn note(client: &Client, command: NoteCommand) -> anyhow::Result<Output> {
+async fn comment(client: &Client, command: CommentCommand) -> anyhow::Result<Output> {
     match command {
-        NoteCommand::Ls { ws, task, unread } => {
-            let mut request = client.note_list();
-            if let Some(ws) = optional_workspace(client, ws.as_deref()).await? {
-                request = request.workspace(ws);
-            }
-            if let Some(task) = task {
-                request = request.task(task);
-            }
-            if unread {
-                request = request.unread(true);
-            }
-            let notes = request.send().await.map_err(ApiError::from)?;
-            Output::new(&*notes, render::notes(&notes))
+        CommentCommand::Ls { task } => {
+            let comments = client
+                .comment_list()
+                .id(task)
+                .send()
+                .await
+                .map_err(ApiError::from)?;
+            Output::new(&*comments, render::comments(&comments))
         }
-        NoteCommand::Add { body, on } => {
-            let workspace_id = optional_workspace(client, on.ws.as_deref()).await?;
-            let note = client
-                .note_create()
-                .body(NewNote {
+        CommentCommand::Add { body, task } => {
+            let comment = client
+                .comment_create()
+                .id(task)
+                .body(NewComment {
                     body,
-                    task_id: on.task,
-                    workspace_id,
+                    pane: caller_pane(),
                 })
                 .send()
                 .await
                 .map_err(ApiError::from)?;
-            Output::new(&*note, render::note_created(&note))
-        }
-        NoteCommand::Read { id } => {
-            let note = client
-                .note_update()
-                .id(id)
-                .body(NotePatch {
-                    read: Some(true),
-                    read_by_pane: caller_pane(),
-                    ..NotePatch::default()
-                })
-                .send()
-                .await
-                .map_err(ApiError::from)?;
-            Output::new(&*note, render::note_body(&note))
+            Output::new(&*comment, render::comment_created(&comment))
         }
     }
+}
+
+/// The workspace `--ws` names, else the caller's (`$AGENTDECK_WORKSPACE`).
+async fn instruction_workspace(
+    client: &Client,
+    reference: Option<String>,
+) -> anyhow::Result<WorkspaceId> {
+    let reference = reference.or_else(caller_workspace).ok_or_else(|| {
+        anyhow::anyhow!("name a workspace with --ws: you aren't in one (no ${WORKSPACE_VAR})")
+    })?;
+    workspace_id(client, &reference).await
+}
+
+async fn instruction(client: &Client, command: InstructionCommand) -> anyhow::Result<Output> {
+    match command {
+        InstructionCommand::Ls { ws } => {
+            let workspace = instruction_workspace(client, ws).await?;
+            let instructions = client
+                .instruction_list()
+                .id(workspace)
+                .send()
+                .await
+                .map_err(ApiError::from)?;
+            Output::new(&*instructions, render::instructions(&instructions))
+        }
+        InstructionCommand::Add { body, ws } => {
+            let workspace = instruction_workspace(client, ws).await?;
+            let instruction = client
+                .instruction_create()
+                .id(workspace)
+                .body(NewInstruction { body })
+                .send()
+                .await
+                .map_err(ApiError::from)?;
+            Output::new(&*instruction, render::instruction_saved(&instruction))
+        }
+        InstructionCommand::Edit { id, body } => {
+            let instruction = client
+                .instruction_update()
+                .id(id)
+                .body(InstructionPatch { body: Some(body) })
+                .send()
+                .await
+                .map_err(ApiError::from)?;
+            Output::new(&*instruction, render::instruction_saved(&instruction))
+        }
+        InstructionCommand::Rm { id } => {
+            client
+                .instruction_delete()
+                .id(id)
+                .send()
+                .await
+                .map_err(ApiError::from)?;
+            Output::new(
+                &json!({ "id": id, "deleted": true }),
+                format!("deleted {id}\n"),
+            )
+        }
+    }
+}
+
+/// `$AGENTDECK_WORKSPACE`, when it is set: an id, slug or name.
+pub fn caller_workspace() -> Option<String> {
+    std::env::var(WORKSPACE_VAR)
+        .ok()
+        .filter(|value| !value.is_empty())
 }
 
 /// `$AGENTDECK_PANE`, when it holds a pane id.

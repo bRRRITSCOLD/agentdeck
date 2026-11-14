@@ -1,6 +1,6 @@
 //! The main window's sidebar (spec §11), the `Sidebar` board of Penpot's "Main window": the
 //! brand with its new workspace `+`, Inbox and Tasks, then every workspace with its rolled-up
-//! state, unread notes and open PRs, the archived ones in a foldable Archived group, and when
+//! state and open PRs, the archived ones in a foldable Archived group, and when
 //! PRs last synced at the bottom. The `+` asks the window for the dialog with a
 //! [`SidebarEvent`].
 //!
@@ -266,9 +266,6 @@ impl SidebarView {
                         .flex()
                         .items_center()
                         .gap(space::S2)
-                        .when(counts.unread_notes > 0, |c| {
-                            c.child(Count::new(IconName::StickyNote, counts.unread_notes))
-                        })
                         .when(counts.prs > 0, |c| {
                             c.child(Count::new(IconName::GitPullRequest, counts.prs))
                         }),

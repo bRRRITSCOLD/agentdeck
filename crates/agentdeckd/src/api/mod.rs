@@ -4,8 +4,9 @@
 //! bearer token gets 401 before anything else about it is looked at. An expected domain
 //! failure is its own status with an `error_code`; see [`client_error`].
 
+mod comments;
 mod health;
-mod notes;
+mod instructions;
 mod panes;
 mod prs;
 mod tabs;
@@ -74,10 +75,14 @@ pub fn api() -> ApiDescription<ApiContext> {
         api.register(tasks::task_get),
         api.register(tasks::task_update),
         api.register(tasks::task_delete),
-        api.register(notes::note_list),
-        api.register(notes::note_create),
-        api.register(notes::note_update),
-        api.register(notes::note_delete),
+        api.register(comments::comment_list),
+        api.register(comments::comment_create),
+        api.register(comments::comment_seen),
+        api.register(comments::comment_delete),
+        api.register(instructions::instruction_list),
+        api.register(instructions::instruction_create),
+        api.register(instructions::instruction_update),
+        api.register(instructions::instruction_delete),
         api.register(prs::prs_sync),
         api.register(prs::prs_status),
         api.register(panes::pane_create),
