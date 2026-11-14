@@ -1,10 +1,12 @@
 //! PR sync (spec §8): the viewer's open GitHub PRs become PR tasks, every 120 s and on demand.
 //!
 //! The first sync, and one every [`FULL_SYNC_VAR`] seconds (an hour by default), is full: it
-//! searches every open PR and fetches the stored ones that left the search. The rest are
-//! incremental: they search only the PRs updated since the last good sync began, in any
-//! state, then refresh pending checks (a finished check run doesn't update a PR) and match
-//! inbox PRs to workspaces again from what's stored.
+//! lists the open PRs, most recently updated first, down to the age cutoff (`[pr_sync]
+//! max_age_days`, see [`crate::config`]), and fetches the stored ones that left the list; a
+//! stored one older than the cutoff is aged out instead. The rest are incremental: they
+//! search only the PRs updated since the last good sync began, in any state, then refresh
+//! pending checks (a finished check run doesn't update a PR) and match inbox PRs to
+//! workspaces again from what's stored.
 //!
 //! - [`token`]: the token, from `gh auth token`.
 //! - [`github`]: the GraphQL search and the fetch by number.
@@ -23,7 +25,7 @@ use std::time::Duration;
 
 use agentdeck_core::ws::Entity;
 use agentdeck_core::{ChecksState, PrState, WorkspaceId};
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use tokio::time::MissedTickBehavior;
 
 use crate::db::{self, Db};
@@ -65,6 +67,8 @@ struct Inner {
     github: Github,
     /// How often a sync is full.
     full_every: Duration,
+    /// How old an open PR may be and still sync; `None` for no cutoff.
+    max_age: Option<TimeDelta>,
     state: Mutex<State>,
     /// Held for the length of a sync, so syncs never overlap.
     running: tokio::sync::Mutex<()>,
@@ -110,13 +114,15 @@ impl From<db::DbError> for SyncError {
 impl PrSync {
     /// Starts the timer, whose first sync runs now and reads the token with `gh auth token`
     /// (on the timer's task, so a slow `gh` never holds up the daemon's start). `endpoint` is
-    /// the GraphQL URL; a sync is full every `full_every`. Must be called inside a tokio
+    /// the GraphQL URL; a sync is full every `full_every`; open PRs GitHub last updated more
+    /// than `max_age` ago aren't synced (`None` syncs them all). Must be called inside a tokio
     /// runtime.
     pub fn start(
         db: Db,
         events: Events,
         endpoint: String,
         full_every: Duration,
+        max_age: Option<TimeDelta>,
     ) -> anyhow::Result<PrSync> {
         let sync = PrSync {
             inner: Arc::new(Inner {
@@ -124,6 +130,7 @@ impl PrSync {
                 events,
                 github: Github::new(endpoint)?,
                 full_every,
+                max_age,
                 state: Mutex::new(State {
                     token: None,
                     status: PrSyncStatus {
@@ -218,11 +225,16 @@ impl PrSync {
         let workspaces = self.workspace_dirs().await?;
         let clones =
             Arc::new(tokio::task::spawn_blocking(move || Clones::scan(&workspaces)).await?);
-        match self.read(&token, since, &clones).await {
+        let read = Read {
+            since,
+            cutoff: self.inner.max_age.map(|max_age| began - max_age),
+            clones,
+        };
+        match self.read(&token, &read).await {
             Err(SyncError::Github(GithubError::Unauthorized)) => {
                 // The token may have been refreshed or revoked: ask `gh` again, once.
                 let token = self.refresh_token().await?;
-                self.read(&token, since, &clones).await.inspect_err(|err| {
+                self.read(&token, &read).await.inspect_err(|err| {
                     if matches!(err, SyncError::Github(GithubError::Unauthorized)) {
                         self.log_out();
                     }
@@ -238,28 +250,33 @@ impl PrSync {
 
     /// Reads GitHub and stores what it shows: a full read when `since` is `None`, else an
     /// incremental one.
-    async fn read(
-        &self,
-        token: &str,
-        since: Option<DateTime<Utc>>,
-        clones: &Arc<Clones>,
-    ) -> Result<(), SyncError> {
-        match since {
-            None => self.read_full(token, clones).await,
-            Some(since) => self.read_since(token, since, clones).await,
+    async fn read(&self, token: &str, read: &Read) -> Result<(), SyncError> {
+        match read.since {
+            None => self.read_full(token, read.cutoff, &read.clones).await,
+            Some(since) => {
+                self.read_since(token, since, read.cutoff, &read.clones)
+                    .await
+            }
         }
     }
 
     /// A full read, in two phases.
     ///
     /// 1. The list of open PRs, light fields only, stored page by page as it arrives. A
-    ///    stored PR keeps its checks and review for now.
+    ///    stored PR keeps its checks and review for now. The list is most recently updated
+    ///    first, so it ends at the first PR older than `cutoff`, which isn't stored.
     /// 2. Every field, fetched by number, for the PRs that need it: new ones, ones GitHub
     ///    updated since they were stored, and ones whose checks are pending.
     ///
     /// Then the PRs stored as open that left the list are fetched by number, so a merge or
-    /// close reaches its task; one GitHub no longer shows is closed.
-    async fn read_full(&self, token: &str, clones: &Arc<Clones>) -> Result<(), SyncError> {
+    /// close reaches its task; one GitHub no longer shows is closed. One last updated before
+    /// `cutoff` isn't fetched: it is aged out, its task moving to done once.
+    async fn read_full(
+        &self,
+        token: &str,
+        cutoff: Option<DateTime<Utc>>,
+        clones: &Arc<Clones>,
+    ) -> Result<(), SyncError> {
         let github = &self.inner.github;
         let stored = self
             .inner
@@ -272,7 +289,12 @@ impl PrSync {
         for _ in 0..github::MAX_LIST_PAGES {
             let page = github.list_page(token, after.as_deref()).await?;
             let mut prs = Vec::with_capacity(page.prs.len());
+            let mut past_cutoff = false;
             for pr in page.prs {
+                if older_than(&pr.updated_at, cutoff) {
+                    past_cutoff = true;
+                    break;
+                }
                 let key = (pr.repo.clone(), pr.number);
                 match stored
                     .iter()
@@ -301,12 +323,17 @@ impl PrSync {
             let prs_done = u32::try_from(seen.len()).unwrap_or(u32::MAX);
             self.set_progress(Some(PrSyncProgress {
                 prs_done,
-                prs: page.total.max(prs_done),
+                // The list's count takes in the PRs past the cutoff, which this sync skips.
+                prs: if past_cutoff {
+                    prs_done
+                } else {
+                    page.total.max(prs_done)
+                },
                 stage: PrSyncStage::Listing,
             }));
             match page.next {
-                Some(next) => after = Some(next),
-                None => break,
+                Some(next) if !past_cutoff => after = Some(next),
+                _ => break,
             }
         }
 
@@ -319,6 +346,11 @@ impl PrSync {
             .collect();
         self.store(details, Vec::new(), clones).await?;
 
+        let (aged, stored): (Vec<RemotePr>, Vec<RemotePr>) = stored
+            .into_iter()
+            .partition(|pr| older_than(&pr.updated_at, cutoff));
+        let aged: Vec<(String, i64)> = aged.into_iter().map(|pr| (pr.repo, pr.number)).collect();
+        self.age_out(missing(&aged, &seen)).await?;
         let stored: Vec<(String, i64)> =
             stored.into_iter().map(|pr| (pr.repo, pr.number)).collect();
         let left = missing(&stored, &seen);
@@ -335,13 +367,15 @@ impl PrSync {
     }
 
     /// An incremental read: the PRs updated at or after `since`, in any state, keeping a
-    /// merged or closed one only if it's stored as open; then the stored open PRs with pending
-    /// checks the search left out, fetched by number, and the inbox PRs it left out, matched
-    /// to a workspace again as stored. Nothing is gone: only a full read says so.
+    /// merged or closed one only if it's stored as open, and none last updated before
+    /// `cutoff`; then the stored open PRs with pending checks the search left out, fetched by
+    /// number, and the inbox PRs it left out, matched to a workspace again as stored. Nothing
+    /// is gone: only a full read says so.
     async fn read_since(
         &self,
         token: &str,
         since: DateTime<Utc>,
+        cutoff: Option<DateTime<Utc>>,
         clones: &Arc<Clones>,
     ) -> Result<(), SyncError> {
         let github = &self.inner.github;
@@ -362,6 +396,7 @@ impl PrSync {
                 .filter(|pr| {
                     pr.state == PrState::Open || stored.contains(&(pr.repo.clone(), pr.number))
                 })
+                .filter(|pr| !older_than(&pr.updated_at, cutoff))
                 .collect();
             self.store(prs, Vec::new(), clones).await?;
             let prs_done = u32::try_from(seen.len()).unwrap_or(u32::MAX);
@@ -437,6 +472,22 @@ impl PrSync {
         Ok(())
     }
 
+    /// Ages out the stored open PRs `prs`, and tells clients which tasks changed.
+    async fn age_out(&self, prs: Vec<(String, i64)>) -> Result<(), SyncError> {
+        if prs.is_empty() {
+            return Ok(());
+        }
+        let changed = self
+            .inner
+            .db
+            .call(move |conn| db::pull_requests::age_out(conn, &prs))
+            .await?;
+        for task in changed {
+            self.inner.events.changed(Entity::Task, task);
+        }
+        Ok(())
+    }
+
     /// `(id, dir)` of each workspace that isn't archived, oldest first.
     async fn workspace_dirs(&self) -> Result<Vec<(WorkspaceId, PathBuf)>, db::DbError> {
         let workspaces = self
@@ -483,6 +534,25 @@ impl PrSync {
     }
 }
 
+/// What one sync reads, decided as it begins.
+struct Read {
+    /// When the incremental search reaches back to; `None` for a full read.
+    since: Option<DateTime<Utc>>,
+    /// Open PRs last updated before this aren't synced; `None` for no cutoff.
+    cutoff: Option<DateTime<Utc>>,
+    /// The clones in the workspaces, for matching.
+    clones: Arc<Clones>,
+}
+
+/// Whether a PR last updated at `updated_at` (RFC 3339) is older than `cutoff`. One whose time
+/// doesn't parse isn't: better synced than dropped.
+fn older_than(updated_at: &str, cutoff: Option<DateTime<Utc>>) -> bool {
+    let Some(cutoff) = cutoff else {
+        return false;
+    };
+    DateTime::parse_from_rfc3339(updated_at).is_ok_and(|updated| updated < cutoff)
+}
+
 /// Each of `wanted` (`(repo, number)`) that isn't among `seen`.
 fn missing(wanted: &[(String, i64)], seen: &[(String, i64)]) -> Vec<(String, i64)> {
     wanted
@@ -512,6 +582,40 @@ fn since(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod older_than {
+        use super::*;
+
+        fn cutoff() -> Option<DateTime<Utc>> {
+            Some(
+                DateTime::parse_from_rfc3339("2026-08-16T10:00:00Z")
+                    .unwrap()
+                    .to_utc(),
+            )
+        }
+
+        #[test]
+        fn should_be_older_when_updated_before_the_cutoff() {
+            assert!(older_than("2017-03-01T12:00:00Z", cutoff()));
+            assert!(older_than("2026-08-16T09:59:59Z", cutoff()));
+        }
+
+        #[test]
+        fn should_not_be_older_when_updated_at_or_after_the_cutoff() {
+            assert!(!older_than("2026-08-16T10:00:00Z", cutoff()));
+            assert!(!older_than("2026-11-14T10:00:00Z", cutoff()));
+        }
+
+        #[test]
+        fn should_never_be_older_without_a_cutoff() {
+            assert!(!older_than("2017-03-01T12:00:00Z", None));
+        }
+
+        #[test]
+        fn should_not_be_older_when_the_time_does_not_parse() {
+            assert!(!older_than("yesterday", cutoff()));
+        }
+    }
 
     mod since {
         use super::*;
