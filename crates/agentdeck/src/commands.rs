@@ -2,11 +2,11 @@
 
 use std::path::Path;
 
-use agentdeck_client::Client;
 use agentdeck_client::types::{
     InputWhen, InstructionPatch, NewComment, NewInstruction, NewTask, NewWorkspace, PaneInput,
     TaskPatch,
 };
+use agentdeck_client::{Client, panes};
 use agentdeck_core::{PaneId, WorkspaceId};
 use anyhow::Context;
 use futures_util::TryStreamExt;
@@ -320,6 +320,14 @@ async fn agent(client: &Client, command: AgentCommand) -> anyhow::Result<Output>
             )
             .await?;
             Output::new(&pane, render::pane(&pane))
+        }
+        AgentCommand::Link { pane, task, .. } => {
+            let linked = panes::link_task(client, pane, task).await?;
+            let human = match task {
+                Some(task) => format!("linked {pane} to {task}\n"),
+                None => format!("unlinked {pane}\n"),
+            };
+            Output::new(&linked, human)
         }
         AgentCommand::Send { pane, text, now } => {
             let accepted = client
