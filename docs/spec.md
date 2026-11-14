@@ -363,7 +363,12 @@ Built on `brrritscold-core-gpui` (`init`, `Root`, theme preference, toasts). Scr
   - Review: approved `success`, changes requested `warning`, required `muted-foreground`.
   - Task statuses aren't coloured.
   - The terminal palette follows the theme. Terminal text is JetBrains Mono (`font-family.mono`).
-- **Notifications:** an OS notification when a pane turns `blocked` or `done` while its tab isn't visible, and when a PR task's checks fail or a review arrives. They can be muted per workspace.
+- **Notifications:** the GUI shows OS notifications through GPUI's system notifications (the freedesktop notifications D-Bus API on Linux), named "agentdeck"; only while it runs, and the daemon sends none. Nothing about them is configurable in v1: no global mute, quiet hours or sounds.
+  - **Panes:** an agent pane (not a shell) turning `blocked` or `done` while the user can't see it: its tab isn't the one shown, its workspace isn't, or the window isn't focused. Title "<Agent> is blocked" / "<Agent> is done"; body "<linked task title, else tab title> · <workspace>". Once per state change, not again while the state holds.
+  - **PRs:** a PR task's checks turning `failure`, or its review turning `approved` or `changes_requested`. Title "Checks failed" / "Approved" / "Changes requested"; body "<repo> #<n> · <title>". Changes are held while a PR sync runs and shown when it ends; more than 3 PRs changed in one sync make one "N PRs changed" whose body lists their "<repo> #<n>".
+  - Only changes between two reads count: what the GUI first reads after connecting (a pane already blocked, a check already failing) notifies nothing.
+  - **Muted:** a muted workspace's panes and PR tasks never notify; an Inbox PR has no workspace, so it always can.
+  - **Click:** clicking a notification's body focuses the window and shows what it is about: the pane, in its workspace and tab; the task sheet on a PR task; the Tasks view for "N PRs changed". Notifications offer no buttons.
 - **Keymap:** `keymap.rs`, normal app shortcuts, `secondary-` bindings loaded with `KeyBinding::load`.
   - A binding wins over the terminal, so every shortcut is one a shell has no use for, after GNOME Terminal. Plain ctrl-letter, alt-letter, the arrows and the paging keys always reach the pane.
   - Quit `secondary-shift-q`; next / previous tab `ctrl-pagedown` / `ctrl-pageup` (or `ctrl-tab` / `ctrl-shift-tab`); tab 1–9 `alt-1`…`alt-9`; next / previous pane `secondary-shift-down` / `secondary-shift-up`, in layout order; new shell tab `secondary-shift-t`; split the focused pane with a shell right / down `secondary-shift-e` / `secondary-shift-o` (after Terminator); close it `secondary-shift-w`, asking first while it runs. Closing a tab's last pane closes the tab.
@@ -375,6 +380,7 @@ Built on `brrritscold-core-gpui` (`init`, `Root`, theme preference, toasts). Scr
 | unit | `agentdeck-core`, GUI views (`#[gpui::test]`), daemon pure parts | rules with recorded output, layout tree, snapshot encode/decode round-trip, env allowlist, `openapi.json` staleness |
 | integration | `agentdeckd/tests/integration` | temp `$XDG_*` dirs, a real daemon on a random port, a real client; PTYs run `sh`; GitHub is httpmock; `gh` is a stub script on `PATH` |
 | integration | `agentdeck/tests/integration` | the real `agentdeck` binary in temp `$XDG_*` dirs, starting the real daemon itself; `agentdeck mcp` driven over stdio with hand-written JSON-RPC; panes run `sh`, never a real agent CLI |
+| integration | `agentdeck-gui/tests/integration` | GPUI's Linux system notifications against a fake notification server on a private `dbus-daemon` session bus, the app side in a child process: what the unit tier's test platform records stands for |
 
 There is no e2e tier. GPUI's headless context doesn't advance real sockets, so anything touching sockets is an integration test. CI is Linux only: fmt, clippy, unit, integration and doc, with warnings denied.
 

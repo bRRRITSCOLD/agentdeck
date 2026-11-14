@@ -12,3 +12,6 @@ sudo apt-get "${apt_opts[@]}" install -y \
   libwebkit2gtk-4.1-dev libxkbcommon-x11-dev libx11-xcb-dev \
   libssl-dev libzstd-dev libasound2-dev \
   vulkan-validationlayers libvulkan1
+
+# Not GPUI's: agentdeck-gui's notification contract test starts a private session bus.
+sudo apt-get "${apt_opts[@]}" install -y dbus-daemon

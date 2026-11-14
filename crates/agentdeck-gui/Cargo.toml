@@ -30,8 +30,14 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# The notification contract test's fake notification server reads its D-Bus messages as a
+# stream.
+futures-util.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+# The notification contract test's fake notification server, on a private bus. GPUI's Linux
+# platform already speaks D-Bus through this zbus (via notify-rust), so it adds no crate.
+zbus = { workspace = true }
 
 [lints]
 workspace = true

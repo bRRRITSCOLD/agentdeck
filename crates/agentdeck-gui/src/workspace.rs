@@ -318,6 +318,12 @@ impl WorkspaceView {
         self.reread(window, cx);
     }
 
+    /// Shows the tab holding `pane` and focuses it, once a read has it.
+    pub fn reveal_pane(&mut self, pane: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_next = Some(pane);
+        self.reread(window, cx);
+    }
+
     /// Shows the tab `tab`, if the workspace has it.
     pub fn select(&mut self, tab: TabId, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected != Some(tab) && self.read.tabs.iter().any(|t| t.id == tab) {
@@ -417,7 +423,12 @@ impl WorkspaceView {
         let kept = self
             .selected
             .filter(|selected| self.read.tabs.iter().any(|tab| tab.id == *selected));
-        self.selected = kept.or_else(|| self.read.tabs.first().map(|tab| tab.id));
+        // The tab holding a pane waiting for focus wins, so a pane can be shown by id alone.
+        let holding = self.focus_next.and_then(|pane| {
+            let holds = |tab: &&Tab| tab.layout.as_ref().is_some_and(|l| l.contains(pane));
+            self.read.tabs.iter().find(holds).map(|tab| tab.id)
+        });
+        self.selected = (holding.or(kept)).or_else(|| self.read.tabs.first().map(|tab| tab.id));
         self.sync(window, cx);
         // A workspace opened with no tabs gets a shell; one emptied while shown stays empty.
         if !std::mem::replace(&mut self.read_once, true) && self.read.tabs.is_empty() {
