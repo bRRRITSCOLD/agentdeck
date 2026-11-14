@@ -33,15 +33,13 @@ mod tasks;
 mod terminal;
 mod title_bar;
 mod top_bar;
+mod window_state;
 mod workspace;
 
 use std::rc::Rc;
 
 use brrritscold_core_gpui::Root;
-use gpui::{
-    App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions,
-    px, size,
-};
+use gpui::{App, AppContext as _, TitlebarOptions, WindowDecorations, WindowOptions};
 
 use crate::connection::{Connection, DaemonConnector};
 use crate::shell::Shell;
@@ -57,10 +55,20 @@ fn main() {
         terminal::init(cx);
         keymap::init(cx);
         let connection = cx.new(|cx| Connection::new(Rc::new(DaemonConnector), cx));
-        let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
+        // 1440×900, the design's size, fitted to the display; or the bounds saved last time
+        // while they still land on a connected display (spec §11).
+        let state_file = window_state::state_file(|name| std::env::var_os(name));
+        let saved = state_file.as_deref().and_then(window_state::load);
+        let displays: Vec<_> = cx
+            .displays()
+            .iter()
+            .map(|display| display.visible_bounds())
+            .collect();
+        let primary = cx.primary_display().map(|display| display.visible_bounds());
+        let window_bounds = window_state::initial_bounds(saved, &displays, primary);
         cx.open_window(
             WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_bounds: Some(window_bounds),
                 titlebar: Some(TitlebarOptions {
                     title: Some("agentdeck".into()),
                     ..Default::default()
@@ -75,6 +83,9 @@ fn main() {
                 ..Default::default()
             },
             |window, cx| {
+                if let Some(path) = state_file {
+                    window_state::remember(path, window, cx);
+                }
                 let shell = cx.new(|cx| Shell::new(connection, window, cx));
                 cx.new(|cx| Root::new(shell, window, cx))
             },
