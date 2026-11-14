@@ -1,13 +1,15 @@
-//! The right panel (spec §11), Penpot "Main window" `RightPanel`: the selected workspace's
-//! tasks and PRs, grouped by status, each with a status picker. Done tasks hide behind
-//! "Show N done". The top bar's panel button toggles it, through
-//! [`ToggleRightPanel`](crate::keymap::ToggleRightPanel), which the window handles. The
-//! Tasks & PRs `+` asks the window for the new task dialog on the workspace ([`NewTask`]).
+//! The right panel (spec §11), Penpot "Main window" `RightPanel`. The top bar's panel button
+//! toggles it, through [`ToggleRightPanel`](crate::keymap::ToggleRightPanel), which the
+//! window handles.
 //!
-//! Below the tasks come the workspace's instructions, newest first, and a field that adds one
-//! for every agent in the workspace (Enter sends it; the Instructions header's `+` focuses
-//! it). Each instruction's `…` menu sends it to a live agent pane at once (spec §9), edits it
-//! in place (Ctrl+Enter or Save saves, Escape or Cancel drops the edit) or deletes it.
+//! First come the workspace's instructions, newest first, and a field that adds one for every
+//! agent in the workspace (Enter sends it; the Instructions header's `+` focuses it). Each
+//! instruction's `…` menu sends it to a live agent pane at once (spec §9), edits it in place
+//! (Ctrl+Enter or Save saves, Escape or Cancel drops the edit) or deletes it.
+//!
+//! Below a separator come the workspace's tasks and PRs, grouped by status, each with a status
+//! picker. Done tasks hide behind "Show N done". The Tasks & PRs `+` asks the window for the
+//! new task dialog on the workspace ([`NewTask`]).
 //!
 //! Like the Tasks view it shows the sidebar's [`Snapshot`], passed on by the window; an
 //! instruction added here comes back through the daemon's `changed`.
@@ -338,6 +340,9 @@ impl RightPanel {
 
 impl Render for RightPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let s = cx.theme().semantic();
+        // Instructions first: the header with its `+`, each instruction, then Penpot
+        // `NewInstruction`.
         let mut list = div()
             .id("panel-list")
             .flex()
@@ -345,7 +350,56 @@ impl Render for RightPanel {
             .flex_1()
             .min_h_0()
             .gap(space::S1)
-            .overflow_y_scroll();
+            .overflow_y_scroll()
+            .child(
+                section_header("Instructions", s).child(
+                    div().debug_selector(|| "add instruction".into()).child(
+                        Button::new("add-instruction")
+                            .variant(ButtonVariant::Ghost)
+                            .size(ButtonSize::IconXs)
+                            .icon(IconName::Plus)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.new_instruction
+                                    .update(cx, |input, cx| input.focus(window, cx));
+                            })),
+                    ),
+                ),
+            )
+            .children(
+                self.instructions()
+                    .iter()
+                    .map(|instruction| match &self.editor {
+                        Some((editing, editor)) if *editing == instruction.id => {
+                            instruction_editor(instruction.id, editor, self.can_save(cx), cx)
+                        }
+                        _ => {
+                            let targets =
+                                instruction_list::send_targets(&self.snapshot, instruction.id);
+                            instruction_item(instruction, targets, cx)
+                        }
+                    }),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .debug_selector(|| "new instruction".into())
+                    .child(Input::new(&self.new_instruction)),
+            )
+            // Then Separator, the Tasks & PRs header with its `+`, and the groups.
+            .child(Separator::new().my(space::S1))
+            .child(
+                section_header("Tasks & PRs", s).child(
+                    div().debug_selector(|| "add task".into()).child(
+                        Button::new("add-task")
+                            .variant(ButtonVariant::Ghost)
+                            .size(ButtonSize::IconXs)
+                            .icon(IconName::Plus)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                cx.emit(NewTask(this.workspace));
+                            })),
+                    ),
+                ),
+            );
         for group in self.groups() {
             let status = group.status;
             let collapsed = self.is_collapsed(status);
@@ -396,38 +450,6 @@ impl Render for RightPanel {
                 ),
             );
         }
-        // Then Separator, the Instructions header with its `+`, and each instruction.
-        let s = cx.theme().semantic();
-        list = list
-            .child(Separator::new().my(space::S1))
-            .child(
-                section_header("Instructions", s).child(
-                    div().debug_selector(|| "add instruction".into()).child(
-                        Button::new("add-instruction")
-                            .variant(ButtonVariant::Ghost)
-                            .size(ButtonSize::IconXs)
-                            .icon(IconName::Plus)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.new_instruction
-                                    .update(cx, |input, cx| input.focus(window, cx));
-                            })),
-                    ),
-                ),
-            )
-            .children(
-                self.instructions()
-                    .iter()
-                    .map(|instruction| match &self.editor {
-                        Some((editing, editor)) if *editing == instruction.id => {
-                            instruction_editor(instruction.id, editor, self.can_save(cx), cx)
-                        }
-                        _ => {
-                            let targets =
-                                instruction_list::send_targets(&self.snapshot, instruction.id);
-                            instruction_item(instruction, targets, cx)
-                        }
-                    }),
-            );
         // Penpot `RightPanel`: `card`, padded `space.3` down and `space.2` across, rows
         // `space.1` apart.
         div()
@@ -436,26 +458,10 @@ impl Render for RightPanel {
             .h_full()
             .flex()
             .flex_col()
-            .gap(space::S1)
             .py(space::S3)
             .px(space::S2)
             .bg(s.card)
-            .child(
-                section_header("Tasks & PRs", s).child(
-                    div().debug_selector(|| "add task".into()).child(
-                        Button::new("add-task")
-                            .variant(ButtonVariant::Ghost)
-                            .size(ButtonSize::IconXs)
-                            .icon(IconName::Plus)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                cx.emit(NewTask(this.workspace));
-                            })),
-                    ),
-                ),
-            )
             .child(list)
-            // Penpot `NewInstruction`.
-            .child(div().flex_none().child(Input::new(&self.new_instruction)))
     }
 }
 
@@ -1047,6 +1053,35 @@ mod tests {
 
             assert_eq!(typed(&panel, cx), "keep me");
         }
+    }
+
+    #[gpui::test]
+    fn should_list_instructions_before_tasks(cx: &mut TestAppContext) {
+        let (panel, cx) = open(cx);
+        panel.update(cx, |p, cx| {
+            let mut snapshot = snapshot();
+            snapshot.instructions = vec![crate::overview::fixtures::instruction(30, id(1))];
+            p.show(id(1), snapshot, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let card: &str = format!("instruction {}", id::<agentdeck_core::InstructionId>(30)).leak();
+        let title: &str = format!("task title {}", id::<TaskId>(1)).leak();
+        let order = [
+            "add instruction",
+            card,
+            "new instruction",
+            "add task",
+            title,
+        ];
+        let tops: Vec<_> = (order.into_iter())
+            .map(|selector| {
+                (cx.debug_bounds(selector))
+                    .unwrap_or_else(|| panic!("{selector} shows"))
+                    .top()
+            })
+            .collect();
+        assert!(tops.is_sorted(), "top to bottom: {tops:?}");
     }
 
     fn statuses(panel: &Entity<RightPanel>, cx: &mut VisualTestContext) -> Vec<TaskStatus> {
