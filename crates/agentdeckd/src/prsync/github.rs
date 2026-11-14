@@ -25,6 +25,10 @@ const MAX_PAGES: usize = 10;
 /// PRs fetched by number in one request.
 const BATCH_SIZE: usize = 50;
 
+/// The waits before each retry of a request that failed for a reason that may pass: a 5xx, a
+/// failed connection, a body cut short. One try, then one more per wait.
+const RETRY_WAITS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(2)];
+
 const PR_FIELDS: &str = "fragment pr on PullRequest {
   number title url state isDraft headRefName updatedAt
   repository { nameWithOwner }
@@ -64,12 +68,12 @@ pub enum GithubError {
     #[error("GitHub rejected the token")]
     Unauthorized,
     /// Any other non-success HTTP status.
-    #[error("GitHub answered {status}: {body}")]
+    #[error("GitHub answered {status}{}", message.as_deref().map(|m| format!(": {m}")).unwrap_or_default())]
     Status {
         /// The status code.
         status: u16,
-        /// The start of the response body.
-        body: String,
+        /// The `message` of a JSON body; `None` for any other body, such as an HTML error page.
+        message: Option<String>,
     },
     /// The response held GraphQL errors and no data.
     #[error("GitHub GraphQL errors: {0}")]
@@ -141,8 +145,31 @@ impl Github {
         Ok(prs)
     }
 
-    /// Posts one GraphQL query and returns its `data`.
+    /// Posts one GraphQL query and returns its `data`, trying again after each of
+    /// `RETRY_WAITS` while it fails for a reason that may pass.
     async fn query(
+        &self,
+        token: &str,
+        query: &str,
+        variables: Value,
+    ) -> Result<Value, GithubError> {
+        let mut waits = RETRY_WAITS.iter();
+        loop {
+            match self.query_once(token, query, variables.clone()).await {
+                Err(err) if err.may_pass() => match waits.next() {
+                    Some(wait) => {
+                        tracing::info!("GitHub call failed, trying again in {wait:?}: {err}");
+                        tokio::time::sleep(*wait).await;
+                    }
+                    None => return Err(err),
+                },
+                result => return result,
+            }
+        }
+    }
+
+    /// Posts one GraphQL query once and returns its `data`.
+    async fn query_once(
         &self,
         token: &str,
         query: &str,
@@ -163,11 +190,28 @@ impl Github {
             let body = response.text().await.unwrap_or_default();
             return Err(GithubError::Status {
                 status: status.as_u16(),
-                body: body.chars().take(200).collect(),
+                message: message(&body),
             });
         }
         data(response.json().await?)
     }
+}
+
+impl GithubError {
+    /// Whether trying again may succeed: a 5xx, or a request that failed in transit.
+    fn may_pass(&self) -> bool {
+        match self {
+            GithubError::Status { status, .. } => *status >= 500,
+            GithubError::Http(_) => true,
+            GithubError::Unauthorized | GithubError::GraphQl(_) | GithubError::Shape(_) => false,
+        }
+    }
+}
+
+/// The `message` of a JSON error body, as GitHub's REST-style errors carry one.
+fn message(body: &str) -> Option<String> {
+    let body: Value = serde_json::from_str(body).ok()?;
+    body.get("message")?.as_str().map(str::to_owned)
 }
 
 /// A GraphQL response body's `data`. Partial errors next to data are GitHub's way of saying
