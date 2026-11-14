@@ -253,6 +253,27 @@ mod get_v1_ws {
                 .await;
         }
 
+        /// Sends `primary` for the screen's channel and waits until the daemon has applied it,
+        /// drawing what arrives meanwhile. The daemon handles one connection's messages in
+        /// order but two connections' in any order, so another client's `resize` sent after
+        /// this returns is the one that comes second (spec §5). The marker is the
+        /// `not_attached` answer to a detach of a channel nothing is on.
+        async fn make_primary(ws: &mut Ws, screen: &mut crate::support::ws::Screen, channel: u32) {
+            const UNUSED: u32 = u32::MAX;
+            ws.send(ClientMessage::Primary { channel }).await;
+            ws.send(ClientMessage::Detach { channel: UNUSED }).await;
+            ws.until(|frame| {
+                screen.take(&frame);
+                matches!(
+                    frame,
+                    Frame::Message(ServerMessage::Error { channel: Some(UNUSED), ref code, .. })
+                        if code == "not_attached"
+                )
+                .then_some(())
+            })
+            .await;
+        }
+
         #[tokio::test]
         async fn should_follow_the_primary_client_and_tell_the_others() {
             let daemon = TestDaemon::start().await;
@@ -297,7 +318,7 @@ mod get_v1_ws {
             let mut other = Ws::connect(&daemon).await;
             let mut screen = primary.attach(pane.id, 1).await;
             other.attach(pane.id, 7).await;
-            primary.send(ClientMessage::Primary { channel: 1 }).await;
+            make_primary(&mut primary, &mut screen, 1).await;
 
             other
                 .send(ClientMessage::Resize {
@@ -326,7 +347,7 @@ mod get_v1_ws {
             let mut second = Ws::connect(&daemon).await;
             let mut screen = first.attach(pane.id, 1).await;
             second.attach(pane.id, 2).await;
-            first.send(ClientMessage::Primary { channel: 1 }).await;
+            make_primary(&mut first, &mut screen, 1).await;
             second
                 .send(ClientMessage::Resize {
                     channel: 2,
