@@ -5,7 +5,9 @@
 //! resize edges frame it.
 //!
 //! It archives and unarchives the selected workspace when the top bar asks, toasting the
-//! outcome; an archive's toast offers Undo.
+//! outcome; an archive's toast offers Undo. The top bar's Delete workspace… opens the delete
+//! dialog; once a workspace is deleted the selection falls back to the first workspace left,
+//! else the Inbox.
 
 use std::sync::Arc;
 
@@ -24,6 +26,7 @@ use gpui::{
 
 use crate::api::Api;
 use crate::connection::{Connection, Status};
+use crate::delete_workspace::{DeleteEvent, DeleteTarget, DeleteWorkspaceDialog};
 use crate::frame;
 use crate::inbox::{InboxView, Synced};
 use crate::keymap::ToggleRightPanel;
@@ -34,7 +37,7 @@ use crate::right_panel::RightPanel;
 use crate::sidebar::{Selection, SidebarEvent, SidebarView};
 use crate::tasks::TasksView;
 use crate::title_bar::{Close, Minimize, TitleBar, ToggleMaximize};
-use crate::top_bar::{ArchiveWorkspace, TopBar, UnarchiveWorkspace};
+use crate::top_bar::{ArchiveWorkspace, DeleteWorkspace, TopBar, UnarchiveWorkspace};
 use crate::workspace::{WorkspaceView, failed};
 
 /// Whether `err` is the daemon refusing with `code`.
@@ -54,6 +57,8 @@ pub struct Shell {
     new_workspace: Option<Entity<NewWorkspaceDialog>>,
     /// The new agent dialog, while connected.
     new_agent: Option<Entity<NewAgentDialog>>,
+    /// The Delete workspace dialog, while connected.
+    delete_workspace: Option<Entity<DeleteWorkspaceDialog>>,
     _new_workspace: Vec<Subscription>,
     /// The selected workspace.
     workspace: Option<Entity<WorkspaceView>>,
@@ -92,6 +97,7 @@ impl Shell {
             _selection: None,
             new_workspace: None,
             new_agent: None,
+            delete_workspace: None,
             _new_workspace: Vec::new(),
             workspace: None,
             tasks: None,
@@ -117,6 +123,7 @@ impl Shell {
                     self.tasks = Some(cx.new(|cx| TasksView::new(api.clone(), window, cx)));
                     let inbox = cx.new(|_| InboxView::new(api.clone()));
                     let new_agent = cx.new(|_| NewAgentDialog::new(api.clone()));
+                    let delete = cx.new(|cx| DeleteWorkspaceDialog::new(api.clone(), window, cx));
                     self.panel = Some(cx.new(|cx| RightPanel::new(api.clone(), window, cx)));
                     let sidebar = cx.new(|cx| SidebarView::new(api, &connection, cx));
                     self._selection =
@@ -150,6 +157,13 @@ impl Shell {
                                 }
                             },
                         ),
+                        cx.subscribe_in(&delete, window, |shell, _, event, window, cx| {
+                            match event {
+                                DeleteEvent::ArchiveInstead(_) => shell.archive(window, cx),
+                                // The sidebar's selection falls back once it is gone.
+                                DeleteEvent::Deleted(_) => shell.refresh(cx),
+                            }
+                        }),
                         cx.subscribe(&dialog, |shell, _, Created(id), cx| {
                             if let Some(sidebar) = &shell.sidebar {
                                 let selection = Selection::Workspace(*id);
@@ -160,6 +174,7 @@ impl Shell {
                     self.new_workspace = Some(dialog);
                     self.inbox = Some(inbox);
                     self.new_agent = Some(new_agent);
+                    self.delete_workspace = Some(delete);
                     self.sidebar = Some(sidebar);
                     self.follow_selection(window, cx);
                 }
@@ -174,6 +189,7 @@ impl Shell {
                 self.inbox = None;
                 self.panel = None;
                 self.new_agent = None;
+                self.delete_workspace = None;
                 self.selection = None;
             }
         }
@@ -325,6 +341,27 @@ impl Shell {
         .detach();
     }
 
+    /// Opens the Delete workspace dialog on the selected workspace.
+    fn delete_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(sidebar), Some(dialog), Some(Selection::Workspace(selected))) =
+            (&self.sidebar, &self.delete_workspace, self.selection)
+        else {
+            return;
+        };
+        let sidebar = sidebar.read(cx);
+        let Some(row) = sidebar.overview().workspace(selected) else {
+            return;
+        };
+        let target = DeleteTarget {
+            id: row.id,
+            name: row.name.clone(),
+            dir: row.dir.clone(),
+            archived: row.archived,
+        };
+        let snapshot = sidebar.snapshot().clone();
+        dialog.update(cx, |dialog, cx| dialog.open(target, &snapshot, window, cx));
+    }
+
     /// Brings `workspace`, named `name`, back from the archive.
     fn unarchive(
         &mut self,
@@ -407,6 +444,7 @@ impl Shell {
                 })
                 .children(self.new_workspace.clone())
                 .children(self.new_agent.clone())
+                .children(self.delete_workspace.clone())
                 .into_any_element(),
         }
     }
@@ -430,6 +468,9 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &NewAgent, window, cx| this.new_agent(window, cx)))
             .on_action(cx.listener(|this, _: &ArchiveWorkspace, window, cx| {
                 this.archive(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &DeleteWorkspace, window, cx| {
+                this.delete_workspace(window, cx);
             }))
             .on_action(cx.listener(|this, _: &UnarchiveWorkspace, window, cx| {
                 if let Some((workspace, name, true)) = this.selected_workspace(cx) {
@@ -968,6 +1009,129 @@ mod tests {
             harness.shell.read_with(cx, |shell, cx| {
                 (shell.workspace.as_ref()).map(|view| view.read(cx).workspace())
             })
+        }
+
+        mod delete {
+            use super::*;
+            use crate::delete_workspace::DeleteWorkspaceDialog;
+            use crate::top_bar::DeleteWorkspace;
+
+            fn dialog(
+                harness: &Harness,
+                cx: &mut VisualTestContext,
+            ) -> Entity<DeleteWorkspaceDialog> {
+                harness
+                    .shell
+                    .read_with(cx, |shell, _| shell.delete_workspace.clone().unwrap())
+            }
+
+            fn is_open(harness: &Harness, cx: &mut VisualTestContext) -> bool {
+                dialog(harness, cx).read_with(cx, |d, _| d.is_open())
+            }
+
+            /// Opens the top bar's menu and picks its `n`th item by keyboard.
+            fn pick_from_menu(harness: &Harness, n: usize, cx: &mut VisualTestContext) {
+                let trigger = cx.debug_bounds("workspace menu").expect("the menu shows");
+                harness.click(trigger.center(), cx);
+                cx.simulate_keystrokes(&format!("{}enter", "down ".repeat(n)));
+                harness.settle(cx);
+            }
+
+            fn open_and_delete(harness: &Harness, name: &str, cx: &mut VisualTestContext) {
+                cx.dispatch_action(DeleteWorkspace);
+                harness.settle(cx);
+                cx.simulate_input(name);
+                cx.simulate_keystrokes("enter");
+                harness.settle(cx);
+            }
+
+            fn selection(harness: &Harness, cx: &mut VisualTestContext) -> Option<Selection> {
+                harness.shell.read_with(cx, |shell, _| shell.selection)
+            }
+
+            #[gpui::test]
+            fn should_open_from_the_top_bar_menu_after_archive(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open(daemon(), cx);
+
+                pick_from_menu(&harness, 2, cx);
+
+                assert!(is_open(&harness, cx));
+                assert_eq!(*harness.api.archived.lock().unwrap(), []);
+            }
+
+            #[gpui::test]
+            fn should_open_from_an_archived_workspaces_menu(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open(daemon(), cx);
+                harness.select(2, cx);
+
+                pick_from_menu(&harness, 1, cx);
+
+                assert!(is_open(&harness, cx));
+                assert_eq!(*harness.api.unarchived.lock().unwrap(), []);
+            }
+
+            #[gpui::test]
+            fn should_archive_instead_when_asked(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open(daemon(), cx);
+                cx.dispatch_action(DeleteWorkspace);
+                harness.settle(cx);
+
+                let dialog = dialog(&harness, cx);
+                cx.update(|window, cx| dialog.update(cx, |d, cx| d.archive_instead(window, cx)));
+                harness.settle(cx);
+
+                assert_eq!(*harness.api.archived.lock().unwrap(), [id(1)]);
+                assert!(!is_open(&harness, cx));
+                assert_eq!(harness.last_notice(cx).title, "Archived agentdeck");
+            }
+
+            #[gpui::test]
+            fn should_toast_a_refusal_to_archive_instead(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open(daemon(), cx);
+                cx.dispatch_action(DeleteWorkspace);
+                harness.settle(cx);
+                harness
+                    .api
+                    .refuse_next("panes_running", "Close its 1 running pane first");
+
+                let dialog = dialog(&harness, cx);
+                cx.update(|window, cx| dialog.update(cx, |d, cx| d.archive_instead(window, cx)));
+                harness.settle(cx);
+
+                let notice = harness.last_notice(cx);
+                assert_eq!(notice.title, "Can't archive agentdeck");
+                assert!(!harness.is_archived(1, cx));
+            }
+
+            #[gpui::test]
+            fn should_select_the_first_workspace_left_once_deleted(cx: &mut TestAppContext) {
+                let api = daemon();
+                let mut snapshot = api.snapshot_now();
+                snapshot.workspaces.push(workspace(3, "third"));
+                api.set(snapshot);
+                let (harness, cx) = Harness::open(api, cx);
+                harness.select(3, cx);
+
+                open_and_delete(&harness, "third", cx);
+
+                assert_eq!(*harness.api.deleted.lock().unwrap(), [id(3)]);
+                assert!(!is_open(&harness, cx));
+                assert_eq!(selection(&harness, cx), Some(Selection::Workspace(id(1))));
+            }
+
+            #[gpui::test]
+            fn should_select_the_inbox_once_the_last_workspace_is_deleted(cx: &mut TestAppContext) {
+                let api = Arc::new(FakeApi::with(Snapshot {
+                    workspaces: vec![workspace(1, "agentdeck")],
+                    ..Snapshot::default()
+                }));
+                let (harness, cx) = Harness::open(api, cx);
+
+                open_and_delete(&harness, "agentdeck", cx);
+
+                assert_eq!(*harness.api.deleted.lock().unwrap(), [id(1)]);
+                assert_eq!(selection(&harness, cx), Some(Selection::Inbox));
+            }
         }
     }
 

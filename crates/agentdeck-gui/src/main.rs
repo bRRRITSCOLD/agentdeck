@@ -6,6 +6,7 @@
 mod api;
 mod connection;
 mod count;
+mod delete_workspace;
 mod frame;
 mod inbox;
 mod keymap;

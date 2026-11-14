@@ -265,11 +265,17 @@ Built on `brrritscold-core-gpui` (`init`, `Root`, theme preference, toasts). Scr
 - **Sidebar:** workspaces, each with a rolled-up state (any blocked → blocked, else any working → working, else any done → done) and its unread-note and PR counts. Inbox and Tasks entries sit at the top. Below the workspaces, an **Archived** group header (chevron, "Archived", a count) lists the archived workspaces, oldest first: rows with `muted-foreground` labels and no counts. It is folded at first, a click toggles it, it stays open while it holds the selected workspace, and it is hidden while nothing is archived.
 - **Workspace view:** a top bar with the workspace's name and dir, New agent, a `…` workspace menu and the right panel toggle; under it, tabs, with split panes inside each. Each pane has a header showing its title, state and linked task, and a menu to split or close it. A `+` after the tabs opens a shell tab in the workspace dir; a workspace with no tabs when shown gets one.
   - **Archive workspace**, in the `…` menu, archives at once, with no dialog, since it can be undone. The daemon refuses while a pane runs, and a toast "Can't archive <name>" gives its reason ("Close its 2 running panes first"). Otherwise the toast "Archived <name>" says "Its folder, tasks and notes are kept." and offers **Undo**, which unarchives. The workspace stays selected, now archived.
-  - **An archived workspace** shows an outline **Unarchive** in place of New agent and no Archive item; in place of its tabs and panes, "<name> is archived" over "Unarchive it to open its tabs and start agents here again." It attaches no terminals and opens no shell tab.
+  - **Delete workspace…**, after a separator and in `destructive`, opens the delete dialog.
+  - **An archived workspace** shows an outline **Unarchive** in place of New agent, and its menu has only Delete workspace…. In place of its tabs and panes it shows "<name> is archived" over "Unarchive it to open its tabs and start agents here again." It attaches no terminals and opens no shell tab.
 - **Right panel**, which can be toggled: the workspace's tasks and PRs, as a list grouped by status, plus its notes.
 - **Tasks view:** a grouped list of every task. Done tasks are hidden by default, and each row has a status picker.
 - **Inbox:** tasks with no workspace, mostly PRs.
-- **Dialogs:** new workspace, new agent (agent, cwd, task), and a delete confirmation that shows the dirty report.
+- **Dialogs:** new workspace, new agent (agent, cwd, task), and delete workspace:
+  - **Delete workspace** is titled "Delete <name>?", with "This can't be undone. Archive it instead to keep its folder."
+  - It reads the dirty report on opening, showing "Checking for unpushed work…" meanwhile. When repos are dirty, a destructive alert "N repos have work that isn't pushed" / "Deleting removes the folder and everything in it." sits over a card per repo: its path under the workspace, "N uncommitted files in <the folder they share>" and "<branch>: not pushed" for each unpushed branch.
+  - Then "Its N tasks move to the Inbox. Its N notes are deleted." and "Type <name> to confirm" over an input.
+  - The footer is **Archive instead** (absent once archived), which closes it and archives as the menu does, **Cancel** and the destructive **Delete workspace**. Delete is disabled until the input is the name exactly. It deletes with `force`, since the report has been shown; Enter does the same, and Escape cancels.
+  - A failed delete keeps the dialog open and toasts why. Once deleted, the selection falls back to the first workspace left, else the Inbox.
 - **Terminal:**
   - `alacritty_terminal` per attached pane, drawn by our own renderer.
   - **Zed's GPL-3.0 terminal crates are never copied.**
