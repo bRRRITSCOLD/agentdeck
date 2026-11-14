@@ -17,8 +17,8 @@ use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
-    IntoElement, ListState, ParentElement as _, Render, SharedString, Styled as _, Subscription,
-    Window, div, list, px,
+    IntoElement, ListState, ParentElement as _, Pixels, Render, SharedString, Styled as _,
+    Subscription, Window, div, list, px,
 };
 use gpui_base::input::InputEvent;
 
@@ -26,12 +26,12 @@ use crate::api::Api;
 use crate::new_task::NewTask;
 use crate::overview::Snapshot;
 use crate::task_list::{self, Group, Query, Row, Scope};
-use crate::task_row::{self, Table};
+use crate::task_row::{self, Layout, Table};
 use crate::task_sheet::OpenTask;
 use crate::workspace::failed;
 
 /// The filter's width. Raw in Penpot too.
-const FILTER_WIDTH: f32 = 240.;
+const FILTER_WIDTH: f32 = 180.;
 
 /// One item of the list: a group's header, or a row under it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +55,8 @@ pub struct TasksView {
     /// The items the list draws from, as last rendered.
     shown: Vec<Item>,
     list: ListState,
+    /// The columns shown, fitted to the width the table was last drawn at.
+    layout: Layout,
     _filter: Subscription,
 }
 
@@ -78,7 +80,20 @@ impl TasksView {
             collapsed: HashSet::new(),
             shown: Vec::new(),
             list: task_row::list_state(),
+            layout: Table::Tasks.widest(),
             _filter,
+        }
+    }
+
+    /// Fits the columns to the table's `width`, as drawn. A row's height follows its title's
+    /// width, so a change measures the rows again. It runs while the frame is drawn, which
+    /// ignores a notify, so the redraw is asked for once the frame is done.
+    fn fit(&mut self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) {
+        let layout = Table::Tasks.fit(width);
+        if layout != self.layout {
+            self.layout = layout;
+            self.list.remeasure();
+            cx.defer_in(window, |_, _, cx| cx.notify());
         }
     }
 
@@ -195,7 +210,7 @@ impl TasksView {
                     }),
                 );
                 let open = Box::new(cx.listener(move |_, _, _, cx| cx.emit(OpenTask(task))));
-                task_row::spaced(task_row::wide(row, picker, Table::Tasks, open, cx))
+                task_row::spaced(task_row::wide(row, picker, self.layout, open, cx))
             }
             None => div().into_any_element(),
         }
@@ -284,9 +299,10 @@ impl Render for TasksView {
         let table = task_row::table(
             "task-table",
             "task table",
-            Table::Tasks,
+            self.layout,
             rows,
             &self.list,
+            cx.listener(|this, width: &Pixels, window, cx| this.fit(*width, window, cx)),
             cx,
         );
         // Penpot `Content`: Header / Columns / List, `space.4` apart, padded `space.6`.
@@ -610,6 +626,92 @@ mod tests {
         cx.run_until_parked();
 
         harness.draw(cx);
+    }
+
+    mod columns {
+        use gpui::{px, size};
+
+        use super::*;
+
+        /// The view's width in a window `width` wide: the window less the sidebar.
+        fn open_in(width: f32, cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
+            let (harness, cx) = Harness::open(board(), cx);
+            cx.simulate_resize(size(px(width - 261.), px(800.)));
+            fit(&harness, cx);
+            (harness, cx)
+        }
+
+        /// Lets the frame a resize draws refit the columns. The redraw that refit asks for
+        /// must come by itself, as it has to in the app: nothing here draws.
+        fn fit(_: &Harness, cx: &mut VisualTestContext) {
+            cx.run_until_parked();
+        }
+
+        fn shown(selector: String, cx: &mut VisualTestContext) -> bool {
+            cx.debug_bounds(selector.leak()).is_some()
+        }
+
+        fn cell(column: &str, task: u32) -> String {
+            format!("{column} {}", id::<TaskId>(task))
+        }
+
+        #[gpui::test]
+        fn should_show_every_column_in_a_wide_window(cx: &mut TestAppContext) {
+            let (_, cx) = open_in(1440., cx);
+
+            for column in ["Agent", "Checks", "Review", "Workspace"] {
+                assert!(shown(format!("column {column}"), cx), "{column}");
+            }
+            assert!(shown(cell("agent", 1), cx));
+            assert!(shown(cell("checks", 2), cx));
+        }
+
+        #[gpui::test]
+        fn should_drop_the_agent_column_first_when_the_table_does_not_fit(cx: &mut TestAppContext) {
+            let (_, cx) = open_in(1350., cx);
+
+            assert!(!shown("column Agent".into(), cx));
+            assert!(!shown(cell("agent", 1), cx));
+            assert!(shown("column Checks".into(), cx));
+            assert!(shown(cell("checks", 2), cx));
+        }
+
+        #[gpui::test]
+        fn should_not_scroll_sideways_at_1200(cx: &mut TestAppContext) {
+            let (_, cx) = open_in(1200., cx);
+
+            let table = cx.debug_bounds("task table").expect("the table");
+            let row = cx.debug_bounds(cell("task", 2).leak()).expect("a row");
+            assert!(row.right() <= table.right(), "{row:?} overflows {table:?}");
+            for column in ["Agent", "Checks"] {
+                assert!(!shown(format!("column {column}"), cx), "{column}");
+            }
+            assert!(!shown(cell("checks", 2), cx));
+        }
+
+        #[gpui::test]
+        fn should_keep_review_and_workspace(cx: &mut TestAppContext) {
+            let (_, cx) = open_in(1200., cx);
+
+            for (column, cell_name) in [("Review", "review"), ("Workspace", "workspace")] {
+                let header = cx.debug_bounds(format!("column {column}").leak());
+                let row = cx.debug_bounds(cell(cell_name, 2).leak());
+                let header = header.expect(column);
+                let row = row.expect(cell_name);
+                assert_eq!(header.left(), row.left(), "{column} lines up");
+            }
+        }
+
+        #[gpui::test]
+        fn should_bring_the_columns_back_when_the_window_widens(cx: &mut TestAppContext) {
+            let (harness, cx) = open_in(1200., cx);
+
+            cx.simulate_resize(size(px(1440. - 261.), px(800.)));
+            fit(&harness, cx);
+
+            assert!(shown("column Agent".into(), cx));
+            assert!(shown(cell("agent", 1), cx));
+        }
     }
 
     mod scrollbar {

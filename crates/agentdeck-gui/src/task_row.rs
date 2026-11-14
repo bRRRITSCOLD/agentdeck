@@ -15,7 +15,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Div, ElementId, Hsla, InteractiveElement as _, IntoElement, ListAlignment,
     ListState, ParentElement as _, Pixels, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Window, div, px,
+    Styled as _, Window, canvas, div, px,
 };
 
 use crate::state_dot::{StateDot, StateDotState};
@@ -30,15 +30,19 @@ pub fn list_state() -> ListState {
 }
 
 /// Columns over `rows`, `list`'s rows, as wide as the area allows and never narrower than
-/// `table`: a narrower area scrolls them sideways together, by a sideways wheel only. The
+/// `layout`: a narrower area scrolls them sideways together, by a sideways wheel only. The
 /// list's scrollbar sits over the area's right edge, outside that scroll, so it stays in
 /// view at any width; a hidden copy of the columns keeps it level with the list.
+///
+/// Each frame tells `on_width` the area's width, so the view can [`Table::fit`] its layout
+/// to it for the next.
 pub fn table(
     id: &'static str,
     selector: &'static str,
-    table: Table,
+    layout: Layout,
     rows: impl IntoElement,
     list: &ListState,
+    on_width: impl Fn(&Pixels, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> Div {
     let scrolled = div()
@@ -54,11 +58,11 @@ pub fn table(
             div()
                 .flex_1()
                 .min_h_0()
-                .min_w(table.min_width())
+                .min_w(layout.min_width())
                 .flex()
                 .flex_col()
                 .gap(space::S4)
-                .child(columns(table, cx))
+                .child(columns(layout, cx))
                 .child(rows),
         );
     // As wide as the area, not the table: the copy of the columns overflows it, unseen.
@@ -69,7 +73,7 @@ pub fn table(
         .flex()
         .flex_col()
         .gap(space::S4)
-        .child(columns(table, cx).min_w(table.min_width()).invisible())
+        .child(columns(layout, cx).min_w(layout.min_width()).invisible())
         .child(
             div()
                 .flex_1()
@@ -85,6 +89,14 @@ pub fn table(
         .flex_col()
         .child(scrolled)
         .child(scrollbar)
+        .child(
+            canvas(
+                move |bounds, window, cx| on_width(&bounds.size.width, window, cx),
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        )
 }
 
 /// Makes `list` hold `count` items, keeping its scroll position, and measures them again: a
@@ -131,13 +143,14 @@ impl Columns {
     pub const REVIEW: Pixels = px(128.);
     /// Workspace.
     pub const WORKSPACE: Pixels = px(140.);
-    /// The title's least width. Below it the table scrolls sideways instead: Penpot's boards
-    /// are 1440 wide, and a narrower window would squeeze the title to nothing.
-    pub const TITLE_MIN: Pixels = px(240.);
+    /// The title's least width. Below it a column drops ([`Table::fit`]), and below the
+    /// narrowest layout the table scrolls sideways, so a narrow window never squeezes the
+    /// title to nothing. Penpot "Tasks · 1200" fits beside the sidebar with it.
+    pub const TITLE_MIN: Pixels = px(200.);
 }
 
-/// Which list a table is: the Inbox's hides the agent and workspace columns and names the
-/// others its own way, as Penpot's "Inbox" board does.
+/// Which list a table is: the Inbox's has no agent or workspace column and names the others
+/// its own way, as Penpot's "Inbox" board does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Table {
     /// The Tasks view.
@@ -147,11 +160,65 @@ pub enum Table {
 }
 
 impl Table {
-    /// Whether rows show the agent and workspace cells.
-    fn full(self) -> bool {
-        self == Table::Tasks
+    /// Its layouts, widest first: each drops one more column, in the order the table gives
+    /// them up when it doesn't fit. Tasks drops Agent, then Checks; Review and Workspace
+    /// stay. The Inbox, which has neither Agent nor Workspace, drops Checks, then Review.
+    fn layouts(self) -> [Layout; 3] {
+        let layout = |agent, checks, review| Layout {
+            table: self,
+            agent,
+            checks,
+            review,
+            workspace: self == Table::Tasks,
+        };
+        match self {
+            Table::Tasks => [
+                layout(true, true, true),
+                layout(false, true, true),
+                layout(false, false, true),
+            ],
+            Table::Inbox => [
+                layout(false, true, true),
+                layout(false, false, true),
+                layout(false, false, false),
+            ],
+        }
     }
 
+    /// Every column the table has.
+    pub fn widest(self) -> Layout {
+        self.layouts()[0]
+    }
+
+    /// The widest layout that fits `width`; below the narrowest, the narrowest, which then
+    /// scrolls sideways.
+    pub fn fit(self, width: Pixels) -> Layout {
+        let layouts = self.layouts();
+        let narrowest = layouts[layouts.len() - 1];
+        (layouts.into_iter())
+            .find(|layout| layout.min_width() <= width)
+            .unwrap_or(narrowest)
+    }
+}
+
+/// The columns a table shows at its width: status, kind icon, title, PR and draft always;
+/// the others while they fit ([`Table::fit`]). Header and row cells follow the same layout,
+/// so they drop together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Layout {
+    /// Which list it is, which names the columns.
+    pub table: Table,
+    /// Linked agent (Tasks only).
+    pub agent: bool,
+    /// Checks.
+    pub checks: bool,
+    /// Review.
+    pub review: bool,
+    /// Workspace (Tasks only).
+    pub workspace: bool,
+}
+
+impl Layout {
     /// The table's least width: every column it shows, the title at its least, the
     /// `space.3` gaps and the rows' `space.2` padding.
     pub fn min_width(self) -> Pixels {
@@ -161,11 +228,14 @@ impl Table {
             Columns::TITLE_MIN,
             Columns::PR,
             Columns::DRAFT,
-            Columns::CHECKS,
-            Columns::REVIEW,
         ];
-        let extra = [Columns::AGENT, Columns::WORKSPACE];
-        let shown = extra.iter().filter(|_| self.full());
+        let optional = [
+            (self.agent, Columns::AGENT),
+            (self.checks, Columns::CHECKS),
+            (self.review, Columns::REVIEW),
+            (self.workspace, Columns::WORKSPACE),
+        ];
+        let shown = (optional.iter()).filter_map(|(shown, width)| shown.then_some(width));
         let (sum, count) =
             (fixed.iter().chain(shown)).fold((px(0.), 0.), |(sum, n), w| (sum + *w, n + 1.));
         sum + space::S3 * (count - 1.) + space::S2 * 2.
@@ -201,15 +271,17 @@ fn none(cx: &App) -> Div {
         .child("—")
 }
 
-/// Penpot `Columns`: the column names over the rows, xs medium muted.
-pub fn columns(table: Table, cx: &App) -> Div {
+/// Penpot `Columns`: the column names over the rows, xs medium muted; `layout`'s columns
+/// only. Tests find a named column as `column <name>`.
+pub fn columns(layout: Layout, cx: &App) -> Div {
     let s = cx.theme().semantic();
     let name = |width: Option<Pixels>, text: &'static str| {
         let cell = match width {
             Some(width) => cell(width),
             None => div().flex_1().min_w(Columns::TITLE_MIN),
         };
-        cell.child(text)
+        cell.debug_selector(move || format!("column {text}"))
+            .child(text)
     };
     div()
         .flex()
@@ -221,19 +293,25 @@ pub fn columns(table: Table, cx: &App) -> Div {
         .text_color(s.muted_foreground)
         .child(name(Some(Columns::STATUS), "Status"))
         .child(name(Some(Columns::ICON), ""))
-        .map(|row| match table {
-            Table::Tasks => row
-                .child(name(None, "Task"))
-                .child(name(Some(Columns::AGENT), "Agent"))
-                .child(name(Some(Columns::PR), "PR")),
-            Table::Inbox => row
-                .child(name(None, "Title"))
-                .child(name(Some(Columns::PR), "Repository")),
+        .map(|row| match layout.table {
+            Table::Tasks => row.child(name(None, "Task")),
+            Table::Inbox => row.child(name(None, "Title")),
+        })
+        .when(layout.agent, |row| {
+            row.child(name(Some(Columns::AGENT), "Agent"))
+        })
+        .map(|row| match layout.table {
+            Table::Tasks => row.child(name(Some(Columns::PR), "PR")),
+            Table::Inbox => row.child(name(Some(Columns::PR), "Repository")),
         })
         .child(name(Some(Columns::DRAFT), ""))
-        .child(name(Some(Columns::CHECKS), "Checks"))
-        .child(name(Some(Columns::REVIEW), "Review"))
-        .when(table.full(), |row| {
+        .when(layout.checks, |row| {
+            row.child(name(Some(Columns::CHECKS), "Checks"))
+        })
+        .when(layout.review, |row| {
+            row.child(name(Some(Columns::REVIEW), "Review"))
+        })
+        .when(layout.workspace, |row| {
             row.child(name(Some(Columns::WORKSPACE), "Workspace"))
         })
 }
@@ -390,10 +468,10 @@ fn unseen_dot(row: &Row, cx: &App) -> Option<Div> {
 }
 
 /// Penpot `TaskRow` (`wide`): picker, kind icon, title, agent, PR, draft, checks, review and
-/// workspace, `space.3` apart, padded `space.2`; `table`'s columns only. `picker` is the
+/// workspace, `space.3` apart, padded `space.2`; `layout`'s columns only. `picker` is the
 /// row's status picker; clicking the title runs `on_open`. The title is followed by a dot
-/// while the task's agent comments are unseen.
-pub fn wide(row: &Row, picker: Select, table: Table, on_open: OnOpen, cx: &App) -> AnyElement {
+/// while the task's agent comments are unseen. Tests find a cell as `<column> <id>`.
+pub fn wide(row: &Row, picker: Select, layout: Layout, on_open: OnOpen, cx: &App) -> AnyElement {
     let s = cx.theme().semantic();
     let muted = |text: SharedString, size: gpui::Rems| {
         div()
@@ -407,14 +485,15 @@ pub fn wide(row: &Row, picker: Select, table: Table, on_open: OnOpen, cx: &App) 
         TaskKind::Plain => IconName::ListTodo,
         TaskKind::Pr => IconName::GitPullRequest,
     };
+    let id = row.id;
+    let agent_cell = cell(Columns::AGENT).debug_selector(move || format!("agent {id}"));
     let agent = match &row.agent {
-        Some(agent) => cell(Columns::AGENT)
+        Some(agent) => agent_cell
             .child(StateDot::new().state(StateDotState::of(agent.state, None)))
             .child(muted(agent.name.clone(), font_size::XS)),
-        None => cell(Columns::AGENT).child(none(cx)),
+        None => agent_cell.child(none(cx)),
     };
     let pr = row.pr.as_ref();
-    let id = row.id;
     div()
         .debug_selector(move || format!("task {id}"))
         .flex()
@@ -439,7 +518,7 @@ pub fn wide(row: &Row, picker: Select, table: Table, on_open: OnOpen, cx: &App) 
                 .child(title(row, on_open, cx))
                 .children(unseen_dot(row, cx)),
         )
-        .when(table.full(), |r| r.child(agent))
+        .when(layout.agent, |r| r.child(agent))
         .child(cell(Columns::PR).when_some(pr, |c, pr| {
             c.child(muted(pr.reference.clone(), font_size::SM))
         }))
@@ -448,19 +527,28 @@ pub fn wide(row: &Row, picker: Select, table: Table, on_open: OnOpen, cx: &App) 
                 c.child(Badge::new().variant(BadgeVariant::Outline).label("draft"))
             }),
         )
-        .child(
-            cell(Columns::CHECKS).when_some(pr.and_then(|pr| pr.checks), |c, state| {
-                c.child(checks(state, false, cx))
-            }),
-        )
-        .child(
-            cell(Columns::REVIEW).when_some(pr.and_then(|pr| pr.review), |c, state| {
-                c.child(review(state, cx))
-            }),
-        )
-        .when(table.full(), |r| {
+        .when(layout.checks, |r| {
+            r.child(
+                cell(Columns::CHECKS)
+                    .debug_selector(move || format!("checks {id}"))
+                    .when_some(pr.and_then(|pr| pr.checks), |c, state| {
+                        c.child(checks(state, false, cx))
+                    }),
+            )
+        })
+        .when(layout.review, |r| {
+            r.child(
+                cell(Columns::REVIEW)
+                    .debug_selector(move || format!("review {id}"))
+                    .when_some(pr.and_then(|pr| pr.review), |c, state| {
+                        c.child(review(state, cx))
+                    }),
+            )
+        })
+        .when(layout.workspace, |r| {
             r.child(match &row.workspace {
                 Some(name) => cell(Columns::WORKSPACE)
+                    .debug_selector(move || format!("workspace {id}"))
                     .child(
                         Icon::new(IconName::Folder)
                             .size(px(14.))
@@ -474,7 +562,9 @@ pub fn wide(row: &Row, picker: Select, table: Table, on_open: OnOpen, cx: &App) 
                             .text_color(s.foreground)
                             .child(name.clone()),
                     ),
-                None => cell(Columns::WORKSPACE).child(none(cx)),
+                None => cell(Columns::WORKSPACE)
+                    .debug_selector(move || format!("workspace {id}"))
+                    .child(none(cx)),
             })
         })
         .into_any_element()
@@ -564,15 +654,66 @@ pub fn panel(row: &Row, picker: Select, on_open: OnOpen, cx: &App) -> AnyElement
 mod tests {
     use super::*;
 
-    mod table {
+    mod layout {
         use super::*;
 
         #[test]
         fn should_fit_every_column_the_title_at_its_least_and_the_gaps() {
-            // Penpot's Tasks board: 1131 wide with a 267px title, so 1104 with a 240px one.
-            assert_eq!(Table::Tasks.min_width(), px(1104.));
+            // Penpot's Tasks board: 1131 wide with a 267px title, so 1064 with a 200px one.
+            assert_eq!(Table::Tasks.widest().min_width(), px(1064.));
             // Penpot's Inbox board: 1131 wide with a 527px title.
-            assert_eq!(Table::Inbox.min_width(), px(1131. - 527. + 240.));
+            assert_eq!(Table::Inbox.widest().min_width(), px(1131. - 527. + 200.));
+        }
+
+        #[test]
+        fn should_show_every_column_in_a_wide_window() {
+            let layout = Table::Tasks.fit(px(1064.));
+            assert_eq!(layout, Table::Tasks.widest());
+            assert!(layout.agent && layout.checks && layout.review && layout.workspace);
+        }
+
+        #[test]
+        fn should_drop_the_agent_column_first_when_the_table_does_not_fit() {
+            let layout = Table::Tasks.fit(px(1063.));
+            assert!(!layout.agent);
+            assert!(layout.checks);
+            assert_eq!(layout.min_width(), px(956.));
+        }
+
+        #[test]
+        fn should_drop_checks_after_agent() {
+            let layout = Table::Tasks.fit(px(955.));
+            assert!(!layout.agent && !layout.checks);
+            assert_eq!(layout.min_width(), px(864.));
+        }
+
+        #[test]
+        fn should_keep_review_and_workspace() {
+            let layout = Table::Tasks.fit(px(400.));
+            assert!(layout.review && layout.workspace);
+            assert_eq!(layout.min_width(), px(864.));
+        }
+
+        #[test]
+        fn should_fit_the_tasks_table_beside_the_sidebar_at_1200() {
+            // 1200 less the sidebar (261) and the content's padding (48).
+            assert!(Table::Tasks.fit(px(891.)).min_width() <= px(891.));
+        }
+
+        #[test]
+        fn should_drop_checks_then_review_in_the_inbox() {
+            let inbox = Table::Inbox;
+            assert!(!inbox.widest().agent && !inbox.widest().workspace);
+            let narrower = inbox.fit(px(803.));
+            assert!(!narrower.checks && narrower.review);
+            let narrowest = inbox.fit(px(711.));
+            assert!(!narrowest.checks && !narrowest.review);
+            assert_eq!(narrowest.min_width(), px(572.));
+        }
+
+        #[test]
+        fn should_show_every_inbox_column_at_1200() {
+            assert_eq!(Table::Inbox.fit(px(891.)), Table::Inbox.widest());
         }
     }
 }
