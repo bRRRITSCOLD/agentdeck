@@ -25,6 +25,7 @@ use gpui::{
 use gpui_base::input::InputEvent;
 
 use crate::api::Api;
+use crate::form_enter::form_enter;
 use crate::notice;
 use crate::overview::Snapshot;
 use crate::workspace::failed;
@@ -396,7 +397,7 @@ impl Render for DeleteWorkspaceDialog {
                             .child(
                                 Field::new()
                                     .child(Label::new().child(format!("Type {name} to confirm")))
-                                    .child(Input::new(&self.confirm)),
+                                    .child(form_enter(Input::new(&self.confirm))),
                             ),
                     )
                     // Penpot `agentdeck/DeleteFooterActions`.
@@ -622,6 +623,26 @@ mod tests {
             harness.settle(cx);
 
             assert_eq!(harness.deleted(), [id(1)]);
+            assert!(!harness.is_open(cx));
+            assert_eq!(*harness.events.borrow(), [DeleteEvent::Deleted(id(1))]);
+        }
+
+        #[gpui::test]
+        fn should_stay_open_on_enter_before_the_name_is_typed(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::new(Arc::new(FakeApi::with(snapshot())), cx);
+            harness.open(cx);
+            cx.update(|window, cx| {
+                let input = harness.dialog.read(cx).confirm.clone();
+                input.update(cx, |input, cx| input.focus(window, cx));
+            });
+
+            cx.simulate_input("tabs-a11");
+            cx.simulate_keystrokes("enter");
+            harness.settle(cx);
+
+            assert!(harness.is_open(cx));
+            assert_eq!(harness.deleted(), []);
+            assert!(harness.events.borrow().is_empty());
         }
 
         #[gpui::test]
