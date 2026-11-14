@@ -405,6 +405,38 @@ mod get_v1_ws {
         }
 
         #[tokio::test]
+        async fn should_send_an_event_published_right_after_the_upgrade() {
+            let daemon = TestDaemon::start().await;
+            // Warm the client's connection pool, so the change below goes out at once.
+            daemon.client.task_list().send().await.expect("list tasks");
+
+            for round in 0..20 {
+                let mut ws = Ws::connect(&daemon).await;
+                // No await between the 101 and the change: the daemon must already be
+                // subscribed when the client sees the connection open.
+                let task = daemon
+                    .client
+                    .task_create()
+                    .body(NewTask {
+                        title: format!("t{round}"),
+                        body: None,
+                        status: None,
+                        workspace_id: None,
+                    })
+                    .send()
+                    .await
+                    .expect("create a task")
+                    .into_inner();
+
+                ws.expect(ServerMessage::Changed {
+                    entity: Entity::Task,
+                    id: task.id.to_string(),
+                })
+                .await;
+            }
+        }
+
+        #[tokio::test]
         async fn should_send_changed_when_a_pane_is_created() {
             let daemon = TestDaemon::start().await;
             let place = Place::new(&daemon).await;
