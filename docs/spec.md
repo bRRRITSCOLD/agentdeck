@@ -12,7 +12,8 @@ One Cargo virtual workspace, pinned like rust-packages: GPUI pin, toolchain 1.99
 | `agentdeckd` | bin | core | tokio, dropshot, rusqlite, portable-pty, alacritty_terminal |
 | `agentdeck-client` | lib | core | progenitor output from `openapi.json`, checked in, built by `cargo xtask client`; plus `daemon` (find or start the daemon, §2) and `ws` (the `/v1/ws` client, §5), shared by the CLI and the GUI |
 | `agentdeck` | bin | core, client | CLI and `agentdeck mcp` (rmcp); no GPUI. A current-thread tokio runtime drives the async client and the MCP server |
-| `agentdeck-gui` | bin | core, client, `brrritscold-core-gpui` | GPUI app. A small multi-thread tokio runtime, kept as a GPUI global, drives the client and the socket |
+| `agentdeck-gui` | bin | core, client, notify, `brrritscold-core-gpui` | GPUI app. A small multi-thread tokio runtime, kept as a GPUI global, drives the client and the socket |
+| `agentdeck-notify` | lib | — | The GUI's desktop notifications: the freedesktop notifications D-Bus API over one zbus connection, on zbus's own runtime (no tokio); clicks reach GPUI's foreground (§11) |
 | `xtask` | bin | — | `openapi` (regenerate spec), `client` (regenerate client), `ci` |
 
 Licence `MIT OR Apache-2.0`.
@@ -364,7 +365,8 @@ Built on `brrritscold-core-gpui` (`init`, `Root`, theme preference, toasts). Scr
   - Review: approved `success`, changes requested `warning`, required `muted-foreground`.
   - Task statuses aren't coloured.
   - The terminal palette follows the theme. Terminal text is JetBrains Mono (`font-family.mono`).
-- **Notifications:** the GUI shows OS notifications through GPUI's system notifications (the freedesktop notifications D-Bus API on Linux), named "agentdeck"; only while it runs, and the daemon sends none. Nothing about them is configurable in v1: no global mute, quiet hours or sounds.
+- **Notifications:** the GUI shows OS notifications through the freedesktop notifications D-Bus API, named "agentdeck", with no icon, no hints and the server's own timeout; only while it runs, and the daemon sends none. Nothing about them is configurable in v1: no global mute, quiet hours or sounds.
+  - **One connection:** `agentdeck-notify` holds one session-bus connection for the whole app and one task on GPUI's foreground that sends each `Notify` and reads the server's `ActionInvoked` and `NotificationClosed`, by the id the server gave each notification. A notification left open costs an entry in that id map, never a thread or a connection; it leaves the map once clicked or closed. (GPUI's own `show_system_notification` starts a thread and a connection per notification and holds both until the server closes it, #133.) Without a session bus the GUI logs why once and shows none.
   - **Panes:** an agent pane (not a shell) turning `blocked` or `done` while the user can't see it: its tab isn't the one shown, its workspace isn't, or the window isn't focused. Title "<Agent> is blocked" / "<Agent> is done"; body "<linked task title, else tab title> · <workspace>". Once per state change, not again while the state holds.
   - **PRs:** a PR task's checks turning `failure`, or its review turning `approved` or `changes_requested`. Title "Checks failed" / "Approved" / "Changes requested"; body "<repo> #<n> · <title>". Changes are held while a PR sync runs and shown when it ends; more than 3 PRs changed in one sync make one "N PRs changed" whose body lists their "<repo> #<n>".
   - Only changes between two reads count: what the GUI first reads after connecting (a pane already blocked, a check already failing) notifies nothing.
@@ -381,7 +383,7 @@ Built on `brrritscold-core-gpui` (`init`, `Root`, theme preference, toasts). Scr
 | unit | `agentdeck-core`, GUI views (`#[gpui::test]`), daemon pure parts | rules with recorded output, layout tree, snapshot encode/decode round-trip, env allowlist, `openapi.json` staleness |
 | integration | `agentdeckd/tests/integration` | temp `$XDG_*` dirs, a real daemon on a random port, a real client; PTYs run `sh`; GitHub is httpmock; `gh` is a stub script on `PATH` |
 | integration | `agentdeck/tests/integration` | the real `agentdeck` binary in temp `$XDG_*` dirs, starting the real daemon itself; `agentdeck mcp` driven over stdio with hand-written JSON-RPC; panes run `sh`, never a real agent CLI |
-| integration | `agentdeck-gui/tests/integration` | GPUI's Linux system notifications against a fake notification server on a private `dbus-daemon` session bus, the app side in a child process: what the unit tier's test platform records stands for |
+| integration | `agentdeck-notify/tests/integration` | the desktop notifier against a fake notification server on a private `dbus-daemon` session bus, the app side (GPUI's headless platform) in a child process: what it sends, one connection and no thread per notification, a click routed by id, a closed notification forgotten. The GUI's unit tests stand in a fake `Notifier` for it |
 
 There is no e2e tier. GPUI's headless context doesn't advance real sockets, so anything touching sockets is an integration test. CI is Linux only: fmt, clippy, unit, integration and doc, with warnings denied.
 
