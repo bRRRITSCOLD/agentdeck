@@ -9,7 +9,7 @@ use agentdeck_client::instructions;
 use agentdeck_client::panes::{self, pane_if_any};
 use agentdeck_client::types::{
     Comment, DirtyReport, InstructionPatch, NewComment, NewInstruction, NewTask, NewWorkspace,
-    Pane, Tab, TaskPatch,
+    Pane, Settings, SettingsPatch, Tab, TaskPatch,
 };
 use agentdeck_client::{ApiError, Client};
 use agentdeck_core::{
@@ -117,6 +117,13 @@ pub trait Api: Send + Sync {
     /// does its dir when agentdeck made it. Only call it once the user has seen the dirty
     /// report.
     fn delete_workspace(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<()>>;
+
+    /// Every setting in `config.toml`, as the daemon uses it (spec §2).
+    fn settings(&self, cx: &App) -> Task<anyhow::Result<Settings>>;
+
+    /// Changes the settings `patch` names and returns them all. A refusal is an [`ApiError`];
+    /// `invalid_setting` names the key in its message.
+    fn update_settings(&self, patch: SettingsPatch, cx: &App) -> Task<anyhow::Result<Settings>>;
 }
 
 pub use agentdeck_client::panes::PaneAt;
@@ -367,6 +374,23 @@ impl Api for Daemon {
             Ok(())
         })
     }
+
+    fn settings(&self, cx: &App) -> Task<anyhow::Result<Settings>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            let settings = (client.settings_get().send().await).map_err(ApiError::from)?;
+            Ok(settings.into_inner())
+        })
+    }
+
+    fn update_settings(&self, patch: SettingsPatch, cx: &App) -> Task<anyhow::Result<Settings>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            let settings =
+                (client.settings_update().body(patch).send().await).map_err(ApiError::from)?;
+            Ok(settings.into_inner())
+        })
+    }
 }
 
 /// Reads a [`WorkspacePanes`]: the tabs, then each pane in their layouts, then each task
@@ -459,6 +483,19 @@ pub(crate) mod fake {
 
     use super::*;
 
+    /// The daemon's defaults: the system theme and a 90-day PR cutoff, nothing overridden.
+    pub fn default_settings() -> Settings {
+        use agentdeck_client::types::{AppearanceSettings, PrSyncSettings, ThemePreference};
+
+        Settings {
+            appearance: AppearanceSettings {
+                theme: ThemePreference::System,
+            },
+            pr_sync: PrSyncSettings { max_age_days: 90 },
+            overridden_by_env: Vec::new(),
+        }
+    }
+
     /// Answers every read with what it holds now, and counts the snapshot reads. Writes
     /// change what it holds, as the daemon would, but broadcast nothing.
     #[derive(Default)]
@@ -508,6 +545,12 @@ pub(crate) mod fake {
         dirty: Mutex<HashMap<WorkspaceId, DirtyReport>>,
         /// The workspaces deleted, in order.
         pub deleted: Mutex<Vec<WorkspaceId>>,
+        /// The settings; the daemon's defaults when unset.
+        settings: Mutex<Option<Settings>>,
+        /// How many times the settings were read.
+        settings_reads: Mutex<usize>,
+        /// The settings patches sent, in order.
+        pub settings_patches: Mutex<Vec<SettingsPatch>>,
     }
 
     impl FakeApi {
@@ -588,6 +631,21 @@ pub(crate) mod fake {
         /// How many times a task's comments were read.
         pub fn comment_reads(&self) -> usize {
             *self.comment_reads.lock().unwrap()
+        }
+
+        /// The settings it holds now.
+        pub fn settings_now(&self) -> Settings {
+            (self.settings.lock().unwrap().clone()).unwrap_or_else(default_settings)
+        }
+
+        /// Answers later reads with `settings`, as if another client had changed them.
+        pub fn set_settings(&self, settings: Settings) {
+            *self.settings.lock().unwrap() = Some(settings);
+        }
+
+        /// How many times the settings were read.
+        pub fn settings_reads(&self) -> usize {
+            *self.settings_reads.lock().unwrap()
         }
 
         /// Stamps or clears `workspace`'s `archived_at`, as the daemon does.
@@ -923,6 +981,31 @@ pub(crate) mod fake {
                 .retain(|i| i.workspace_id != workspace);
             self.deleted.lock().unwrap().push(workspace);
             Task::ready(Ok(()))
+        }
+
+        fn settings(&self, _cx: &App) -> Task<anyhow::Result<Settings>> {
+            *self.settings_reads.lock().unwrap() += 1;
+            Task::ready(Ok(self.settings_now()))
+        }
+
+        fn update_settings(
+            &self,
+            patch: SettingsPatch,
+            _cx: &App,
+        ) -> Task<anyhow::Result<Settings>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            let mut settings = self.settings_now();
+            if let Some(theme) = patch.appearance.as_ref().and_then(|a| a.theme) {
+                settings.appearance.theme = theme;
+            }
+            if let Some(days) = patch.pr_sync.as_ref().and_then(|p| p.max_age_days) {
+                settings.pr_sync.max_age_days = days;
+            }
+            self.set_settings(settings.clone());
+            self.settings_patches.lock().unwrap().push(patch);
+            Task::ready(Ok(settings))
         }
     }
 }

@@ -1,7 +1,8 @@
 //! The main window's content: what the daemon connection allows. Until it connects, a
-//! centred status; once it does, the sidebar beside the selected view: a workspace's pane
-//! the Tasks view or the Inbox, and the new workspace dialog the
-//! sidebar's `+` opens. When the compositor leaves decorations to the app, a title bar and
+//! centred status; once it does, the sidebar beside the selected view: a workspace's pane,
+//! the Tasks view, the Inbox or Settings, and the new workspace dialog the
+//! sidebar's `+` opens. Settings is made as the window connects, so the saved theme applies
+//! from the start. When the compositor leaves decorations to the app, a title bar and
 //! resize edges frame it.
 //!
 //! It archives and unarchives the selected workspace when the top bar asks, toasting the
@@ -39,6 +40,7 @@ use crate::new_task::{NewTask, NewTaskDialog};
 use crate::new_workspace::{Created, NewWorkspaceDialog};
 use crate::notice::{self, Notice, NoticeAction};
 use crate::right_panel::RightPanel;
+use crate::settings::SettingsView;
 use crate::sidebar::{Selection, SidebarEvent, SidebarView};
 use crate::task_sheet::{OpenTask, TaskSheet};
 use crate::tasks::TasksView;
@@ -76,6 +78,9 @@ pub struct Shell {
     tasks: Option<Entity<TasksView>>,
     /// The Inbox, while connected; shown while the sidebar selects it.
     inbox: Option<Entity<InboxView>>,
+    /// Settings, while connected; shown while the sidebar's gear selects it. It also applies
+    /// the saved theme.
+    settings: Option<Entity<SettingsView>>,
     /// The right panel beside a workspace, while connected.
     panel: Option<Entity<RightPanel>>,
     /// Whether the right panel shows; the top bar's panel button flips it.
@@ -114,6 +119,7 @@ impl Shell {
             workspace: None,
             tasks: None,
             inbox: None,
+            settings: None,
             panel: None,
             panel_open: true,
             selection: None,
@@ -138,6 +144,8 @@ impl Shell {
                     let new_task = cx.new(|cx| NewTaskDialog::new(api.clone(), window, cx));
                     let panel = cx.new(|cx| RightPanel::new(api.clone(), window, cx));
                     let tasks = cx.new(|cx| TasksView::new(api.clone(), window, cx));
+                    let settings =
+                        cx.new(|cx| SettingsView::new(api.clone(), &connection, window, cx));
                     let task_sheet =
                         cx.new(|cx| TaskSheet::new(api.clone(), &connection, window, cx));
                     let sidebar = cx.new(|cx| SidebarView::new(api, &connection, cx));
@@ -208,6 +216,7 @@ impl Shell {
                     self.new_task = Some(new_task);
                     self.task_sheet = Some(task_sheet);
                     self.tasks = Some(tasks);
+                    self.settings = Some(settings);
                     self.panel = Some(panel);
                     self.sidebar = Some(sidebar);
                     self.follow_selection(window, cx);
@@ -221,6 +230,7 @@ impl Shell {
                 self.workspace = None;
                 self.tasks = None;
                 self.inbox = None;
+                self.settings = None;
                 self.panel = None;
                 self.new_agent = None;
                 self.delete_workspace = None;
@@ -262,7 +272,7 @@ impl Shell {
         let sidebar = sidebar.read(cx);
         let row = match selection {
             Selection::Workspace(selected) => sidebar.overview().workspace(selected),
-            Selection::Inbox | Selection::Tasks => None,
+            Selection::Inbox | Selection::Tasks | Selection::Settings => None,
         };
         let Some(row) = row else {
             self.workspace = None;
@@ -499,6 +509,9 @@ impl Shell {
                     }
                     Some(Selection::Inbox) if self.inbox.is_some() => {
                         body.children(self.inbox.clone())
+                    }
+                    Some(Selection::Settings) if self.settings.is_some() => {
+                        body.children(self.settings.clone())
                     }
                     _ => body.child(div().flex_1()),
                 })
@@ -760,6 +773,49 @@ mod tests {
                     assert_eq!(shell.selection, Some(Selection::Inbox));
                     assert!(shell.inbox.is_some());
                 });
+            }
+        }
+
+        mod settings {
+            use super::*;
+            use crate::api::fake::default_settings;
+            use agentdeck_client::types::{AppearanceSettings, Settings, ThemePreference};
+
+            #[gpui::test]
+            fn should_show_settings_when_the_sidebar_selects_it(cx: &mut TestAppContext) {
+                let connector = Rc::new(FakeConnector::default());
+                let _remote = connector.then_connect_to(workspace_with_a_pane());
+                let shell = open(connector, cx);
+                let sidebar = shell.read_with(cx, |shell, _| shell.sidebar.clone().unwrap());
+
+                sidebar.update(cx, |sidebar, cx| sidebar.select(Selection::Settings, cx));
+                cx.run_until_parked();
+
+                shell.read_with(cx, |shell, _| {
+                    assert_eq!(shell.selection, Some(Selection::Settings));
+                    assert!(shell.settings.is_some());
+                });
+                assert_eq!(shown_workspace(&shell, cx), None);
+            }
+
+            #[gpui::test]
+            fn should_apply_the_saved_theme_once_connected(cx: &mut TestAppContext) {
+                let connector = Rc::new(FakeConnector::default());
+                let api = workspace_with_a_pane();
+                api.set_settings(Settings {
+                    appearance: AppearanceSettings {
+                        theme: ThemePreference::Dark,
+                    },
+                    ..default_settings()
+                });
+                let _remote = connector.then_connect_to(api);
+
+                open(connector, cx);
+
+                assert_eq!(
+                    cx.read(|cx| cx.theme().preference()),
+                    brrritscold_core_gpui::ThemePreference::Dark
+                );
             }
         }
 

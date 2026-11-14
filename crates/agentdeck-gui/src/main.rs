@@ -23,6 +23,7 @@ mod rereads;
 mod right_panel;
 mod runtime;
 mod scrollbar;
+mod settings;
 mod shell;
 mod sidebar;
 mod state_dot;
