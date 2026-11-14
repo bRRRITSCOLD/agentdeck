@@ -135,7 +135,14 @@ impl Db {
 
 /// Now, as the RFC 3339 UTC string every time column holds.
 pub fn now() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    stamp(chrono::Utc::now())
+}
+
+/// `at` as the RFC 3339 UTC string every time column holds: to the microsecond, so a create
+/// and an edit in the same millisecond still stamp in order. Every stamp has six fraction digits
+/// and a `Z`, so stamps sort as text, also after the millisecond stamps older rows carry.
+fn stamp(at: chrono::DateTime<chrono::Utc>) -> String {
+    at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
 }
 
 /// A new id: a UUIDv7, so ids sort by creation time.
@@ -185,6 +192,39 @@ pub fn exists(conn: &Connection, table: &str, id: impl fmt::Display) -> rusqlite
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod stamp {
+        use super::*;
+
+        fn at(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
+            chrono::DateTime::parse_from_rfc3339(rfc3339)
+                .expect("an RFC 3339 time")
+                .to_utc()
+        }
+
+        #[test]
+        fn should_order_two_instants_in_the_same_millisecond() {
+            let first = stamp(at("2026-11-14T10:00:00.123400Z"));
+            let second = stamp(at("2026-11-14T10:00:00.123401Z"));
+
+            assert!(second > first, "{first} then {second}");
+        }
+
+        #[test]
+        fn should_sort_after_a_millisecond_stamp_from_an_earlier_millisecond() {
+            // Rows written before stamps carried microseconds keep their millisecond stamps.
+            let stored = "2026-11-14T10:00:00.123Z";
+
+            assert!(stamp(at("2026-11-14T10:00:00.124000Z")).as_str() > stored);
+        }
+
+        #[test]
+        fn should_parse_back_to_the_same_instant() {
+            let instant = at("2026-11-14T10:00:00.123456Z");
+
+            assert_eq!(at(&stamp(instant)), instant);
+        }
+    }
 
     mod migrations {
         use super::*;

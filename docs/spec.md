@@ -27,7 +27,7 @@ Licence `MIT OR Apache-2.0`.
 
 ## 3. Data model
 
-Ids are UUIDv7 strings. Times are RFC 3339 UTC strings.
+Ids are UUIDv7 strings. Times are RFC 3339 UTC strings; the daemon stamps them to the microsecond (`2026-11-14T10:00:00.123456Z`), so they sort as text and an edit right after a create still stamps later. Rows written before that carry milliseconds, which still sort before every later stamp.
 
 ```sql
 CREATE TABLE workspaces (
