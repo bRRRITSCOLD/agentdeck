@@ -11,6 +11,7 @@ mod frame;
 mod inbox;
 mod keymap;
 mod new_agent;
+mod new_task;
 mod new_workspace;
 mod note_list;
 mod notice;
