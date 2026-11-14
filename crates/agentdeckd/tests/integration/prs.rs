@@ -394,24 +394,79 @@ mod post_v1_prs_sync {
     }
 
     #[tokio::test]
-    async fn should_report_a_github_failure_and_keep_the_tasks_200() {
+    async fn should_report_a_github_failure_briefly_after_three_tries_and_keep_the_tasks_200() {
         let github = MockServer::start_async().await;
         let mut search = mock_search(&github, TOKEN, &[Pr::open(7)]);
         let daemon = daemon(&github, Some(TOKEN)).await;
         let synced = sync(&daemon.client).await;
 
         search.delete();
-        github.mock(|_, then| {
-            then.status(502).body("bad gateway");
+        let bad_gateway = github.mock(|_, then| {
+            then.status(502)
+                .body("<html><head><title>502 Bad Gateway</title></head></html>");
         });
         let status = sync(&daemon.client).await;
 
         assert_eq!(status.login, GhLogin::LoggedIn);
+        assert_eq!(status.last_error.as_deref(), Some("GitHub answered 502"));
+        assert_eq!(status.last_synced_at, synced.last_synced_at);
+        assert_eq!(pr_tasks(&daemon.client).await.len(), 1);
+        bad_gateway.assert_calls(3);
+    }
+
+    #[tokio::test]
+    async fn should_keep_the_message_github_gives_with_a_failure_200() {
+        let github = MockServer::start_async().await;
+        github.mock(|_, then| {
+            then.status(403)
+                .json_body(serde_json::json!({ "message": "API rate limit exceeded" }));
+        });
+        let daemon = daemon(&github, Some(TOKEN)).await;
+
+        let status = sync(&daemon.client).await;
+
         assert_eq!(
             status.last_error.as_deref(),
-            Some("GitHub answered 502: bad gateway")
+            Some("GitHub answered 403: API rate limit exceeded")
         );
-        assert_eq!(status.last_synced_at, synced.last_synced_at);
+    }
+
+    #[tokio::test]
+    async fn should_retry_a_github_hiccup_and_finish_the_sync() {
+        let github = MockServer::start_async().await;
+        let bad_gateway = github.mock(|_, then| {
+            then.status(502).body("bad gateway");
+        });
+        // The timer's first sync, at start, meets the 502.
+        let daemon = daemon(&github, Some(TOKEN)).await;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while bad_gateway.calls_async().await == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "no call to GitHub 10 s after start"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        bad_gateway.delete_async().await;
+        mock_search(&github, TOKEN, &[Pr::open(7)]);
+
+        // The same sync, retried: no other runs for 120 s.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let status = daemon
+                .client
+                .prs_status()
+                .send()
+                .await
+                .expect("status")
+                .into_inner();
+            if status.last_synced_at.is_some() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "not synced: {status:?}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         assert_eq!(pr_tasks(&daemon.client).await.len(), 1);
     }
 }
