@@ -244,10 +244,10 @@ mod post_v1_prs_sync {
         mock_search(&github, TOKEN, &[]);
         let fetch = mock_fetch(
             &github,
-            &Pr {
+            &[Pr {
                 state: "MERGED",
                 ..Pr::open(7)
-            },
+            }],
         );
         sync(&daemon.client).await;
         sync(&daemon.client).await;
@@ -258,6 +258,37 @@ mod post_v1_prs_sync {
         assert_eq!(task.pr.expect("the task's PR").state, PrState::Merged);
         // Fetched by number once; a merged PR isn't fetched again.
         fetch.assert_calls(1);
+    }
+
+    #[tokio::test]
+    async fn should_fetch_prs_that_left_the_search_50_at_a_time_200() {
+        let github = MockServer::start_async().await;
+        let open: Vec<Pr> = (1..=120).map(Pr::open).collect();
+        let mut search = mock_search(&github, TOKEN, &open);
+        let daemon = daemon(&github, Some(TOKEN)).await;
+        sync(&daemon.client).await;
+
+        search.delete();
+        mock_search(&github, TOKEN, &[]);
+        let merged: Vec<Pr> = open
+            .iter()
+            .map(|pr| Pr {
+                state: "MERGED",
+                ..pr.clone()
+            })
+            .collect();
+        let fetches: Vec<_> = merged
+            .chunks(50)
+            .map(|batch| mock_fetch(&github, batch))
+            .collect();
+        sync(&daemon.client).await;
+
+        let tasks = pr_tasks(&daemon.client).await;
+        assert_eq!(tasks.len(), 120);
+        assert!(tasks.iter().all(|task| task.status == TaskStatus::Done));
+        for fetch in &fetches {
+            fetch.assert_calls(1);
+        }
     }
 
     #[tokio::test]
@@ -272,7 +303,7 @@ mod post_v1_prs_sync {
         github.mock(|when, then| {
             when.body_includes("pullRequest(");
             then.status(200).json_body(serde_json::json!({
-                "data": { "repository": null },
+                "data": { "p0": null },
                 "errors": [ { "message": "Could not resolve to a Repository" } ]
             }));
         });

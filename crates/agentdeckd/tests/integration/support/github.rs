@@ -117,20 +117,24 @@ pub fn mock_search<'a>(server: &'a MockServer, token: &str, prs: &[Pr]) -> Mock<
     })
 }
 
-/// The fetch of `pr` by number, answered with `pr` as it is now.
-pub fn mock_fetch<'a>(server: &'a MockServer, pr: &Pr) -> Mock<'a> {
-    let (owner, name) = pr.repo.split_once('/').expect("owner/name");
-    let node = pr.node();
+/// One batched fetch by number, answered with `prs` as they are now. It matches the batch
+/// that starts with `prs[0]`, the daemon asking for each as `p<i>`.
+pub fn mock_fetch<'a>(server: &'a MockServer, prs: &[Pr]) -> Mock<'a> {
+    let first = &prs[0];
+    let (owner, name) = first.repo.split_once('/').expect("owner/name");
+    let data: serde_json::Map<String, Value> = prs
+        .iter()
+        .enumerate()
+        .map(|(i, pr)| (format!("p{i}"), json!({ "pullRequest": pr.node() })))
+        .collect();
     server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
             .body_includes("pullRequest(")
             .json_body_includes(
-                json!({ "variables": { "owner": owner, "name": name, "number": pr.number } })
-                    .to_string(),
+                json!({ "variables": { "o0": owner, "r0": name, "n0": first.number } }).to_string(),
             );
-        then.status(200)
-            .json_body(json!({ "data": { "repository": { "pullRequest": node } } }));
+        then.status(200).json_body(json!({ "data": data }));
     })
 }
 
