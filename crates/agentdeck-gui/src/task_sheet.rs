@@ -4,6 +4,9 @@
 //! thread, oldest first; its footer (`agentdeck/CommentComposer`) writes a comment for the
 //! task's agent. Enter is a newline there; Ctrl+Enter or **Comment** sends.
 //!
+//! While no agent works on the task, the status row ends in **Start agent**, which closes the
+//! sheet and asks the window for New agent on the task's workspace with [`StartAgentOn`].
+//!
 //! Clicking a task's title in the Tasks view, the Inbox or the right panel asks the window
 //! for it with [`OpenTask`]. Opening it reads the thread and marks the task's agent comments
 //! seen, which clears the row's unseen mark. While open, a `changed comment` reads the thread again.

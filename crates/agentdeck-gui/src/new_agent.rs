@@ -2,7 +2,8 @@
 //! folder it runs in (the workspace root or a repo inside it) and an optional task to link.
 //! The description under the task says what the launch prompt will carry.
 //!
-//! The top bar's "New agent" button asks the window for it with [`NewAgent`]. Once the
+//! The top bar's "New agent" button asks the window for it with [`NewAgent`]; the task
+//! sheet's Start agent opens it on the task's workspace with the task picked. Once the
 //! daemon has started the agent and it has a place in a tab, the dialog closes and emits
 //! [`Launched`], so the window can show that tab and focus the pane: the agent may be asking
 //! about trust (spec §6).
@@ -35,9 +36,11 @@ actions!(
     ]
 );
 
-/// The dialog started an agent: the tab it was placed in, and its pane.
+/// The dialog started an agent: its workspace, the tab it was placed in, and its pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Launched {
+    /// The workspace.
+    pub workspace: WorkspaceId,
     /// The tab.
     pub tab: TabId,
     /// The pane.
@@ -187,6 +190,18 @@ impl NewAgentDialog {
         self.handle.is_open()
     }
 
+    /// The workspace it's open on.
+    #[cfg(test)]
+    pub fn workspace(&self) -> Option<WorkspaceId> {
+        self.target.as_ref().map(|target| target.id)
+    }
+
+    /// The task picked.
+    #[cfg(test)]
+    pub fn task(&self) -> Option<TaskId> {
+        self.task
+    }
+
     /// Picks the agent.
     pub fn set_agent(&mut self, agent: Agent, cx: &mut Context<Self>) {
         self.agent = agent;
@@ -205,13 +220,14 @@ impl NewAgentDialog {
         cx.notify();
     }
 
-    /// The workspace's tasks that aren't done, in the daemon's order.
+    /// The workspace's tasks that aren't done, and the one picked, in the daemon's order.
     fn tasks(&self) -> Vec<(TaskId, SharedString)> {
         let Some(target) = &self.target else {
             return Vec::new();
         };
         (self.snapshot.tasks.iter())
-            .filter(|t| t.workspace_id == Some(target.id) && t.status != TaskStatus::Done)
+            .filter(|t| t.workspace_id == Some(target.id))
+            .filter(|t| t.status != TaskStatus::Done || Some(t.id) == self.task)
             .map(|t| (t.id, SharedString::from(t.title.clone())))
             .collect()
     }
@@ -493,6 +509,20 @@ mod tests {
                 .dialog
                 .read_with(cx, |d, _| d.tasks().into_iter().map(|(t, _)| t).collect());
             assert_eq!(tasks, [id(10)]);
+        }
+
+        #[gpui::test]
+        fn should_offer_a_done_task_once_it_is_picked(cx: &mut TestAppContext) {
+            let (harness, cx) = open(cx);
+
+            harness
+                .dialog
+                .update(cx, |d, cx| d.set_task(Some(id(11)), cx));
+
+            let tasks: Vec<TaskId> = harness
+                .dialog
+                .read_with(cx, |d, _| d.tasks().into_iter().map(|(t, _)| t).collect());
+            assert_eq!(tasks, [id(10), id(11)]);
         }
 
         #[gpui::test]
