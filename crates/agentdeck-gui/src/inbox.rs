@@ -1,6 +1,6 @@
 //! The Inbox (spec §11), Penpot "Screens" → "Inbox": tasks with no workspace, mostly PRs,
 //! each with a status picker, and the PR sync's state with a "Sync now" button. Done tasks
-//! are left out.
+//! are left out. While gh is logged out, an alert over the columns says how to log in.
 //!
 //! Like the Tasks view it shows the sidebar's [`Snapshot`], passed on by the window. A sync
 //! asked for here emits [`Synced`] once done, so the window can have the sidebar read again:
@@ -10,8 +10,11 @@
 
 use std::sync::Arc;
 
+use agentdeck_client::types::GhLogin;
 use agentdeck_core::{TaskId, TaskStatus};
-use brrritscold_core_gpui::{ActiveTheme as _, Button, ButtonVariant};
+use brrritscold_core_gpui::{
+    ActiveTheme as _, Alert, AlertDescription, AlertTitle, Button, ButtonVariant, IconName,
+};
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -236,6 +239,26 @@ impl Render for InboxView {
             .p(space::S6)
             .bg(s.background)
             .child(self.header(cx))
+            // Penpot "Inbox · gh logged out": a default `Alert` over the columns.
+            .when(
+                self.snapshot.pr_sync.login == GhLogin::LoggedOut,
+                |content| {
+                    content.child(
+                        div()
+                            .flex_none()
+                            .debug_selector(|| "gh banner".into())
+                            .child(
+                            Alert::new()
+                                .icon(IconName::Info)
+                                .title(AlertTitle::new("GitHub isn't connected"))
+                                .description(AlertDescription::new(
+                                    "PR sync uses the gh login. Run gh auth login in a terminal, \
+                                 then press Sync now.",
+                                )),
+                        ),
+                    )
+                },
+            )
             .child(table)
             .when(self.shown.is_empty(), |content| {
                 content.child(
@@ -477,6 +500,39 @@ mod tests {
 
         let label = cx.update(|_, cx| harness.view.read(cx).sync_label(chrono::Utc::now()));
         assert_eq!(label, "Syncing… 50 of 271 PRs");
+    }
+
+    /// [`inbox`] with gh logged out.
+    fn logged_out() -> Snapshot {
+        let mut snapshot = inbox();
+        snapshot.pr_sync.login = agentdeck_client::types::GhLogin::LoggedOut;
+        snapshot.pr_sync.last_error = Some("gh is not logged in".into());
+        snapshot
+    }
+
+    #[gpui::test]
+    fn should_show_the_gh_banner_while_gh_is_logged_out(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::open(logged_out(), cx);
+        harness.draw(cx);
+
+        assert!(cx.debug_bounds("gh banner").is_some());
+        let label = cx.update(|_, cx| harness.view.read(cx).sync_label(chrono::Utc::now()));
+        assert_eq!(label, "gh logged out");
+    }
+
+    #[gpui::test]
+    fn should_hide_the_gh_banner_once_gh_is_logged_in(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::open(logged_out(), cx);
+        harness.draw(cx);
+
+        cx.update(|_, cx| {
+            harness
+                .view
+                .update(cx, |view, cx| view.set_snapshot(inbox(), cx))
+        });
+        harness.draw(cx);
+
+        assert!(cx.debug_bounds("gh banner").is_none());
     }
 
     #[gpui::test]
