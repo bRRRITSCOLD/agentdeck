@@ -1,10 +1,10 @@
 //! Task comments: `/v1/tasks/{id}/comments` and `/v1/comments/{id}` (spec §9).
 
 use agentdeck_core::ws::Entity;
-use agentdeck_core::{CommentId, TaskId};
+use agentdeck_core::{CommentAuthor, CommentId, TaskId};
 use dropshot::{
-    HttpError, HttpResponseCreated, HttpResponseDeleted, HttpResponseOk, Path, RequestContext,
-    TypedBody, endpoint,
+    HttpError, HttpResponseCreated, HttpResponseDeleted, HttpResponseOk,
+    HttpResponseUpdatedNoContent, Path, RequestContext, TypedBody, endpoint,
 };
 
 use super::{ApiContext, Authorized, IdPath};
@@ -46,9 +46,36 @@ pub(crate) async fn comment_create(
         .call(move |c| db::comments::create(c, task, &new))
         .await?;
     context.events.changed(Entity::Comment, comment.id);
+    if comment.author == CommentAuthor::Agent {
+        // The task's count of unseen agent comments went up.
+        context.events.changed(Entity::Task, task);
+    }
     delivery::deliver_to_task_pane(&context.db, &context.terminals, &context.events, &comment)
         .await;
     Ok(HttpResponseCreated(comment))
+}
+
+/// Marks every agent comment on a task seen by the user: the GUI does this when the user
+/// opens the task, which clears its "new from agent" dot.
+#[endpoint { method = POST, path = "/v1/tasks/{id}/comments/seen" }]
+pub(crate) async fn comment_seen(
+    rqctx: RequestContext<ApiContext>,
+    _auth: Authorized,
+    path: Path<IdPath<TaskId>>,
+) -> Result<HttpResponseUpdatedNoContent, HttpError> {
+    let task = path.into_inner().id;
+    let context = rqctx.context();
+    let seen = context
+        .db
+        .call(move |c| db::comments::mark_seen(c, task))
+        .await?;
+    if !seen.is_empty() {
+        for id in seen {
+            context.events.changed(Entity::Comment, id);
+        }
+        context.events.changed(Entity::Task, task);
+    }
+    Ok(HttpResponseUpdatedNoContent())
 }
 
 /// Deletes a comment.

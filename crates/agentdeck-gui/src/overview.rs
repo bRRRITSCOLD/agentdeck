@@ -319,6 +319,7 @@ pub(crate) mod fixtures {
             id: id(n),
             kind,
             pr: None,
+            unseen_agent_comments: 0,
             status: TaskStatus::Todo,
             title: format!("task {n}"),
             updated_at: CREATED.into(),

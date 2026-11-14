@@ -77,6 +77,7 @@ pub fn api() -> ApiDescription<ApiContext> {
         api.register(tasks::task_delete),
         api.register(comments::comment_list),
         api.register(comments::comment_create),
+        api.register(comments::comment_seen),
         api.register(comments::comment_delete),
         api.register(instructions::instruction_list),
         api.register(instructions::instruction_create),

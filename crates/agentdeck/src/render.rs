@@ -240,6 +240,7 @@ mod tests {
             id: "0190a1b2-c3d4-7e5f-8a9b-000000000002".parse().unwrap(),
             kind: TaskKind::Plain,
             pr: None,
+            unseen_agent_comments: 0,
             status: TaskStatus::Doing,
             title: title.into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
@@ -309,6 +310,7 @@ mod tests {
                 delivered_at: delivered.then(|| "2026-01-01T01:00:00Z".into()),
                 delivered_to_pane: None,
                 id: "0190a1b2-c3d4-7e5f-8a9b-000000000003".parse().unwrap(),
+                seen_at: None,
                 task_id: "0190a1b2-c3d4-7e5f-8a9b-000000000001".parse().unwrap(),
             }
         }

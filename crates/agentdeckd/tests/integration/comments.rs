@@ -78,6 +78,11 @@ mod post_v1_tasks_id_comments {
             (comment.delivered_at, comment.delivered_to_pane),
             (None, None)
         );
+        assert_eq!(
+            comment.seen_at.as_ref(),
+            Some(&comment.created_at),
+            "yours is seen"
+        );
     }
 
     #[tokio::test]
@@ -92,6 +97,24 @@ mod post_v1_tasks_id_comments {
         assert_eq!(comment.author, CommentAuthor::Agent);
         assert_eq!(comment.author_agent, Some(Agent::Claude));
         assert_eq!(comment.author_pane, Some(pane.id));
+        assert_eq!(comment.seen_at, None, "an agent's is new to the user");
+    }
+
+    #[tokio::test]
+    async fn should_send_changed_for_the_task_when_an_agent_comments_201() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let task = task(&daemon.client).await;
+        let pane = place.spawn(&daemon.client, &sh("sleep 60")).await;
+        let mut ws = Ws::connect(&daemon).await;
+
+        comment(&daemon.client, task.id, "PR opened", Some(pane.id)).await;
+
+        ws.expect(ServerMessage::Changed {
+            entity: Entity::Task,
+            id: task.id.to_string(),
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -214,6 +237,70 @@ mod get_v1_tasks_id_comments {
             daemon
                 .client
                 .comment_list()
+                .id(uuid::Uuid::now_v7())
+                .send()
+                .await,
+        );
+
+        assert_eq!(status, 404);
+    }
+}
+
+mod post_v1_tasks_id_comments_seen {
+    use super::*;
+
+    async fn unseen(client: &Client, task: TaskId) -> u32 {
+        client
+            .task_get()
+            .id(task)
+            .send()
+            .await
+            .expect("read the task")
+            .into_inner()
+            .unseen_agent_comments
+    }
+
+    #[tokio::test]
+    async fn should_mark_every_agent_comment_on_the_task_seen_204() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let (task, other) = (task(&daemon.client).await, task(&daemon.client).await);
+        let pane = place.spawn(&daemon.client, &sh("sleep 60")).await;
+        let first = comment(&daemon.client, task.id, "PR opened", Some(pane.id)).await;
+        comment(&daemon.client, task.id, "looks good", None).await;
+        comment(&daemon.client, task.id, "checks green", Some(pane.id)).await;
+        comment(&daemon.client, other.id, "elsewhere", Some(pane.id)).await;
+        assert_eq!(unseen(&daemon.client, task.id).await, 2);
+        let mut ws = Ws::connect(&daemon).await;
+
+        let response = daemon
+            .client
+            .comment_seen()
+            .id(task.id)
+            .send()
+            .await
+            .expect("mark seen");
+
+        assert_eq!(response.status().as_u16(), 204);
+        assert_eq!(unseen(&daemon.client, task.id).await, 0);
+        assert_eq!(unseen(&daemon.client, other.id).await, 1);
+        let thread = list(&daemon.client, task.id).await;
+        assert!(thread.iter().all(|c| c.seen_at.is_some()), "{thread:?}");
+        ws.expect(ServerMessage::Changed {
+            entity: Entity::Comment,
+            id: first.id.to_string(),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn should_answer_not_found_for_an_unknown_task_404() {
+        let daemon = TestDaemon::start().await;
+
+        let (status, _) = error_response(
+            daemon
+                .client
+                .comment_seen()
                 .id(uuid::Uuid::now_v7())
                 .send()
                 .await,

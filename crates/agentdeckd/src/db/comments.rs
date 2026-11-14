@@ -7,7 +7,7 @@ use super::{DbError, exists, new_id, now, opt_text, text};
 use crate::model::{Comment, NewComment};
 
 const COLUMNS: &str = "id, task_id, body, author, author_agent, author_pane, created_at, \
-                       delivered_at, delivered_to_pane";
+                       delivered_at, delivered_to_pane, seen_at";
 
 fn from_row(row: &Row<'_>) -> rusqlite::Result<Comment> {
     Ok(Comment {
@@ -20,6 +20,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Comment> {
         created_at: row.get("created_at")?,
         delivered_at: row.get("delivered_at")?,
         delivered_to_pane: opt_text(row, "delivered_to_pane")?,
+        seen_at: row.get("seen_at")?,
     })
 }
 
@@ -83,9 +84,13 @@ pub fn create(conn: &Connection, task: TaskId, new: &NewComment) -> Result<Comme
         }
     };
     let id: CommentId = new_id();
+    let created = now();
+    // The user has seen what they wrote; an agent's comment is new to them.
+    let seen = (author == CommentAuthor::User).then(|| created.clone());
     conn.execute(
-        "INSERT INTO comments (id, task_id, body, author, author_agent, author_pane, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO comments
+           (id, task_id, body, author, author_agent, author_pane, created_at, seen_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             id.to_string(),
             task.to_string(),
@@ -93,7 +98,8 @@ pub fn create(conn: &Connection, task: TaskId, new: &NewComment) -> Result<Comme
             author.as_str(),
             agent.map(Agent::as_str),
             new.pane.map(|pane| pane.to_string()),
-            now(),
+            created,
+            seen,
         ],
     )?;
     get(conn, id)
@@ -108,6 +114,20 @@ pub fn mark_delivered(conn: &Connection, id: CommentId, pane: PaneId) -> Result<
         params![id.to_string(), now(), pane.to_string()],
     )?;
     Ok(changed > 0)
+}
+
+/// Marks every agent comment on `task` the user hasn't seen as seen now; the ones it marked.
+pub fn mark_seen(conn: &Connection, task: TaskId) -> Result<Vec<CommentId>, DbError> {
+    if !exists(conn, "tasks", task)? {
+        return Err(DbError::NotFound("task"));
+    }
+    let mut stmt = conn.prepare(
+        "UPDATE comments SET seen_at = ?2
+         WHERE task_id = ?1 AND author = 'agent' AND seen_at IS NULL
+         RETURNING id",
+    )?;
+    let rows = stmt.query_map(params![task.to_string(), now()], |row| text(row, "id"))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 /// Deletes a comment.

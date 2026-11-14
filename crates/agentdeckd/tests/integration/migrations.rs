@@ -111,6 +111,10 @@ mod migration_0002 {
         let bodies: Vec<&str> = comments.iter().map(|c| c.body.as_str()).collect();
         assert_eq!(bodies, ["It fails on CI only", "Also check Firefox"]);
         assert!(comments.iter().all(|c| c.author == CommentAuthor::User));
+        assert!(
+            comments.iter().all(|c| c.seen_at.is_some()),
+            "the user's are seen"
+        );
         let (read, unread) = (&comments[0], &comments[1]);
         assert_eq!(
             read.delivered_at.as_deref(),

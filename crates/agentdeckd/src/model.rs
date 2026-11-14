@@ -132,6 +132,8 @@ pub struct Task {
     pub done_at: Option<String>,
     /// The pull request behind a PR task; `None` for a plain task.
     pub pr: Option<PullRequest>,
+    /// Agents' comments on the task the user hasn't seen yet.
+    pub unseen_agent_comments: u32,
 }
 
 /// The GitHub pull request behind a PR task, as PR sync last saw it (spec §8).
@@ -220,6 +222,9 @@ pub struct Comment {
     pub delivered_at: Option<String>,
     /// The pane it was delivered to.
     pub delivered_to_pane: Option<PaneId>,
+    /// When the user saw it; `None` while an agent's comment is new to the user. The user's
+    /// own comments are seen when written.
+    pub seen_at: Option<String>,
 }
 
 /// `POST /v1/tasks/{id}/comments`.

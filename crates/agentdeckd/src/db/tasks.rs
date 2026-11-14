@@ -10,7 +10,9 @@ use crate::model::{NewTask, PullRequest, Task, TaskFilter, TaskPatch};
 /// A task with its PR row, if any: `FROM {TABLES}` reads both.
 const COLUMNS: &str = "t.id, t.title, t.body, t.status, t.kind, t.workspace_id, t.created_at,
     t.updated_at, t.done_at, p.repo, p.number, p.url, p.state AS pr_state, p.draft, p.head_ref,
-    p.checks, p.review, p.updated_at AS pr_updated_at, p.synced_at";
+    p.checks, p.review, p.updated_at AS pr_updated_at, p.synced_at,
+    (SELECT COUNT(*) FROM comments c
+     WHERE c.task_id = t.id AND c.author = 'agent' AND c.seen_at IS NULL) AS unseen_agent_comments";
 const TABLES: &str = "tasks t LEFT JOIN pull_requests p ON p.task_id = t.id";
 
 fn pr_from_row(row: &Row<'_>) -> rusqlite::Result<Option<PullRequest>> {
@@ -43,6 +45,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Task> {
         updated_at: row.get("updated_at")?,
         done_at: row.get("done_at")?,
         pr: pr_from_row(row)?,
+        unseen_agent_comments: row.get("unseen_agent_comments")?,
     })
 }
 

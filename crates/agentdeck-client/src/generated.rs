@@ -30,6 +30,9 @@ pub mod types {
         pub delivered_to_pane: ::std::option::Option<agentdeck_core::PaneId>,
         ///The comment's id.
         pub id: agentdeck_core::CommentId,
+        ///When the user saw it; `None` while an agent's comment is new to the user. The user's own comments are seen when written.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub seen_at: ::std::option::Option<::std::string::String>,
         ///The task it's on.
         pub task_id: agentdeck_core::TaskId,
     }
@@ -581,6 +584,8 @@ pub mod types {
         pub status: agentdeck_core::TaskStatus,
         ///The title.
         pub title: ::std::string::String,
+        ///Agents' comments on the task the user hasn't seen yet.
+        pub unseen_agent_comments: u32,
         ///When the task last changed.
         pub updated_at: ::std::string::String,
         ///The linked workspace; `None` puts the task in the inbox.
@@ -678,6 +683,10 @@ pub mod types {
                 ::std::string::String,
             >,
             id: ::std::result::Result<agentdeck_core::CommentId, ::std::string::String>,
+            seen_at: ::std::result::Result<
+                ::std::option::Option<::std::string::String>,
+                ::std::string::String,
+            >,
             task_id: ::std::result::Result<agentdeck_core::TaskId, ::std::string::String>,
         }
         impl ::std::default::Default for Comment {
@@ -691,6 +700,7 @@ pub mod types {
                     delivered_at: Ok(Default::default()),
                     delivered_to_pane: Ok(Default::default()),
                     id: Err("no value supplied for id".to_string()),
+                    seen_at: Ok(Default::default()),
                     task_id: Err("no value supplied for task_id".to_string()),
                 }
             }
@@ -776,6 +786,16 @@ pub mod types {
                     .map_err(|e| format!("error converting supplied value for id: {e}"));
                 self
             }
+            pub fn seen_at<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<::std::string::String>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.seen_at = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for seen_at: {e}"));
+                self
+            }
             pub fn task_id<T>(mut self, value: T) -> Self
             where
                 T: ::std::convert::TryInto<agentdeck_core::TaskId>,
@@ -801,6 +821,7 @@ pub mod types {
                     delivered_at: value.delivered_at?,
                     delivered_to_pane: value.delivered_to_pane?,
                     id: value.id?,
+                    seen_at: value.seen_at?,
                     task_id: value.task_id?,
                 })
             }
@@ -816,6 +837,7 @@ pub mod types {
                     delivered_at: Ok(value.delivered_at),
                     delivered_to_pane: Ok(value.delivered_to_pane),
                     id: Ok(value.id),
+                    seen_at: Ok(value.seen_at),
                     task_id: Ok(value.task_id),
                 }
             }
@@ -2507,6 +2529,7 @@ pub mod types {
             >,
             status: ::std::result::Result<agentdeck_core::TaskStatus, ::std::string::String>,
             title: ::std::result::Result<::std::string::String, ::std::string::String>,
+            unseen_agent_comments: ::std::result::Result<u32, ::std::string::String>,
             updated_at: ::std::result::Result<::std::string::String, ::std::string::String>,
             workspace_id: ::std::result::Result<
                 ::std::option::Option<agentdeck_core::WorkspaceId>,
@@ -2524,6 +2547,9 @@ pub mod types {
                     pr: Ok(Default::default()),
                     status: Err("no value supplied for status".to_string()),
                     title: Err("no value supplied for title".to_string()),
+                    unseen_agent_comments: Err(
+                        "no value supplied for unseen_agent_comments".to_string()
+                    ),
                     updated_at: Err("no value supplied for updated_at".to_string()),
                     workspace_id: Ok(Default::default()),
                 }
@@ -2610,6 +2636,16 @@ pub mod types {
                     .map_err(|e| format!("error converting supplied value for title: {e}"));
                 self
             }
+            pub fn unseen_agent_comments<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<u32>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.unseen_agent_comments = value.try_into().map_err(|e| {
+                    format!("error converting supplied value for unseen_agent_comments: {e}")
+                });
+                self
+            }
             pub fn updated_at<T>(mut self, value: T) -> Self
             where
                 T: ::std::convert::TryInto<::std::string::String>,
@@ -2643,6 +2679,7 @@ pub mod types {
                     pr: value.pr?,
                     status: value.status?,
                     title: value.title?,
+                    unseen_agent_comments: value.unseen_agent_comments?,
                     updated_at: value.updated_at?,
                     workspace_id: value.workspace_id?,
                 })
@@ -2659,6 +2696,7 @@ pub mod types {
                     pr: Ok(value.pr),
                     status: Ok(value.status),
                     title: Ok(value.title),
+                    unseen_agent_comments: Ok(value.unseen_agent_comments),
                     updated_at: Ok(value.updated_at),
                     workspace_id: Ok(value.workspace_id),
                 }
@@ -3363,6 +3401,23 @@ impl Client {
     ///```
     pub fn comment_create(&self) -> builder::CommentCreate<'_> {
         builder::CommentCreate::new(self)
+    }
+    ///Marks every agent comment on a task seen by the user: the GUI does this when the user
+    ///
+    ///opens the task, which clears its "new from agent" dot.
+    ///
+    ///Sends a `POST` request to `/v1/tasks/{id}/comments/seen`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///```ignore
+    ///let response = client.comment_seen()
+    ///    .id(id)
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn comment_seen(&self) -> builder::CommentSeen<'_> {
+        builder::CommentSeen::new(self)
     }
     ///Every workspace, archived ones included, oldest first
     ///
@@ -5034,6 +5089,73 @@ pub mod builder {
             let response = result?;
             match response.status().as_u16() {
                 201u16 => ResponseValue::from_response(response).await,
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::comment_seen`]
+    ///
+    ///[`Client::comment_seen`]: super::Client::comment_seen
+    #[derive(Debug, Clone)]
+    pub struct CommentSeen<'a> {
+        client: &'a super::Client,
+        id: Result<agentdeck_core::TaskId, String>,
+    }
+    impl<'a> CommentSeen<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self {
+                client: client,
+                id: Err("id was not initialized".to_string()),
+            }
+        }
+        pub fn id<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<agentdeck_core::TaskId>,
+        {
+            self.id = value
+                .try_into()
+                .map_err(|_| "conversion to `agentdeck_core :: TaskId` for id failed".to_string());
+            self
+        }
+        ///Sends a `POST` request to `/v1/tasks/{id}/comments/seen`
+        pub async fn send(self) -> Result<ResponseValue<()>, Error<types::Error>> {
+            let Self { client, id } = self;
+            let id = id.map_err(Error::InvalidRequest)?;
+            let url = format!(
+                "{}/v1/tasks/{}/comments/seen",
+                client.baseurl,
+                encode_path(&id.to_string()),
+            );
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .post(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "comment_seen",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                204u16 => Ok(ResponseValue::empty(response)),
                 400u16..=499u16 => Err(Error::ErrorResponse(
                     ResponseValue::from_response(response).await?,
                 )),

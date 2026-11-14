@@ -109,6 +109,11 @@
             ],
             "description": "The comment's id."
           },
+          "seen_at": {
+            "description": "When the user saw it; `None` while an agent's comment is new to the user. The user's own comments are seen when written.",
+            "nullable": true,
+            "type": "string"
+          },
           "task_id": {
             "allOf": [
               {
@@ -1033,6 +1038,12 @@
             "description": "The title.",
             "type": "string"
           },
+          "unseen_agent_comments": {
+            "description": "Agents' comments on the task the user hasn't seen yet.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "updated_at": {
             "description": "When the task last changed.",
             "type": "string"
@@ -1054,6 +1065,7 @@
           "kind",
           "status",
           "title",
+          "unseen_agent_comments",
           "updated_at"
         ],
         "type": "object"
@@ -1903,6 +1915,35 @@
           }
         },
         "summary": "Adds a comment to a task. With `pane`, it is that pane's agent's and is never delivered."
+      }
+    },
+    "/v1/tasks/{id}/comments/seen": {
+      "post": {
+        "description": "opens the task, which clears its \"new from agent\" dot.",
+        "operationId": "comment_seen",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/TaskId"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Marks every agent comment on a task seen by the user: the GUI does this when the user"
       }
     },
     "/v1/workspaces": {

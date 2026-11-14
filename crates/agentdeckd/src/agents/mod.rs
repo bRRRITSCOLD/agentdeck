@@ -115,6 +115,7 @@ mod tests {
             updated_at: String::new(),
             done_at: None,
             pr: None,
+            unseen_agent_comments: 0,
         }
     }
 
@@ -139,6 +140,7 @@ mod tests {
             created_at: String::new(),
             delivered_at: None,
             delivered_to_pane: None,
+            seen_at: None,
         }
     }
 
