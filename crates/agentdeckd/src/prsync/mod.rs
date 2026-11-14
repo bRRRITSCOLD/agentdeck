@@ -159,8 +159,8 @@ impl PrSync {
     pub async fn sync(&self) -> PrSyncStatus {
         let _running = self.inner.running.lock().await;
         self.set_progress(Some(PrSyncProgress {
-            pages_done: 0,
-            pages: 0,
+            prs_done: 0,
+            prs: 0,
         }));
         let result = self.sync_once().await;
         {
@@ -256,7 +256,7 @@ impl PrSync {
         };
         let mut seen: Vec<(String, i64)> = Vec::new();
         let mut after: Option<String> = None;
-        for page_no in 1..=github::MAX_PAGES {
+        for _ in 0..github::MAX_PAGES {
             let page = github.search_page(token, &q, after.as_deref()).await?;
             seen.extend(page.prs.iter().map(|pr| (pr.repo.clone(), pr.number)));
             let prs: Vec<RemotePr> = page
@@ -271,14 +271,10 @@ impl PrSync {
                 })
                 .collect();
             self.store(prs, Vec::new(), clones).await?;
-            let pages = page
-                .total
-                .div_ceil(github::PAGE_SIZE)
-                .max(page_no + u32::from(page.next.is_some()))
-                .min(github::MAX_PAGES);
+            let prs_done = u32::try_from(seen.len()).unwrap_or(u32::MAX);
             self.set_progress(Some(PrSyncProgress {
-                pages_done: page_no,
-                pages,
+                prs_done,
+                prs: page.total.max(prs_done),
             }));
             match page.next {
                 Some(next) => after = Some(next),

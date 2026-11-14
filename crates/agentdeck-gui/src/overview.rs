@@ -90,13 +90,13 @@ pub enum PrSync {
     Failed,
     /// The last sync finished then.
     SyncedAt(DateTime<Utc>),
-    /// A sync is running, `pages_done` of its `pages` search pages read; `pages` is 0 until
-    /// the first page answers.
+    /// A sync is running, `prs_done` of its `prs` PRs read; `prs` is 0 until the first page
+    /// answers.
     Syncing {
-        /// Pages read so far.
-        pages_done: u32,
-        /// Pages expected.
-        pages: u32,
+        /// PRs read so far.
+        prs_done: u32,
+        /// PRs expected.
+        prs: u32,
     },
 }
 
@@ -107,8 +107,8 @@ impl PrSync {
             PrSync::NotYet => "PRs not synced yet".to_owned(),
             PrSync::Failed => "PR sync failed".to_owned(),
             PrSync::SyncedAt(at) => format!("PRs synced {}", ago(now - at)),
-            PrSync::Syncing { pages_done, pages } => {
-                format!("Syncing PRs…{}", of(pages_done, pages))
+            PrSync::Syncing { prs_done, prs } => {
+                format!("Syncing PRs…{}", of(prs_done, prs, ""))
             }
         }
     }
@@ -119,17 +119,17 @@ impl PrSync {
             PrSync::NotYet => "Not synced yet".to_owned(),
             PrSync::Failed => "Sync failed".to_owned(),
             PrSync::SyncedAt(at) => format!("Synced {}", ago(now - at)),
-            PrSync::Syncing { pages_done, pages } => format!("Syncing…{}", of(pages_done, pages)),
+            PrSync::Syncing { prs_done, prs } => format!("Syncing…{}", of(prs_done, prs, " PRs")),
         }
     }
 }
 
-/// " 2 of 6" once a sync knows how many pages it has; nothing before.
-fn of(pages_done: u32, pages: u32) -> String {
-    if pages == 0 {
+/// " 100 of 271" and then `unit` once a sync knows how many PRs it has; nothing before.
+fn of(prs_done: u32, prs: u32, unit: &str) -> String {
+    if prs == 0 {
         String::new()
     } else {
-        format!(" {pages_done} of {pages}")
+        format!(" {prs_done} of {prs}{unit}")
     }
 }
 
@@ -218,8 +218,8 @@ impl Snapshot {
             .and_then(|at| DateTime::parse_from_rfc3339(at).ok());
         let pr_sync = match (&self.pr_sync.progress, &self.pr_sync.last_error, synced_at) {
             (Some(progress), _, _) => PrSync::Syncing {
-                pages_done: progress.pages_done,
-                pages: progress.pages,
+                prs_done: progress.prs_done,
+                prs: progress.prs,
             },
             (None, Some(_), _) => PrSync::Failed,
             (None, None, Some(at)) => PrSync::SyncedAt(at.to_utc()),
@@ -509,15 +509,15 @@ mod tests {
                 snapshot.pr_sync.last_synced_at = Some("2026-11-12T10:00:00Z".into());
                 snapshot.pr_sync.last_error = Some("gh: rate limited".into());
                 snapshot.pr_sync.progress = Some(agentdeck_client::types::PrSyncProgress {
-                    pages_done: 2,
-                    pages: 6,
+                    prs_done: 100,
+                    prs: 271,
                 });
 
                 assert_eq!(
                     snapshot.overview().pr_sync,
                     PrSync::Syncing {
-                        pages_done: 2,
-                        pages: 6
+                        prs_done: 100,
+                        prs: 271
                     }
                 );
             }
@@ -590,11 +590,14 @@ mod tests {
 
         #[test]
         fn should_say_how_far_a_running_sync_is_once_it_knows() {
-            let syncing = |pages_done, pages| PrSync::Syncing { pages_done, pages };
+            let syncing = |prs_done, prs| PrSync::Syncing { prs_done, prs };
 
-            assert_eq!(syncing(2, 6).label(at(NOW)), "Syncing PRs… 2 of 6");
+            assert_eq!(syncing(100, 271).label(at(NOW)), "Syncing PRs… 100 of 271");
             assert_eq!(syncing(0, 0).label(at(NOW)), "Syncing PRs…");
-            assert_eq!(syncing(2, 6).short_label(at(NOW)), "Syncing… 2 of 6");
+            assert_eq!(
+                syncing(100, 271).short_label(at(NOW)),
+                "Syncing… 100 of 271 PRs"
+            );
             assert_eq!(syncing(0, 0).short_label(at(NOW)), "Syncing…");
         }
     }
