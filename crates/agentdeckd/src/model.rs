@@ -296,8 +296,8 @@ pub struct PrSyncStatus {
     pub last_error: Option<String>,
     /// How far the sync running now is; `None` while none runs.
     pub progress: Option<PrSyncProgress>,
-    /// How many days since GitHub last updated an open PR it may be and still sync
-    /// (`[pr_sync] max_age_days`, as the daemon read it at start); `0` for no cutoff.
+    /// How many days since GitHub last updated an open PR it may be and still sync: the
+    /// setting `pr_sync.max_age_days` as it is now; `0` for no cutoff.
     pub max_age_days: u32,
 }
 
@@ -404,4 +404,82 @@ pub struct InputAccepted {
 pub struct TailQuery {
     /// At most this many of the last bytes; all that is kept (256 KiB) when absent.
     pub bytes: Option<u64>,
+}
+
+/// `GET /v1/settings`, and what `PATCH /v1/settings` answers: every setting with the value
+/// the daemon uses (spec §2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Settings {
+    /// `[appearance]`.
+    pub appearance: AppearanceSettings,
+    /// `[pr_sync]`.
+    pub pr_sync: PrSyncSettings,
+    /// The dotted keys (`pr_sync.max_age_days`) whose value comes from an environment
+    /// variable, not `config.toml`. A PATCH of one is written to the file, but the variable
+    /// still wins until the daemon runs without it.
+    pub overridden_by_env: Vec<String>,
+}
+
+/// `[appearance]`: how the GUI looks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AppearanceSettings {
+    /// `appearance.theme`: light, dark, or the desktop's choice.
+    pub theme: ThemePreference,
+}
+
+/// `[pr_sync]`: which open PRs PR sync keeps (spec §8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PrSyncSettings {
+    /// `pr_sync.max_age_days`: only open PRs GitHub updated in the last this many days sync;
+    /// `0` for every open PR.
+    pub max_age_days: u32,
+}
+
+/// `appearance.theme`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemePreference {
+    /// Follow the desktop's light or dark setting.
+    #[default]
+    System,
+    /// Always dark.
+    Dark,
+    /// Always light.
+    Light,
+}
+
+/// `PATCH /v1/settings`: the settings to change, by section; the rest stay as they are.
+///
+/// The schema is typed, but each section is read as plain JSON so that a value or key the
+/// daemon doesn't take is a 400 `invalid_setting` naming its dotted key, not a parse error.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct SettingsPatch {
+    /// `[appearance]` keys to change.
+    #[schemars(with = "Option<AppearancePatch>")]
+    pub appearance: Option<serde_json::Value>,
+    /// `[pr_sync]` keys to change.
+    #[schemars(with = "Option<PrSyncPatch>")]
+    pub pr_sync: Option<serde_json::Value>,
+    /// Sections no setting is in, so the PATCH can name them in its error.
+    #[serde(flatten)]
+    #[schemars(skip)]
+    pub unknown: serde_json::Map<String, serde_json::Value>,
+}
+
+/// `[appearance]` in a [`SettingsPatch`]: its schema only, since `config::validate` reads the
+/// JSON itself.
+#[derive(JsonSchema)]
+#[expect(dead_code, reason = "a schema, never built")]
+pub struct AppearancePatch {
+    /// A new `appearance.theme`.
+    pub theme: Option<ThemePreference>,
+}
+
+/// `[pr_sync]` in a [`SettingsPatch`]: its schema only, since `config::validate` reads the
+/// JSON itself.
+#[derive(JsonSchema)]
+#[expect(dead_code, reason = "a schema, never built")]
+pub struct PrSyncPatch {
+    /// A new `pr_sync.max_age_days`; `0` for no cutoff.
+    pub max_age_days: Option<u32>,
 }

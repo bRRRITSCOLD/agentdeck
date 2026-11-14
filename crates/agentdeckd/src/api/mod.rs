@@ -9,6 +9,7 @@ mod health;
 mod instructions;
 mod panes;
 mod prs;
+mod settings;
 mod tabs;
 mod tasks;
 mod workspaces;
@@ -27,6 +28,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::auth::bearer_matches;
+use crate::config::Config;
 use crate::db::{Db, DbError};
 use crate::events::Events;
 use crate::prsync::PrSync;
@@ -47,6 +49,8 @@ pub struct ApiContext {
     pub scratch_root: PathBuf,
     /// PR sync, for `/v1/prs`.
     pub prs: PrSync,
+    /// The settings in `config.toml`, for `/v1/settings`.
+    pub settings: Config,
     /// The live panes.
     pub terminals: Terminals,
     /// The events every WebSocket client gets.
@@ -85,6 +89,8 @@ pub fn api() -> ApiDescription<ApiContext> {
         api.register(instructions::instruction_delete),
         api.register(prs::prs_sync),
         api.register(prs::prs_status),
+        api.register(settings::settings_get),
+        api.register(settings::settings_update),
         api.register(panes::pane_create),
         api.register(panes::pane_get),
         api.register(panes::pane_delete),

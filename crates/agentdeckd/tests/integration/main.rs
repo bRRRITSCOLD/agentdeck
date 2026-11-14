@@ -13,6 +13,8 @@ mod migrations;
 mod panes;
 mod panes_client;
 mod prs;
+mod settings;
+mod settings_client;
 mod support;
 mod tabs;
 mod tasks;

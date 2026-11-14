@@ -42,6 +42,38 @@
         ],
         "type": "string"
       },
+      "AppearancePatch": {
+        "description": "`[appearance]` in a [`SettingsPatch`]: its schema only, since `config::validate` reads the JSON itself.",
+        "properties": {
+          "theme": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ThemePreference"
+              }
+            ],
+            "description": "A new `appearance.theme`.",
+            "nullable": true
+          }
+        },
+        "type": "object"
+      },
+      "AppearanceSettings": {
+        "description": "`[appearance]`: how the GUI looks.",
+        "properties": {
+          "theme": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ThemePreference"
+              }
+            ],
+            "description": "`appearance.theme`: light, dark, or the desktop's choice."
+          }
+        },
+        "required": [
+          "theme"
+        ],
+        "type": "object"
+      },
       "ChecksState": {
         "enum": [
           "pending",
@@ -737,6 +769,19 @@
         ],
         "type": "string"
       },
+      "PrSyncPatch": {
+        "description": "`[pr_sync]` in a [`SettingsPatch`]: its schema only, since `config::validate` reads the JSON itself.",
+        "properties": {
+          "max_age_days": {
+            "description": "A new `pr_sync.max_age_days`; `0` for no cutoff.",
+            "format": "uint32",
+            "minimum": 0,
+            "nullable": true,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
       "PrSyncProgress": {
         "description": "How far a running PR sync is through the viewer's PRs.",
         "properties": {
@@ -765,6 +810,21 @@
           "prs",
           "prs_done",
           "stage"
+        ],
+        "type": "object"
+      },
+      "PrSyncSettings": {
+        "description": "`[pr_sync]`: which open PRs PR sync keeps (spec §8).",
+        "properties": {
+          "max_age_days": {
+            "description": "`pr_sync.max_age_days`: only open PRs GitHub updated in the last this many days sync; `0` for every open PR.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "max_age_days"
         ],
         "type": "object"
       },
@@ -809,7 +869,7 @@
             "description": "The `gh` login state."
           },
           "max_age_days": {
-            "description": "How many days since GitHub last updated an open PR it may be and still sync (`[pr_sync] max_age_days`, as the daemon read it at start); `0` for no cutoff.",
+            "description": "How many days since GitHub last updated an open PR it may be and still sync: the setting `pr_sync.max_age_days` as it is now; `0` for no cutoff.",
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
@@ -908,6 +968,64 @@
           "review_required"
         ],
         "type": "string"
+      },
+      "Settings": {
+        "description": "`GET /v1/settings`, and what `PATCH /v1/settings` answers: every setting with the value the daemon uses (spec §2).",
+        "properties": {
+          "appearance": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AppearanceSettings"
+              }
+            ],
+            "description": "`[appearance]`."
+          },
+          "overridden_by_env": {
+            "description": "The dotted keys (`pr_sync.max_age_days`) whose value comes from an environment variable, not `config.toml`. A PATCH of one is written to the file, but the variable still wins until the daemon runs without it.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "pr_sync": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PrSyncSettings"
+              }
+            ],
+            "description": "`[pr_sync]`."
+          }
+        },
+        "required": [
+          "appearance",
+          "overridden_by_env",
+          "pr_sync"
+        ],
+        "type": "object"
+      },
+      "SettingsPatch": {
+        "description": "`PATCH /v1/settings`: the settings to change, by section; the rest stay as they are.\n\nThe schema is typed, but each section is read as plain JSON so that a value or key the daemon doesn't take is a 400 `invalid_setting` naming its dotted key, not a parse error.",
+        "properties": {
+          "appearance": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AppearancePatch"
+              }
+            ],
+            "description": "`[appearance]` keys to change.",
+            "nullable": true
+          },
+          "pr_sync": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PrSyncPatch"
+              }
+            ],
+            "description": "`[pr_sync]` keys to change.",
+            "nullable": true
+          }
+        },
+        "type": "object"
       },
       "SplitDirection": {
         "enum": [
@@ -1130,6 +1248,32 @@
           "done"
         ],
         "type": "string"
+      },
+      "ThemePreference": {
+        "description": "`appearance.theme`.",
+        "oneOf": [
+          {
+            "description": "Follow the desktop's light or dark setting.",
+            "enum": [
+              "system"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "Always dark.",
+            "enum": [
+              "dark"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "Always light.",
+            "enum": [
+              "light"
+            ],
+            "type": "string"
+          }
+        ]
       },
       "UnpushedBranch": {
         "description": "A local branch holding commits that are on no remote.",
@@ -1589,6 +1733,64 @@
           }
         },
         "summary": "Syncs PR tasks with GitHub now and answers with the status the sync left. Clients call it"
+      }
+    },
+    "/v1/settings": {
+      "get": {
+        "description": "`overridden_by_env` names the keys an environment variable sets.",
+        "operationId": "settings_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Settings"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Every setting with the value the daemon uses."
+      },
+      "patch": {
+        "description": "The changes are written to `config.toml`, keeping its other keys and comments, and apply at once. A key or value the daemon doesn't take is 400 `invalid_setting`, naming the key; a `config.toml` that doesn't parse is left as it is, 409 `unparsable_config`. A key an environment variable overrides is written, but the variable's value stays in use.",
+        "operationId": "settings_update",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SettingsPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Settings"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Changes some settings and answers with them all."
       }
     },
     "/v1/tabs/{id}": {

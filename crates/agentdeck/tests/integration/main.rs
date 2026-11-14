@@ -4,6 +4,7 @@
 
 mod agent;
 mod comment;
+mod config;
 mod daemon;
 mod instruction;
 mod mcp;

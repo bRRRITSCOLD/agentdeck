@@ -14,7 +14,8 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::cli::{
-    AgentCommand, Command, CommentCommand, InstructionCommand, PrCommand, TaskCommand, WsCommand,
+    AgentCommand, Command, CommentCommand, ConfigCommand, InstructionCommand, PrCommand,
+    TaskCommand, WsCommand,
 };
 use crate::{launch, render, resolve};
 use agentdeck_client::ApiError;
@@ -52,6 +53,7 @@ pub async fn run(client: &Client, command: Command) -> anyhow::Result<Output> {
         Command::Instruction(command) => instruction(client, command).await,
         Command::Agent(command) => agent(client, command).await,
         Command::Pr(command) => pr(client, command).await,
+        Command::Config(command) => config(client, command).await,
         Command::Tail { pane, bytes } => tail(client, pane, bytes).await,
         Command::Mcp => unreachable!("main serves mcp"),
     }
@@ -347,6 +349,29 @@ async fn pr(client: &Client, command: PrCommand) -> anyhow::Result<Output> {
     }
     .map_err(ApiError::from)?;
     Output::new(&*status, render::pr_status(&status))
+}
+
+async fn config(client: &Client, command: ConfigCommand) -> anyhow::Result<Output> {
+    use agentdeck_client::settings;
+
+    match command {
+        ConfigCommand::Ls => {
+            let all = client.settings_get().send().await.map_err(ApiError::from)?;
+            Output::new(&*all, render::settings(&all, None))
+        }
+        ConfigCommand::Get { key } => {
+            let all = client.settings_get().send().await.map_err(ApiError::from)?;
+            let value = settings::value(&all, &key).ok_or_else(|| {
+                anyhow::anyhow!("{key} isn't a setting; `agentdeck config ls` lists them")
+            })?;
+            let human = format!("{}\n", render::setting_value(&value));
+            Output::new(&json!({ "key": key, "value": value }), human)
+        }
+        ConfigCommand::Set { key, value } => {
+            let all = settings::set(client, &key, settings::parse_value(&value)).await?;
+            Output::new(&all, render::settings(&all, Some(&key)))
+        }
+    }
 }
 
 async fn tail(client: &Client, pane: PaneId, bytes: Option<u64>) -> anyhow::Result<Output> {

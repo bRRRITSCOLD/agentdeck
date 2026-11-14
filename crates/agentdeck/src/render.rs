@@ -1,9 +1,11 @@
 //! Human-readable output. `--json` prints the API's own objects instead.
 
+use agentdeck_client::settings;
 use agentdeck_client::types::{
-    Comment, DirtyReport, Instruction, Pane, PrSyncStage, PrSyncStatus, Task, Workspace,
+    Comment, DirtyReport, Instruction, Pane, PrSyncStage, PrSyncStatus, Settings, Task, Workspace,
 };
 use agentdeck_core::CommentAuthor;
+use serde_json::Value;
 
 /// Left-aligned columns two spaces apart, under a header row; `empty` when there are no rows.
 fn table<const N: usize>(headers: [&str; N], rows: &[[String; N]], empty: &str) -> String {
@@ -195,6 +197,42 @@ pub fn pr_status(status: &PrSyncStatus) -> String {
         out.push_str(&format!("last error: {error}\n"));
     }
     out
+}
+
+/// The settings, a key and its value per line; only `key`'s line when one is given. A value an
+/// environment variable sets says so.
+pub fn settings(all: &Settings, key: Option<&str>) -> String {
+    let entries = settings::entries(all);
+    let width = entries
+        .iter()
+        .map(|(name, _)| name.len())
+        .max()
+        .unwrap_or(0);
+    let mut out = String::new();
+    for (name, value) in &entries {
+        if key.is_some_and(|key| key != name) {
+            continue;
+        }
+        let shown = if key.is_some() {
+            format!("{name}  {}", setting_value(value))
+        } else {
+            format!("{name:<width$}  {}", setting_value(value))
+        };
+        out.push_str(&shown);
+        if all.overridden_by_env.contains(name) {
+            out.push_str("  (an environment variable overrides config.toml)");
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// A setting's value as typed on the command line: text without quotes.
+pub fn setting_value(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
 }
 
 /// What `ws rm` without `--force` would lose.

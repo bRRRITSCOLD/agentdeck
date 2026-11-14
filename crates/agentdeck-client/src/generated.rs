@@ -7,6 +7,29 @@ use progenitor_client::{ClientHooks, OperationInfo, RequestBuilderExt, encode_pa
 /// Types used as operation parameters and responses.
 #[allow(clippy::all)]
 pub mod types {
+    ///`[appearance]` in a [`SettingsPatch`]: its schema only, since `config::validate` reads the JSON itself.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
+    pub struct AppearancePatch {
+        ///A new `appearance.theme`.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub theme: ::std::option::Option<ThemePreference>,
+    }
+    impl AppearancePatch {
+        pub fn builder() -> builder::AppearancePatch {
+            Default::default()
+        }
+    }
+    ///`[appearance]`: how the GUI looks.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct AppearanceSettings {
+        ///`appearance.theme`: light, dark, or the desktop's choice.
+        pub theme: ThemePreference,
+    }
+    impl AppearanceSettings {
+        pub fn builder() -> builder::AppearanceSettings {
+            Default::default()
+        }
+    }
     ///A comment in a task's thread (spec §9). The user's comments are delivered to the task's agent; an agent's are a record and never delivered.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct Comment {
@@ -406,6 +429,18 @@ pub mod types {
             Default::default()
         }
     }
+    ///`[pr_sync]` in a [`SettingsPatch`]: its schema only, since `config::validate` reads the JSON itself.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
+    pub struct PrSyncPatch {
+        ///A new `pr_sync.max_age_days`; `0` for no cutoff.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub max_age_days: ::std::option::Option<u32>,
+    }
+    impl PrSyncPatch {
+        pub fn builder() -> builder::PrSyncPatch {
+            Default::default()
+        }
+    }
     ///How far a running PR sync is through the viewer's PRs.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct PrSyncProgress {
@@ -418,6 +453,17 @@ pub mod types {
     }
     impl PrSyncProgress {
         pub fn builder() -> builder::PrSyncProgress {
+            Default::default()
+        }
+    }
+    ///`[pr_sync]`: which open PRs PR sync keeps (spec §8).
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct PrSyncSettings {
+        ///`pr_sync.max_age_days`: only open PRs GitHub updated in the last this many days sync; `0` for every open PR.
+        pub max_age_days: u32,
+    }
+    impl PrSyncSettings {
+        pub fn builder() -> builder::PrSyncSettings {
             Default::default()
         }
     }
@@ -485,7 +531,7 @@ pub mod types {
         pub last_synced_at: ::std::option::Option<::std::string::String>,
         ///The `gh` login state.
         pub login: GhLogin,
-        ///How many days since GitHub last updated an open PR it may be and still sync (`[pr_sync] max_age_days`, as the daemon read it at start); `0` for no cutoff.
+        ///How many days since GitHub last updated an open PR it may be and still sync: the setting `pr_sync.max_age_days` as it is now; `0` for no cutoff.
         pub max_age_days: u32,
         ///How far the sync running now is; `None` while none runs.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -524,6 +570,38 @@ pub mod types {
     }
     impl PullRequest {
         pub fn builder() -> builder::PullRequest {
+            Default::default()
+        }
+    }
+    ///`GET /v1/settings`, and what `PATCH /v1/settings` answers: every setting with the value the daemon uses (spec §2).
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct Settings {
+        ///`[appearance]`.
+        pub appearance: AppearanceSettings,
+        ///The dotted keys (`pr_sync.max_age_days`) whose value comes from an environment variable, not `config.toml`. A PATCH of one is written to the file, but the variable still wins until the daemon runs without it.
+        pub overridden_by_env: ::std::vec::Vec<::std::string::String>,
+        ///`[pr_sync]`.
+        pub pr_sync: PrSyncSettings,
+    }
+    impl Settings {
+        pub fn builder() -> builder::Settings {
+            Default::default()
+        }
+    }
+    ///`PATCH /v1/settings`: the settings to change, by section; the rest stay as they are.
+    ///
+    ///The schema is typed, but each section is read as plain JSON so that a value or key the daemon doesn't take is a 400 `invalid_setting` naming its dotted key, not a parse error.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
+    pub struct SettingsPatch {
+        ///`[appearance]` keys to change.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub appearance: ::std::option::Option<AppearancePatch>,
+        ///`[pr_sync]` keys to change.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub pr_sync: ::std::option::Option<PrSyncPatch>,
+    }
+    impl SettingsPatch {
+        pub fn builder() -> builder::SettingsPatch {
             Default::default()
         }
     }
@@ -620,6 +698,64 @@ pub mod types {
             Default::default()
         }
     }
+    ///`appearance.theme`.
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum ThemePreference {
+        ///Follow the desktop's light or dark setting.
+        #[serde(rename = "system")]
+        System,
+        ///Always dark.
+        #[serde(rename = "dark")]
+        Dark,
+        ///Always light.
+        #[serde(rename = "light")]
+        Light,
+    }
+    impl ::std::fmt::Display for ThemePreference {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::System => f.write_str("system"),
+                Self::Dark => f.write_str("dark"),
+                Self::Light => f.write_str("light"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for ThemePreference {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "system" => Ok(Self::System),
+                "dark" => Ok(Self::Dark),
+                "light" => Ok(Self::Light),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for ThemePreference {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for ThemePreference {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
     ///A local branch holding commits that are on no remote.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct UnpushedBranch {
@@ -676,6 +812,89 @@ pub mod types {
     }
     /// Types for composing complex structures.
     pub mod builder {
+        #[derive(Clone, Debug)]
+        pub struct AppearancePatch {
+            theme: ::std::result::Result<
+                ::std::option::Option<super::ThemePreference>,
+                ::std::string::String,
+            >,
+        }
+        impl ::std::default::Default for AppearancePatch {
+            fn default() -> Self {
+                Self {
+                    theme: Ok(Default::default()),
+                }
+            }
+        }
+        impl AppearancePatch {
+            pub fn theme<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<super::ThemePreference>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.theme = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for theme: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<AppearancePatch> for super::AppearancePatch {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: AppearancePatch,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    theme: value.theme?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::AppearancePatch> for AppearancePatch {
+            fn from(value: super::AppearancePatch) -> Self {
+                Self {
+                    theme: Ok(value.theme),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
+        pub struct AppearanceSettings {
+            theme: ::std::result::Result<super::ThemePreference, ::std::string::String>,
+        }
+        impl ::std::default::Default for AppearanceSettings {
+            fn default() -> Self {
+                Self {
+                    theme: Err("no value supplied for theme".to_string()),
+                }
+            }
+        }
+        impl AppearanceSettings {
+            pub fn theme<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<super::ThemePreference>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.theme = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for theme: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<AppearanceSettings> for super::AppearanceSettings {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: AppearanceSettings,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    theme: value.theme?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::AppearanceSettings> for AppearanceSettings {
+            fn from(value: super::AppearanceSettings) -> Self {
+                Self {
+                    theme: Ok(value.theme),
+                }
+            }
+        }
         #[derive(Clone, Debug)]
         pub struct Comment {
             author: ::std::result::Result<agentdeck_core::CommentAuthor, ::std::string::String>,
@@ -2027,6 +2246,46 @@ pub mod types {
             }
         }
         #[derive(Clone, Debug)]
+        pub struct PrSyncPatch {
+            max_age_days: ::std::result::Result<::std::option::Option<u32>, ::std::string::String>,
+        }
+        impl ::std::default::Default for PrSyncPatch {
+            fn default() -> Self {
+                Self {
+                    max_age_days: Ok(Default::default()),
+                }
+            }
+        }
+        impl PrSyncPatch {
+            pub fn max_age_days<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<u32>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.max_age_days = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for max_age_days: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<PrSyncPatch> for super::PrSyncPatch {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: PrSyncPatch,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    max_age_days: value.max_age_days?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::PrSyncPatch> for PrSyncPatch {
+            fn from(value: super::PrSyncPatch) -> Self {
+                Self {
+                    max_age_days: Ok(value.max_age_days),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
         pub struct PrSyncProgress {
             prs: ::std::result::Result<u32, ::std::string::String>,
             prs_done: ::std::result::Result<u32, ::std::string::String>,
@@ -2091,6 +2350,46 @@ pub mod types {
                     prs: Ok(value.prs),
                     prs_done: Ok(value.prs_done),
                     stage: Ok(value.stage),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
+        pub struct PrSyncSettings {
+            max_age_days: ::std::result::Result<u32, ::std::string::String>,
+        }
+        impl ::std::default::Default for PrSyncSettings {
+            fn default() -> Self {
+                Self {
+                    max_age_days: Err("no value supplied for max_age_days".to_string()),
+                }
+            }
+        }
+        impl PrSyncSettings {
+            pub fn max_age_days<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<u32>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.max_age_days = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for max_age_days: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<PrSyncSettings> for super::PrSyncSettings {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: PrSyncSettings,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    max_age_days: value.max_age_days?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::PrSyncSettings> for PrSyncSettings {
+            fn from(value: super::PrSyncSettings) -> Self {
+                Self {
+                    max_age_days: Ok(value.max_age_days),
                 }
             }
         }
@@ -2368,6 +2667,137 @@ pub mod types {
                     synced_at: Ok(value.synced_at),
                     updated_at: Ok(value.updated_at),
                     url: Ok(value.url),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
+        pub struct Settings {
+            appearance: ::std::result::Result<super::AppearanceSettings, ::std::string::String>,
+            overridden_by_env: ::std::result::Result<
+                ::std::vec::Vec<::std::string::String>,
+                ::std::string::String,
+            >,
+            pr_sync: ::std::result::Result<super::PrSyncSettings, ::std::string::String>,
+        }
+        impl ::std::default::Default for Settings {
+            fn default() -> Self {
+                Self {
+                    appearance: Err("no value supplied for appearance".to_string()),
+                    overridden_by_env: Err("no value supplied for overridden_by_env".to_string()),
+                    pr_sync: Err("no value supplied for pr_sync".to_string()),
+                }
+            }
+        }
+        impl Settings {
+            pub fn appearance<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<super::AppearanceSettings>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.appearance = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for appearance: {e}"));
+                self
+            }
+            pub fn overridden_by_env<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::vec::Vec<::std::string::String>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.overridden_by_env = value.try_into().map_err(|e| {
+                    format!("error converting supplied value for overridden_by_env: {e}")
+                });
+                self
+            }
+            pub fn pr_sync<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<super::PrSyncSettings>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.pr_sync = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for pr_sync: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<Settings> for super::Settings {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: Settings,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    appearance: value.appearance?,
+                    overridden_by_env: value.overridden_by_env?,
+                    pr_sync: value.pr_sync?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::Settings> for Settings {
+            fn from(value: super::Settings) -> Self {
+                Self {
+                    appearance: Ok(value.appearance),
+                    overridden_by_env: Ok(value.overridden_by_env),
+                    pr_sync: Ok(value.pr_sync),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
+        pub struct SettingsPatch {
+            appearance: ::std::result::Result<
+                ::std::option::Option<super::AppearancePatch>,
+                ::std::string::String,
+            >,
+            pr_sync: ::std::result::Result<
+                ::std::option::Option<super::PrSyncPatch>,
+                ::std::string::String,
+            >,
+        }
+        impl ::std::default::Default for SettingsPatch {
+            fn default() -> Self {
+                Self {
+                    appearance: Ok(Default::default()),
+                    pr_sync: Ok(Default::default()),
+                }
+            }
+        }
+        impl SettingsPatch {
+            pub fn appearance<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<super::AppearancePatch>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.appearance = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for appearance: {e}"));
+                self
+            }
+            pub fn pr_sync<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<super::PrSyncPatch>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.pr_sync = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for pr_sync: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<SettingsPatch> for super::SettingsPatch {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: SettingsPatch,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    appearance: value.appearance?,
+                    pr_sync: value.pr_sync?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::SettingsPatch> for SettingsPatch {
+            fn from(value: super::SettingsPatch) -> Self {
+                Self {
+                    appearance: Ok(value.appearance),
+                    pr_sync: Ok(value.pr_sync),
                 }
             }
         }
@@ -3337,6 +3767,35 @@ impl Client {
     ///```
     pub fn prs_sync(&self) -> builder::PrsSync<'_> {
         builder::PrsSync::new(self)
+    }
+    ///Every setting with the value the daemon uses
+    ///
+    ///`overridden_by_env` names the keys an environment variable sets.
+    ///
+    ///Sends a `GET` request to `/v1/settings`
+    ///
+    ///```ignore
+    ///let response = client.settings_get()
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn settings_get(&self) -> builder::SettingsGet<'_> {
+        builder::SettingsGet::new(self)
+    }
+    ///Changes some settings and answers with them all
+    ///
+    ///The changes are written to `config.toml`, keeping its other keys and comments, and apply at once. A key or value the daemon doesn't take is 400 `invalid_setting`, naming the key; a `config.toml` that doesn't parse is left as it is, 409 `unparsable_config`. A key an environment variable overrides is written, but the variable's value stays in use.
+    ///
+    ///Sends a `PATCH` request to `/v1/settings`
+    ///
+    ///```ignore
+    ///let response = client.settings_update()
+    ///    .body(body)
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn settings_update(&self) -> builder::SettingsUpdate<'_> {
+        builder::SettingsUpdate::new(self)
     }
     ///Deletes a tab and its panes
     ///
@@ -4435,6 +4894,130 @@ pub mod builder {
                 .build()?;
             let info = OperationInfo {
                 operation_id: "prs_sync",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                200u16 => ResponseValue::from_response(response).await,
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::settings_get`]
+    ///
+    ///[`Client::settings_get`]: super::Client::settings_get
+    #[derive(Debug, Clone)]
+    pub struct SettingsGet<'a> {
+        client: &'a super::Client,
+    }
+    impl<'a> SettingsGet<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self { client: client }
+        }
+        ///Sends a `GET` request to `/v1/settings`
+        pub async fn send(self) -> Result<ResponseValue<types::Settings>, Error<types::Error>> {
+            let Self { client } = self;
+            let url = format!("{}/v1/settings", client.baseurl,);
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .get(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "settings_get",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                200u16 => ResponseValue::from_response(response).await,
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::settings_update`]
+    ///
+    ///[`Client::settings_update`]: super::Client::settings_update
+    #[derive(Debug, Clone)]
+    pub struct SettingsUpdate<'a> {
+        client: &'a super::Client,
+        body: Result<types::builder::SettingsPatch, String>,
+    }
+    impl<'a> SettingsUpdate<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self {
+                client: client,
+                body: Ok(::std::default::Default::default()),
+            }
+        }
+        pub fn body<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<types::SettingsPatch>,
+            <V as std::convert::TryInto<types::SettingsPatch>>::Error: std::fmt::Display,
+        {
+            self.body = value
+                .try_into()
+                .map(From::from)
+                .map_err(|s| format!("conversion to `SettingsPatch` for body failed: {}", s));
+            self
+        }
+        pub fn body_map<F>(mut self, f: F) -> Self
+        where
+            F: std::ops::FnOnce(types::builder::SettingsPatch) -> types::builder::SettingsPatch,
+        {
+            self.body = self.body.map(f);
+            self
+        }
+        ///Sends a `PATCH` request to `/v1/settings`
+        pub async fn send(self) -> Result<ResponseValue<types::Settings>, Error<types::Error>> {
+            let Self { client, body } = self;
+            let body = body
+                .and_then(|v| types::SettingsPatch::try_from(v).map_err(|e| e.to_string()))
+                .map_err(Error::InvalidRequest)?;
+            let url = format!("{}/v1/settings", client.baseurl,);
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .patch(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .json(&body)
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "settings_update",
             };
             client.pre(&mut request, &info).await?;
             let result = client.exec(request, &info).await;
