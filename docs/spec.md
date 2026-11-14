@@ -270,6 +270,8 @@ Built on `brrritscold-core-gpui` (`init`, `Root`, theme preference, toasts). Scr
 - **Right panel**, which can be toggled: the workspace's tasks and PRs, as a list grouped by status, plus its notes.
 - **Tasks view:** a grouped list of every task. Done tasks are hidden by default, and each row has a status picker.
 - **Inbox:** tasks with no workspace, mostly PRs.
+  - **gh logged out:** while `GET /v1/prs/status` says `logged_out`, a default alert with the `Info` icon sits between the Inbox's header and its columns: "GitHub isn't connected" / "PR sync uses the gh login. Run gh auth login in a terminal, then press Sync now." It goes once the login is back.
+  - The header's sync label and the sidebar's footer read "gh logged out" then, over a failed sync or an earlier one; a running sync still shows its progress, so pressing Sync now after logging in answers at once.
 - **Dialogs:** new workspace, new agent (agent, cwd, task), and delete workspace:
   - **Delete workspace** is titled "Delete <name>?", with "This can't be undone. Archive it instead to keep its folder."
   - It reads the dirty report on opening, showing "Checking for unpushed work…" meanwhile. When repos are dirty, a destructive alert "N repos have work that isn't pushed" / "Deleting removes the folder and everything in it." sits over a card per repo: its path under the workspace, "N uncommitted files in <the folder they share>" and "<branch>: not pushed" for each unpushed branch.

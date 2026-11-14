@@ -90,6 +90,8 @@ pub enum PrSync {
     NotYet,
     /// The most recent sync failed.
     Failed,
+    /// `gh` has no usable login, so no sync can read GitHub.
+    LoggedOut,
     /// The last sync finished then.
     SyncedAt(DateTime<Utc>),
     /// A sync is running, `prs_done` of its `prs` PRs read; `prs` is 0 until the first page
@@ -110,6 +112,7 @@ impl PrSync {
         match self {
             PrSync::NotYet => "PRs not synced yet".to_owned(),
             PrSync::Failed => "PR sync failed".to_owned(),
+            PrSync::LoggedOut => "gh logged out".to_owned(),
             PrSync::SyncedAt(at) => format!("PRs synced {}", ago(now - at)),
             PrSync::Syncing { details: true, .. } => "Syncing PR details…".to_owned(),
             PrSync::Syncing { prs_done, prs, .. } => {
@@ -123,6 +126,7 @@ impl PrSync {
         match self {
             PrSync::NotYet => "Not synced yet".to_owned(),
             PrSync::Failed => "Sync failed".to_owned(),
+            PrSync::LoggedOut => "gh logged out".to_owned(),
             PrSync::SyncedAt(at) => format!("Synced {}", ago(now - at)),
             PrSync::Syncing { details: true, .. } => "Syncing details…".to_owned(),
             PrSync::Syncing { prs_done, prs, .. } => {
@@ -243,12 +247,16 @@ impl Snapshot {
             .last_synced_at
             .as_deref()
             .and_then(|at| DateTime::parse_from_rfc3339(at).ok());
+        // A running sync shows first, so "Sync now" after logging in answers at once; then
+        // a logged-out gh, the reason any sync fails until then.
+        let logged_out = self.pr_sync.login == agentdeck_client::types::GhLogin::LoggedOut;
         let pr_sync = match (&self.pr_sync.progress, &self.pr_sync.last_error, synced_at) {
             (Some(progress), _, _) => PrSync::Syncing {
                 prs_done: progress.prs_done,
                 prs: progress.prs,
                 details: progress.stage == agentdeck_client::types::PrSyncStage::Details,
             },
+            (None, _, _) if logged_out => PrSync::LoggedOut,
             (None, Some(_), _) => PrSync::Failed,
             (None, None, Some(at)) => PrSync::SyncedAt(at.to_utc()),
             (None, None, None) => PrSync::NotYet,
@@ -577,6 +585,32 @@ mod tests {
             }
 
             #[test]
+            fn should_report_a_logged_out_gh_over_a_failure_and_an_earlier_sync() {
+                let mut snapshot = Snapshot::default();
+                snapshot.pr_sync.last_synced_at = Some("2026-11-12T10:00:00Z".into());
+                snapshot.pr_sync.last_error = Some("gh is not logged in".into());
+                snapshot.pr_sync.login = agentdeck_client::types::GhLogin::LoggedOut;
+
+                assert_eq!(snapshot.overview().pr_sync, PrSync::LoggedOut);
+            }
+
+            #[test]
+            fn should_report_a_running_sync_over_a_logged_out_gh() {
+                let mut snapshot = Snapshot::default();
+                snapshot.pr_sync.login = agentdeck_client::types::GhLogin::LoggedOut;
+                snapshot.pr_sync.progress = Some(agentdeck_client::types::PrSyncProgress {
+                    prs_done: 0,
+                    prs: 0,
+                    stage: agentdeck_client::types::PrSyncStage::Listing,
+                });
+
+                assert!(matches!(
+                    snapshot.overview().pr_sync,
+                    PrSync::Syncing { .. }
+                ));
+            }
+
+            #[test]
             fn should_report_none_before_the_first_sync() {
                 assert_eq!(Snapshot::default().overview().pr_sync, PrSync::NotYet);
             }
@@ -666,6 +700,12 @@ mod tests {
             );
             assert_eq!(short(PrSync::NotYet), "Not synced yet");
             assert_eq!(short(PrSync::Failed), "Sync failed");
+        }
+
+        #[test]
+        fn should_say_gh_is_logged_out_in_both_labels() {
+            assert_eq!(PrSync::LoggedOut.label(at(NOW)), "gh logged out");
+            assert_eq!(PrSync::LoggedOut.short_label(at(NOW)), "gh logged out");
         }
 
         #[test]
