@@ -9,13 +9,13 @@ use agentdeck_client::types::{
     GhLogin, NewWorkspace, PrSyncProgress, PrSyncStatus, Task, Workspace,
 };
 use agentdeck_core::{ChecksState, PrState, ReviewState, TaskKind, TaskStatus};
-use httpmock::MockServer;
+use httpmock::{Mock, MockServer};
 
 use agentdeck_core::ws::{Entity, ServerMessage};
 
 use crate::support::git::git;
 use crate::support::github::{
-    Pr, mock_fetch, mock_full_search, mock_search, mock_search_page, mock_unauthorized,
+    BATCH, Pr, mock_fetch, mock_list, mock_list_page, mock_search, mock_unauthorized,
     mock_updated_search, set_gh_token,
 };
 use crate::support::ws::{Frame, Ws};
@@ -274,7 +274,7 @@ mod post_v1_prs_sync {
     }
 
     #[tokio::test]
-    async fn should_fetch_prs_that_left_the_search_50_at_a_time_200() {
+    async fn should_fetch_prs_that_left_the_list_25_at_a_time_200() {
         let github = MockServer::start_async().await;
         let open: Vec<Pr> = (1..=120).map(Pr::open).collect();
         let mut search = mock_search(&github, TOKEN, &open);
@@ -291,7 +291,7 @@ mod post_v1_prs_sync {
             })
             .collect();
         let fetches: Vec<_> = merged
-            .chunks(50)
+            .chunks(BATCH)
             .map(|batch| mock_fetch(&github, batch))
             .collect();
         sync(&daemon.client).await;
@@ -476,26 +476,29 @@ mod post_v1_prs_sync {
 mod incremental {
     use super::*;
 
-    /// A daemon past its first, full sync, whose GitHub shows `open` in the full search and
-    /// nothing in the incremental one until a test says otherwise.
-    async fn synced(github: &MockServer, open: &[Pr]) -> TestDaemon {
-        mock_full_search(github, TOKEN, open);
+    /// A daemon past its first, full sync of `open`, whose incremental search shows nothing
+    /// until a test says otherwise. The first sync's mocks are deleted, so a test's own fetch
+    /// by number is the only one.
+    async fn synced<'a>(github: &'a MockServer, open: &[Pr]) -> (TestDaemon, Mock<'a>) {
+        let mut first = mock_list(github, TOKEN, open);
+        let updated = mock_updated_search(github, TOKEN, &[]);
         let daemon = daemon(github, Some(TOKEN)).await;
         sync(&daemon.client).await;
-        daemon
+        first.delete();
+        (daemon, updated)
     }
 
     #[tokio::test]
     async fn should_ask_only_for_prs_updated_since_the_last_sync_200() {
         let github = MockServer::start_async().await;
-        let full = mock_full_search(&github, TOKEN, &[Pr::open(7)]);
+        let full = mock_list(&github, TOKEN, &[Pr::open(7)]);
         let updated = mock_updated_search(&github, TOKEN, &[]);
         let daemon = daemon(&github, Some(TOKEN)).await;
 
         sync(&daemon.client).await;
         sync(&daemon.client).await;
 
-        full.assert_calls(1);
+        full.list.assert_calls(1);
         assert!(updated.calls() >= 1);
         assert_eq!(pr_tasks(&daemon.client).await.len(), 1);
     }
@@ -503,12 +506,11 @@ mod incremental {
     #[tokio::test]
     async fn should_move_a_pr_merged_since_the_last_sync_to_done_without_a_fetch_200() {
         let github = MockServer::start_async().await;
-        let mut updated = mock_updated_search(&github, TOKEN, &[]);
+        let (daemon, mut updated) = synced(&github, &[Pr::open(7)]).await;
         let fetch = github.mock(|when, then| {
             when.body_includes("pullRequest(");
             then.status(500);
         });
-        let daemon = synced(&github, &[Pr::open(7)]).await;
 
         updated.delete();
         mock_updated_search(
@@ -529,8 +531,7 @@ mod incremental {
     #[tokio::test]
     async fn should_not_store_a_closed_pr_it_never_saw_open_200() {
         let github = MockServer::start_async().await;
-        let mut updated = mock_updated_search(&github, TOKEN, &[]);
-        let daemon = synced(&github, &[Pr::open(7)]).await;
+        let (daemon, mut updated) = synced(&github, &[Pr::open(7)]).await;
 
         updated.delete();
         mock_updated_search(
@@ -554,7 +555,11 @@ mod incremental {
     #[tokio::test]
     async fn should_refresh_pending_checks_the_search_leaves_out_200() {
         let github = MockServer::start_async().await;
-        mock_updated_search(&github, TOKEN, &[]);
+        let pending = Pr {
+            checks: Some("PENDING"),
+            ..Pr::open(7)
+        };
+        let (daemon, _updated) = synced(&github, &[pending]).await;
         let fetch = mock_fetch(
             &github,
             &[Pr {
@@ -562,14 +567,6 @@ mod incremental {
                 ..Pr::open(7)
             }],
         );
-        let daemon = synced(
-            &github,
-            &[Pr {
-                checks: Some("PENDING"),
-                ..Pr::open(7)
-            }],
-        )
-        .await;
 
         sync(&daemon.client).await;
 
@@ -585,8 +582,7 @@ mod incremental {
     #[tokio::test]
     async fn should_move_an_inbox_pr_into_a_workspace_once_a_clone_appears_200() {
         let github = MockServer::start_async().await;
-        mock_updated_search(&github, TOKEN, &[]);
-        let daemon = synced(&github, &[Pr::open(7)]).await;
+        let (daemon, _updated) = synced(&github, &[Pr::open(7)]).await;
         let dir = daemon.new_dir("ws");
         let workspace = attach(&daemon.client, &dir).await;
 
@@ -600,12 +596,86 @@ mod incremental {
     }
 }
 
+mod full {
+    use super::*;
+
+    #[tokio::test]
+    async fn should_fetch_details_only_for_new_or_changed_prs_200() {
+        let github = MockServer::start_async().await;
+        let mut first = mock_list(&github, TOKEN, &[Pr::open(7), Pr::open(8)]);
+        let daemon = full_daemon(&github, Some(TOKEN)).await;
+        sync(&daemon.client).await;
+        first.delete();
+
+        let changed = Pr {
+            updated_at: "2026-11-02T10:00:00Z",
+            checks: Some("SUCCESS"),
+            ..Pr::open(8)
+        };
+        let list = mock_list_page(
+            &github,
+            TOKEN,
+            &[Pr::open(7), changed.clone()],
+            None,
+            None,
+            2,
+            Duration::ZERO,
+        );
+        let unchanged = mock_fetch(&github, &[Pr::open(7)]);
+        let details = mock_fetch(&github, &[changed]);
+        sync(&daemon.client).await;
+
+        list.assert_calls(1);
+        unchanged.assert_calls(0);
+        details.assert_calls(1);
+        let checks: Vec<_> = pr_tasks(&daemon.client)
+            .await
+            .into_iter()
+            .map(|task| {
+                let pr = task.pr.expect("the task's PR");
+                (pr.number, pr.checks)
+            })
+            .collect();
+        assert!(
+            checks.contains(&(8, Some(ChecksState::Success))),
+            "{checks:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_list_a_new_pr_before_its_details_arrive() {
+        let github = MockServer::start_async().await;
+        mock_list_page(
+            &github,
+            TOKEN,
+            &[Pr::open(7)],
+            None,
+            None,
+            1,
+            Duration::ZERO,
+        );
+        github.mock(|when, then| {
+            when.body_includes("pullRequest(");
+            then.status(200)
+                .delay(Duration::from_secs(5))
+                .json_body(serde_json::json!({ "data": {} }));
+        });
+        let daemon = daemon(&github, Some(TOKEN)).await;
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while pr_tasks(&daemon.client).await.is_empty() {
+            assert!(Instant::now() < deadline, "no row while its details load");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+}
+
 mod progress {
     use super::*;
 
     /// A daemon whose first sync reads two pages: PR 1 at once, then PR 2 after `delay`.
     async fn two_pages(github: &MockServer, delay: Duration) -> TestDaemon {
-        mock_search_page(
+        mock_list_page(
             github,
             TOKEN,
             &[Pr::open(1)],
@@ -614,7 +684,8 @@ mod progress {
             2,
             Duration::ZERO,
         );
-        mock_search_page(github, TOKEN, &[Pr::open(2)], Some("c1"), None, 2, delay);
+        mock_list_page(github, TOKEN, &[Pr::open(2)], Some("c1"), None, 2, delay);
+        mock_fetch(github, &[Pr::open(1), Pr::open(2)]);
         daemon(github, Some(TOKEN)).await
     }
 

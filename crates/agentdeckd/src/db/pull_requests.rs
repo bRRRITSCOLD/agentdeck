@@ -30,13 +30,23 @@ pub fn open_pending(conn: &Connection) -> Result<Vec<(String, i64)>, DbError> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// Every PR stored as open, as last synced.
+pub fn open_prs(conn: &Connection) -> Result<Vec<RemotePr>, DbError> {
+    stored_where(conn, "p.state = ?1")
+}
+
 /// Every PR stored as open whose task is in the inbox, as last synced, so it can be matched
 /// to a workspace again without asking GitHub.
 pub fn inbox_open(conn: &Connection) -> Result<Vec<RemotePr>, DbError> {
-    let mut stmt = conn.prepare(
+    stored_where(conn, "p.state = ?1 AND t.workspace_id IS NULL")
+}
+
+/// The stored PRs matching `condition`, where `?1` is the open state, as last synced.
+fn stored_where(conn: &Connection, condition: &str) -> Result<Vec<RemotePr>, DbError> {
+    let mut stmt = conn.prepare(&format!(
         "SELECT p.task_id FROM pull_requests p JOIN tasks t ON t.id = p.task_id
-         WHERE p.state = ?1 AND t.workspace_id IS NULL ORDER BY p.repo, p.number",
-    )?;
+         WHERE {condition} ORDER BY p.repo, p.number"
+    ))?;
     let ids = stmt
         .query_map([PrState::Open.as_str()], |row| text(row, "task_id"))?
         .collect::<rusqlite::Result<Vec<TaskId>>>()?;
