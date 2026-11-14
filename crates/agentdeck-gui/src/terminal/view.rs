@@ -19,6 +19,12 @@
 //! gets the buttons, drags, moves and wheel instead, and shift takes them back for selecting
 //! and the scrollback; a click the program hears clears that selection. Otherwise the wheel scrolls the scrollback, or on the alternate screen
 //! sends an arrow key per line (DECSET 1007).
+//!
+//! Links, after most terminals: `secondary` (ctrl, or cmd on macOS) and a left click opens the
+//! link under the pointer, an OSC 8 hyperlink or an `http(s)://` URL in the text, even while
+//! the program has the mouse, which then hears nothing of that click. Only `http`, `https` and
+//! `mailto` open ([`link::openable`]). While `secondary` is held over a link, its cells are
+//! underlined and the pointer is a pointing hand.
 
 use std::ops::Range;
 
@@ -31,15 +37,17 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, Bounds, ClipboardItem, Context, ElementInputHandler, Entity, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyDownEvent,
-    Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Pixels, Point,
-    Render, ScrollEvent, SharedString, Styled as _, Subscription, UTF16Selection, Window, canvas,
+    Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    ParentElement as _, Pixels, Point, Render, ScrollEvent, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, UTF16Selection, Window, canvas,
     div,
 };
 
 use super::element::{Layout, Metrics, Pointer, terminal};
 use super::input::{self, Button, Mouse};
+use super::link::{self, Link};
 use super::palette::Palette;
-use super::screen::{Copied, Frame, GridSize, Screen, SelectionKind};
+use super::screen::{Copied, Frame, GridSize, Hit, Screen, SelectionKind};
 use crate::connection::{Connection, DaemonEvent};
 use crate::keymap::{self, Copy, Paste};
 
@@ -85,6 +93,8 @@ pub struct TerminalView {
     reported: Option<(usize, usize)>,
     /// What an input method is composing, shown at the cursor until it commits.
     marked: Option<String>,
+    /// The cell under the pointer while `secondary` is held, where a link is underlined.
+    hovered: Option<Hit>,
     focus: FocusHandle,
     _subscriptions: [Subscription; 2],
 }
@@ -114,6 +124,7 @@ impl TerminalView {
             held: None,
             reported: None,
             marked: None,
+            hovered: None,
             focus,
             _subscriptions: [events, activation],
         };
@@ -337,6 +348,10 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus, cx);
+        if event.modifiers.secondary(cx) && self.open_link(event.position, cx) {
+            self.held = None;
+            return;
+        }
         if self.report_press(Button::Left, event, cx) {
             return;
         }
@@ -369,10 +384,57 @@ impl TerminalView {
         self.report_press(Button::Right, event, cx);
     }
 
+    /// Opens the link at `position`, if one is there and its scheme is allowed; whether a link
+    /// was there, so the click goes no further.
+    fn open_link(&self, position: Point<Pixels>, cx: &mut App) -> bool {
+        let (Attachment::Live(screen), Some(layout)) = (&self.attachment, self.layout) else {
+            return false;
+        };
+        if !layout.covers(position) {
+            return false;
+        }
+        let Some(link) = screen.link_at(layout.hit(position)) else {
+            return false;
+        };
+        if link::openable(&link.uri) {
+            cx.open_url(&link.uri);
+        } else {
+            tracing::debug!(uri = link.uri, "refused to open a link with that scheme");
+        }
+        true
+    }
+
     /// A move over the terminal with no button held, which only DECSET 1003 hears of.
-    fn on_hover(&mut self, event: &MouseMoveEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn on_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         if event.pressed_button.is_none() {
+            self.hover(event.position, &event.modifiers, cx);
             self.report(Mouse::Move(None), event.position, &event.modifiers, 1);
+        }
+    }
+
+    fn on_modifiers_changed(
+        &mut self,
+        event: &ModifiersChangedEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.hover(window.mouse_position(), &event.modifiers, cx);
+    }
+
+    /// Notes the cell under the pointer at `position` while `secondary` is held, so the link
+    /// there, if any, is underlined.
+    fn hover(&mut self, position: Point<Pixels>, modifiers: &Modifiers, cx: &mut Context<Self>) {
+        let hovered = self
+            .layout
+            .filter(|layout| modifiers.secondary(cx) && layout.covers(position))
+            .map(|layout| layout.hit(position));
+        self.set_hovered(hovered, cx);
+    }
+
+    fn set_hovered(&mut self, hovered: Option<Hit>, cx: &mut Context<Self>) {
+        if hovered != self.hovered {
+            self.hovered = hovered;
+            cx.notify();
         }
     }
 
@@ -448,7 +510,7 @@ impl TerminalView {
         let Attachment::Live(screen) = &self.attachment else {
             return blank();
         };
-        let mut frame = screen.frame(palette, focused);
+        let mut frame = screen.frame(palette, focused, self.hovered_link().as_ref());
         frame.preedit = self
             .marked
             .as_deref()
@@ -474,6 +536,14 @@ impl TerminalView {
         self.marked
             .as_deref()
             .map_or(0, |text| text.encode_utf16().count())
+    }
+
+    /// The link under the pointer while `secondary` is held, if any.
+    fn hovered_link(&self) -> Option<Link> {
+        let Attachment::Live(screen) = &self.attachment else {
+            return None;
+        };
+        screen.link_at(self.hovered?)
     }
 
     /// The visible text, for tests.
@@ -647,6 +717,7 @@ impl Render for TerminalView {
             let _ = this.update(cx, |this, cx| this.on_pointer(pointer, cx));
         };
         let muted = mode.semantic().muted_foreground;
+        let pointing = self.hovered_link().is_some();
         // Penpot `agentdeck / TerminalSurface`: `background`, padding `space.3`.
         div()
             .id(("terminal", self.channel))
@@ -659,7 +730,14 @@ impl Render for TerminalView {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_left_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_middle_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_down))
-            .on_mouse_move(cx.listener(Self::on_hover))
+            .on_mouse_move(cx.listener(Self::on_move))
+            .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !hovered {
+                    this.set_hovered(None, cx);
+                }
+            }))
+            .when(pointing, |view| view.cursor_pointer())
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste_clipboard))
             .on_key_down(cx.listener(Self::on_key_down))
@@ -1813,6 +1891,229 @@ mod tests {
             for preference in [ThemePreference::Light, ThemePreference::Dark] {
                 cx.update(|_, cx| Theme::set_preference(preference, cx));
                 harness.draw(cx);
+            }
+        }
+    }
+
+    mod links {
+        use super::*;
+
+        /// `secondary` alone: ctrl on Linux, cmd on macOS.
+        fn secondary(cx: &mut VisualTestContext) -> Modifiers {
+            cx.update(|_, cx| Modifiers::secondary_key(cx))
+        }
+
+        const OSC_8: &[u8] = b"\x1b]8;;https://example.com\x1b\\example\x1b]8;;\x1b\\";
+
+        fn ctrl_click(harness: &Harness, line: usize, col: usize, cx: &mut VisualTestContext) {
+            let at = harness.at(line, col, Side::Left, cx);
+            let secondary = secondary(cx);
+            harness.click(at, MouseButton::Left, secondary, cx);
+        }
+
+        fn opened(
+            snapshot: &[u8],
+            line: usize,
+            col: usize,
+            cx: &mut TestAppContext,
+        ) -> Option<String> {
+            let (harness, cx) = Harness::live(snapshot, cx);
+            ctrl_click(&harness, line, col, cx);
+            cx.opened_url()
+        }
+
+        #[gpui::test]
+        fn should_open_an_osc_8_link_on_a_ctrl_click(cx: &mut TestAppContext) {
+            let (mut harness, cx) = Harness::live(OSC_8, cx);
+
+            ctrl_click(&harness, 0, 2, cx);
+
+            assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
+            assert_eq!(harness.sent(), []);
+        }
+
+        #[gpui::test]
+        fn should_not_open_a_link_on_a_plain_click(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::live(OSC_8, cx);
+            let (from, to) = (
+                harness.at(0, 0, Side::Left, cx),
+                harness.at(0, 6, Side::Right, cx),
+            );
+
+            harness.drag(from, to, 1, Modifiers::default(), cx);
+
+            assert_eq!(cx.opened_url(), None);
+            assert_eq!(harness.copied(cx).as_deref(), Some("example"));
+        }
+
+        #[gpui::test]
+        fn should_open_a_url_in_the_text(cx: &mut TestAppContext) {
+            assert_eq!(
+                opened(b"see https://a.io/x", 0, 8, cx).as_deref(),
+                Some("https://a.io/x")
+            );
+        }
+
+        #[gpui::test]
+        fn should_open_a_soft_wrapped_url_whole(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::live(b"", cx);
+            // Written once the pane fits the window, so it wraps at the grid's width.
+            let cols = harness
+                .view(cx)
+                .read_with(cx, |view, _| view.layout)
+                .expect("laid out")
+                .grid
+                .cols;
+            let url = format!("https://example.com/{}", "a".repeat(usize::from(cols)));
+            harness.deliver(Event::Output(1, format!("go {url} now").into_bytes()), cx);
+            harness.draw(cx);
+
+            ctrl_click(&harness, 1, 2, cx);
+
+            assert_eq!(cx.opened_url(), Some(url));
+        }
+
+        #[gpui::test]
+        fn should_leave_trailing_punctuation_out_of_the_url(cx: &mut TestAppContext) {
+            assert_eq!(
+                opened(b"(at https://a.io/x).", 0, 8, cx).as_deref(),
+                Some("https://a.io/x")
+            );
+        }
+
+        #[gpui::test]
+        fn should_refuse_a_scheme_it_does_not_allow(cx: &mut TestAppContext) {
+            let (mut harness, cx) =
+                Harness::live(b"\x1b]8;;file:///etc/passwd\x1b\\passwd\x1b]8;;\x1b\\", cx);
+
+            ctrl_click(&harness, 0, 2, cx);
+
+            assert_eq!(cx.opened_url(), None);
+            assert_eq!(harness.sent(), []);
+        }
+
+        #[gpui::test]
+        fn should_open_nothing_on_a_ctrl_click_off_a_link(cx: &mut TestAppContext) {
+            assert_eq!(opened(b"hello https://a.io", 0, 1, cx), None);
+        }
+
+        mod mouse_tracking {
+            use super::*;
+
+            /// A link on the first line, under a program that hears SGR clicks.
+            fn tracking() -> Vec<u8> {
+                [OSC_8, b"\x1b[?1000h\x1b[?1006h"].concat()
+            }
+
+            #[gpui::test]
+            fn should_open_the_link_and_send_the_program_nothing(cx: &mut TestAppContext) {
+                let (mut harness, cx) = Harness::live(&tracking(), cx);
+
+                ctrl_click(&harness, 0, 2, cx);
+
+                assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
+                assert_eq!(harness.sent(), []);
+            }
+
+            #[gpui::test]
+            fn should_still_report_a_ctrl_click_off_a_link(cx: &mut TestAppContext) {
+                let (mut harness, cx) = Harness::live(&tracking(), cx);
+
+                ctrl_click(&harness, 1, 3, cx);
+
+                // Ctrl adds 16 to the button; cmd isn't reported.
+                let expected: [&[u8]; 2] = if secondary(cx).control {
+                    [b"\x1b[<16;4;2M", b"\x1b[<16;4;2m"]
+                } else {
+                    [b"\x1b[<0;4;2M", b"\x1b[<0;4;2m"]
+                };
+                assert_eq!(
+                    harness.sent(),
+                    expected.map(|bytes| Outgoing::Input(1, bytes.to_vec()))
+                );
+                assert_eq!(cx.opened_url(), None);
+            }
+        }
+
+        mod hover {
+            use super::*;
+
+            /// The underlined text on the first line.
+            fn underlined(harness: &Harness, cx: &mut VisualTestContext) -> Vec<String> {
+                let palette = Palette::new(cx.update(|_, cx| cx.theme().mode()));
+                harness.view(cx).read_with(cx, |view, _| {
+                    view.frame(&palette, true).lines[0]
+                        .runs
+                        .iter()
+                        .filter(|run| run.style.underline)
+                        .map(|run| run.text.clone())
+                        .collect()
+                })
+            }
+
+            fn pointing(harness: &Harness, cx: &mut VisualTestContext) -> bool {
+                harness
+                    .view(cx)
+                    .read_with(cx, |view, _| view.hovered_link().is_some())
+            }
+
+            fn hover(
+                harness: &Harness,
+                col: usize,
+                modifiers: Modifiers,
+                cx: &mut VisualTestContext,
+            ) {
+                let at = harness.at(0, col, Side::Left, cx);
+                cx.simulate_mouse_move(at, None, modifiers);
+                harness.draw(cx);
+            }
+
+            #[gpui::test]
+            fn should_underline_the_link_while_the_modifier_is_held(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::live(b"see https://a.io ok", cx);
+
+                let secondary = secondary(cx);
+                hover(&harness, 6, secondary, cx);
+
+                assert_eq!(underlined(&harness, cx), ["https://a.io"]);
+                assert!(pointing(&harness, cx));
+            }
+
+            #[gpui::test]
+            fn should_clear_the_underline_when_the_modifier_is_released(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::live(b"see https://a.io ok", cx);
+                let secondary = secondary(cx);
+                hover(&harness, 6, secondary, cx);
+
+                cx.simulate_modifiers_change(Modifiers::none());
+                harness.draw(cx);
+
+                assert_eq!(underlined(&harness, cx), Vec::<String>::new());
+                assert!(!pointing(&harness, cx));
+            }
+
+            #[gpui::test]
+            fn should_underline_once_the_modifier_is_pressed_over_a_link(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::live(OSC_8, cx);
+                hover(&harness, 2, Modifiers::default(), cx);
+                assert_eq!(underlined(&harness, cx), Vec::<String>::new());
+
+                let secondary = secondary(cx);
+                cx.simulate_modifiers_change(secondary);
+                harness.draw(cx);
+
+                assert_eq!(underlined(&harness, cx), ["example"]);
+            }
+
+            #[gpui::test]
+            fn should_not_underline_text_off_a_link(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::live(b"see https://a.io ok", cx);
+
+                let secondary = secondary(cx);
+                hover(&harness, 1, secondary, cx);
+
+                assert_eq!(underlined(&harness, cx), Vec::<String>::new());
+                assert!(!pointing(&harness, cx));
             }
         }
     }

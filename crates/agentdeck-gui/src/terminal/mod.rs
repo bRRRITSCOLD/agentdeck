@@ -3,6 +3,7 @@
 
 mod element;
 mod input;
+mod link;
 mod palette;
 mod screen;
 mod view;

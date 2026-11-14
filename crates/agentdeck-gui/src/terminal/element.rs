@@ -123,6 +123,15 @@ impl Layout {
         };
         Hit { line, col, side }
     }
+
+    /// Whether `position` is over a cell of the grid, not the padding around it.
+    pub fn covers(&self, position: Point<Pixels>) -> bool {
+        let size = size(
+            self.cell.width * f32::from(self.grid.cols),
+            self.cell.height * f32::from(self.grid.rows),
+        );
+        Bounds::new(self.origin, size).contains(&position)
+    }
 }
 
 /// What a held mouse button does, wherever the pointer is: a drag that started on a terminal
@@ -310,7 +319,7 @@ mod tests {
         use super::*;
 
         /// A 10 × 4 grid of 8 × 16 cells at (100, 50).
-        const LAYOUT: Layout = Layout {
+        pub(super) const LAYOUT: Layout = Layout {
             origin: Point {
                 x: px(100.),
                 y: px(50.),
@@ -352,6 +361,25 @@ mod tests {
         #[test]
         fn should_take_the_line_end_right_of_the_grid() {
             assert_eq!(hit(1000., 50. + 16. + 1.), (1, 9, Side::Right));
+        }
+    }
+
+    mod covers {
+        use super::*;
+
+        const LAYOUT: Layout = hit::LAYOUT;
+
+        #[test]
+        fn should_cover_the_grids_cells() {
+            assert!(LAYOUT.covers(point(px(100.), px(50.))));
+            assert!(LAYOUT.covers(point(px(100. + 8. * 10. - 1.), px(50. + 16. * 4. - 1.))));
+        }
+
+        #[test]
+        fn should_not_cover_the_padding_around_the_grid() {
+            for (x, y) in [(99., 60.), (110., 49.), (180., 60.), (110., 114.)] {
+                assert!(!LAYOUT.covers(point(px(x), px(y))), "({x}, {y})");
+            }
         }
     }
 
