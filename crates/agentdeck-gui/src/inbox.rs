@@ -25,6 +25,7 @@ use gpui::{
 
 use crate::api::Api;
 use crate::overview::{PrSync, Snapshot};
+use crate::scrollbar;
 use crate::task_list::{self, Query, Row, Scope};
 use crate::task_row::{self, Table};
 use crate::task_sheet::OpenTask;
@@ -203,12 +204,21 @@ impl Render for InboxView {
             task_row::relist(&self.list, rows.len());
             self.shown = rows;
         }
-        let rows = list(
-            self.list.clone(),
-            cx.processor(|this, ix, _, cx| this.item(ix, cx)),
-        )
-        .flex_1()
-        .min_h_0();
+        let rows = div()
+            .debug_selector(|| "inbox list".into())
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(
+                list(
+                    self.list.clone(),
+                    cx.processor(|this, ix, _, cx| this.item(ix, cx)),
+                )
+                .flex_1()
+                .min_h_0(),
+            )
+            .child(scrollbar::vertical(&self.list, cx));
         // Columns over List, never narrower than the table; it scrolls sideways instead.
         let table = div()
             .id("inbox-table")
@@ -582,5 +592,52 @@ mod tests {
 
         assert_eq!(*harness.synced.borrow(), 0);
         harness.draw(cx);
+    }
+
+    mod scrollbar {
+        use gpui::{ScrollDelta, ScrollEvent, point, px};
+
+        use super::*;
+        use crate::scrollbar::testing::thumb;
+
+        fn list(cx: &mut VisualTestContext) -> gpui::Bounds<gpui::Pixels> {
+            cx.debug_bounds("inbox list").expect("the list")
+        }
+
+        #[gpui::test]
+        fn should_show_a_scrollbar_when_the_list_overflows(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(crowded(300), cx);
+            harness.draw(cx);
+
+            let list = list(cx);
+            assert!(thumb(list, cx).is_some());
+        }
+
+        #[gpui::test]
+        fn should_hide_the_scrollbar_when_everything_fits(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(inbox(), cx);
+            harness.draw(cx);
+
+            let list = list(cx);
+            assert_eq!(thumb(list, cx), None);
+        }
+
+        #[gpui::test]
+        fn should_move_the_thumb_when_the_list_scrolls(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(crowded(300), cx);
+            harness.draw(cx);
+            let list = list(cx);
+            let before = thumb(list, cx).expect("a thumb");
+
+            cx.simulate_event(ScrollEvent {
+                position: list.center(),
+                delta: ScrollDelta::Pixels(point(px(0.), px(-2000.))),
+                ..ScrollEvent::default()
+            });
+            harness.draw(cx);
+
+            let after = thumb(list, cx).expect("a thumb");
+            assert!(after.origin.y > before.origin.y);
+        }
     }
 }

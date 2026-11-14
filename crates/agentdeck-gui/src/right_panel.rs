@@ -26,8 +26,8 @@ use brrritscold_core_gpui::{
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, px,
+    IntoElement, ParentElement as _, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
 use gpui_base::input::InputEvent;
 
@@ -36,6 +36,7 @@ use crate::instruction_list::{self, InstructionRow, SendTarget};
 use crate::keymap::{self, CancelEdit, Submit};
 use crate::new_task::NewTask;
 use crate::overview::Snapshot;
+use crate::scrollbar;
 use crate::task_list::{self, Group, Query, Scope};
 use crate::task_row;
 use crate::task_sheet::OpenTask;
@@ -62,6 +63,8 @@ pub struct RightPanel {
     /// Whether the edit is being saved; Save waits for it.
     saving: bool,
     _editor: Option<Subscription>,
+    /// Where the list is scrolled to, for its scrollbar.
+    scroll: ScrollHandle,
 }
 
 impl EventEmitter<NewTask> for RightPanel {}
@@ -92,6 +95,7 @@ impl RightPanel {
             editor: None,
             saving: false,
             _editor: None,
+            scroll: ScrollHandle::new(),
         }
     }
 
@@ -345,12 +349,14 @@ impl Render for RightPanel {
         // `NewInstruction`.
         let mut list = div()
             .id("panel-list")
+            .debug_selector(|| "panel list".into())
             .flex()
             .flex_col()
             .flex_1()
             .min_h_0()
             .gap(space::S1)
             .overflow_y_scroll()
+            .track_scroll(&self.scroll)
             .child(
                 section_header("Instructions", s).child(
                     div().debug_selector(|| "add instruction".into()).child(
@@ -462,6 +468,7 @@ impl Render for RightPanel {
             .px(space::S2)
             .bg(s.card)
             .child(list)
+            .child(scrollbar::vertical(&self.scroll, cx))
     }
 }
 
@@ -1187,6 +1194,42 @@ mod tests {
             cx.update(|_, cx| Theme::set_preference(preference, cx));
             cx.run_until_parked();
             cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+    }
+
+    mod scrollbar {
+        use super::*;
+        use crate::scrollbar::testing::thumb;
+
+        fn draw(cx: &mut VisualTestContext) {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+
+        #[gpui::test]
+        fn should_show_a_scrollbar_when_the_list_overflows(cx: &mut TestAppContext) {
+            let (panel, cx) = open(cx);
+            let ws = workspace(1, "a");
+            let crowded = Snapshot {
+                tasks: (1..=100)
+                    .map(|n| with_status(n, TaskStatus::Doing, ws.id))
+                    .collect(),
+                workspaces: vec![ws],
+                ..Snapshot::default()
+            };
+            panel.update(cx, |view, cx| view.show(id(1), crowded, cx));
+            draw(cx);
+
+            let list = cx.debug_bounds("panel list").expect("the list");
+            assert!(thumb(list, cx).is_some());
+        }
+
+        #[gpui::test]
+        fn should_hide_the_scrollbar_when_everything_fits(cx: &mut TestAppContext) {
+            let (_panel, cx) = open(cx);
+            draw(cx);
+
+            let list = cx.debug_bounds("panel list").expect("the list");
+            assert_eq!(thumb(list, cx), None);
         }
     }
 }
