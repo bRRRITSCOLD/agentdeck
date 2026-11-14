@@ -808,6 +808,12 @@
             ],
             "description": "The `gh` login state."
           },
+          "max_age_days": {
+            "description": "How many days since GitHub last updated an open PR it may be and still sync (`[pr_sync] max_age_days`, as the daemon read it at start); `0` for no cutoff.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "progress": {
             "allOf": [
               {
@@ -819,7 +825,8 @@
           }
         },
         "required": [
-          "login"
+          "login",
+          "max_age_days"
         ],
         "type": "object"
       },

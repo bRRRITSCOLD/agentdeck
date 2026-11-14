@@ -56,7 +56,7 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
         events.clone(),
         github_api,
         full_every,
-        pr_config.max_age(),
+        pr_config,
     )?;
     let terminals = Terminals::new(db.clone(), events.clone(), paths.rules_dir());
     terminals.run_state_timer();

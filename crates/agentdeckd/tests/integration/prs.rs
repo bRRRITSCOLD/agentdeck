@@ -1023,6 +1023,30 @@ mod get_v1_prs_status {
         assert_eq!(response.status().as_u16(), 200);
         assert_eq!(response.into_inner().login, GhLogin::LoggedOut);
     }
+
+    #[tokio::test]
+    async fn should_report_the_age_cutoff_the_sync_uses_200() {
+        let dirs = tempfile::tempdir().expect("a temp dir");
+        set_daemon_env(dirs.path(), &[("AGENTDECK_PR_MAX_AGE_DAYS", "30")]);
+        let daemon = TestDaemon::start_in(dirs).await;
+
+        let response = daemon.client.prs_status().send().await.expect("status");
+
+        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(response.into_inner().max_age_days, 30);
+    }
+
+    #[tokio::test]
+    async fn should_report_no_age_cutoff_as_zero_200() {
+        let dirs = tempfile::tempdir().expect("a temp dir");
+        set_daemon_env(dirs.path(), &[("AGENTDECK_PR_MAX_AGE_DAYS", "0")]);
+        let daemon = TestDaemon::start_in(dirs).await;
+
+        let response = daemon.client.prs_status().send().await.expect("status");
+
+        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(response.into_inner().max_age_days, 0);
+    }
 }
 
 mod timer {

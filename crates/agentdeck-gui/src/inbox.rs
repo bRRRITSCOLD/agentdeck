@@ -254,7 +254,7 @@ impl Render for InboxView {
             .child(self.header(cx))
             // Penpot "Inbox · gh logged out": a default `Alert` over the columns.
             .when(
-                self.snapshot.pr_sync.login == GhLogin::LoggedOut,
+                (self.snapshot.pr_sync.as_ref()).is_some_and(|s| s.login == GhLogin::LoggedOut),
                 |content| {
                     content.child(
                         div()
@@ -300,7 +300,7 @@ mod tests {
 
     use super::*;
     use crate::api::fake::FakeApi;
-    use crate::overview::fixtures::{id, task, workspace};
+    use crate::overview::fixtures::{id, pr_sync, task, workspace};
 
     struct Harness {
         api: Arc<FakeApi>,
@@ -533,7 +533,7 @@ mod tests {
     fn should_say_how_far_a_sync_it_did_not_start_is(cx: &mut TestAppContext) {
         let (harness, cx) = Harness::open(inbox(), cx);
         let mut snapshot = inbox();
-        snapshot.pr_sync.progress = Some(agentdeck_client::types::PrSyncProgress {
+        pr_sync(&mut snapshot).progress = Some(agentdeck_client::types::PrSyncProgress {
             prs_done: 50,
             prs: 271,
             stage: agentdeck_client::types::PrSyncStage::Listing,
@@ -552,8 +552,8 @@ mod tests {
     /// [`inbox`] with gh logged out.
     fn logged_out() -> Snapshot {
         let mut snapshot = inbox();
-        snapshot.pr_sync.login = agentdeck_client::types::GhLogin::LoggedOut;
-        snapshot.pr_sync.last_error = Some("gh is not logged in".into());
+        pr_sync(&mut snapshot).login = agentdeck_client::types::GhLogin::LoggedOut;
+        pr_sync(&mut snapshot).last_error = Some("gh is not logged in".into());
         snapshot
     }
 

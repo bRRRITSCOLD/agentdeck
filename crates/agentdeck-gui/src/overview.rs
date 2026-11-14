@@ -38,8 +38,8 @@ pub struct Snapshot {
     pub tasks: Vec<Task>,
     /// Every workspace's instructions.
     pub instructions: Vec<Instruction>,
-    /// PR sync's last run.
-    pub pr_sync: PrSyncStatus,
+    /// PR sync's last run and its settings; `None` until read.
+    pub pr_sync: Option<PrSyncStatus>,
 }
 
 impl Default for Snapshot {
@@ -49,12 +49,7 @@ impl Default for Snapshot {
             panes: Vec::new(),
             tasks: Vec::new(),
             instructions: Vec::new(),
-            pr_sync: PrSyncStatus {
-                last_error: None,
-                last_synced_at: None,
-                progress: None,
-                login: agentdeck_client::types::GhLogin::LoggedIn,
-            },
+            pr_sync: None,
         }
     }
 }
@@ -225,15 +220,22 @@ impl Snapshot {
             .iter()
             .map(row)
             .partition(|row| row.archived);
-        let synced_at = self
-            .pr_sync
+        let Some(status) = &self.pr_sync else {
+            return Overview {
+                inbox: counts(None),
+                workspaces,
+                archived,
+                pr_sync: PrSync::NotYet,
+            };
+        };
+        let synced_at = status
             .last_synced_at
             .as_deref()
             .and_then(|at| DateTime::parse_from_rfc3339(at).ok());
         // A running sync shows first, so "Sync now" after logging in answers at once; then
         // a logged-out gh, the reason any sync fails until then.
-        let logged_out = self.pr_sync.login == agentdeck_client::types::GhLogin::LoggedOut;
-        let pr_sync = match (&self.pr_sync.progress, &self.pr_sync.last_error, synced_at) {
+        let logged_out = status.login == agentdeck_client::types::GhLogin::LoggedOut;
+        let pr_sync = match (&status.progress, &status.last_error, synced_at) {
             (Some(progress), _, _) => PrSync::Syncing {
                 prs_done: progress.prs_done,
                 prs: progress.prs,
@@ -256,12 +258,12 @@ impl Snapshot {
 /// Builders for snapshots in tests.
 #[cfg(test)]
 pub(crate) mod fixtures {
-    use agentdeck_client::types::{Comment, Instruction, Task, Workspace};
+    use agentdeck_client::types::{Comment, Instruction, PrSyncStatus, Task, Workspace};
     use agentdeck_core::{
         AgentState, CommentAuthor, PaneId, TaskId, TaskKind, TaskStatus, WorkspaceId,
     };
 
-    use super::PaneState;
+    use super::{PaneState, Snapshot};
 
     const CREATED: &str = "2026-11-12T00:00:00Z";
 
@@ -298,6 +300,22 @@ pub(crate) mod fixtures {
             title: format!("tab {n}"),
             workspace_id: workspace,
         }
+    }
+
+    /// PR sync's status as read: gh logged in, no sync yet, the default 90-day cutoff.
+    pub fn pr_status() -> PrSyncStatus {
+        PrSyncStatus {
+            last_error: None,
+            last_synced_at: None,
+            login: agentdeck_client::types::GhLogin::LoggedIn,
+            max_age_days: 90,
+            progress: None,
+        }
+    }
+
+    /// `snapshot`'s PR sync status, read as [`pr_status`] if it wasn't.
+    pub fn pr_sync(snapshot: &mut Snapshot) -> &mut PrSyncStatus {
+        snapshot.pr_sync.get_or_insert_with(pr_status)
     }
 
     /// A pane in `workspace`.
@@ -522,7 +540,7 @@ mod tests {
             #[test]
             fn should_report_the_last_sync() {
                 let mut snapshot = Snapshot::default();
-                snapshot.pr_sync.last_synced_at = Some("2026-11-12T10:00:00Z".into());
+                pr_sync(&mut snapshot).last_synced_at = Some("2026-11-12T10:00:00Z".into());
 
                 assert_eq!(
                     snapshot.overview().pr_sync,
@@ -533,8 +551,8 @@ mod tests {
             #[test]
             fn should_report_a_failure_over_an_earlier_sync() {
                 let mut snapshot = Snapshot::default();
-                snapshot.pr_sync.last_synced_at = Some("2026-11-12T10:00:00Z".into());
-                snapshot.pr_sync.last_error = Some("gh: rate limited".into());
+                pr_sync(&mut snapshot).last_synced_at = Some("2026-11-12T10:00:00Z".into());
+                pr_sync(&mut snapshot).last_error = Some("gh: rate limited".into());
 
                 assert_eq!(snapshot.overview().pr_sync, PrSync::Failed);
             }
@@ -542,9 +560,9 @@ mod tests {
             #[test]
             fn should_report_a_logged_out_gh_over_a_failure_and_an_earlier_sync() {
                 let mut snapshot = Snapshot::default();
-                snapshot.pr_sync.last_synced_at = Some("2026-11-12T10:00:00Z".into());
-                snapshot.pr_sync.last_error = Some("gh is not logged in".into());
-                snapshot.pr_sync.login = agentdeck_client::types::GhLogin::LoggedOut;
+                pr_sync(&mut snapshot).last_synced_at = Some("2026-11-12T10:00:00Z".into());
+                pr_sync(&mut snapshot).last_error = Some("gh is not logged in".into());
+                pr_sync(&mut snapshot).login = agentdeck_client::types::GhLogin::LoggedOut;
 
                 assert_eq!(snapshot.overview().pr_sync, PrSync::LoggedOut);
             }
@@ -552,8 +570,8 @@ mod tests {
             #[test]
             fn should_report_a_running_sync_over_a_logged_out_gh() {
                 let mut snapshot = Snapshot::default();
-                snapshot.pr_sync.login = agentdeck_client::types::GhLogin::LoggedOut;
-                snapshot.pr_sync.progress = Some(agentdeck_client::types::PrSyncProgress {
+                pr_sync(&mut snapshot).login = agentdeck_client::types::GhLogin::LoggedOut;
+                pr_sync(&mut snapshot).progress = Some(agentdeck_client::types::PrSyncProgress {
                     prs_done: 0,
                     prs: 0,
                     stage: agentdeck_client::types::PrSyncStage::Listing,
@@ -573,9 +591,9 @@ mod tests {
             #[test]
             fn should_report_a_running_sync_over_the_last_one() {
                 let mut snapshot = Snapshot::default();
-                snapshot.pr_sync.last_synced_at = Some("2026-11-12T10:00:00Z".into());
-                snapshot.pr_sync.last_error = Some("gh: rate limited".into());
-                snapshot.pr_sync.progress = Some(agentdeck_client::types::PrSyncProgress {
+                pr_sync(&mut snapshot).last_synced_at = Some("2026-11-12T10:00:00Z".into());
+                pr_sync(&mut snapshot).last_error = Some("gh: rate limited".into());
+                pr_sync(&mut snapshot).progress = Some(agentdeck_client::types::PrSyncProgress {
                     prs_done: 100,
                     prs: 271,
                     stage: agentdeck_client::types::PrSyncStage::Listing,

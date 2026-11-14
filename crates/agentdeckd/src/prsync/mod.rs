@@ -25,9 +25,10 @@ use std::time::Duration;
 
 use agentdeck_core::ws::Entity;
 use agentdeck_core::{ChecksState, PrState, WorkspaceId};
-use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use tokio::time::MissedTickBehavior;
 
+use crate::config::PrSyncConfig;
 use crate::db::{self, Db};
 use crate::events::Events;
 use crate::model::{GhLogin, PrSyncProgress, PrSyncStage, PrSyncStatus};
@@ -67,8 +68,8 @@ struct Inner {
     github: Github,
     /// How often a sync is full.
     full_every: Duration,
-    /// How old an open PR may be and still sync; `None` for no cutoff.
-    max_age: Option<TimeDelta>,
+    /// Which open PRs sync.
+    config: PrSyncConfig,
     state: Mutex<State>,
     /// Held for the length of a sync, so syncs never overlap.
     running: tokio::sync::Mutex<()>,
@@ -115,14 +116,14 @@ impl PrSync {
     /// Starts the timer, whose first sync runs now and reads the token with `gh auth token`
     /// (on the timer's task, so a slow `gh` never holds up the daemon's start). `endpoint` is
     /// the GraphQL URL; a sync is full every `full_every`; open PRs GitHub last updated more
-    /// than `max_age` ago aren't synced (`None` syncs them all). Must be called inside a tokio
-    /// runtime.
+    /// than `config.max_age_days` ago aren't synced, and the status says how many days that
+    /// is. Must be called inside a tokio runtime.
     pub fn start(
         db: Db,
         events: Events,
         endpoint: String,
         full_every: Duration,
-        max_age: Option<TimeDelta>,
+        config: PrSyncConfig,
     ) -> anyhow::Result<PrSync> {
         let sync = PrSync {
             inner: Arc::new(Inner {
@@ -130,7 +131,7 @@ impl PrSync {
                 events,
                 github: Github::new(endpoint)?,
                 full_every,
-                max_age,
+                config,
                 state: Mutex::new(State {
                     token: None,
                     status: PrSyncStatus {
@@ -138,6 +139,7 @@ impl PrSync {
                         last_synced_at: None,
                         last_error: None,
                         progress: None,
+                        max_age_days: config.max_age_days,
                     },
                     last_good: None,
                     last_full: None,
@@ -227,7 +229,7 @@ impl PrSync {
             Arc::new(tokio::task::spawn_blocking(move || Clones::scan(&workspaces)).await?);
         let read = Read {
             since,
-            cutoff: self.inner.max_age.map(|max_age| began - max_age),
+            cutoff: self.inner.config.max_age().map(|max_age| began - max_age),
             clones,
         };
         match self.read(&token, &read).await {
