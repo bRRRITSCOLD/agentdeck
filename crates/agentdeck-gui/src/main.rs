@@ -54,6 +54,7 @@ fn main() {
         brrritscold_core_gpui::init(cx);
         runtime::init(cx);
         terminal::init(cx);
+        terminal::open::use_processes(cx);
         keymap::init(cx);
         let connection = cx.new(|cx| Connection::new(Rc::new(DaemonConnector), cx));
         // 1440×900, the design's size, fitted to the display; or the bounds saved last time

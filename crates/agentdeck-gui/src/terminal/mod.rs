@@ -4,7 +4,9 @@
 mod element;
 mod input;
 mod link;
+pub mod open;
 mod palette;
+mod path;
 mod screen;
 mod view;
 

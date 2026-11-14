@@ -4,8 +4,11 @@
 //! Replies the `Term` generates (DA, cursor position, colour queries) are dropped: only the
 //! daemon's `Term` answers queries. What a program copies with OSC 52 is kept for the view to
 //! put on the clipboard ([`Screen::take_copies`]); a program reading the clipboard is refused.
+//! The working directory the shell last reported with OSC 7, which `alacritty_terminal`
+//! ignores, is kept for resolving file paths ([`Screen::reported_cwd`]).
 
 use std::cell::RefCell;
+use std::ops::RangeInclusive;
 use std::rc::Rc;
 
 use alacritty_terminal::Term;
@@ -23,6 +26,7 @@ use gpui::Hsla;
 use super::input::{MouseProtocol, Tracking};
 use super::link::{Link, trim_url};
 use super::palette::{Palette, dim};
+use super::path::{self, PathLink};
 
 /// A terminal's size in cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,6 +187,10 @@ impl EventListener for Copies {
 /// so the search ignores case.
 const URL: &str = r#"https?://[^\x00-\x1f\x7f-\x9f<>"\s{|}\\^⟨⟩`]+"#;
 
+/// A run of text that may be a file path: anything but controls, spaces, quotes and brackets.
+/// [`path::parse`] decides whether it is one.
+const PATH: &str = r#"[^\x00-\x1f\x7f-\x9f\s<>"'`()\[\]{}|]+"#;
+
 /// A terminal model, fed by the daemon.
 pub struct Screen {
     term: Term<Copies>,
@@ -190,6 +198,26 @@ pub struct Screen {
     copies: Copies,
     /// Finds [`URL`]s; searching needs it mutably.
     urls: RefCell<RegexSearch>,
+    /// Finds [`PATH`]s.
+    paths: RefCell<RegexSearch>,
+    /// Reads OSC 7 out of the same bytes.
+    osc: alacritty_terminal::vte::Parser,
+    cwd: ReportedCwd,
+}
+
+/// The URI of the last OSC 7 (`ESC ] 7 ; file://host/path ST`).
+#[derive(Default)]
+struct ReportedCwd(Option<String>);
+
+impl alacritty_terminal::vte::Perform for ReportedCwd {
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        if let [b"7", uri @ ..] = params
+            && !uri.is_empty()
+        {
+            // A `;` in the URI splits it into more params.
+            self.0 = String::from_utf8(uri.join(&b';')).ok();
+        }
+    }
 }
 
 impl Screen {
@@ -207,12 +235,22 @@ impl Screen {
             parser: Processor::new(),
             copies,
             urls: RefCell::new(RegexSearch::new(URL).expect("the URL pattern is valid")),
+            paths: RefCell::new(RegexSearch::new(PATH).expect("the path pattern is valid")),
+            osc: alacritty_terminal::vte::Parser::new(),
+            cwd: ReportedCwd::default(),
         }
     }
 
     /// Feeds bytes from the daemon: a snapshot or live output.
     pub fn feed(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.term, bytes);
+        self.osc.advance(&mut self.cwd, bytes);
+    }
+
+    /// The `file://` URI of the working directory the shell last reported with OSC 7; `None`
+    /// until it reports one. A snapshot doesn't carry it, so it starts over on each attach.
+    pub fn reported_cwd(&self) -> Option<&str> {
+        self.cwd.0.as_deref()
     }
 
     /// What programs copied since the last call, oldest first.
@@ -370,6 +408,26 @@ impl Screen {
         })
     }
 
+    /// The file path in the text under the visible cell `at`, searched for across the soft
+    /// wraps of its line, with its `:line:col`; `None` off one. Whether the file exists is the
+    /// caller's to check.
+    pub fn path_at(&self, at: Hit) -> Option<PathLink> {
+        let point = self.point(at);
+        let start = self.term.line_search_left(point);
+        let end = self.term.line_search_right(point);
+        let mut paths = self.paths.borrow_mut();
+        let found = RegexIter::new(start, end, Direction::Right, &self.term, &mut paths)
+            .find(|found| found.contains(&point))?;
+        let text = self.term.bounds_to_string(*found.start(), *found.end());
+        let path = path::parse(&text)?;
+        let dropped = text.chars().count() - path.len;
+        let end = found.end().sub(&self.term, Boundary::Grid, dropped);
+        (point <= end).then(|| PathLink {
+            path,
+            cells: *found.start()..=end,
+        })
+    }
+
     /// Scrolls the view `lines` into the scrollback (positive) or back towards the bottom.
     pub fn scroll(&mut self, lines: i32) {
         self.term.scroll_display(Scroll::Delta(lines));
@@ -407,9 +465,14 @@ impl Screen {
         })
     }
 
-    /// What it shows now, in `palette`; a `focused` terminal draws its cursor filled, and
-    /// `link`'s cells are underlined.
-    pub fn frame(&self, palette: &Palette, focused: bool, link: Option<&Link>) -> Frame {
+    /// What it shows now, in `palette`; a `focused` terminal draws its cursor filled, and the
+    /// `link`ed cells are underlined.
+    pub fn frame(
+        &self,
+        palette: &Palette,
+        focused: bool,
+        link: Option<&RangeInclusive<Point>>,
+    ) -> Frame {
         let content = self.term.renderable_content();
         let offset = content.display_offset as i32;
         let mut lines = vec![FrameLine::default(); self.term.screen_lines()];
@@ -460,7 +523,7 @@ impl Screen {
                     });
                 }
             }
-            let linked = link.is_some_and(|link| link.cells.contains(&indexed.point));
+            let linked = link.is_some_and(|cells| cells.contains(&indexed.point));
             builder.push(
                 column.0,
                 cells,
@@ -916,6 +979,84 @@ mod tests {
         }
     }
 
+    mod path_at {
+        use alacritty_terminal::index::Line;
+
+        use super::*;
+
+        fn at(line: usize, col: usize) -> Hit {
+            Hit {
+                line,
+                col,
+                side: Side::Left,
+            }
+        }
+
+        fn cells(from: (i32, usize), to: (i32, usize)) -> std::ops::RangeInclusive<Point> {
+            Point::new(Line(from.0), Column(from.1))..=Point::new(Line(to.0), Column(to.1))
+        }
+
+        #[test]
+        fn should_find_a_path_with_its_line_and_column_and_cells() {
+            let screen = screen(b"--> src/main.rs:42:7");
+
+            let found = screen.path_at(at(0, 6)).expect("a path");
+
+            assert_eq!(found.path.path, "src/main.rs");
+            assert_eq!((found.path.line, found.path.col), (Some(42), Some(7)));
+            assert_eq!(found.cells, cells((0, 4), (0, 19)));
+        }
+
+        #[test]
+        fn should_leave_out_brackets_quotes_and_trailing_punctuation() {
+            let screen = screen(b"(\"a/b.txt:3\").");
+
+            let found = screen.path_at(at(0, 4)).expect("a path");
+
+            assert_eq!(found.path.path, "a/b.txt");
+            assert_eq!(found.path.line, Some(3));
+            assert_eq!(found.cells, cells((0, 2), (0, 10)));
+            assert!(screen.path_at(at(0, 11)).is_none());
+        }
+
+        #[test]
+        fn should_join_a_path_that_soft_wraps() {
+            let screen = screen(b"in a/very/long/path/to/main.rs:9 x");
+
+            let found = screen.path_at(at(1, 3)).expect("a path");
+
+            assert_eq!(found.path.path, "a/very/long/path/to/main.rs");
+            assert_eq!(found.path.line, Some(9));
+            assert_eq!(found.cells, cells((0, 3), (1, 11)));
+        }
+
+        #[test]
+        fn should_find_nothing_on_a_word_or_after_the_column() {
+            let screen = screen(b"hello src/a.rs:1:fn");
+
+            assert!(screen.path_at(at(0, 1)).is_none());
+            assert!(screen.path_at(at(0, 18)).is_none());
+        }
+    }
+
+    mod reported_cwd {
+        use super::*;
+
+        #[test]
+        fn should_be_none_until_the_shell_reports_one() {
+            assert_eq!(screen(b"$ ").reported_cwd(), None);
+        }
+
+        #[test]
+        fn should_keep_the_last_osc_7_however_it_is_chunked() {
+            let mut screen = screen(b"\x1b]7;file://box/first\x07$ ");
+            screen.feed(b"\x1b]7;file://box/w/re");
+            screen.feed(b"po\x1b\\$ ");
+
+            assert_eq!(screen.reported_cwd(), Some("file://box/w/repo"));
+        }
+    }
+
     mod from_clicks {
         use super::*;
 
@@ -1120,7 +1261,7 @@ mod tests {
                     })
                     .expect("a link");
 
-                let frame = screen.frame(&palette(), true, Some(&link));
+                let frame = screen.frame(&palette(), true, Some(&link.cells));
 
                 let runs: Vec<_> = frame.lines[0]
                     .runs

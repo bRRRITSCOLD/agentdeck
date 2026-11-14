@@ -50,6 +50,40 @@ impl FileOpener {
     pub fn words(&self) -> &[String] {
         &self.words
     }
+
+    /// The program and its arguments for opening `path` (absolute) at `line` and `col`, each
+    /// `1` when the path names none. Each placeholder is filled into its word as is, so a
+    /// path holding spaces, quotes or `{line}` stays one argument, unchanged.
+    pub fn argv(&self, path: &str, line: Option<u32>, col: Option<u32>) -> Vec<String> {
+        let line = line.unwrap_or(1).to_string();
+        let col = col.unwrap_or(1).to_string();
+        let values = [(PATH, path), ("{line}", &line), ("{col}", &col)];
+        self.words.iter().map(|word| fill(word, &values)).collect()
+    }
+}
+
+/// `word` with each placeholder in `values` replaced, in one pass, so what a value holds is
+/// never read as a placeholder.
+fn fill(word: &str, values: &[(&str, &str)]) -> String {
+    let mut filled = String::with_capacity(word.len());
+    let mut rest = word;
+    while !rest.is_empty() {
+        match values
+            .iter()
+            .find(|(placeholder, _)| rest.starts_with(placeholder))
+        {
+            Some((placeholder, value)) => {
+                filled.push_str(value);
+                rest = &rest[placeholder.len()..];
+            }
+            None => {
+                let next = rest.chars().next().expect("not empty");
+                filled.push(next);
+                rest = &rest[next.len_utf8()..];
+            }
+        }
+    }
+    filled
 }
 
 #[cfg(test)]
@@ -114,6 +148,65 @@ mod tests {
             assert_eq!(
                 OpenerError::NoPath.to_string(),
                 "must pass {path} to the command, as in `code -g {path}:{line}`"
+            );
+        }
+    }
+
+    mod argv {
+        use super::*;
+
+        fn argv(command: &str, path: &str, line: Option<u32>, col: Option<u32>) -> Vec<String> {
+            FileOpener::parse(command)
+                .expect("a valid opener")
+                .argv(path, line, col)
+        }
+
+        #[test]
+        fn should_fill_in_the_path_line_and_column() {
+            assert_eq!(
+                argv(
+                    "code -g {path}:{line}:{col}",
+                    "/w/src/main.rs",
+                    Some(42),
+                    Some(7)
+                ),
+                ["code", "-g", "/w/src/main.rs:42:7"]
+            );
+        }
+
+        #[test]
+        fn should_fill_in_1_for_a_line_or_column_the_path_does_not_name() {
+            assert_eq!(
+                argv("kitty nvim +{line} {path}", "/w/a.txt", None, None),
+                ["kitty", "nvim", "+1", "/w/a.txt"]
+            );
+            assert_eq!(
+                argv("code -g {path}:{line}:{col}", "/w/a.txt", Some(3), None),
+                ["code", "-g", "/w/a.txt:3:1"]
+            );
+        }
+
+        #[test]
+        fn should_keep_a_path_with_spaces_and_quotes_one_argument() {
+            assert_eq!(
+                argv("xdg-open {path}", "/w/my notes/it's \"x\".md", None, None),
+                ["xdg-open", "/w/my notes/it's \"x\".md"]
+            );
+        }
+
+        #[test]
+        fn should_not_fill_placeholders_inside_the_path() {
+            assert_eq!(
+                argv("code -g {path}:{line}", "/w/{line}/{col}.rs", Some(2), None),
+                ["code", "-g", "/w/{line}/{col}.rs:2"]
+            );
+        }
+
+        #[test]
+        fn should_keep_quoted_words_and_other_braces_as_written() {
+            assert_eq!(
+                argv("ed --title 'a {b}' {path}", "/w/x", None, None),
+                ["ed", "--title", "a {b}", "/w/x"]
             );
         }
     }
