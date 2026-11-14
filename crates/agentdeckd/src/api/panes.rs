@@ -14,7 +14,7 @@ use dropshot::{
 use super::{ApiContext, Authorized, IdPath, client_error};
 use crate::agents::{self, codex, delivery};
 use crate::db;
-use crate::model::{InputAccepted, InputWhen, NewPane, Pane, PaneInput, TailQuery};
+use crate::model::{InputAccepted, InputWhen, NewPane, Pane, PaneInput, PanePatch, TailQuery};
 use crate::terminal::env::default_shell;
 use crate::terminal::pane::{Launch, SpawnError, When};
 use crate::terminal::tail::TAIL_CAPACITY;
@@ -196,6 +196,36 @@ pub(crate) async fn pane_get(
     let context = rqctx.context();
     let id = path.into_inner().id;
     let pane = context.db.call(move |c| db::panes::get(c, id)).await?;
+    Ok(HttpResponseOk(with_live_status(context, pane)))
+}
+
+/// Links the pane to a task in its workspace that isn't done, or unlinks it (`task_id`
+/// null). The task's comments no agent has had yet are then typed into the pane once it is
+/// idle, as a new comment would be (spec §9).
+#[endpoint { method = PATCH, path = "/v1/panes/{id}" }]
+pub(crate) async fn pane_update(
+    rqctx: RequestContext<ApiContext>,
+    _auth: Authorized,
+    path: Path<IdPath<PaneId>>,
+    body: TypedBody<PanePatch>,
+) -> Result<HttpResponseOk<Pane>, HttpError> {
+    let context = rqctx.context();
+    let id = path.into_inner().id;
+    let task = body.into_inner().task_id;
+    let (pane, before) = context
+        .db
+        .call(move |c| db::panes::set_task(c, id, task))
+        .await?;
+    context.events.changed(Entity::Pane, id);
+    if before != task {
+        for linked in [before, task].into_iter().flatten() {
+            context.events.changed(Entity::Task, linked);
+        }
+        if let Some(task) = task {
+            delivery::deliver_waiting(&context.db, &context.terminals, &context.events, task, id)
+                .await;
+        }
+    }
     Ok(HttpResponseOk(with_live_status(context, pane)))
 }
 

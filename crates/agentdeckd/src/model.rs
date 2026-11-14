@@ -371,6 +371,22 @@ pub struct NewPane {
     pub task_id: Option<TaskId>,
 }
 
+/// `PATCH /v1/panes/{id}`: the task to link the pane to, or null to unlink it. `task_id` is
+/// required, so an empty body can't unlink a pane by accident.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct PanePatch {
+    /// A task in the pane's workspace that isn't done, or null.
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(schema_with = "nullable_task_id")]
+    pub task_id: Option<TaskId>,
+}
+
+/// A task id or null, as a required property: schemars leaves an `Option` field out of
+/// `required` on its own.
+fn nullable_task_id(generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+    generator.subschema_for::<Option<TaskId>>()
+}
+
 /// When `POST /v1/panes/{id}/input` reaches the terminal.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

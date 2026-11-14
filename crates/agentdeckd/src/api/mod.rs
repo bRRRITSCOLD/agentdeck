@@ -93,6 +93,7 @@ pub fn api() -> ApiDescription<ApiContext> {
         api.register(settings::settings_update),
         api.register(panes::pane_create),
         api.register(panes::pane_get),
+        api.register(panes::pane_update),
         api.register(panes::pane_delete),
         api.register(panes::pane_input),
         api.register(panes::pane_tail),
