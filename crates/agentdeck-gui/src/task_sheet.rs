@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use agentdeck_client::types::{Comment, Task};
 use agentdeck_core::ws::{Entity as Changed, ServerMessage};
-use agentdeck_core::{Agent, AgentState, CommentAuthor, TaskId, TaskStatus};
+use agentdeck_core::{Agent, AgentState, CommentAuthor, TaskId, TaskStatus, WorkspaceId};
 use brrritscold_core_gpui::{
     ActiveTheme as _, Badge, BadgeVariant, Button, ButtonSize, DialogHandle, Select, SelectTrigger,
     Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle, Textarea,
@@ -62,6 +62,20 @@ pub struct Summary {
     pub description: Option<SharedString>,
     /// Its PR, for a PR task the sync has filled in.
     pub pr: Option<PrCell>,
+    /// The Start agent button at the end of the status row.
+    pub start_agent: StartAgent,
+}
+
+/// The sheet's Start agent button (Penpot `TaskSheetBody` → `StartAgent`), shown while no
+/// live agent pane is linked to the task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartAgent {
+    /// Not shown: an agent is working on the task.
+    Hidden,
+    /// Opens New agent on this workspace, the task's, with the task picked.
+    On(WorkspaceId),
+    /// Shown disabled, with this tooltip: the task has nowhere to start one.
+    Disabled(SharedString),
 }
 
 /// `task`'s summary in `snapshot`, if it holds the task.
@@ -74,10 +88,19 @@ pub fn summary(snapshot: &Snapshot, task: TaskId) -> Option<Summary> {
         Some(agent) => format!("{} is working on it.", agent_name(agent)),
         None => "No agent on it.".to_owned(),
     };
-    let place = held
-        .workspace_id
-        .and_then(|ws| snapshot.workspaces.iter().find(|w| w.id == ws))
-        .map_or("in the Inbox".to_owned(), |w| format!("in {}", w.name));
+    let workspace =
+        (held.workspace_id).and_then(|ws| snapshot.workspaces.iter().find(|w| w.id == ws));
+    let place = workspace.map_or("in the Inbox".to_owned(), |w| format!("in {}", w.name));
+    let start_agent = match (working, workspace) {
+        (Some(_), _) => StartAgent::Hidden,
+        (None, None) => {
+            StartAgent::Disabled("Move this task to a workspace to start an agent on it.".into())
+        }
+        (None, Some(w)) if w.archived_at.is_some() => {
+            StartAgent::Disabled(format!("Unarchive {} to start an agent on it.", w.name).into())
+        }
+        (None, Some(w)) => StartAgent::On(w.id),
+    };
     let row = task_list::rows(
         snapshot,
         &task_list::Query {
@@ -95,6 +118,7 @@ pub fn summary(snapshot: &Snapshot, task: TaskId) -> Option<Summary> {
         place: place.into(),
         description: (!held.body.trim().is_empty()).then(|| held.body.clone().into()),
         pr: row.and_then(|r| r.pr),
+        start_agent,
     })
 }
 
@@ -662,6 +686,58 @@ mod tests {
         #[test]
         fn should_be_none_for_a_task_it_doesnt_hold() {
             assert_eq!(summary(&snapshot(), id(99)), None);
+        }
+
+        mod start_agent {
+            use super::*;
+
+            #[test]
+            fn should_start_on_its_workspace_with_no_agent_on_it() {
+                let summary = summary(&snapshot(), id(10)).unwrap();
+
+                assert_eq!(summary.start_agent, StartAgent::On(id(1)));
+            }
+
+            #[test]
+            fn should_be_hidden_while_an_agent_works_on_it() {
+                let mut snapshot = snapshot();
+                let ws = snapshot.workspaces[0].clone();
+                snapshot.panes = vec![agent_pane(30, &ws, Agent::Claude, 10)];
+
+                let summary = summary(&snapshot, id(10)).unwrap();
+
+                assert_eq!(summary.start_agent, StartAgent::Hidden);
+            }
+
+            #[test]
+            fn should_be_disabled_for_an_inbox_task_saying_to_move_it() {
+                let snapshot = Snapshot {
+                    tasks: vec![task(11, TaskKind::Plain, None)],
+                    ..snapshot()
+                };
+
+                let summary = summary(&snapshot, id(11)).unwrap();
+
+                assert_eq!(
+                    summary.start_agent,
+                    StartAgent::Disabled(
+                        "Move this task to a workspace to start an agent on it.".into()
+                    )
+                );
+            }
+
+            #[test]
+            fn should_be_disabled_in_an_archived_workspace_saying_to_unarchive_it() {
+                let mut snapshot = snapshot();
+                snapshot.workspaces[0].archived_at = Some(NOW.into());
+
+                let summary = summary(&snapshot, id(10)).unwrap();
+
+                assert_eq!(
+                    summary.start_agent,
+                    StartAgent::Disabled("Unarchive tabs-a11y to start an agent on it.".into())
+                );
+            }
         }
     }
 
