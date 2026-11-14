@@ -163,6 +163,35 @@ fn search_page(nodes: Vec<Value>) -> Value {
     })
 }
 
+/// One page of the full search for `token`: the one after cursor `after` (`None` for the
+/// first), answered with `prs`, `total` as the search's count, and `next` as the next page's
+/// cursor, after `delay`.
+pub fn mock_search_page<'a>(
+    server: &'a MockServer,
+    token: &str,
+    prs: &[Pr],
+    after: Option<&str>,
+    next: Option<&str>,
+    total: usize,
+    delay: std::time::Duration,
+) -> Mock<'a> {
+    let nodes: Vec<Value> = prs.iter().map(Pr::node).collect();
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .header("authorization", format!("Bearer {token}"))
+            .body_includes("search(")
+            .json_body_includes(json!({ "variables": { "after": after } }).to_string());
+        then.status(200).delay(delay).json_body(json!({
+            "data": { "search": {
+                "issueCount": total,
+                "pageInfo": { "hasNextPage": next.is_some(), "endCursor": next },
+                "nodes": nodes
+            } }
+        }));
+    })
+}
+
 /// One batched fetch by number, answered with `prs` as they are now. It matches the batch
 /// that starts with `prs[0]`, the daemon asking for each as `p<i>`.
 pub fn mock_fetch<'a>(server: &'a MockServer, prs: &[Pr]) -> Mock<'a> {

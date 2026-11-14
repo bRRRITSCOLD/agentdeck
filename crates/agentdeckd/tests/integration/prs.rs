@@ -5,7 +5,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use agentdeck_client::Client;
-use agentdeck_client::types::{GhLogin, NewWorkspace, PrSyncStatus, Task, Workspace};
+use agentdeck_client::types::{
+    GhLogin, NewWorkspace, PrSyncProgress, PrSyncStatus, Task, Workspace,
+};
 use agentdeck_core::{ChecksState, PrState, ReviewState, TaskKind, TaskStatus};
 use httpmock::MockServer;
 
@@ -13,8 +15,8 @@ use agentdeck_core::ws::{Entity, ServerMessage};
 
 use crate::support::git::git;
 use crate::support::github::{
-    Pr, mock_fetch, mock_full_search, mock_search, mock_unauthorized, mock_updated_search,
-    set_gh_token,
+    Pr, mock_fetch, mock_full_search, mock_search, mock_search_page, mock_unauthorized,
+    mock_updated_search, set_gh_token,
 };
 use crate::support::ws::{Frame, Ws};
 use crate::support::{TestDaemon, set_daemon_env};
@@ -595,6 +597,76 @@ mod incremental {
             pr_tasks(&daemon.client).await[0].workspace_id,
             Some(workspace.id)
         );
+    }
+}
+
+mod progress {
+    use super::*;
+
+    /// A daemon whose first sync reads two pages: PR 1 at once, then PR 2 after `delay`.
+    async fn two_pages(github: &MockServer, delay: Duration) -> TestDaemon {
+        mock_search_page(
+            github,
+            TOKEN,
+            &[Pr::open(1)],
+            None,
+            Some("c1"),
+            51,
+            Duration::ZERO,
+        );
+        mock_search_page(github, TOKEN, &[Pr::open(2)], Some("c1"), None, 51, delay);
+        daemon(github, Some(TOKEN)).await
+    }
+
+    async fn status(client: &Client) -> PrSyncStatus {
+        client
+            .prs_status()
+            .send()
+            .await
+            .expect("status")
+            .into_inner()
+    }
+
+    #[tokio::test]
+    async fn should_store_each_page_as_it_arrives_and_say_how_far_it_is() {
+        let github = MockServer::start_async().await;
+        let daemon = two_pages(&github, Duration::from_secs(3)).await;
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while pr_tasks(&daemon.client).await.is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "page 1 not stored while page 2 waits"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        assert_eq!(
+            status(&daemon.client).await.progress,
+            Some(PrSyncProgress {
+                pages_done: 1,
+                pages: 2
+            })
+        );
+        let finished = sync(&daemon.client).await;
+        assert_eq!(finished.progress, None);
+        assert_eq!(pr_tasks(&daemon.client).await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn should_tell_websocket_clients_the_sync_status_changed() {
+        let github = MockServer::start_async().await;
+        let daemon = two_pages(&github, Duration::from_millis(500)).await;
+        let mut ws = Ws::connect(&daemon).await;
+
+        ws.until(|frame| match frame {
+            Frame::Message(ServerMessage::Changed {
+                entity: Entity::PrSync,
+                ..
+            }) => Some(()),
+            _ => None,
+        })
+        .await;
     }
 }
 

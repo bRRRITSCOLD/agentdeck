@@ -175,6 +175,12 @@ pub fn pr_status(status: &PrSyncStatus) -> String {
         status.login,
         status.last_synced_at.as_deref().unwrap_or("never"),
     );
+    if let Some(progress) = &status.progress {
+        out.push_str(&format!(
+            "syncing:   page {} of {}\n",
+            progress.pages_done, progress.pages
+        ));
+    }
     if let Some(error) = &status.last_error {
         out.push_str(&format!("last error: {error}\n"));
     }
@@ -312,11 +318,36 @@ mod tests {
                 last_error: Some("gh is not logged in".into()),
                 last_synced_at: None,
                 login: GhLogin::LoggedOut,
+                progress: None,
             });
 
             assert_eq!(
                 out,
                 "gh:        logged_out\nlast sync: never\nlast error: gh is not logged in\n"
+            );
+        }
+    }
+
+    mod pr_status_syncing {
+        use agentdeck_client::types::PrSyncProgress;
+
+        use super::*;
+
+        #[test]
+        fn should_say_how_far_a_running_sync_is() {
+            let out = pr_status(&PrSyncStatus {
+                last_error: None,
+                last_synced_at: Some("2026-11-14T10:00:00.000Z".into()),
+                login: GhLogin::LoggedIn,
+                progress: Some(PrSyncProgress {
+                    pages_done: 2,
+                    pages: 6,
+                }),
+            });
+
+            assert_eq!(
+                out,
+                "gh:        logged_in\nlast sync: 2026-11-14T10:00:00.000Z\nsyncing:   page 2 of 6\n"
             );
         }
     }

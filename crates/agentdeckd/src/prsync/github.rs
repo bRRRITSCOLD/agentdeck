@@ -19,8 +19,8 @@ pub fn updated_search(since: &str) -> String {
 }
 
 /// Search results per page, and how many pages one sync reads at most.
-const PAGE_SIZE: u32 = 50;
-const MAX_PAGES: usize = 10;
+pub const PAGE_SIZE: u32 = 50;
+pub const MAX_PAGES: u32 = 10;
 
 /// PRs fetched by number in one request.
 const BATCH_SIZE: usize = 50;
@@ -103,30 +103,25 @@ impl Github {
         Ok(Github { http, endpoint })
     }
 
-    /// Every PR the search `q` finds, up to `MAX_PAGES` pages.
-    pub async fn search(&self, token: &str, q: &str) -> Result<Vec<RemotePr>, GithubError> {
+    /// The page of the search `q` after cursor `after` (`None` for the first page).
+    pub async fn search_page(
+        &self,
+        token: &str,
+        q: &str,
+        after: Option<&str>,
+    ) -> Result<SearchPage, GithubError> {
         let query = format!(
             "query($q: String!, $first: Int!, $after: String) {{
   search(query: $q, type: ISSUE, first: $first, after: $after) {{
+    issueCount
     pageInfo {{ hasNextPage endCursor }}
     nodes {{ ...pr }}
   }}
 }}
 {PR_FIELDS}"
         );
-        let mut prs = Vec::new();
-        let mut after: Option<String> = None;
-        for _ in 0..MAX_PAGES {
-            let variables = json!({ "q": q, "first": PAGE_SIZE, "after": after });
-            let data = self.query(token, &query, variables).await?;
-            let page = parse_search(data)?;
-            prs.extend(page.prs);
-            match page.next {
-                Some(cursor) => after = Some(cursor),
-                None => break,
-            }
-        }
-        Ok(prs)
+        let variables = json!({ "q": q, "first": PAGE_SIZE, "after": after });
+        parse_search(self.query(token, &query, variables).await?)
     }
 
     /// Each of `wanted` (`(repo, number)`) by number, `BATCH_SIZE` to a request, in order;
@@ -241,10 +236,13 @@ fn data(body: Value) -> Result<Value, GithubError> {
 
 /// One page of search results.
 #[derive(Debug, PartialEq, Eq)]
-struct SearchPage {
-    prs: Vec<RemotePr>,
+pub struct SearchPage {
+    /// The page's PRs.
+    pub prs: Vec<RemotePr>,
     /// The cursor of the next page, if there is one.
-    next: Option<String>,
+    pub next: Option<String>,
+    /// How many results the whole search has.
+    pub total: u32,
 }
 
 fn parse_search(data: Value) -> Result<SearchPage, GithubError> {
@@ -255,6 +253,8 @@ fn parse_search(data: Value) -> Result<SearchPage, GithubError> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Search {
+        #[serde(default)]
+        issue_count: u32,
         page_info: PageInfo,
         nodes: Vec<SearchNode>,
     }
@@ -286,6 +286,7 @@ fn parse_search(data: Value) -> Result<SearchPage, GithubError> {
     Ok(SearchPage {
         prs,
         next: info.end_cursor.filter(|_| info.has_next_page),
+        total: data.search.issue_count,
     })
 }
 
@@ -501,6 +502,14 @@ mod tests {
                     updated_at: "2026-11-01T10:00:00Z".into(),
                 }]
             );
+        }
+
+        #[test]
+        fn should_read_how_many_results_the_whole_search_has() {
+            let mut data = search(vec![], Some("abc"));
+            data["search"]["issueCount"] = json!(271);
+
+            assert_eq!(parse_search(data).unwrap().total, 271);
         }
 
         #[test]
