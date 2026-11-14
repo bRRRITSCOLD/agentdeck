@@ -72,6 +72,16 @@ pub enum WsCommand {
         /// The workspace.
         ws: String,
     },
+    /// Stop the GUI's notifications for a workspace's agents and PRs.
+    Mute {
+        /// The workspace.
+        ws: String,
+    },
+    /// Let the GUI notify about a muted workspace again.
+    Unmute {
+        /// The workspace.
+        ws: String,
+    },
     /// Delete a workspace, and its dir when agentdeck created it.
     Rm {
         /// The workspace.

@@ -1,4 +1,4 @@
-//! `agentdeck ws ls | new | archive | rm`.
+//! `agentdeck ws ls | new | archive | mute | unmute | rm`.
 
 use std::process::Command;
 
@@ -108,6 +108,57 @@ mod ws_archive {
         let stderr = env.fails(&["ws", "archive", "nope"]);
 
         assert!(stderr.contains("unknown_workspace"), "{stderr}");
+    }
+}
+
+mod ws_mute {
+    use super::*;
+
+    #[test]
+    fn should_mute_by_slug() {
+        let env = TestEnv::new();
+        let ws = env.workspace("web");
+
+        let stdout = env.ok(&["ws", "mute", text(&ws, "slug")]);
+
+        assert_eq!(stdout, format!("muted {}\n", text(&ws, "slug")));
+        assert_eq!(env.json(&["ws", "ls"])[0]["muted"], true);
+    }
+
+    #[test]
+    fn should_print_the_workspace_with_json() {
+        let env = TestEnv::new();
+        let ws = env.workspace("web");
+
+        let muted = env.json(&["ws", "mute", text(&ws, "slug")]);
+
+        assert_eq!(muted["id"], ws["id"]);
+        assert_eq!(muted["muted"], true);
+    }
+
+    #[test]
+    fn should_fail_for_an_unknown_workspace() {
+        let env = TestEnv::new();
+
+        let stderr = env.fails(&["ws", "mute", "nope"]);
+
+        assert!(stderr.contains("unknown_workspace"), "{stderr}");
+    }
+}
+
+mod ws_unmute {
+    use super::*;
+
+    #[test]
+    fn should_unmute_a_muted_workspace() {
+        let env = TestEnv::new();
+        let ws = env.workspace("web");
+        env.ok(&["ws", "mute", text(&ws, "slug")]);
+
+        let stdout = env.ok(&["ws", "unmute", text(&ws, "slug")]);
+
+        assert_eq!(stdout, format!("unmuted {}\n", text(&ws, "slug")));
+        assert_eq!(env.json(&["ws", "ls"])[0]["muted"], false);
     }
 }
 

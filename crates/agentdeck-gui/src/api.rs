@@ -114,6 +114,9 @@ pub trait Api: Send + Sync {
     /// Brings the archived `workspace` back.
     fn unarchive_workspace(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<()>>;
 
+    /// Mutes `workspace`'s notifications, or unmutes them.
+    fn set_muted(&self, workspace: WorkspaceId, muted: bool, cx: &App) -> Task<anyhow::Result<()>>;
+
     /// The git repos under `workspace`'s dir that hold work on no remote.
     fn dirty(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<DirtyReport>>;
 
@@ -371,6 +374,16 @@ impl Api for Daemon {
         })
     }
 
+    fn set_muted(&self, workspace: WorkspaceId, muted: bool, cx: &App) -> Task<anyhow::Result<()>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            let patch = client.workspace_update().id(workspace);
+            let patch = patch.body_map(|patch| patch.muted(Some(muted)));
+            patch.send().await.map_err(ApiError::from)?;
+            Ok(())
+        })
+    }
+
     fn dirty(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<DirtyReport>> {
         let client = self.client.clone();
         runtime::spawn(cx, async move {
@@ -562,6 +575,8 @@ pub(crate) mod fake {
         pub archived: Mutex<Vec<WorkspaceId>>,
         /// The workspaces unarchived, in order.
         pub unarchived: Mutex<Vec<WorkspaceId>>,
+        /// The mutes and unmutes asked for: the workspace and whether to mute it, in order.
+        pub muted: Mutex<Vec<(WorkspaceId, bool)>>,
         /// Each workspace's dirty report; clean when unset.
         dirty: Mutex<HashMap<WorkspaceId, DirtyReport>>,
         /// The workspaces deleted, in order.
@@ -999,6 +1014,23 @@ pub(crate) mod fake {
             }
             self.set_archived(workspace, false);
             self.unarchived.lock().unwrap().push(workspace);
+            Task::ready(Ok(()))
+        }
+
+        fn set_muted(
+            &self,
+            workspace: WorkspaceId,
+            muted: bool,
+            _cx: &App,
+        ) -> Task<anyhow::Result<()>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            let mut snapshot = self.snapshot.lock().unwrap();
+            if let Some(w) = snapshot.workspaces.iter_mut().find(|w| w.id == workspace) {
+                w.muted = muted;
+            }
+            self.muted.lock().unwrap().push((workspace, muted));
             Task::ready(Ok(()))
         }
 

@@ -91,6 +91,21 @@ pub fn absolute(dir: &Path) -> anyhow::Result<String> {
         .map_err(|dir| anyhow::anyhow!("{} isn't UTF-8", Path::new(&dir).display()))
 }
 
+/// `ws mute` and `ws unmute`: patches the workspace's `muted`, printing `muted <slug>` or
+/// `unmuted <slug>`.
+async fn set_muted(client: &Client, ws: &str, muted: bool) -> anyhow::Result<Output> {
+    let id = workspace_id(client, ws).await?;
+    let ws = client
+        .workspace_update()
+        .id(id)
+        .body_map(|patch| patch.muted(Some(muted)))
+        .send()
+        .await
+        .map_err(ApiError::from)?;
+    let verb = if muted { "muted" } else { "unmuted" };
+    Output::new(&*ws, format!("{verb} {}\n", ws.slug))
+}
+
 async fn ws(client: &Client, command: WsCommand) -> anyhow::Result<Output> {
     match command {
         WsCommand::Ls => {
@@ -121,6 +136,8 @@ async fn ws(client: &Client, command: WsCommand) -> anyhow::Result<Output> {
                 .map_err(ApiError::from)?;
             Output::new(&*ws, format!("archived {}\n", ws.slug))
         }
+        WsCommand::Mute { ws } => set_muted(client, &ws, true).await,
+        WsCommand::Unmute { ws } => set_muted(client, &ws, false).await,
         WsCommand::Rm { ws, force } => {
             let id = workspace_id(client, &ws).await?;
             match client.workspace_delete().id(id).force(force).send().await {
