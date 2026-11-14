@@ -256,6 +256,7 @@ impl Api for Daemon {
         runtime::spawn(cx, async move {
             let pane = panes::launch_agent(&client, workspace, agent, cwd, task).await?;
             Ok(Launched {
+                workspace,
                 tab: pane.tab_id,
                 pane: pane.id,
             })
@@ -840,8 +841,13 @@ pub(crate) mod fake {
             }
             let tab: TabId = self.make_id();
             let pane: PaneId = self.make_id();
+            let workspace = launch.workspace;
             self.launched.lock().unwrap().push(launch);
-            Task::ready(Ok(Launched { tab, pane }))
+            Task::ready(Ok(Launched {
+                workspace,
+                tab,
+                pane,
+            }))
         }
 
         fn send_instruction(

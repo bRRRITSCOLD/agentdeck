@@ -12,12 +12,14 @@
 //!
 //! The Tasks view and the right panel ask for the new task dialog with
 //! [`NewTask`], preset to the Inbox or their workspace. They and the Inbox ask for the task
-//! sheet with [`OpenTask`] when a task's title is clicked.
+//! sheet with [`OpenTask`] when a task's title is clicked; the sheet's Start agent asks for
+//! the new agent dialog on the task's workspace with [`StartAgentOn`]. Once an agent starts,
+//! the window shows its workspace and tab.
 
 use std::sync::Arc;
 
 use agentdeck_client::ApiError;
-use agentdeck_core::WorkspaceId;
+use agentdeck_core::{TaskId, WorkspaceId};
 use brrritscold_core_gpui::{
     ActiveTheme as _, Alert, AlertAction, AlertDescription, AlertTitle, AlertVariant, Button,
     ButtonSize, ButtonVariant, IconName, Separator, SeparatorOrientation,
@@ -42,7 +44,7 @@ use crate::notice::{self, Notice, NoticeAction};
 use crate::right_panel::RightPanel;
 use crate::settings::SettingsView;
 use crate::sidebar::{Selection, SidebarEvent, SidebarView};
-use crate::task_sheet::{OpenTask, TaskSheet};
+use crate::task_sheet::{OpenTask, StartAgentOn, TaskSheet};
 use crate::tasks::TasksView;
 use crate::title_bar::{Close, Minimize, TitleBar, ToggleMaximize};
 use crate::top_bar::{ArchiveWorkspace, DeleteWorkspace, TopBar, UnarchiveWorkspace};
@@ -167,17 +169,20 @@ impl Shell {
                                 sidebar.update(cx, |sidebar, cx| sidebar.refresh(cx));
                             }
                         }),
-                        // Show the agent's tab and focus it: it may be asking about trust.
+                        // Show the agent's workspace and tab, and focus it: it may be asking
+                        // about trust.
                         cx.subscribe_in(
                             &new_agent,
                             window,
                             |shell, _, launched: &Launched, window, cx| {
-                                if let Some(workspace) = &shell.workspace {
-                                    let Launched { tab, pane } = *launched;
-                                    workspace.update(cx, |view, cx| {
-                                        view.show_pane(tab, pane, window, cx)
-                                    });
-                                }
+                                shell.show_launched(*launched, window, cx);
+                            },
+                        ),
+                        cx.subscribe_in(
+                            &task_sheet,
+                            window,
+                            |shell, _, ask: &StartAgentOn, window, cx| {
+                                shell.open_new_agent(ask.workspace, Some(ask.task), window, cx);
                             },
                         ),
                         cx.subscribe_in(&delete, window, |shell, _, event, window, cx| {
@@ -304,16 +309,27 @@ impl Shell {
         cx.notify();
     }
 
-    /// Opens the new agent dialog on the workspace shown, offering its root and the repos in
-    /// it.
+    /// Opens the new agent dialog on the workspace shown.
     fn new_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(sidebar), Some(dialog), Some(Selection::Workspace(selected))) =
-            (&self.sidebar, &self.new_agent, self.selection)
-        else {
+        if let Some(Selection::Workspace(selected)) = self.selection {
+            self.open_new_agent(selected, None, window, cx);
+        }
+    }
+
+    /// Opens the new agent dialog on `workspace`, offering its root and the repos in it, with
+    /// `task` picked.
+    fn open_new_agent(
+        &mut self,
+        workspace: WorkspaceId,
+        task: Option<TaskId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(sidebar), Some(dialog)) = (&self.sidebar, &self.new_agent) else {
             return;
         };
         let sidebar = sidebar.read(cx);
-        let Some(row) = (sidebar.overview().workspaces.iter()).find(|w| w.id == selected) else {
+        let Some(row) = (sidebar.overview().workspaces.iter()).find(|w| w.id == workspace) else {
             return;
         };
         let target = Target {
@@ -324,8 +340,31 @@ impl Shell {
         let folders = new_agent::folders(&row.dir, new_agent::repos_in(&row.dir));
         let snapshot = sidebar.snapshot().clone();
         dialog.update(cx, |dialog, cx| {
-            dialog.open(target, folders, snapshot, window, cx)
+            dialog.open(target, folders, snapshot, window, cx);
+            dialog.set_task(task, cx);
         });
+    }
+
+    /// Shows the workspace an agent was launched in, selecting it first if another view
+    /// shows, then the agent's tab, focusing its pane.
+    fn show_launched(&mut self, launched: Launched, window: &mut Window, cx: &mut Context<Self>) {
+        let Launched {
+            workspace,
+            tab,
+            pane,
+        } = launched;
+        if self.selection != Some(Selection::Workspace(workspace))
+            && let Some(sidebar) = &self.sidebar
+        {
+            let selection = Selection::Workspace(workspace);
+            sidebar.update(cx, |sidebar, cx| sidebar.select(selection, cx));
+            self.follow_selection(window, cx);
+        }
+        if let Some(view) = &self.workspace
+            && view.read(cx).workspace() == workspace
+        {
+            view.update(cx, |view, cx| view.show_pane(tab, pane, window, cx));
+        }
     }
 
     /// Opens the new task dialog as a view asks, offering the workspaces the sidebar holds.
@@ -994,6 +1033,79 @@ mod tests {
                     *api.seen.lock().unwrap(),
                     [id::<agentdeck_core::TaskId>(2); 2]
                 );
+            }
+
+            mod start_agent {
+                use agentdeck_client::ws::Remote;
+
+                use super::*;
+                use crate::task_sheet::StartAgentOn;
+
+                /// Workspace 1 shown, and workspace 2 `other`, holding task 3.
+                fn daemon() -> Arc<FakeApi> {
+                    let api = workspace_with_a_pane();
+                    let mut snapshot = api.snapshot_now();
+                    snapshot.workspaces.push(workspace(2, "other"));
+                    snapshot.tasks = vec![crate::overview::fixtures::task(
+                        3,
+                        agentdeck_core::TaskKind::Plain,
+                        Some(id(2)),
+                    )];
+                    api.set(snapshot);
+                    api
+                }
+
+                /// The shell, once the sheet's Start agent asked for task 3 in workspace 2,
+                /// and the daemon's end, which keeps it connected.
+                fn asked(
+                    cx: &mut TestAppContext,
+                ) -> (Entity<Shell>, Entity<NewAgentDialog>, Remote) {
+                    let connector = Rc::new(FakeConnector::default());
+                    let remote = connector.then_connect_to(daemon());
+                    let shell = open(connector, cx);
+                    let sheet = sheet(&shell, cx);
+                    sheet.update(cx, |_, cx| {
+                        cx.emit(StartAgentOn {
+                            workspace: id(2),
+                            task: id(3),
+                        })
+                    });
+                    cx.run_until_parked();
+                    let dialog = shell.read_with(cx, |shell, _| shell.new_agent.clone().unwrap());
+                    (shell, dialog, remote)
+                }
+
+                #[gpui::test]
+                fn should_open_new_agent_on_the_tasks_workspace_with_the_task_picked(
+                    cx: &mut TestAppContext,
+                ) {
+                    let (shell, dialog, _remote) = asked(cx);
+
+                    assert!(dialog.read_with(cx, |d, _| d.is_open()));
+                    assert_eq!(dialog.read_with(cx, |d, _| d.workspace()), Some(id(2)));
+                    assert_eq!(dialog.read_with(cx, |d, _| d.task()), Some(id(3)));
+                    // The window stays where it was until the agent starts.
+                    assert_eq!(shown_workspace(&shell, cx), Some(id(1)));
+                }
+
+                #[gpui::test]
+                fn should_show_the_tasks_workspace_once_the_agent_starts(cx: &mut TestAppContext) {
+                    let (shell, dialog, _remote) = asked(cx);
+                    let window = cx.windows()[0];
+
+                    window
+                        .update(cx, |_, window, cx| {
+                            dialog.update(cx, |d, cx| d.start(window, cx));
+                        })
+                        .unwrap();
+                    cx.run_until_parked();
+
+                    assert_eq!(shown_workspace(&shell, cx), Some(id(2)));
+                    assert_eq!(
+                        shell.read_with(cx, |shell, _| shell.selection),
+                        Some(Selection::Workspace(id(2)))
+                    );
+                }
             }
         }
 
