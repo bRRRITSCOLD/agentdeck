@@ -846,12 +846,15 @@ mod tests {
         }
 
         #[gpui::test]
-        fn should_offer_unarchive_in_place_of_new_agent_and_the_menu(cx: &mut TestAppContext) {
+        fn should_offer_unarchive_in_place_of_new_agent(cx: &mut TestAppContext) {
             let (_harness, cx) = archived(cx);
 
             assert!(cx.debug_bounds("unarchive").is_some());
             assert!(cx.debug_bounds("new agent").is_none());
-            assert!(cx.debug_bounds("workspace menu").is_none());
+            assert!(
+                cx.debug_bounds("workspace menu").is_some(),
+                "Delete still applies"
+            );
         }
 
         #[gpui::test]

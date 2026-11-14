@@ -1,15 +1,16 @@
 //! Penpot `Centre / TopBar`: the selected workspace's name and directory, above its tabs
 //! (spec §11).
 //!
-//! Its New agent button opens the new agent dialog, its `…` menu archives the workspace and
-//! its panel button toggles the right panel, all as actions the window handles. An archived
-//! workspace's bar has Unarchive in place of New agent, and no menu.
+//! Its New agent button opens the new agent dialog, its `…` menu archives the workspace or
+//! opens the Delete workspace dialog, and its panel button toggles the right panel, all as
+//! actions the window handles. An archived workspace's bar has Unarchive in place of New
+//! agent, and its menu only Delete.
 
 use std::path::Path;
 
 use brrritscold_core_gpui::{
     ActiveTheme as _, Button, ButtonSize, ButtonVariant, DropdownMenu, DropdownMenuContent,
-    DropdownMenuItem, IconName,
+    DropdownMenuItem, DropdownMenuItemVariant, DropdownMenuSeparator, IconName,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
@@ -28,6 +29,8 @@ actions!(
         ArchiveWorkspace,
         /// Brings the archived workspace shown back.
         UnarchiveWorkspace,
+        /// Opens the Delete workspace dialog on the workspace shown.
+        DeleteWorkspace,
     ]
 );
 
@@ -126,11 +129,10 @@ impl RenderOnce for TopBar {
             // sm), `WorkspaceMenu`, then `TogglePanel`: ghost, icon-sm, `PanelRight`.
             .child(div().flex_1())
             .map(|bar| match self.archived {
-                false => bar
-                    .child(outline("new agent", "New agent", NewAgent))
-                    .child(menu()),
+                false => bar.child(outline("new agent", "New agent", NewAgent)),
                 true => bar.child(outline("unarchive", "Unarchive", UnarchiveWorkspace)),
             })
+            .child(menu(self.archived))
             .child(
                 div().debug_selector(|| "toggle panel".into()).child(
                     Button::new("toggle-panel")
@@ -156,11 +158,22 @@ fn outline(name: &'static str, label: &'static str, action: impl Action) -> impl
     )
 }
 
-/// Penpot `WorkspaceMenu`: a ghost icon-sm `Ellipsis` button opening the workspace's actions.
-fn menu() -> impl IntoElement {
+/// Penpot `WorkspaceMenu`: a ghost icon-sm `Ellipsis` button opening the workspace's actions:
+/// Archive workspace, a separator and the destructive Delete workspace…; only Delete once the
+/// workspace is `archived`.
+fn menu(archived: bool) -> impl IntoElement {
     let item = |label: &'static str, action: Box<dyn Action>| {
         DropdownMenuItem::new(label)
             .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
+    };
+    let delete = item("Delete workspace…", Box::new(DeleteWorkspace))
+        .variant(DropdownMenuItemVariant::Destructive);
+    let content = match archived {
+        false => DropdownMenuContent::new()
+            .item(item("Archive workspace", Box::new(ArchiveWorkspace)))
+            .separator(DropdownMenuSeparator::new())
+            .item(delete),
+        true => DropdownMenuContent::new().item(delete),
     };
     div().debug_selector(|| "workspace menu".into()).child(
         DropdownMenu::new("workspace-menu")
@@ -170,10 +183,7 @@ fn menu() -> impl IntoElement {
                     .size(ButtonSize::IconSm)
                     .icon(IconName::Ellipsis),
             )
-            .content(
-                DropdownMenuContent::new()
-                    .item(item("Archive workspace", Box::new(ArchiveWorkspace))),
-            ),
+            .content(content),
     )
 }
 

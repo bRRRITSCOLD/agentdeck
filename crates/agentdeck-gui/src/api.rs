@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 use agentdeck_client::daemon::Daemon;
 use agentdeck_client::panes::{self, pane_if_any};
-use agentdeck_client::types::{NewNote, NewWorkspace, Pane, Tab, TaskPatch};
+use agentdeck_client::types::{DirtyReport, NewNote, NewWorkspace, Pane, Tab, TaskPatch};
 use agentdeck_client::{ApiError, Client};
 use agentdeck_core::{PaneId, SplitDirection, TabId, TaskId, TaskStatus, WorkspaceId};
 use gpui::{App, Task};
@@ -70,6 +70,14 @@ pub trait Api: Send + Sync {
 
     /// Brings the archived `workspace` back.
     fn unarchive_workspace(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<()>>;
+
+    /// The git repos under `workspace`'s dir that hold work on no remote.
+    fn dirty(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<DirtyReport>>;
+
+    /// Deletes `workspace`, dirty or not: its tasks move to the Inbox, its notes go, and so
+    /// does its dir when agentdeck made it. Only call it once the user has seen the dirty
+    /// report.
+    fn delete_workspace(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<()>>;
 }
 
 pub use agentdeck_client::panes::PaneAt;
@@ -222,6 +230,23 @@ impl Api for Daemon {
             Ok(())
         })
     }
+
+    fn dirty(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<DirtyReport>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            let report = client.workspace_dirty().id(workspace).send().await;
+            Ok(report.map_err(ApiError::from)?.into_inner())
+        })
+    }
+
+    fn delete_workspace(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<()>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            let deleting = client.workspace_delete().id(workspace).force(true).send();
+            deleting.await.map_err(ApiError::from)?;
+            Ok(())
+        })
+    }
 }
 
 /// Reads a [`WorkspacePanes`]: the tabs, then each pane in their layouts, then each task
@@ -336,6 +361,10 @@ pub(crate) mod fake {
         pub archived: Mutex<Vec<WorkspaceId>>,
         /// The workspaces unarchived, in order.
         pub unarchived: Mutex<Vec<WorkspaceId>>,
+        /// Each workspace's dirty report; clean when unset.
+        dirty: Mutex<HashMap<WorkspaceId, DirtyReport>>,
+        /// The workspaces deleted, in order.
+        pub deleted: Mutex<Vec<WorkspaceId>>,
     }
 
     impl FakeApi {
@@ -350,6 +379,11 @@ pub(crate) mod fake {
         /// Answers later reads with `snapshot`.
         pub fn set(&self, snapshot: Snapshot) {
             *self.snapshot.lock().unwrap() = snapshot;
+        }
+
+        /// What it holds now.
+        pub fn snapshot_now(&self) -> Snapshot {
+            self.snapshot.lock().unwrap().clone()
         }
 
         /// Answers later reads of `workspace`'s tabs with `tabs`.
@@ -396,6 +430,11 @@ pub(crate) mod fake {
             let tabs = self.tabs.lock().unwrap();
             let tab = tabs.get(&workspace)?.iter().find(|t| t.id == tab)?;
             tab.layout.clone()
+        }
+
+        /// Answers later reads of `workspace`'s dirty report with `report`.
+        pub fn set_dirty(&self, workspace: WorkspaceId, report: DirtyReport) {
+            self.dirty.lock().unwrap().insert(workspace, report);
         }
 
         /// Stamps or clears `workspace`'s `archived_at`, as the daemon does.
@@ -609,6 +648,27 @@ pub(crate) mod fake {
             }
             self.set_archived(workspace, false);
             self.unarchived.lock().unwrap().push(workspace);
+            Task::ready(Ok(()))
+        }
+
+        fn dirty(&self, workspace: WorkspaceId, _cx: &App) -> Task<anyhow::Result<DirtyReport>> {
+            let dirty = self.dirty.lock().unwrap().get(&workspace).cloned();
+            Task::ready(Ok(dirty.unwrap_or(DirtyReport { repos: Vec::new() })))
+        }
+
+        fn delete_workspace(&self, workspace: WorkspaceId, _cx: &App) -> Task<anyhow::Result<()>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            let mut snapshot = self.snapshot.lock().unwrap();
+            snapshot.workspaces.retain(|w| w.id != workspace);
+            for task in &mut snapshot.tasks {
+                if task.workspace_id == Some(workspace) {
+                    task.workspace_id = None;
+                }
+            }
+            snapshot.notes.retain(|n| n.workspace_id != Some(workspace));
+            self.deleted.lock().unwrap().push(workspace);
             Task::ready(Ok(()))
         }
     }
