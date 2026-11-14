@@ -65,8 +65,8 @@ pub mod types {
         pub path: ::std::string::String,
         ///Changed, staged and untracked files, as `git status --porcelain` prints them.
         pub uncommitted: ::std::vec::Vec<::std::string::String>,
-        ///Local branches with commits that are on no remote.
-        pub unpushed_branches: ::std::vec::Vec<::std::string::String>,
+        ///Local branches with commits that are on no remote, by name.
+        pub unpushed_branches: ::std::vec::Vec<UnpushedBranch>,
     }
     impl DirtyRepo {
         pub fn builder() -> builder::DirtyRepo {
@@ -618,6 +618,19 @@ pub mod types {
             Default::default()
         }
     }
+    ///A local branch holding commits that are on no remote.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct UnpushedBranch {
+        ///How many of its commits are on no remote branch, whether or not it has an upstream.
+        pub commits: u32,
+        ///The branch's short name, e.g. `feat/tabs`.
+        pub name: ::std::string::String,
+    }
+    impl UnpushedBranch {
+        pub fn builder() -> builder::UnpushedBranch {
+            Default::default()
+        }
+    }
     ///A free-form unit of work with its own directory.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct Workspace {
@@ -924,7 +937,7 @@ pub mod types {
                 ::std::string::String,
             >,
             unpushed_branches: ::std::result::Result<
-                ::std::vec::Vec<::std::string::String>,
+                ::std::vec::Vec<super::UnpushedBranch>,
                 ::std::string::String,
             >,
         }
@@ -960,7 +973,7 @@ pub mod types {
             }
             pub fn unpushed_branches<T>(mut self, value: T) -> Self
             where
-                T: ::std::convert::TryInto<::std::vec::Vec<::std::string::String>>,
+                T: ::std::convert::TryInto<::std::vec::Vec<super::UnpushedBranch>>,
                 T::Error: ::std::fmt::Display,
             {
                 self.unpushed_branches = value.try_into().map_err(|e| {
@@ -2793,6 +2806,60 @@ pub mod types {
                     status: Ok(value.status),
                     title: Ok(value.title),
                     workspace_id: Ok(value.workspace_id),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
+        pub struct UnpushedBranch {
+            commits: ::std::result::Result<u32, ::std::string::String>,
+            name: ::std::result::Result<::std::string::String, ::std::string::String>,
+        }
+        impl ::std::default::Default for UnpushedBranch {
+            fn default() -> Self {
+                Self {
+                    commits: Err("no value supplied for commits".to_string()),
+                    name: Err("no value supplied for name".to_string()),
+                }
+            }
+        }
+        impl UnpushedBranch {
+            pub fn commits<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<u32>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.commits = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for commits: {e}"));
+                self
+            }
+            pub fn name<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::string::String>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.name = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for name: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<UnpushedBranch> for super::UnpushedBranch {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: UnpushedBranch,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    commits: value.commits?,
+                    name: value.name?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::UnpushedBranch> for UnpushedBranch {
+            fn from(value: super::UnpushedBranch) -> Self {
+                Self {
+                    commits: Ok(value.commits),
+                    name: Ok(value.name),
                 }
             }
         }

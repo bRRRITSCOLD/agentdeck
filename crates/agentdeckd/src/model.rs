@@ -70,8 +70,17 @@ pub struct DirtyRepo {
     pub path: String,
     /// Changed, staged and untracked files, as `git status --porcelain` prints them.
     pub uncommitted: Vec<String>,
-    /// Local branches with commits that are on no remote.
-    pub unpushed_branches: Vec<String>,
+    /// Local branches with commits that are on no remote, by name.
+    pub unpushed_branches: Vec<UnpushedBranch>,
+}
+
+/// A local branch holding commits that are on no remote.
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct UnpushedBranch {
+    /// The branch's short name, e.g. `feat/tabs`.
+    pub name: String,
+    /// How many of its commits are on no remote branch, whether or not it has an upstream.
+    pub commits: u32,
 }
 
 /// A tab in a workspace, holding a split tree of panes.

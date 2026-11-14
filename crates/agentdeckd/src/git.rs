@@ -6,7 +6,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::model::{DirtyRepo, DirtyReport};
+use crate::model::{DirtyRepo, DirtyReport, UnpushedBranch};
 
 /// How deep under the workspace dir to look for repos: the dir itself, the repos cloned into
 /// it and one level of grouping folders. A repo's own subdirs are never searched.
@@ -23,10 +23,18 @@ pub fn dirty_report(dir: &Path) -> io::Result<DirtyReport> {
             &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
         )?;
         for branch in branches.lines().filter(|line| !line.is_empty()) {
+            // Commits on no remote branch, upstream or not: one call either way, and a
+            // branch never pushed counts what it would push.
             let full = format!("refs/heads/{branch}");
             let ahead = git(&repo, &["rev-list", "--count", &full, "--not", "--remotes"])?;
-            if ahead.trim() != "0" {
-                unpushed_branches.push(branch.to_owned());
+            let commits: u32 = ahead.trim().parse().map_err(|err| {
+                io::Error::other(format!("git rev-list --count printed {ahead:?}: {err}"))
+            })?;
+            if commits > 0 {
+                unpushed_branches.push(UnpushedBranch {
+                    name: branch.to_owned(),
+                    commits,
+                });
             }
         }
         if !uncommitted.is_empty() || !unpushed_branches.is_empty() {

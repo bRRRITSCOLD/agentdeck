@@ -185,9 +185,9 @@
             "type": "array"
           },
           "unpushed_branches": {
-            "description": "Local branches with commits that are on no remote.",
+            "description": "Local branches with commits that are on no remote, by name.",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/UnpushedBranch"
             },
             "type": "array"
           }
@@ -1123,6 +1123,26 @@
           "done"
         ],
         "type": "string"
+      },
+      "UnpushedBranch": {
+        "description": "A local branch holding commits that are on no remote.",
+        "properties": {
+          "commits": {
+            "description": "How many of its commits are on no remote branch, whether or not it has an upstream.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "description": "The branch's short name, e.g. `feat/tabs`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "commits",
+          "name"
+        ],
+        "type": "object"
       },
       "Workspace": {
         "description": "A free-form unit of work with its own directory.",

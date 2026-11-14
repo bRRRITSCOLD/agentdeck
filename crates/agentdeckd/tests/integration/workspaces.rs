@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use agentdeck_client::Client;
-use agentdeck_client::types::{NewWorkspace, Workspace};
+use agentdeck_client::types::{NewWorkspace, UnpushedBranch, Workspace};
 
 use crate::support::git::{clone_with_pushed_commit, git, init_with_commit};
 use agentdeck_core::AgentState;
@@ -350,6 +350,14 @@ mod post_v1_workspaces_id_archive {
     }
 }
 
+/// `name`, holding `commits` commits on no remote.
+fn unpushed(name: &str, commits: u32) -> UnpushedBranch {
+    UnpushedBranch {
+        name: name.into(),
+        commits,
+    }
+}
+
 mod get_v1_workspaces_id_dirty {
     use super::*;
 
@@ -374,7 +382,7 @@ mod get_v1_workspaces_id_dirty {
         assert_eq!(report.repos.len(), 1, "{report:?}");
         assert_eq!(report.repos[0].path, repo.display().to_string());
         assert_eq!(report.repos[0].uncommitted, vec!["scratch.txt"]);
-        assert_eq!(report.repos[0].unpushed_branches, vec!["main"]);
+        assert_eq!(report.repos[0].unpushed_branches, [unpushed("main", 1)]);
     }
 
     #[tokio::test]
@@ -400,7 +408,44 @@ mod get_v1_workspaces_id_dirty {
 
         assert_eq!(report.repos.len(), 1, "{report:?}");
         assert!(report.repos[0].uncommitted.is_empty());
-        assert_eq!(report.repos[0].unpushed_branches, vec!["feature"]);
+        assert_eq!(report.repos[0].unpushed_branches, [unpushed("feature", 1)]);
+    }
+
+    #[tokio::test]
+    async fn should_count_each_branchs_commits_on_no_remote_200() {
+        let daemon = TestDaemon::start().await;
+        let dir = daemon.new_dir("ws");
+        let repo = dir.join("clone");
+        clone_with_pushed_commit(&daemon.root().join("remote.git"), &repo);
+        let commit = |name: &str| {
+            std::fs::write(repo.join(name), "new\n").expect("write");
+            git(&repo, &["add", name]);
+            git(&repo, &["commit", "--quiet", "-m", name]);
+        };
+        // Pushed with an upstream, then one commit ahead of it.
+        git(&repo, &["switch", "--quiet", "-c", "tracked"]);
+        commit("tracked.txt");
+        git(&repo, &["push", "--quiet", "-u", "origin", "tracked"]);
+        commit("ahead.txt");
+        // Never pushed, so no upstream: `ahead.txt` and its own commit are on no remote.
+        git(&repo, &["switch", "--quiet", "-c", "local"]);
+        commit("local.txt");
+        let workspace = create(&daemon.client, "ws", Some(&dir)).await;
+
+        let report = daemon
+            .client
+            .workspace_dirty()
+            .id(workspace.id)
+            .send()
+            .await
+            .expect("dirty")
+            .into_inner();
+
+        assert_eq!(report.repos.len(), 1, "{report:?}");
+        assert_eq!(
+            report.repos[0].unpushed_branches,
+            [unpushed("local", 2), unpushed("tracked", 1)]
+        );
     }
 
     #[tokio::test]
@@ -447,7 +492,7 @@ mod delete_v1_workspaces_id {
         assert_eq!(status, 409);
         assert_eq!(error.error_code.as_deref(), Some("dirty"));
         let report = error.dirty.expect("the dirty report");
-        assert_eq!(report.repos[0].unpushed_branches, vec!["main"]);
+        assert_eq!(report.repos[0].unpushed_branches, [unpushed("main", 1)]);
         assert!(repo.is_dir());
         daemon
             .client
