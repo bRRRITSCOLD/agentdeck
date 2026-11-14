@@ -21,13 +21,13 @@ use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Context, EventEmitter, InteractiveElement as _, IntoElement, ListState,
-    ParentElement as _, Render, SharedString, Styled as _, Window, div, list,
+    ParentElement as _, Pixels, Render, SharedString, Styled as _, Window, div, list,
 };
 
 use crate::api::Api;
 use crate::overview::{PrSync, Snapshot};
 use crate::task_list::{self, Query, Row, Scope};
-use crate::task_row::{self, Table};
+use crate::task_row::{self, Layout, Table};
 use crate::task_sheet::OpenTask;
 use crate::workspace::failed;
 
@@ -59,6 +59,8 @@ pub struct InboxView {
     /// The rows the list draws from, as last rendered.
     shown: Vec<Row>,
     list: ListState,
+    /// The columns shown, fitted to the width the table was last drawn at.
+    layout: Layout,
 }
 
 impl EventEmitter<Synced> for InboxView {}
@@ -74,6 +76,19 @@ impl InboxView {
             syncing: false,
             shown: Vec::new(),
             list: task_row::list_state(),
+            layout: Table::Inbox.widest(),
+        }
+    }
+
+    /// Fits the columns to the table's `width`, as drawn. A row's height follows its title's
+    /// width, so a change measures the rows again. It runs while the frame is drawn, which
+    /// ignores a notify, so the redraw is asked for once the frame is done.
+    fn fit(&mut self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) {
+        let layout = Table::Inbox.fit(width);
+        if layout != self.layout {
+            self.layout = layout;
+            self.list.remeasure();
+            cx.defer_in(window, |_, _, cx| cx.notify());
         }
     }
 
@@ -148,7 +163,7 @@ impl InboxView {
             }),
         );
         let open = Box::new(cx.listener(move |_, _, _, cx| cx.emit(OpenTask(task))));
-        task_row::spaced(task_row::wide(row, picker, Table::Inbox, open, cx))
+        task_row::spaced(task_row::wide(row, picker, self.layout, open, cx))
     }
 
     /// Where PR sync stands, at `now`: how far a running sync is, whoever started it, or
@@ -248,9 +263,10 @@ impl Render for InboxView {
         let table = task_row::table(
             "inbox-table",
             "inbox table",
-            Table::Inbox,
+            self.layout,
             rows,
             &self.list,
+            cx.listener(|this, width: &Pixels, window, cx| this.fit(*width, window, cx)),
             cx,
         );
         // Penpot `Content`: Header / Columns / List, `space.4` apart, padded `space.6`.
@@ -688,6 +704,58 @@ mod tests {
                 description(&harness, cx)[1..],
                 ["PRs not updated in the last 30 days are left out; change that in Settings."]
             );
+        }
+    }
+
+    mod columns {
+        use gpui::{px, size};
+
+        use super::*;
+
+        /// The Inbox in a window `width` wide, beside the sidebar, its columns fitted.
+        fn open_in(width: f32, cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
+            let (harness, cx) = Harness::open(inbox(), cx);
+            cx.simulate_resize(size(px(width - 261.), px(800.)));
+            // No draw here: the redraw the refit asks for must come by itself, as in the app.
+            cx.run_until_parked();
+            (harness, cx)
+        }
+
+        fn shown(selector: String, cx: &mut VisualTestContext) -> bool {
+            cx.debug_bounds(selector.leak()).is_some()
+        }
+
+        #[gpui::test]
+        fn should_not_scroll_sideways_at_1200(cx: &mut TestAppContext) {
+            let (_, cx) = open_in(1200., cx);
+
+            let table = cx.debug_bounds("inbox table").expect("the table");
+            let row = bounds(1, cx).expect("a row");
+            assert!(row.right() <= table.right(), "{row:?} overflows {table:?}");
+            for column in ["Checks", "Review"] {
+                assert!(shown(format!("column {column}"), cx), "{column}");
+            }
+        }
+
+        #[gpui::test]
+        fn should_drop_the_checks_column_first_when_the_table_does_not_fit(
+            cx: &mut TestAppContext,
+        ) {
+            let (_, cx) = open_in(1061., cx);
+
+            assert!(!shown("column Checks".into(), cx));
+            assert!(!shown(format!("checks {}", id::<TaskId>(1)), cx));
+            assert!(shown("column Review".into(), cx));
+            assert!(shown(format!("review {}", id::<TaskId>(1)), cx));
+        }
+
+        #[gpui::test]
+        fn should_drop_review_after_checks(cx: &mut TestAppContext) {
+            let (_, cx) = open_in(961., cx);
+
+            assert!(!shown("column Checks".into(), cx));
+            assert!(!shown("column Review".into(), cx));
+            assert!(!shown(format!("review {}", id::<TaskId>(1)), cx));
         }
     }
 
