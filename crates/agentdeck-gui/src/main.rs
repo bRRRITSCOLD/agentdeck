@@ -22,6 +22,7 @@ mod new_task;
 mod new_workspace;
 mod notice;
 mod notifications;
+mod open_pr;
 mod overview;
 mod pane;
 mod pane_header;
