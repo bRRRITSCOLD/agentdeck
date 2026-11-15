@@ -30,9 +30,10 @@ use crate::terminal::pane::Pane;
 /// before the 101 goes out, means every event published after the client sees the
 /// connection open reaches it.
 ///
-/// Unpublished: OpenAPI can't describe the messages, and progenitor's generated upgrade
-/// needs tokio, which the GUI and the CLI don't run. Clients speak the protocol through
-/// `agentdeck_core::ws` over their own WebSocket client.
+/// Unpublished: OpenAPI can't describe the messages, so a generated client would get only the
+/// bare upgrade. The GUI, the one client that opens it, speaks the protocol through
+/// `agentdeck_core::ws` over `agentdeck_client::ws`, whose bounded event channel lets the
+/// daemon see a client that stops reading fall behind and send it `lagged` (spec §5).
 #[endpoint { method = GET, path = "/v1/ws", unpublished = true }]
 pub(crate) async fn ws(
     rqctx: RequestContext<ApiContext>,
