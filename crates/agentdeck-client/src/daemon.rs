@@ -87,7 +87,7 @@ pub enum DaemonError {
         #[source]
         source: Errno,
     },
-    /// The daemon being restarted was still running [`STOP_TIMEOUT`] after SIGTERM.
+    /// The daemon being restarted was still running 10 s after SIGTERM.
     #[error("agentdeckd (pid {pid}) was still running {STOP_TIMEOUT:?} after it was asked to stop")]
     StillRunning {
         /// The daemon's pid.
