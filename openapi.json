@@ -828,8 +828,13 @@
       "PaneInput": {
         "description": "`POST /v1/panes/{id}/input`.",
         "properties": {
+          "submit": {
+            "default": false,
+            "description": "Submits `text` as a message: types it as one bracketed paste when the program turned bracketed paste on (else as is), then presses Enter in a write of its own, after a pause. Claude Code and Codex read text arriving with its Enter as a paste and keep the Enter as a newline. False when absent.",
+            "type": "boolean"
+          },
           "text": {
-            "description": "Typed into the terminal as is; end it with `\\r` to press Enter.",
+            "description": "Typed into the terminal as is, unless `submit`.",
             "type": "string"
           },
           "when": {
@@ -2125,7 +2130,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Types text into the pane: now, or once it is idle, done or blocked (`when: \"idle\"`)."
+        "summary": "Types text into the pane, as is or submitted (`submit`), now or once it is idle (`when`)."
       }
     },
     "/v1/panes/{id}/tail": {

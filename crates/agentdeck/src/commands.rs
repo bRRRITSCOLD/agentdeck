@@ -357,8 +357,9 @@ async fn agent(client: &Client, command: AgentCommand) -> anyhow::Result<Output>
                 .pane_input()
                 .id(pane)
                 .body(PaneInput {
-                    text: format!("{text}\r"),
+                    text,
                     when: if now { InputWhen::Now } else { InputWhen::Idle },
+                    submit: true,
                 })
                 .send()
                 .await

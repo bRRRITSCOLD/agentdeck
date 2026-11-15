@@ -219,10 +219,11 @@ async fn hand_off(
     }
 }
 
-/// Types `comment`, with Enter, into `pane` once the agent is idle or done, if the pane still
-/// holds it then, and marks it delivered; it stays undelivered if the pane exits first.
+/// Submits `comment` (typed, then Enter) into `pane` once the agent is idle or done, if the
+/// pane still holds it then, and marks it delivered; it stays undelivered if the pane exits
+/// first.
 fn deliver(db: &Db, claims: &Claims, events: &Events, pane: &Pane, comment: &Comment) {
-    let text = format!("{}\r", comment.body.trim_end());
+    let text = comment.body.trim_end();
     let (id, pane_id, gives) = (comment.id, pane.id(), claims.clone());
     let claim = Box::new(move || gives.give(id, pane_id));
     let Ok(typed) = pane.deliver(text.as_bytes(), claim) else {

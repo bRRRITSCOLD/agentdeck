@@ -26,18 +26,18 @@ const UNREACHABLE: &str = "http://127.0.0.1:9/graphql";
 
 /// A stub `claude`: records its argv under `<root>/agents/<pane>/argv` (NUL-separated, ended
 /// by `\036` once complete, as the redirect creates the file before anything is in it), sets
-/// Claude Code's idle title, then appends whatever is typed to `stdin` there. Stays in the
-/// foreground, so the claude rules apply.
+/// Claude Code's idle title, then reads what is typed as [`READ_LIKE_A_TUI`] does. Stays in
+/// the foreground, so the claude rules apply.
 const STUB_CLAUDE: &str = r#"#!/bin/sh
 log="$(dirname "$0")/../agents/$AGENTDECK_PANE"
 mkdir -p "$log"
 { for arg in "$@"; do printf '%s\0' "$arg"; done; printf '\036'; } > "$log/argv"
-printf '\033]0;\342\234\263 Claude Code\007> '
-cat >> "$log/stdin"
+stty raw -echo
+printf '\033[?2004h\033]0;\342\234\263 Claude Code\007> '
 "#;
 
-/// A stub `codex`: records its argv, writes a session file as Codex does, then appends
-/// whatever is typed to `stdin`.
+/// A stub `codex`: records its argv, writes a session file as Codex does, then reads what is
+/// typed as [`READ_LIKE_A_TUI`] does.
 const STUB_CODEX: &str = r#"#!/bin/sh
 log="$(dirname "$0")/../agents/$AGENTDECK_PANE"
 mkdir -p "$log"
@@ -46,8 +46,26 @@ id=$(cat /proc/sys/kernel/random/uuid)
 dir="${CODEX_HOME:-$HOME/.codex}/sessions/2026/11/12"
 mkdir -p "$dir"
 : > "$dir/rollout-2026-11-12T09-00-00-$id.jsonl"
-printf '\033]0;codex\007'
-cat >> "$log/stdin"
+stty raw -echo
+printf '\033[?2004h\033]0;codex\007'
+"#;
+
+/// The end of both stubs: reads what is typed as Claude Code's and Codex's TUIs do. Each stub
+/// turns raw mode and bracketed paste on before its idle title, so nothing reaches it
+/// earlier, cooked. A read that is a lone CR is Enter: it submits the prompt, appending it and
+/// a newline to `stdin`. Any other read, CRs included, is a paste: it goes into the prompt,
+/// less the paste's brackets, and submits nothing, so text typed with its Enter in one write
+/// is never submitted (issue #184). Its twin is in `agentdeckd/tests/integration/support`.
+const READ_LIKE_A_TUI: &str = r#"
+: > "$log/prompt"
+while dd bs=65536 count=1 of="$log/read" 2>/dev/null && [ -s "$log/read" ]; do
+  if [ "$(od -An -tx1 "$log/read" | tr -d ' \n')" = 0d ]; then
+    { cat "$log/prompt"; echo; } >> "$log/stdin"
+    : > "$log/prompt"
+  else
+    sed 's/\x1b\[20[01]~//g' "$log/read" >> "$log/prompt"
+  fi
+done
 "#;
 
 /// A `gh` that is never logged in.
@@ -107,6 +125,10 @@ impl TestEnv {
             ("codex", STUB_CODEX),
         ] {
             let path = bin.join(name);
+            let script = match name {
+                "gh" => script.to_owned(),
+                _ => format!("{script}{READ_LIKE_A_TUI}"),
+            };
             std::fs::write(&path, script).expect("writing a stub");
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
                 .expect("making a stub executable");
@@ -358,7 +380,7 @@ fn argv_record(text: &str) -> Option<Vec<String>> {
     Some(args.split_terminator('\0').map(str::to_owned).collect())
 }
 
-/// What has been typed into the stub agent in `pane`.
+/// Every prompt the stub agent in `pane` submitted, each ended by `\n`.
 pub fn agent_typed(env: &TestEnv, pane: &str) -> String {
     std::fs::read_to_string(env.root().join("agents").join(pane).join("stdin")).unwrap_or_default()
 }

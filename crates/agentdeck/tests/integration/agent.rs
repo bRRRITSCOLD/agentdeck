@@ -244,8 +244,9 @@ mod agent_send_to_an_agent {
 
         env.ok(&["agent", "send", id, "hello agent"]);
 
-        eventually("the agent to receive the message", || {
-            agent_typed(&env, id).contains("hello agent").then_some(())
+        let submitted = eventually("the agent to submit the message", || {
+            Some(agent_typed(&env, id)).filter(|typed| !typed.is_empty())
         });
+        assert_eq!(submitted, "hello agent\n");
     }
 }
