@@ -2,7 +2,7 @@
 //! invalid", its form the part `agentdeck/PasteTokenForm`.
 //!
 //! It saves the token with `PUT /v1/github/token`, which checks it with GitHub first, then
-//! closes and toasts "Signed in as <login>", with a scope note when one applies. GitHub
+//! closes and toasts "Signed in as `<login>`", with a scope note when one applies. GitHub
 //! refusing the token, or no keyring, shows under the field and keeps it open; any other
 //! failure keeps it open and toasts why.
 

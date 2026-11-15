@@ -483,17 +483,22 @@ impl GithubSection {
 impl Render for GithubSection {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let auth = self.auth.clone();
+        // The dialogs sit outside the column, so its gaps don't count them.
         div()
-            .debug_selector(|| "github section".into())
-            .flex()
-            .flex_col()
-            .gap(space::S4)
-            .child(self.heading(cx))
-            .when_some(auth, |section, auth| {
-                let account = self.account(&auth, cx);
-                let field = self.client_id_field(&auth, cx);
-                section.child(account).child(field)
-            })
+            .debug_selector(|| "github".into())
+            .child(
+                div()
+                    .debug_selector(|| "github section".into())
+                    .flex()
+                    .flex_col()
+                    .gap(space::S4)
+                    .child(self.heading(cx))
+                    .when_some(auth, |section, auth| {
+                        let account = self.account(&auth, cx);
+                        let field = self.client_id_field(&auth, cx);
+                        section.child(account).child(field)
+                    }),
+            )
             .child(self.paste_token.clone())
             .child(self.sign_in.clone())
     }
@@ -682,6 +687,15 @@ mod tests {
             assert!(!harness.shows("github sign in", cx));
             assert!(harness.shows("github paste token", cx));
             assert!(!harness.shows("github client id clear", cx));
+        }
+
+        #[gpui::test]
+        fn should_take_no_room_for_its_closed_dialogs(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open(saved_token(), cx);
+
+            let whole = cx.debug_bounds("github").expect("the section");
+            let column = cx.debug_bounds("github section").expect("its column");
+            assert_eq!(whole.size.height, column.size.height);
         }
 
         #[gpui::test]
