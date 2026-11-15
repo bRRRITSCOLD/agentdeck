@@ -11,7 +11,7 @@ use crate::support::terminal::{
 };
 use crate::support::{TestDaemon, error_response, set_daemon_env};
 
-/// Types `text` into the pane.
+/// Types `text` into the pane, as is.
 async fn input(
     daemon: &TestDaemon,
     pane: agentdeck_core::PaneId,
@@ -25,6 +25,7 @@ async fn input(
         .body(PaneInput {
             text: text.into(),
             when,
+            submit: false,
         })
         .send()
         .await
@@ -633,6 +634,7 @@ mod post_v1_panes_id_input {
                 .body(PaneInput {
                     text: "x".into(),
                     when: InputWhen::Now,
+                    submit: false,
                 })
                 .send()
                 .await,

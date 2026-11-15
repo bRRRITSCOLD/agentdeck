@@ -261,7 +261,7 @@ pub(crate) async fn pane_delete(
     Ok(HttpResponseDeleted())
 }
 
-/// Types text into the pane: now, or once it is idle, done or blocked (`when: "idle"`).
+/// Types text into the pane, as is or submitted (`submit`), now or once it is idle (`when`).
 #[endpoint { method = POST, path = "/v1/panes/{id}/input" }]
 pub(crate) async fn pane_input(
     rqctx: RequestContext<ApiContext>,
@@ -281,7 +281,7 @@ pub(crate) async fn pane_input(
         InputWhen::Idle => When::Idle,
     };
     let queued = pane
-        .input(input.text.as_bytes(), when)
+        .input(input.text.as_bytes(), input.submit, when)
         .map_err(|_| exited(id))?;
     Ok(HttpResponseAccepted(InputAccepted { queued }))
 }

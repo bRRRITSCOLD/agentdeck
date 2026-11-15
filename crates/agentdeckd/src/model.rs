@@ -543,11 +543,17 @@ pub enum InputWhen {
 /// `POST /v1/panes/{id}/input`.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PaneInput {
-    /// Typed into the terminal as is; end it with `\r` to press Enter.
+    /// Typed into the terminal as is, unless `submit`.
     pub text: String,
     /// `now` when absent.
     #[serde(default)]
     pub when: InputWhen,
+    /// Submits `text` as a message: types it as one bracketed paste when the program turned
+    /// bracketed paste on (else as is), then presses Enter in a write of its own, after a
+    /// pause. Claude Code and Codex read text arriving with its Enter as a paste and keep the
+    /// Enter as a newline. False when absent.
+    #[serde(default)]
+    pub submit: bool,
 }
 
 /// What became of `POST /v1/panes/{id}/input`.

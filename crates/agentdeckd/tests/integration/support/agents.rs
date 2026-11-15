@@ -10,9 +10,9 @@ use agentdeck_core::PaneId;
 use super::TestDaemon;
 
 /// Records its argv; shows a stand-in for the folder trust dialog when its folder holds a
-/// file named `untrusted`, and waits for a line there; then sets the idle title and appends
-/// every line typed to `stdin`. It stays in the foreground (no `exec`), so the pane's
-/// foreground process is `claude` and the claude rules apply.
+/// file named `untrusted`, and waits for a line there; then sets the idle title and reads
+/// what is typed as [`READ_LIKE_A_TUI`] does. It stays in the foreground (no `exec`), so the
+/// pane's foreground process is `claude` and the claude rules apply.
 const STUB_CLAUDE: &str = r#"#!/bin/sh
 log="$(dirname "$0")/../agents/$AGENTDECK_PANE"
 mkdir -p "$log"
@@ -23,13 +23,13 @@ if [ -e untrusted ]; then
   printf '%s\n' "$answer" > "$log/trust"
   printf '\033[2J\033[H'
 fi
-printf '\033]0;\342\234\263 Claude Code\007> '
-cat >> "$log/stdin"
+stty raw -echo
+printf '\033[?2004h\033]0;\342\234\263 Claude Code\007> '
 "#;
 
 /// Records its argv; unless resuming, writes a session file as Codex does, under
 /// `$CODEX_HOME/sessions` (default `$HOME/.codex/sessions`), and records the id in
-/// `session`; then appends every line typed to `stdin`.
+/// `session`; then reads what is typed as [`READ_LIKE_A_TUI`] does.
 const STUB_CODEX: &str = r#"#!/bin/sh
 log="$(dirname "$0")/../agents/$AGENTDECK_PANE"
 mkdir -p "$log"
@@ -41,15 +41,33 @@ if [ "$1" != resume ]; then
   : > "$dir/rollout-2026-11-11T09-00-00-$id.jsonl"
   printf '%s' "$id" > "$log/session"
 fi
-printf '\033]0;codex\007'
-cat >> "$log/stdin"
+stty raw -echo
+printf '\033[?2004h\033]0;codex\007'
+"#;
+
+/// The end of both stubs: reads what is typed as Claude Code's and Codex's TUIs do. Each stub
+/// turns raw mode and bracketed paste on before its idle title, so nothing reaches it
+/// earlier, cooked. A read that is a lone CR is Enter: it submits the prompt, appending it and
+/// a newline to `stdin`. Any other read, CRs included, is a paste: it goes into the prompt,
+/// less the paste's brackets, and submits nothing, so text typed with its Enter in one write
+/// is never submitted (issue #184). Its twin is in `agentdeck/tests/integration/support`.
+const READ_LIKE_A_TUI: &str = r#"
+: > "$log/prompt"
+while dd bs=65536 count=1 of="$log/read" 2>/dev/null && [ -s "$log/read" ]; do
+  if [ "$(od -An -tx1 "$log/read" | tr -d ' \n')" = 0d ]; then
+    { cat "$log/prompt"; echo; } >> "$log/stdin"
+    : > "$log/prompt"
+  else
+    sed 's/\x1b\[20[01]~//g' "$log/read" >> "$log/prompt"
+  fi
+done
 "#;
 
 /// Writes the stub agents into `bin`, the dir the stub `gh` is in.
 pub fn install(bin: &Path) {
     for (name, script) in [("claude", STUB_CLAUDE), ("codex", STUB_CODEX)] {
         let path = bin.join(name);
-        std::fs::write(&path, script).expect("writing a stub agent");
+        std::fs::write(&path, format!("{script}{READ_LIKE_A_TUI}")).expect("writing a stub agent");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
             .expect("making a stub agent executable");
     }
@@ -75,7 +93,7 @@ fn argv_records(text: &str) -> Vec<Vec<String>> {
         .collect()
 }
 
-/// What has been typed into the pane's stub agent, after any trust dialog.
+/// Every prompt the pane's stub agent submitted, each ended by `\n`, after any trust dialog.
 pub fn typed(daemon: &TestDaemon, pane: PaneId) -> String {
     std::fs::read_to_string(log(daemon, pane).join("stdin")).unwrap_or_default()
 }

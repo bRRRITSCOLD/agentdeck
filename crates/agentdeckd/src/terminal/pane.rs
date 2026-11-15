@@ -5,7 +5,8 @@
 //! - the **reader** feeds every chunk of output through [`Pane::output`], then waits for the
 //!   process, records its exit and only then reports it;
 //! - the **writer** writes input in order: typed bytes, delivered `input`, and the `Term`'s
-//!   answers to terminal queries.
+//!   answers to terminal queries. A submitted message's Enter is a write of its own, with a
+//!   pause on either side ([`SUBMIT_PAUSE`]).
 //!
 //! Everything a chunk of output touches (the `Term`, the tail, the OSC scanner, the attached
 //! clients' queues) changes under one lock, [`Pane::live`]. An attach snapshots the `Term`
@@ -28,8 +29,8 @@ use agentdeck_core::ws::{Channel, ServerMessage};
 use agentdeck_core::{AgentState, PaneId, WorkspaceId};
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener};
-use alacritty_terminal::term::Config;
 use alacritty_terminal::term::test::TermSize;
+use alacritty_terminal::term::{Config, TermMode};
 use alacritty_terminal::vte::ansi::Processor;
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
@@ -102,6 +103,39 @@ impl When {
     }
 }
 
+/// How long the writer waits before and after the Enter that submits a message, so the
+/// program reads the message, the Enter and whatever comes next in separate reads. Claude
+/// Code and Codex take text arriving with its Enter in one read as a paste, and keep the Enter
+/// in it as a newline instead of submitting (#184).
+const SUBMIT_PAUSE: Duration = Duration::from_millis(200);
+
+/// What the writer thread writes.
+enum Typing {
+    /// Bytes, as they are.
+    Bytes(Vec<u8>),
+    /// Enter (CR) in a read of its own: written after [`SUBMIT_PAUSE`], and followed by
+    /// another before anything else is written.
+    Enter,
+}
+
+/// What a message is typed as ahead of its Enter: one bracketed paste when the program turned
+/// bracketed paste on (DECSET 2004), with any ESC removed so it can't end the paste early, as
+/// the GUI pastes; else `text` as is.
+fn message(text: &[u8], bracketed: bool) -> Vec<u8> {
+    if !bracketed {
+        return text.to_vec();
+    }
+    let mut bytes = b"\x1b[200~".to_vec();
+    bytes.extend(text.iter().filter(|byte| **byte != 0x1b));
+    bytes.extend_from_slice(b"\x1b[201~");
+    bytes
+}
+
+/// Whether the program in `term` turned bracketed paste on.
+fn bracketed_paste(term: &Term<Listener>) -> bool {
+    term.mode().contains(TermMode::BRACKETED_PASTE)
+}
+
 /// Asked right before queued bytes are typed, under the pane's lock; `false` drops them.
 pub type Claim = Box<dyn FnOnce() -> bool + Send>;
 
@@ -109,6 +143,8 @@ pub type Claim = Box<dyn FnOnce() -> bool + Send>;
 struct Queued {
     when: When,
     bytes: Vec<u8>,
+    /// Typed as a message ([`message`]) followed by Enter, rather than as is.
+    submit: bool,
     /// Told once the bytes are typed; dropped untold if the process exits first or `claim`
     /// says no.
     typed: Option<oneshot::Sender<()>>,
@@ -189,7 +225,7 @@ pub struct Pane {
     id: PaneId,
     live: Mutex<Live>,
     master: Mutex<Box<dyn MasterPty + Send>>,
-    input: Sender<Vec<u8>>,
+    input: Sender<Typing>,
     /// The process's id, which is also its process group's: it runs as a session leader.
     pid: Option<i32>,
     events: Events,
@@ -256,7 +292,7 @@ impl Pane {
         let mut reader = pair.master.try_clone_reader().map_err(SpawnError::Pty)?;
         let mut writer = pair.master.take_writer().map_err(SpawnError::Pty)?;
 
-        let (input, typed) = channel::<Vec<u8>>();
+        let (input, typed) = channel::<Typing>();
         let (term_events, term_events_rx) = channel();
         let term = Term::new(
             Config::default(),
@@ -288,12 +324,19 @@ impl Pane {
         let thread = |role: &str| std::thread::Builder::new().name(format!("pane-{role}-{id}"));
         thread("write")
             .spawn(move || {
-                for bytes in typed {
-                    if writer
-                        .write_all(&bytes)
-                        .and_then(|()| writer.flush())
-                        .is_err()
-                    {
+                let mut type_in =
+                    |bytes: &[u8]| writer.write_all(bytes).and_then(|()| writer.flush());
+                for typing in typed {
+                    let written = match typing {
+                        Typing::Bytes(bytes) => type_in(&bytes),
+                        Typing::Enter => {
+                            std::thread::sleep(SUBMIT_PAUSE);
+                            let written = type_in(b"\r");
+                            std::thread::sleep(SUBMIT_PAUSE);
+                            written
+                        }
+                    };
+                    if written.is_err() {
                         break;
                     }
                 }
@@ -411,31 +454,35 @@ impl Pane {
             .into_iter()
             .partition(|queued| queued.when.accepts(state));
         live.queued = waiting;
+        let bracketed = bracketed_paste(&live.term);
         for queued in ready {
-            self.typed(queued);
+            self.typed(queued, bracketed);
         }
         Some((state, live.title.clone()))
     }
 
-    /// Types `bytes` into the PTY, now or once the pane's state accepts `when`. Returns
-    /// whether it was queued.
-    pub fn input(&self, bytes: &[u8], when: When) -> Result<bool, Exited> {
+    /// Types `bytes` into the PTY, now or once the pane's state accepts `when`: as they are,
+    /// or with `submit` as a message followed by Enter ([`message`], [`Typing::Enter`]).
+    /// Returns whether it was queued.
+    pub fn input(&self, bytes: &[u8], submit: bool, when: When) -> Result<bool, Exited> {
         self.enqueue(Queued {
             when,
             bytes: bytes.to_vec(),
+            submit,
             typed: None,
             claim: None,
         })
     }
 
-    /// Types `bytes` into the PTY once the agent waits at its prompt ([`When::Prompt`]), if
-    /// `claim`, asked right before, still says yes. The receiver is told when they are typed;
-    /// it errs if the process exits first or `claim` says no.
-    pub fn deliver(&self, bytes: &[u8], claim: Claim) -> Result<oneshot::Receiver<()>, Exited> {
+    /// Submits `text` as a message followed by Enter once the agent waits at its prompt
+    /// ([`When::Prompt`]), if `claim`, asked right before, still says yes. The receiver is told
+    /// when it is typed; it errs if the process exits first or `claim` says no.
+    pub fn deliver(&self, text: &[u8], claim: Claim) -> Result<oneshot::Receiver<()>, Exited> {
         let (typed, delivered) = oneshot::channel();
         self.enqueue(Queued {
             when: When::Prompt,
-            bytes: bytes.to_vec(),
+            bytes: text.to_vec(),
+            submit: true,
             typed: Some(typed),
             claim: Some(claim),
         })?;
@@ -452,15 +499,23 @@ impl Pane {
             live.queued.push(queued);
             return Ok(true);
         }
-        self.typed(queued);
+        self.typed(queued, bracketed_paste(&live.term));
         Ok(false)
     }
 
-    fn typed(&self, queued: Queued) {
+    /// Types `queued`; `bracketed` is whether the program has bracketed paste on right now.
+    fn typed(&self, queued: Queued, bracketed: bool) {
         if queued.claim.is_some_and(|claim| !claim()) {
             return;
         }
-        self.write(queued.bytes);
+        if queued.submit {
+            if !queued.bytes.is_empty() {
+                self.write(message(&queued.bytes, bracketed));
+            }
+            self.send(Typing::Enter);
+        } else {
+            self.write(queued.bytes);
+        }
         if let Some(typed) = queued.typed {
             let _ = typed.send(());
         }
@@ -472,8 +527,12 @@ impl Pane {
     }
 
     fn write(&self, bytes: Vec<u8>) {
+        self.send(Typing::Bytes(bytes));
+    }
+
+    fn send(&self, typing: Typing) {
         // The writer thread stops only once the PTY is gone; then there is nobody to type to.
-        let _ = self.input.send(bytes);
+        let _ = self.input.send(typing);
     }
 
     /// Attaches a client: queues `attached` and the snapshot, then subscribes it to live
@@ -606,6 +665,28 @@ mod tests {
                 "`codex` isn't on agentdeckd's PATH. Install it, or start agentdeckd from a \
                  shell where it's found."
             );
+        }
+    }
+
+    mod message {
+        use super::*;
+
+        #[test]
+        fn should_bracket_the_text_as_one_paste_when_bracketed_paste_is_on() {
+            assert_eq!(
+                message(b"fix it\nthen test", true),
+                b"\x1b[200~fix it\nthen test\x1b[201~"
+            );
+        }
+
+        #[test]
+        fn should_drop_any_esc_so_the_text_cannot_end_the_paste_early() {
+            assert_eq!(message(b"a\x1b[201~b", true), b"\x1b[200~a[201~b\x1b[201~");
+        }
+
+        #[test]
+        fn should_type_the_text_as_is_when_bracketed_paste_is_off() {
+            assert_eq!(message(b"a\x1bb\n", false), b"a\x1bb\n");
         }
     }
 
