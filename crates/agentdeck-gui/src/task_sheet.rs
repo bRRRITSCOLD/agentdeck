@@ -404,7 +404,7 @@ impl TaskSheet {
 
     /// Penpot `agentdeck/TaskSheetBody`: the status row, the description, the PR line, the
     /// "Comments" heading and the thread, `space.4` apart, padded `space.4` across.
-    fn body(&self, summary: &Summary, cx: &mut Context<Self>) -> AnyElement {
+    fn body(&self, summary: &Summary, spin: bool, cx: &mut Context<Self>) -> AnyElement {
         let s = cx.theme().semantic();
         let status = Select::new("task-sheet-status")
             .trigger(SelectTrigger::new().w(px(STATUS_WIDTH)))
@@ -443,7 +443,9 @@ impl TaskSheet {
             .when_some(summary.description.clone(), |body, description| {
                 body.child(muted(description))
             })
-            .when_some(summary.pr.as_ref(), |body, pr| body.child(pr_line(pr, cx)))
+            .when_some(summary.pr.as_ref(), |body, pr| {
+                body.child(pr_line(pr, spin, cx))
+            })
             .child(
                 div()
                     .text_size(font_size::SM)
@@ -546,8 +548,9 @@ impl TaskSheet {
     }
 }
 
-/// The PR line: its reference (sm, muted), a draft badge, its checks and its review.
-fn pr_line(pr: &PrCell, cx: &App) -> AnyElement {
+/// The PR line: its reference (sm, muted), a draft badge, its checks and its review. Running
+/// checks turn only while `spin`.
+fn pr_line(pr: &PrCell, spin: bool, cx: &App) -> AnyElement {
     let s = cx.theme().semantic();
     div()
         .flex()
@@ -562,7 +565,9 @@ fn pr_line(pr: &PrCell, cx: &App) -> AnyElement {
         .when(pr.draft, |line| {
             line.child(Badge::new().variant(BadgeVariant::Outline).label("draft"))
         })
-        .when_some(pr.checks, |line, state| line.child(task_row::checks(state)))
+        .when_some(pr.checks, |line, state| {
+            line.child(task_row::checks(state, spin))
+        })
         .when_some(pr.review, |line, state| {
             line.child(task_row::review(state, cx))
         })
@@ -614,7 +619,9 @@ fn comment(row: CommentRow, cx: &App) -> AnyElement {
 }
 
 impl Render for TaskSheet {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A turning mark redraws the window, so it holds still while the window is inactive.
+        let spin = window.is_window_active();
         let summary = self.task.and_then(|task| summary(&self.snapshot, task));
         let mut content = SheetContent::new();
         if let Some(summary) = &summary {
@@ -624,7 +631,7 @@ impl Render for TaskSheet {
                         .title(SheetTitle::new(summary.title.clone()))
                         .description(SheetDescription::new(summary.on_it.clone())),
                 )
-                .child(self.body(summary, cx))
+                .child(self.body(summary, spin, cx))
                 .footer(SheetFooter::new().child(self.composer(cx)));
         }
         Sheet::new("task-sheet")
@@ -1303,6 +1310,43 @@ mod tests {
 
                 assert_eq!(*asked.borrow(), []);
                 assert!(harness.sheet.read_with(cx, |s, _| s.is_open()));
+            }
+        }
+
+        mod spin {
+            use super::*;
+            use crate::overview::fixtures::pr_task;
+            use crate::state_dot::tests::{activate, deactivate, redraws_in_one_second};
+
+            /// The sheet opened on task 10 as a PR whose checks are running.
+            fn running_checks(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
+                let (harness, cx) = Harness::new(Vec::new(), cx);
+                let mut snapshot = snapshot();
+                let ws = snapshot.workspaces[0].id;
+                let mut pr_task = pr_task(10, "acme/widgets", PrState::Open, Some(ws));
+                if let Some(pr) = pr_task.pr.as_mut() {
+                    pr.checks = Some(ChecksState::Pending);
+                }
+                snapshot.tasks = vec![pr_task];
+                cx.update(|window, cx| {
+                    (harness.sheet).update(cx, |s, cx| s.open(id(10), snapshot, window, cx));
+                });
+                harness.settle(cx);
+                activate(cx);
+                (harness, cx)
+            }
+
+            #[gpui::test]
+            fn should_spin_running_checks_while_the_window_is_active(cx: &mut TestAppContext) {
+                let (harness, cx) = running_checks(cx);
+                assert!(redraws_in_one_second(&harness.sheet, cx) > 0);
+            }
+
+            #[gpui::test]
+            fn should_hold_them_still_while_the_window_is_inactive(cx: &mut TestAppContext) {
+                let (harness, cx) = running_checks(cx);
+                deactivate(cx);
+                assert_eq!(redraws_in_one_second(&harness.sheet, cx), 0);
             }
         }
     }

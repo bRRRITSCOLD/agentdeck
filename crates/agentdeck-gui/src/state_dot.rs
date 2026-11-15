@@ -22,26 +22,76 @@ pub fn of(state: AgentState, exit_code: Option<i64>) -> StateDotState {
 
 #[cfg(test)]
 pub mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::time::Duration;
+
     use brrritscold_core_gpui::StateDot;
-    use gpui::{AnyElement, Context, IntoElement, Render, TestAppContext, Window};
+    use gpui::{
+        AnyElement, Context, Entity, IntoElement, Render, TestAppContext, VisualTestContext, Window,
+    };
 
     use super::*;
 
-    /// How many next-frame callbacks one drawn frame of `element` leaves behind: above 0
-    /// while something in it animates.
-    pub fn frames_requested(element: fn() -> AnyElement, cx: &mut TestAppContext) -> usize {
-        struct Host(fn() -> AnyElement);
-        impl Render for Host {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                (self.0)()
-            }
+    /// A view drawing what its fn builds for the window it's in.
+    pub struct Host(fn(&Window) -> AnyElement);
+
+    impl Render for Host {
+        fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            (self.0)(window)
         }
+    }
+
+    /// Opens an active window on a [`Host`] drawing `element`.
+    pub fn host(
+        element: fn(&Window) -> AnyElement,
+        cx: &mut TestAppContext,
+    ) -> (Entity<Host>, &mut VisualTestContext) {
         cx.update(brrritscold_core_gpui::init);
-        let (_, cx) = cx.add_window_view(|_, _| Host(element));
-        cx.update(|window, cx| {
-            window.draw(cx).clear(cx);
-            window.simulate_next_frame(cx)
-        })
+        let (host, cx) = cx.add_window_view(|_, _| Host(element));
+        activate(cx);
+        (host, cx)
+    }
+
+    /// Focuses the window, as the user would. A test window opens inactive.
+    pub fn activate(cx: &mut VisualTestContext) {
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+    }
+
+    /// Blurs the window, then lets the redraw it asks for, and any spinner tick already
+    /// scheduled, play out.
+    pub fn deactivate(cx: &mut VisualTestContext) {
+        cx.deactivate_window();
+        for _ in 0..12 {
+            play_frame(cx);
+        }
+    }
+
+    /// Plays one second of a 60 Hz display and returns how often `view` asked to redraw in
+    /// it: above 0 while something in it turns, 0 when it holds still.
+    pub fn redraws_in_one_second<V: 'static>(
+        view: &Entity<V>,
+        cx: &mut VisualTestContext,
+    ) -> usize {
+        let redraws = Rc::new(Cell::new(0));
+        let _observing = cx.update(|_, cx| {
+            let redraws = redraws.clone();
+            cx.observe(view, move |_, _| redraws.set(redraws.get() + 1))
+        });
+        for _ in 0..60 {
+            play_frame(cx);
+        }
+        redraws.get()
+    }
+
+    /// Moves the clock on by one 60 Hz frame, delivers the frame and lets whatever it woke
+    /// run.
+    fn play_frame(cx: &mut VisualTestContext) {
+        cx.executor()
+            .advance_clock(Duration::from_secs_f64(1. / 60.));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
     }
 
     mod of {
@@ -77,14 +127,20 @@ pub mod tests {
 
         #[gpui::test]
         fn should_spin_a_working_agents_mark(cx: &mut TestAppContext) {
-            let working = || StateDot::new(of(AgentState::Working, None)).into_any_element();
-            assert!(frames_requested(working, cx) > 0);
+            let (host, cx) = host(
+                |_| StateDot::new(of(AgentState::Working, None)).into_any_element(),
+                cx,
+            );
+            assert!(redraws_in_one_second(&host, cx) > 0);
         }
 
         #[gpui::test]
         fn should_hold_an_idle_agents_mark_still(cx: &mut TestAppContext) {
-            let idle = || StateDot::new(of(AgentState::Idle, None)).into_any_element();
-            assert_eq!(frames_requested(idle, cx), 0);
+            let (host, cx) = host(
+                |_| StateDot::new(of(AgentState::Idle, None)).into_any_element(),
+                cx,
+            );
+            assert_eq!(redraws_in_one_second(&host, cx), 0);
         }
     }
 }

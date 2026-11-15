@@ -469,15 +469,15 @@ fn checks_mark(state: ChecksState) -> (UiChecksState, &'static str) {
 }
 
 /// Penpot `Checks`: the icon and its word, as the Tasks view, the Inbox and the task sheet
-/// show a PR's checks.
-pub fn checks(state: ChecksState) -> Checks {
+/// show a PR's checks. Running checks turn only while `spin`: the window is active.
+pub fn checks(state: ChecksState, spin: bool) -> Checks {
     let (mark, word) = checks_mark(state);
-    Checks::new(mark).label(word)
+    Checks::new(mark).label(word).spin(spin)
 }
 
 /// Penpot `Checks` as the right panel shows it: the icon alone.
-fn checks_icon(state: ChecksState) -> Checks {
-    Checks::new(checks_mark(state).0)
+fn checks_icon(state: ChecksState, spin: bool) -> Checks {
+    Checks::new(checks_mark(state).0).spin(spin)
 }
 
 /// The review cell: a badge in the review colour (spec §11), or muted text while one is
@@ -578,13 +578,15 @@ fn unseen_mark(row: &Row, cx: &App) -> Option<Div> {
 /// agent, PR, draft, checks, review, workspace and its `Menu` layer, `space.3` apart, padded
 /// `space.2`; `layout`'s columns only. `picker` is the row's status picker; clicking the
 /// title runs `on_open`. The title cell ends with the [`unseen_mark`] while the task's agent
-/// comments are unseen. Tests find a cell as `<column> <id>`.
+/// comments are unseen. A working agent's mark and running checks turn only while `spin`,
+/// which the caller sets while its window is active. Tests find a cell as `<column> <id>`.
 pub fn wide(
     row: &Row,
     picker: Select,
     layout: Layout,
     parts: RowParts,
     on_open: OnOpen,
+    spin: bool,
     cx: &App,
 ) -> AnyElement {
     let s = cx.theme().semantic();
@@ -604,7 +606,7 @@ pub fn wide(
     let agent_cell = cell(Columns::AGENT).debug_selector(move || format!("agent {id}"));
     let agent = match &row.agent {
         Some(agent) => agent_cell
-            .child(StateDot::new(state_dot::of(agent.state, None)))
+            .child(StateDot::new(state_dot::of(agent.state, None)).spin(spin))
             .child(muted(agent.name.clone(), font_size::XS)),
         None => agent_cell.child(none(cx)),
     };
@@ -648,7 +650,7 @@ pub fn wide(
                 cell(Columns::CHECKS)
                     .debug_selector(move || format!("checks {id}"))
                     .when_some(pr.and_then(|pr| pr.checks), |c, state| {
-                        c.child(checks(state))
+                        c.child(checks(state, spin))
                     }),
             )
         })
@@ -692,8 +694,16 @@ pub fn wide(
 /// its `Menu` layer on top; the status picker, then the checks icon and the review badge
 /// below. Padded `space.2`, the two lines `space.1-5` apart. Clicking the title runs
 /// `on_open`. The [`unseen_mark`] sits just before the agents' mark while the task's agent
-/// comments are unseen. Tests find the agents' mark as `panel agent <id>`.
-pub fn panel(row: &Row, picker: Select, parts: RowParts, on_open: OnOpen, cx: &App) -> AnyElement {
+/// comments are unseen. The agents' mark and the checks turn only while `spin`, as in
+/// [`wide`]. Tests find the agents' mark as `panel agent <id>`.
+pub fn panel(
+    row: &Row,
+    picker: Select,
+    parts: RowParts,
+    on_open: OnOpen,
+    spin: bool,
+    cx: &App,
+) -> AnyElement {
     let s = cx.theme().semantic();
     let kind_icon = match row.kind {
         TaskKind::Plain => IconName::ListTodo,
@@ -748,7 +758,7 @@ pub fn panel(row: &Row, picker: Select, parts: RowParts, on_open: OnOpen, cx: &A
                         div()
                             .debug_selector(move || format!("panel agent {id}"))
                             .flex_none()
-                            .child(StateDot::new(state_dot::of(agent.state, None))),
+                            .child(StateDot::new(state_dot::of(agent.state, None)).spin(spin)),
                     )
                 })
                 .children(parts.menu),
@@ -762,7 +772,7 @@ pub fn panel(row: &Row, picker: Select, parts: RowParts, on_open: OnOpen, cx: &A
                 .child(picker)
                 .child(div().flex_1())
                 .when_some(pr.and_then(|pr| pr.checks), |meta, state| {
-                    meta.child(checks_icon(state))
+                    meta.child(checks_icon(state, spin))
                 })
                 .when_some(pr.and_then(|pr| pr.review), |meta, state| {
                     meta.child(review(state, cx))
@@ -854,7 +864,7 @@ mod tests {
         use gpui::TestAppContext;
 
         use super::*;
-        use crate::state_dot::tests::frames_requested;
+        use crate::state_dot::tests::{host, redraws_in_one_second};
 
         #[test]
         fn should_give_each_state_its_library_state_and_word() {
@@ -874,14 +884,38 @@ mod tests {
 
         #[gpui::test]
         fn should_spin_running_checks(cx: &mut TestAppContext) {
-            let running = || checks(ChecksState::Pending).into_any_element();
-            assert!(frames_requested(running, cx) > 0);
+            let (row, cx) = host(
+                |_| checks(ChecksState::Pending, true).into_any_element(),
+                cx,
+            );
+            assert!(redraws_in_one_second(&row, cx) > 0);
         }
 
         #[gpui::test]
         fn should_hold_passing_checks_still(cx: &mut TestAppContext) {
-            let passing = || checks_icon(ChecksState::Success).into_any_element();
-            assert_eq!(frames_requested(passing, cx), 0);
+            let (row, cx) = host(
+                |_| checks_icon(ChecksState::Success, true).into_any_element(),
+                cx,
+            );
+            assert_eq!(redraws_in_one_second(&row, cx), 0);
+        }
+
+        #[gpui::test]
+        fn should_hold_running_checks_still_without_spin(cx: &mut TestAppContext) {
+            let (row, cx) = host(
+                |_| checks(ChecksState::Pending, false).into_any_element(),
+                cx,
+            );
+            assert_eq!(redraws_in_one_second(&row, cx), 0);
+        }
+
+        #[gpui::test]
+        fn should_hold_the_panels_running_checks_still_without_spin(cx: &mut TestAppContext) {
+            let (row, cx) = host(
+                |_| checks_icon(ChecksState::Pending, false).into_any_element(),
+                cx,
+            );
+            assert_eq!(redraws_in_one_second(&row, cx), 0);
         }
     }
 }
