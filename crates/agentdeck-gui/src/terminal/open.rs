@@ -76,6 +76,15 @@ pub fn argv(path: &str, line: Option<u32>, col: Option<u32>, cx: &App) -> Vec<St
     }
 }
 
+/// The argv that opens `url` with the desktop's handler: the default opener's, with the URL
+/// as its one argument, whatever `terminal.file_opener` is set to. A PR's page opens this
+/// way (spec §11, Opening PRs).
+pub fn url_argv(url: &str) -> Vec<String> {
+    FileOpener::parse(opener::DEFAULT)
+        .expect("the default opener is valid")
+        .argv(url, None, None)
+}
+
 #[cfg(test)]
 pub mod fake {
     //! An [`Opener`] that records what it would run.
