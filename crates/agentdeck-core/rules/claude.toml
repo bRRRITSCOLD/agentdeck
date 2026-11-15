@@ -1,28 +1,30 @@
 # Claude Code's state rules (spec §7). First match wins; every condition a rule names must hold.
 #
-# Sources: the terminal spike (agentdeck#2), which ran Claude Code v2.1.322, and the state
-# research (agentdeck#3), which read herdr's claude.toml. What the spike saw:
-# - The OSC 0 title is `✳ Claude Code` when idle and a spinner glyph while working.
-# - No OSC 9;4. OSC 7501 only as a startup probe (`ESC ] 7501 ; ? BEL`).
+# Source: sessions of Claude Code v2.1.325 recorded at 120×40 with `script/record-pty.py`, in
+# the default inline TUI and in the fullscreen one with a status line; the fixtures are in
+# `tests/fixtures/claude/`. What they show:
+# - The OSC 0 title is a state glyph and the session's name: `✳ Claude Code` at a fresh prompt,
+#   then a name Claude Code makes up after the first turn (`✳ Ok`). The glyph is `✳` when idle
+#   and on a permission prompt, and a half-circle spinner (`◐`, `◑`) while working.
+# - No OSC 9;4. OSC 7501 only as a startup probe (`ESC ] 7501 ; ? BEL`), which agentdeck
+#   doesn't answer, and no state after it.
 # - Dialogs show only in the grid, so `blocked` comes from screen text.
 
 agent = "claude"
 # The native install runs as `claude`; an npm install runs as `node`.
 process = ["claude", "node"]
 
-# A select dialog: the folder trust dialog, and most other choices Claude Code asks for.
+# Dialogs end in a key hint on the bottom row: `Enter to confirm · Esc to cancel` on the folder
+# trust dialog and other select dialogs, `Esc to cancel · Tab to amend` under a tool
+# permission prompt's `Do you want to proceed?`. Model output can't reach that row, which the
+# footer holds whenever no dialog is up, so quoting a dialog in a reply doesn't match. The
+# title shows the idle glyph on a permission prompt, so this sits above the title rules.
 [[rule]]
 state = "blocked"
-rows = "bottom:6"
-contains = ["Enter to confirm", "Esc to cancel"]
+rows = "bottom:1"
+contains = ["Esc to cancel"]
 
-# A tool permission prompt. The title can still show a spinner here, so this sits above it.
-[[rule]]
-state = "blocked"
-rows = "bottom:12"
-contains = ["Do you want to proceed?", "1. Yes"]
-
-# OSC 7501 program status, should Claude Code start sending it.
+# OSC 7501 program status, should Claude Code start sending it unprompted.
 [[rule]]
 state = "blocked"
 program_status = ["blocked"]
@@ -45,10 +47,11 @@ progress = ["normal", "indeterminate"]
 state = "working"
 title_regex = '^[◐◓◑◒\x{2800}-\x{28FF}]'
 
-# The activity line, for when the title is missing or stale.
+# The footer, for when the title is missing or stale: the inline TUI adds `esc to interrupt`
+# to it while a turn runs. Only the bottom row, so a reply quoting it doesn't match.
 [[rule]]
 state = "working"
-rows = "bottom:12"
+rows = "bottom:1"
 contains = ["esc to interrupt"]
 
 [[rule]]

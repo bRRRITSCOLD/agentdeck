@@ -1,0 +1,46 @@
+# Writes idle, thinking, replied, permission-prompt, command, command-done, quoted and
+# exit.bytes. In a throwaway folder that inherits trust (spec §7, "Recording fixtures"):
+#   script/record-pty.py --out DIR --steps turns.steps -- \
+#     claude --setting-sources project,local --strict-mcp-config --model haiku \
+#       --permission-mode manual --session-id <uuid>
+# A fresh prompt, once startup has finished.
+wait Claude Code 30
+sleep 4
+mark idle
+# A reply being written: the title leaves the idle glyph.
+send Reply with only the word ok.
+sleep 1
+send \r
+wait \x1b\]0;(?!✳) 30
+sleep 0.3
+mark thinking
+wait \x1b\]0;✳ 90
+sleep 2
+mark replied
+# A Bash permission prompt (a write, since read-only commands need none), then the command running once it is allowed once.
+send Use the Bash tool to run `touch a.txt; sleep 6; echo hi`, then reply with only what it printed.
+sleep 1
+send \r
+wait proceed 90
+sleep 1
+mark permission-prompt
+send \r
+sleep 2
+mark command
+wait \x1b\]0;✳ 90
+sleep 2
+mark command-done
+# A reply that quotes a permission prompt's text.
+send Reply with exactly these five lines and nothing else: Do you want to proceed? / 1. Yes / 2. No / Esc to cancel / Enter to confirm
+sleep 1
+send \r
+wait \x1b\]0;(?!✳) 30
+wait \x1b\]0;✳ 90
+sleep 2
+mark quoted
+send /exit
+sleep 1
+send \r
+sleep 5
+mark exit
+end

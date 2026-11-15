@@ -204,8 +204,8 @@ process = ["claude"]
 
 [[rule]]                       # first match wins
 state = "blocked"
-rows = "bottom:6"
-contains = ["Enter to confirm", "Esc to cancel"]
+rows = "bottom:1"
+contains = ["Esc to cancel"]
 
 [[rule]]
 state = "working"
@@ -228,7 +228,14 @@ min_ms = 400                   # a new state must hold this long before it is pu
 - **done vs idle:** `done` is published when a pane goes working → idle. It turns back to `idle` once the pane is focused, or after a new prompt.
 - **Exit:** a dead process is `exited`, whatever the rules say.
 - **No match:** the state is `unknown`, unless the pane has produced output in the last 2 s, in which case it is `working`.
-- **v1 ships rules for `claude` and `codex`.** The spike captured `claude`'s title and dialog patterns; `codex`'s rules come from recorded sessions.
+- **v1 ships rules for `claude` and `codex`,** both from recorded sessions.
+- **`claude`** (from Claude Code v2.1.325, recorded at 120×40 in the default inline TUI and in the fullscreen one with a status line; foreground process `claude`, or `node` for some npm installs):
+  - The OSC 0 title is a state glyph and the session's name: `✳ Claude Code` at a fresh prompt, then a name Claude Code makes up after the first turn (`✳ Ok`). The glyph is `✳` when idle, a half-circle spinner (`◐`, `◑`) while it thinks, streams or runs a tool, and `✳` again on a permission prompt. The rules read `working` from a spinner (Braille as well, which versions before v2.1.228 drew) and `idle` from `✳`, below the dialog rule.
+  - Dialogs are read from the screen by the key hint on the bottom non-blank row (`bottom:1`), which model output can't reach because the footer holds it otherwise: `Enter to confirm · Esc to cancel` under the folder trust dialog (`Accessing workspace:` … `Yes, I trust this folder`) and other select dialogs, and `Esc to cancel · Tab to amend` under a tool permission prompt (`Do you want to proceed?` … `1. Yes`). In the fullscreen TUI the dialog replaces the composer and its hint is still the last non-blank row.
+  - The inline footer adds `esc to interrupt` while a turn runs; a rule reads it from the bottom row, for when the title is missing. The fullscreen footer with a status line doesn't show it.
+  - No OSC 9;4. OSC 7501 only as a startup probe, `ESC ] 7501 ; ? BEL`, which agentdeck doesn't answer; no state follows it. The rules keep OSC 7501 and 9;4 entries should Claude Code start sending them unprompted.
+  - These correct the spike's notes in two places: the title doesn't keep `Claude Code` once a session has a name, and it shows `✳`, not a spinner, on a permission prompt, so only the screen tells blocked from idle. The trust dialog now preselects `No, exit`.
+  - After `/exit` it clears the title and prints `claude --resume <session id>`; no rule matches, and the process exit publishes `exited`.
 - **`codex`** (from codex-cli 0.169.0, recorded at 120×40; foreground process `codex`):
   - OSC 7501 carries every state: `state=idle` at a fresh prompt, `working` while it thinks, streams or runs a command, `done` when a turn finishes, `blocked` (`kind=permission`) on an approval prompt, and `clear` on exit. The rules map `blocked`, `working`, and `idle`/`done`/`error` straight across.
   - Two dialogs are read from the screen, ahead of OSC 7501, by the key hint on the bottom non-blank row (`bottom:1`), which model output can't reach because the footer holds it otherwise:
@@ -236,13 +243,17 @@ min_ms = 400                   # a new state must hold this long before it is pu
     - the folder trust dialog (`Trust this folder?` … `enter continue · esc back`), which comes before any OSC 7501.
   - The OSC 0 title is the folder name, with a Braille spinner in front while working and `[ ! ] Action Required |` in front when blocked. Users can choose what the title shows, so no rule reads it. Codex sends no OSC 9;4.
   - After `/exit` it sends OSC 7501 `clear` and prints `codex resume <session id>`; no rule matches, and the process exit publishes `exited`.
-- **Tests:** every rule set has unit tests that feed **recorded terminal output** (`tests/fixtures/<agent>/*.bytes` plus the expected state) through a `Term`. `claude`'s fixtures are hand-authored stand-ins until it is recorded.
+- **Tests:** every rule set has unit tests that feed **recorded terminal output** (`tests/fixtures/<agent>/*.bytes` plus the expected state) through a `Term`.
 - **Recording fixtures:** `script/record-pty.py --out DIR --steps FILE -- <argv>` runs the CLI in a 120×40 PTY with `TERM=xterm-256color`, answers the terminal queries a TUI waits on, types what a steps file says (`wait <regex>`, `sleep`, `send`, `mark <name>`, `end`), and writes the raw bytes since each `mark` to `<name>.bytes`, with each mark's foreground process and OSC sequences in `marks.log`. Each fixture continues the one before it, so a test feeds a chain in order. To re-record `codex`, run the `*.steps` files beside its fixtures, each of which names its flags:
   - Run it in a throwaway git repo (`mktemp -d /tmp/agentdeck-codex-XXXXXX`: no `.` in the path, since `-c` splits its key on dots), never a real one, with trivial prompts; it uses the account's quota.
   - Pass everything as flags; don't edit `~/.codex/config.toml`. `-a on-request -s read-only` plus a prompt asking for a command with escalated permissions forces an approval prompt (0.169.0 dropped `untrusted`). `-c 'projects.<dir>.trust_level="trusted"'` skips the trust dialog; the quoted TOML key form doesn't. Record the trust dialog with no flags and end it without answering, since answering saves the choice to `config.toml`.
   - Sleep a second before sending Enter, or Codex takes the text and the Enter as one paste.
   - Wait on text the prompt itself doesn't contain.
-  - Scrub before committing: the temp dir's random suffix (also where the renderer split it with a cursor move), session ids (to `00000000-0000-7000-8000-000000000001`), and any home path, user or account name. Keep the bytes otherwise as recorded; trimming is only cutting a chain's last fixture at a frame end (`ESC [ ? 2026 l`).
+  - To re-record `claude`, run its `*.steps` files the same way, each naming its flags, with an allowlisted environment (`env -i PATH=… HOME=… USER=… SHELL=… LANG=…`). Never pass `CLAUDECODE` or `CLAUDE_CODE_*` through from a Claude Code session.
+    - `--setting-sources project,local --strict-mcp-config` keeps the user's settings, hooks, plugins, status line and MCP servers out of the recording; `--model haiku` keeps it cheap; `--permission-mode manual` makes a Bash command that writes (`touch a.txt`) ask, since auto mode was on by default and read-only commands like `echo` never ask; `--session-id <uuid>` launches it as agentdeck does.
+    - Claude Code has no flag to skip the trust dialog, and answering `Yes, I trust this folder` saves it to `~/.claude.json`. Trust is inherited from a trusted parent folder, but inside a git repo only up to the repo's root, so record the trust dialog in a fresh `mktemp -d` git repo and end it without answering, and record the sessions in a `mktemp -d -p <a folder trusted once>` that isn't a git repo.
+    - Wait on single words (`proceed`, `confirm`), since Claude Code moves the cursor between words, and on the title (`\x1b\]0;✳`, `\x1b\]0;(?!✳)`) for a turn's start and end.
+  - Scrub before committing: the temp dir's random suffix (also where the renderer split it with a cursor move), session ids (to `00000000-0000-7000-8000-000000000001` for `codex`, `00000000-0000-4000-8000-000000000001` for `claude`), and any home path, user or account name. Keep the bytes otherwise as recorded; trimming is only cutting a chain's last fixture at a frame end (`ESC [ ? 2026 l`).
 
 ## 8. PR sync
 

@@ -1,0 +1,8 @@
+# Writes trust-dialog.bytes. In a fresh throwaway git repo, so Claude Code asks:
+#   script/record-pty.py --out DIR --steps trust-dialog.steps -- \
+#     claude --setting-sources project,local --strict-mcp-config --model haiku
+# Ends without answering: "Yes, I trust this folder" saves the choice to ~/.claude.json.
+wait confirm 30
+sleep 2
+mark trust-dialog
+end

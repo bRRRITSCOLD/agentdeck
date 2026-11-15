@@ -1,9 +1,0 @@
-[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[G● The README introduces demo, a small CLI that renders Markdown to the terminal. It covers
-  installing with cargo, the three subcommands (render, watch, check) and the config file.
-
-[38;2;153;153;153m✻ Churned for 8s · done 7:23 PM[0m
-
-]0;✳ Claude Code[38;2;153;153;153m────────────────────────────────────────────────────────────────────────────────────────────────────[0m
-❯ [2mTry "refactor the config loader"[0m
-[38;2;153;153;153m────────────────────────────────────────────────────────────────────────────────────────────────────[0m
-[38;2;153;153;153m  ? for shortcuts[0m
