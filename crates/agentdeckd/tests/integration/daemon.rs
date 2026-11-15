@@ -1,8 +1,9 @@
 //! The daemon's lifecycle: the lock, `daemon.json`, its files and shutdown (spec §2).
 
 use std::os::unix::fs::PermissionsExt;
+use std::time::Duration;
 
-use crate::support::TestDaemon;
+use crate::support::{Spawned, TestDaemon, eventually_within, hold_lock};
 
 mod agentdeckd {
     use super::*;
@@ -67,6 +68,63 @@ mod agentdeckd {
                 .send()
                 .await
                 .expect("the first still serves");
+        }
+
+        /// The lock held with no `daemon.json`: a daemon that is shutting down, or one
+        /// that won the race to start and doesn't serve yet.
+        mod held_by_a_daemon_without_daemon_json {
+            use super::*;
+
+            fn waiting(root: &std::path::Path) -> Spawned {
+                let mut daemon = Spawned::start(root);
+                eventually_within(
+                    "agentdeckd to wait for the lock",
+                    Duration::from_secs(5),
+                    || {
+                        assert_eq!(daemon.try_wait(), None, "{}", daemon.stderr());
+                        daemon
+                            .stderr()
+                            .contains("waiting for the agentdeckd")
+                            .then_some(())
+                    },
+                );
+                daemon
+            }
+
+            #[test]
+            fn should_give_up_waiting_once_the_other_daemon_serves() {
+                let dirs = tempfile::tempdir().expect("a temp dir");
+                let _lock = hold_lock(dirs.path());
+                let mut daemon = waiting(dirs.path());
+
+                std::fs::write(dirs.path().join("run/agentdeck/daemon.json"), "{}")
+                    .expect("writing daemon.json");
+                let status =
+                    eventually_within("agentdeckd to give up", Duration::from_secs(2), || {
+                        daemon.try_wait()
+                    });
+
+                assert!(!status.success());
+                let stderr = daemon.stderr();
+                assert!(stderr.contains("another agentdeckd is running"), "{stderr}");
+            }
+
+            #[test]
+            fn should_fail_when_the_other_daemon_never_exits() {
+                let dirs = tempfile::tempdir().expect("a temp dir");
+                let _lock = hold_lock(dirs.path());
+                let mut daemon = waiting(dirs.path());
+
+                let status = eventually_within(
+                    "agentdeckd to stop waiting",
+                    Duration::from_secs(20),
+                    || daemon.try_wait(),
+                );
+
+                assert!(!status.success());
+                let stderr = daemon.stderr();
+                assert!(stderr.contains("hasn't exited after 10s"), "{stderr}");
+            }
         }
 
         #[tokio::test]

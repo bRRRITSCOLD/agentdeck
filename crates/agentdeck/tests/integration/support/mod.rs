@@ -130,6 +130,27 @@ impl TestEnv {
         std::fs::write(path, serde_json::to_string(info).unwrap()).expect("writing daemon.json");
     }
 
+    /// Takes the daemon's lock, as a daemon that is still shutting down holds it after it
+    /// withdrew `daemon.json`. Released when the file is dropped.
+    pub fn hold_lock(&self) -> std::fs::File {
+        let dir = self.root().join("run/agentdeck");
+        std::fs::create_dir_all(&dir).expect("creating the runtime dir");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join("lock"))
+            .expect("opening the lock file");
+        lock.try_lock().expect("taking the daemon's lock");
+        lock
+    }
+
+    /// The daemon's log, `$XDG_STATE_HOME/agentdeck/agentdeckd.log`; empty until it exists.
+    pub fn daemon_log(&self) -> String {
+        std::fs::read_to_string(self.root().join("state/agentdeck/agentdeckd.log"))
+            .unwrap_or_default()
+    }
+
     /// A fresh directory under the temp root.
     pub fn new_dir(&self, name: &str) -> PathBuf {
         let dir = self.root().join("dirs").join(name);
