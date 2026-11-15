@@ -3,7 +3,8 @@
 
 use std::ffi::OsString;
 use std::net::TcpListener;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use agentdeck_core::DaemonInfo;
 
@@ -216,6 +217,99 @@ mod connecting_while_a_killed_daemon_exits {
         let info = env.daemon_info().expect("daemon.json after the command");
         assert_ne!(info.pid, stale.pid);
         assert!(alive(info.pid), "the daemon it started isn't running");
+    }
+}
+
+/// A client that connects while the daemon in `daemon.json` is alive but never answers, as
+/// one stopped with SIGSTOP, held in a debugger or deadlocked: its port still accepts.
+mod connecting_to_a_daemon_that_never_answers {
+    use super::*;
+
+    /// A port that accepts connections and never answers on them, held open for the rest of
+    /// the test process.
+    fn silent_port() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("binding a port");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let held: Vec<_> = listener.incoming().collect();
+            drop(held);
+        });
+        port
+    }
+
+    /// Runs `agentdeck ws ls` and waits at most `limit` for it; a client that hangs fails the
+    /// test, rather than the tier's timeout.
+    fn ws_ls_within(env: &TestEnv, limit: Duration) -> Run {
+        let mut cli = env
+            .command()
+            .args(["ws", "ls"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("running agentdeck");
+        let deadline = Instant::now() + limit;
+        while cli.try_wait().expect("polling agentdeck").is_none() {
+            if Instant::now() >= deadline {
+                let _ = cli.kill();
+                let _ = cli.wait();
+                panic!("agentdeck ws ls still hadn't finished after {limit:?}");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Run::from(cli.wait_with_output().expect("waiting on agentdeck"))
+    }
+
+    /// A live process to stand in for the stopped daemon, and the `daemon.json` naming it at
+    /// a silent port. Not this test's own pid: `TestEnv`'s drop sends SIGTERM to whatever pid
+    /// `daemon.json` still names.
+    fn silent_daemon() -> (Child, DaemonInfo) {
+        let stand_in = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("running sleep");
+        let info = DaemonInfo {
+            port: silent_port(),
+            ..stale_info(stand_in.id())
+        };
+        (stand_in, info)
+    }
+
+    #[test]
+    fn should_start_a_daemon_in_its_place() {
+        let env = TestEnv::new();
+        let (mut stand_in, silent) = silent_daemon();
+        env.write_daemon_info(&silent);
+
+        let run = ws_ls_within(&env, Duration::from_secs(15));
+        let _ = stand_in.kill();
+        let _ = stand_in.wait();
+
+        assert!(run.success, "{}", run.stderr);
+        let info = env.daemon_info().expect("daemon.json after the command");
+        assert_ne!(info.port, silent.port);
+        assert!(alive(info.pid), "the daemon it started isn't running");
+    }
+
+    #[test]
+    fn should_fail_once_the_silent_daemon_keeps_its_lock_for_10s() {
+        let env = TestEnv::new();
+        let _lock = env.hold_lock();
+        let (mut stand_in, silent) = silent_daemon();
+        env.write_daemon_info(&silent);
+
+        // 1 s for the client's probe, the started daemon's 10 s wait for the lock, then the
+        // client's 2 s grace, with room to spare.
+        let run = ws_ls_within(&env, Duration::from_secs(30));
+        let _ = stand_in.kill();
+        let _ = stand_in.wait();
+
+        assert!(!run.success, "agentdeck succeeded against a silent daemon");
+        assert!(run.stderr.contains("exited"), "{}", run.stderr);
+        assert!(
+            env.daemon_log().contains("hasn't exited after 10s"),
+            "{}",
+            env.daemon_log()
+        );
     }
 }
 

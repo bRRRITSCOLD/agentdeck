@@ -35,6 +35,10 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 const POLL: Duration = Duration::from_millis(25);
 
+/// How long the daemon in `daemon.json` gets to answer `/v1/health`, as the daemon's own check
+/// gives it (spec §2). A stopped or hung daemon still accepts connections and never answers.
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// The running daemon: a client for its API, and the `daemon.json` it was reached through,
 /// whose port and token also open its WebSocket.
 #[derive(Debug, Clone)]
@@ -186,15 +190,19 @@ fn program(
         .unwrap_or_else(|| "agentdeckd".into())
 }
 
-/// The daemon, when `daemon.json` names a live process that answers `/v1/health`. A missing
-/// or unreadable file, a dead pid and a refused connection all mean no daemon.
+/// The daemon, when `daemon.json` names a live process that answers `/v1/health` within
+/// [`HEALTH_TIMEOUT`]. A missing or unreadable file, a dead pid, a refused connection and no
+/// answer in time all mean no daemon.
 async fn reachable(daemon_json: &Path) -> Option<Daemon> {
     let info = read(daemon_json)?;
     if !alive(info.pid) {
         return None;
     }
     let client = crate::authenticated(&info.base_url(), &info.token).ok()?;
-    client.health().send().await.ok()?;
+    tokio::time::timeout(HEALTH_TIMEOUT, client.health().send())
+        .await
+        .ok()?
+        .ok()?;
     Some(Daemon { client, info })
 }
 
