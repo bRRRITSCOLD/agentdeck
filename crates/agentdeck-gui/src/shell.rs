@@ -256,6 +256,10 @@ impl Shell {
                                 let settings = Selection::Settings;
                                 sidebar.update(cx, |sidebar, cx| sidebar.select(settings, cx));
                             }
+                            // At its GitHub section, the top.
+                            if let Some(settings) = &shell.settings {
+                                settings.update(cx, |settings, cx| settings.scroll_to_github(cx));
+                            }
                         }),
                         cx.subscribe_in(&panel, window, |shell, _, ask, window, cx| {
                             shell.open_task(*ask, window, cx);

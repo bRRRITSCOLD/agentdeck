@@ -1,12 +1,15 @@
 //! The Settings view (spec §11), Penpot "Screens" → "Settings": the settings the daemon keeps
 //! in `config.toml` (spec §2), in sections of fields.
 //!
+//! - **GitHub:** the account and the OAuth client ID ([`GithubSection`]), then "Sync PRs
+//!   updated in the last (days)", saved on Enter or when the field loses focus. Text that
+//!   isn't a count of days shows the field's error and isn't saved.
 //! - **Appearance:** Theme, a Select of System / Dark / Light. Picking one applies it at once
 //!   and saves it.
-//! - **GitHub:** "Sync PRs updated in the last (days)", saved on Enter or when the field loses
-//!   focus. Text that isn't a count of days shows the field's error and isn't saved.
 //! - **Terminal:** "Open file paths with", `terminal.file_opener`, saved the same way. A
 //!   command that isn't an opener ([`FileOpener::parse`]) shows the field's error instead.
+//!
+//! The heading stays put; the sections scroll under it, with the scrollbar the lists show.
 //!
 //! The window makes the view as it connects, so the saved theme applies from the start. It
 //! reads the settings again on every `changed settings`, so a change another client makes
@@ -29,13 +32,15 @@ use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, px,
+    ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, point, px,
 };
 use gpui_base::input::InputEvent;
 
 use crate::api::Api;
 use crate::connection::{Connection, DaemonEvent};
+use crate::github::GithubSection;
+use crate::scrollbar;
 use crate::workspace::failed;
 
 /// A section's width. Raw in Penpot too: the fields are 480px wide.
@@ -93,6 +98,10 @@ pub struct SettingsView {
     opener: Entity<InputState>,
     /// Why the opener typed wasn't saved, and the text that wasn't, until it is edited.
     opener_error: Option<(SharedString, SharedString)>,
+    /// The GitHub account and client ID, at the top of the GitHub section.
+    github: Entity<GithubSection>,
+    /// Scrolls the sections under the heading.
+    scroll: ScrollHandle,
     _days: Subscription,
     _opener: Subscription,
     _events: Subscription,
@@ -128,9 +137,12 @@ impl SettingsView {
                 this.reread(window, cx);
             }
         });
+        let github = cx.new(|cx| GithubSection::new(api.clone(), connection, window, cx));
         let mut view = SettingsView {
             api,
             settings: None,
+            github,
+            scroll: ScrollHandle::new(),
             days,
             days_error: None,
             opener,
@@ -141,6 +153,12 @@ impl SettingsView {
         };
         view.reread(window, cx);
         view
+    }
+
+    /// Scrolls back to the top, where the GitHub section is.
+    pub fn scroll_to_github(&mut self, cx: &mut Context<Self>) {
+        self.scroll.set_offset(point(px(0.), px(0.)));
+        cx.notify();
     }
 
     /// Why the days typed weren't saved, if they weren't.
@@ -484,35 +502,66 @@ impl Render for SettingsView {
         let s = cx.theme().semantic();
         let theme = self.theme_field(cx);
         let appearance = self.section("Appearance", [theme], cx);
-        let github = self.section("GitHub", [self.days_field()], cx);
         let terminal = self.section("Terminal", [self.opener_field()], cx);
+        // Penpot `GitHub`: its heading and account (the GitHub section's), then the cutoff.
+        let github = div()
+            .debug_selector(|| "settings section GitHub".into())
+            .w(SECTION_WIDTH)
+            .flex()
+            .flex_col()
+            .gap(space::S4)
+            .child(self.github.clone())
+            .child(self.days_field());
         let header = self.header(cx);
-        // Penpot `Content`: Header / Sections, padded `space.6`, as the Inbox's.
+        // Penpot `Content`: Header / Sections, padded `space.6`, as the Inbox's. The heading
+        // stays put and the sections scroll, the scrollbar 2px in from the right edge and 8px
+        // up from the bottom, as Penpot's `Scrollbar` sits.
         div()
-            .id("settings")
             .debug_selector(|| "settings view".into())
             .size_full()
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .overflow_y_scroll()
             .flex()
             .flex_col()
-            .gap(space::S4)
-            .p(space::S6)
             .bg(s.background)
-            .child(header)
-            // Sections 32px apart under 8px.
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .flex_none()
-                    .gap(space::S8)
-                    .pt(space::S2)
-                    .child(appearance)
-                    .child(github)
-                    .child(terminal),
+                    .pt(space::S6)
+                    .px(space::S6)
+                    .pb(space::S4)
+                    .child(header),
+            )
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .mr(space::S0_5)
+                    .mb(space::S2)
+                    .child(
+                        div()
+                            .id("settings")
+                            .debug_selector(|| "settings sections".into())
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
+                            .pl(space::S6)
+                            .pb(space::S4)
+                            // Sections 32px apart under 8px.
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .flex_none()
+                                    .gap(space::S8)
+                                    .pt(space::S2)
+                                    .child(github)
+                                    .child(appearance)
+                                    .child(terminal),
+                            ),
+                    )
+                    .child(scrollbar::vertical(&self.scroll, cx)),
             )
     }
 }
@@ -1045,8 +1094,53 @@ mod tests {
             assert_eq!(appearance.size.width, SECTION_WIDTH);
             assert_eq!(github.size.width, SECTION_WIDTH);
             assert_eq!(terminal.size.width, SECTION_WIDTH);
-            assert_eq!(github.top() - appearance.bottom(), space::S8);
-            assert_eq!(terminal.top() - github.bottom(), space::S8);
+            assert_eq!(appearance.top() - github.bottom(), space::S8);
+            assert_eq!(terminal.top() - appearance.bottom(), space::S8);
+        }
+
+        #[gpui::test]
+        fn should_show_a_scrollbar_when_the_sections_are_taller_than_the_view(
+            cx: &mut TestAppContext,
+        ) {
+            let (harness, cx) = Harness::open(default_settings(), cx);
+            cx.simulate_resize(gpui::size(px(1440.), px(500.)));
+            harness.settle(cx);
+
+            let sections = cx.debug_bounds("settings sections").expect("the sections");
+            assert!(crate::scrollbar::testing::thumb(sections, cx).is_some());
+        }
+
+        #[gpui::test]
+        fn should_hide_the_scrollbar_when_everything_fits(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(default_settings(), cx);
+            cx.simulate_resize(gpui::size(px(1440.), px(2000.)));
+            harness.settle(cx);
+
+            let sections = cx.debug_bounds("settings sections").expect("the sections");
+            assert_eq!(crate::scrollbar::testing::thumb(sections, cx), None);
+        }
+
+        #[gpui::test]
+        fn should_keep_the_heading_in_place_while_the_sections_scroll(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(default_settings(), cx);
+            cx.simulate_resize(gpui::size(px(1440.), px(500.)));
+            harness.settle(cx);
+            let heading = cx
+                .debug_bounds("settings description")
+                .expect("the heading");
+            let github = cx.debug_bounds("settings section GitHub").expect("GitHub");
+
+            let sections = cx.debug_bounds("settings sections").expect("the sections");
+            cx.simulate_event(gpui::ScrollEvent {
+                position: sections.center(),
+                delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-200.))),
+                ..gpui::ScrollEvent::default()
+            });
+            harness.settle(cx);
+
+            assert_eq!(cx.debug_bounds("settings description"), Some(heading));
+            let scrolled = cx.debug_bounds("settings section GitHub").expect("GitHub");
+            assert!(scrolled.top() < github.top());
         }
 
         #[gpui::test]

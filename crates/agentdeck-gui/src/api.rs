@@ -8,8 +8,9 @@ use agentdeck_client::daemon::Daemon;
 use agentdeck_client::instructions;
 use agentdeck_client::panes::{self, pane_if_any};
 use agentdeck_client::types::{
-    Comment, DirtyReport, InstructionPatch, NewComment, NewInstruction, NewTask, NewWorkspace,
-    Pane, PrClose, PrCloseResult, Settings, SettingsPatch, Tab, TaskPatch,
+    Comment, DeviceSignIn, DirtyReport, GithubAuthInfo, GithubClientIdBody, GithubTokenBody,
+    InstructionPatch, NewComment, NewInstruction, NewTask, NewWorkspace, Pane, PrClose,
+    PrCloseResult, Settings, SettingsPatch, Tab, TaskPatch,
 };
 use agentdeck_client::{ApiError, Client};
 use agentdeck_core::{
@@ -136,6 +137,30 @@ pub trait Api: Send + Sync {
     /// Changes the settings `patch` names and returns them all. A refusal is an [`ApiError`];
     /// `invalid_setting` names the key in its message.
     fn update_settings(&self, patch: SettingsPatch, cx: &App) -> Task<anyhow::Result<Settings>>;
+
+    /// Where the GitHub token comes from, and whose it is (spec §8).
+    fn github_auth(&self, cx: &App) -> Task<anyhow::Result<GithubAuthInfo>>;
+
+    /// Checks a pasted token with GitHub and saves it in the keyring. A refusal is an
+    /// [`ApiError`]: `invalid_token`, `no_keyring` or `github_error`.
+    fn save_token(&self, token: String, cx: &App) -> Task<anyhow::Result<GithubAuthInfo>>;
+
+    /// Deletes the saved token: Sign out.
+    fn sign_out(&self, cx: &App) -> Task<anyhow::Result<GithubAuthInfo>>;
+
+    /// Saves the OAuth client ID in the keyring. A refusal is an [`ApiError`]:
+    /// `invalid_client_id` or `no_keyring`.
+    fn save_client_id(&self, client_id: String, cx: &App) -> Task<anyhow::Result<GithubAuthInfo>>;
+
+    /// Deletes the saved OAuth client ID.
+    fn clear_client_id(&self, cx: &App) -> Task<anyhow::Result<GithubAuthInfo>>;
+
+    /// Starts Sign in with GitHub; how it ends comes as a `github_auth` event. A refusal is
+    /// an [`ApiError`]: `no_client_id`, `no_keyring` or `github_error`.
+    fn start_sign_in(&self, cx: &App) -> Task<anyhow::Result<DeviceSignIn>>;
+
+    /// Cancels the sign-in running, if any.
+    fn cancel_sign_in(&self, cx: &App) -> Task<anyhow::Result<()>>;
 }
 
 pub use agentdeck_client::panes::PaneAt;
@@ -435,6 +460,66 @@ impl Api for Daemon {
             Ok(settings.into_inner())
         })
     }
+
+    fn github_auth(&self, cx: &App) -> Task<anyhow::Result<GithubAuthInfo>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            let auth = (client.github_auth_get().send().await).map_err(ApiError::from)?;
+            Ok(auth.into_inner())
+        })
+    }
+
+    fn save_token(&self, token: String, cx: &App) -> Task<anyhow::Result<GithubAuthInfo>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            let body = GithubTokenBody { token };
+            let auth =
+                (client.github_token_put().body(body).send().await).map_err(ApiError::from)?;
+            Ok(auth.into_inner())
+        })
+    }
+
+    fn sign_out(&self, cx: &App) -> Task<anyhow::Result<GithubAuthInfo>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            let auth = (client.github_token_delete().send().await).map_err(ApiError::from)?;
+            Ok(auth.into_inner())
+        })
+    }
+
+    fn save_client_id(&self, client_id: String, cx: &App) -> Task<anyhow::Result<GithubAuthInfo>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            let body = GithubClientIdBody { client_id };
+            let auth =
+                (client.github_client_id_put().body(body).send().await).map_err(ApiError::from)?;
+            Ok(auth.into_inner())
+        })
+    }
+
+    fn clear_client_id(&self, cx: &App) -> Task<anyhow::Result<GithubAuthInfo>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            let auth = (client.github_client_id_delete().send().await).map_err(ApiError::from)?;
+            Ok(auth.into_inner())
+        })
+    }
+
+    fn start_sign_in(&self, cx: &App) -> Task<anyhow::Result<DeviceSignIn>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            let sign_in = (client.github_device_start().send().await).map_err(ApiError::from)?;
+            Ok(sign_in.into_inner())
+        })
+    }
+
+    fn cancel_sign_in(&self, cx: &App) -> Task<anyhow::Result<()>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            (client.github_device_cancel().send().await).map_err(ApiError::from)?;
+            Ok(())
+        })
+    }
 }
 
 /// Reads a [`WorkspacePanes`]: the tabs, then each pane in their layouts, then each task
@@ -546,6 +631,17 @@ pub(crate) mod fake {
         }
     }
 
+    /// No token from any source and no client ID.
+    pub fn signed_out() -> GithubAuthInfo {
+        GithubAuthInfo {
+            source: agentdeck_client::types::TokenSource::None,
+            env_var: None,
+            login: None,
+            scopes: None,
+            client_id_set: false,
+        }
+    }
+
     /// Answers every read with what it holds now, and counts the snapshot reads. Writes
     /// change what it holds, as the daemon would, but broadcast nothing.
     #[derive(Default)]
@@ -609,6 +705,18 @@ pub(crate) mod fake {
         pub closes: Mutex<Vec<Vec<TaskId>>>,
         /// The PRs GitHub refuses to close, with its message.
         refusals: Mutex<HashMap<TaskId, String>>,
+        /// Where the GitHub token comes from; none and no client ID when unset.
+        github: Mutex<Option<GithubAuthInfo>>,
+        /// The login a pasted token belongs to, and its scopes.
+        pub token_login: Mutex<(String, Option<Vec<String>>)>,
+        /// The tokens pasted, in order.
+        pub saved_tokens: Mutex<Vec<String>>,
+        /// The client IDs saved, in order.
+        pub saved_client_ids: Mutex<Vec<String>>,
+        /// How many sign-ins were started.
+        pub sign_ins: Mutex<usize>,
+        /// How many sign-ins were cancelled.
+        pub cancelled_sign_ins: Mutex<usize>,
     }
 
     impl FakeApi {
@@ -712,6 +820,16 @@ pub(crate) mod fake {
         /// How many times the settings were read.
         pub fn settings_reads(&self) -> usize {
             *self.settings_reads.lock().unwrap()
+        }
+
+        /// The GitHub auth it holds now.
+        pub fn github_now(&self) -> GithubAuthInfo {
+            (self.github.lock().unwrap().clone()).unwrap_or_else(signed_out)
+        }
+
+        /// Answers later reads of the GitHub auth with `auth`.
+        pub fn set_github(&self, auth: GithubAuthInfo) {
+            *self.github.lock().unwrap() = Some(auth);
         }
 
         /// Stamps or clears `workspace`'s `archived_at`, as the daemon does.
@@ -1150,6 +1268,87 @@ pub(crate) mod fake {
             self.set_settings(settings.clone());
             self.settings_patches.lock().unwrap().push(patch);
             Task::ready(Ok(settings))
+        }
+
+        fn github_auth(&self, _cx: &App) -> Task<anyhow::Result<GithubAuthInfo>> {
+            Task::ready(Ok(self.github_now()))
+        }
+
+        fn save_token(&self, token: String, _cx: &App) -> Task<anyhow::Result<GithubAuthInfo>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            let (login, scopes) = self.token_login.lock().unwrap().clone();
+            let auth = GithubAuthInfo {
+                source: agentdeck_client::types::TokenSource::Keyring,
+                login: Some(login),
+                scopes,
+                ..self.github_now()
+            };
+            self.set_github(auth.clone());
+            self.saved_tokens.lock().unwrap().push(token);
+            Task::ready(Ok(auth))
+        }
+
+        fn sign_out(&self, _cx: &App) -> Task<anyhow::Result<GithubAuthInfo>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            let auth = GithubAuthInfo {
+                source: agentdeck_client::types::TokenSource::None,
+                login: None,
+                scopes: None,
+                ..self.github_now()
+            };
+            self.set_github(auth.clone());
+            Task::ready(Ok(auth))
+        }
+
+        fn save_client_id(
+            &self,
+            client_id: String,
+            _cx: &App,
+        ) -> Task<anyhow::Result<GithubAuthInfo>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            let auth = GithubAuthInfo {
+                client_id_set: true,
+                ..self.github_now()
+            };
+            self.set_github(auth.clone());
+            self.saved_client_ids.lock().unwrap().push(client_id);
+            Task::ready(Ok(auth))
+        }
+
+        fn clear_client_id(&self, _cx: &App) -> Task<anyhow::Result<GithubAuthInfo>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            let auth = GithubAuthInfo {
+                client_id_set: false,
+                ..self.github_now()
+            };
+            self.set_github(auth.clone());
+            Task::ready(Ok(auth))
+        }
+
+        fn start_sign_in(&self, _cx: &App) -> Task<anyhow::Result<DeviceSignIn>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            *self.sign_ins.lock().unwrap() += 1;
+            Task::ready(Ok(DeviceSignIn {
+                user_code: "WDJB-MJHT".into(),
+                verification_uri: "https://github.com/login/device".into(),
+                expires_at: (chrono::Utc::now() + chrono::TimeDelta::seconds(872))
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            }))
+        }
+
+        fn cancel_sign_in(&self, _cx: &App) -> Task<anyhow::Result<()>> {
+            *self.cancelled_sign_ins.lock().unwrap() += 1;
+            Task::ready(Ok(()))
         }
     }
 }

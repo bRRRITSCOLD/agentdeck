@@ -1,6 +1,7 @@
-//! GitHub's GraphQL API (spec §8): the list of the viewer's open PRs with light fields, the
-//! search for PRs updated since a time, PRs by number with every field, in batches, and
-//! closing a PR: its node id by number, in batches, then one `closePullRequest` each.
+//! GitHub's GraphQL API (spec §8): the viewer's login and scopes, the list of the viewer's
+//! open PRs with light fields, the search for PRs updated since a time, PRs by number with
+//! every field, in batches, and closing a PR: its node id by number, in batches, then one
+//! `closePullRequest` each.
 
 use std::time::Duration;
 
@@ -81,6 +82,16 @@ pub struct RemotePr {
     pub updated_at: String,
 }
 
+/// Who a token belongs to, and what it may do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Viewer {
+    /// The token's user.
+    pub login: String,
+    /// A classic token's scopes, from `X-OAuth-Scopes`; `None` when GitHub sends no such
+    /// header, as for a fine-grained token.
+    pub scopes: Option<Vec<String>>,
+}
+
 /// Why a GitHub call failed.
 #[derive(Debug, thiserror::Error)]
 pub enum GithubError {
@@ -121,6 +132,27 @@ impl Github {
             .timeout(Duration::from_secs(30))
             .build()?;
         Ok(Github { http, endpoint })
+    }
+
+    /// Who `token` belongs to, and its scopes. A token GitHub rejects is
+    /// [`GithubError::Unauthorized`].
+    pub async fn viewer(&self, token: &str) -> Result<Viewer, GithubError> {
+        #[derive(Deserialize)]
+        struct Data {
+            viewer: Login,
+        }
+        #[derive(Deserialize)]
+        struct Login {
+            login: String,
+        }
+        let (data, scopes) = self
+            .query_with_scopes(token, "query { viewer { login } }", json!({}))
+            .await?;
+        let data: Data = serde_json::from_value(data)?;
+        Ok(Viewer {
+            login: data.viewer.login,
+            scopes: scopes.as_deref().map(parse_scopes),
+        })
     }
 
     /// The page of the search `q` after cursor `after` (`None` for the first page).
@@ -200,13 +232,14 @@ impl Github {
 
     /// The node id of each of `wanted` (`(repo, number)`), in order, looked up as fetches by
     /// number go: `BATCH_SIZE` to a request, `BATCHES_IN_FLIGHT` at once. A failure is each
-    /// PR's own: GitHub's message for one it doesn't show, or why its batch's request failed.
+    /// PR's own: GitHub's message for one it doesn't show, or why its batch's request failed;
+    /// only GitHub refusing the token fails the whole lookup.
     pub async fn node_ids(
         &self,
         token: &str,
         wanted: &[(String, i64)],
-    ) -> Vec<Result<String, String>> {
-        use futures_util::StreamExt as _;
+    ) -> Result<Vec<Result<String, String>>, GithubError> {
+        use futures_util::{StreamExt as _, TryStreamExt as _};
 
         let batches: Vec<Vec<(String, i64)>> =
             wanted.chunks(BATCH_SIZE).map(<[_]>::to_vec).collect();
@@ -215,27 +248,28 @@ impl Github {
             .map(|batch| self.node_id_batch(token, batch));
         let found: Vec<Vec<Result<String, String>>> = futures_util::stream::iter(lookups)
             .buffered(BATCHES_IN_FLIGHT)
-            .collect()
-            .await;
-        found.into_iter().flatten().collect()
+            .try_collect()
+            .await?;
+        Ok(found.into_iter().flatten().collect())
     }
 
-    /// One request for `batch`'s node ids.
+    /// One request for `batch`'s node ids; an error only when GitHub refuses the token.
     async fn node_id_batch(
         &self,
         token: &str,
         batch: Vec<(String, i64)>,
-    ) -> Vec<Result<String, String>> {
+    ) -> Result<Vec<Result<String, String>>, GithubError> {
         let (query, variables) = batch_query(&batch, "nodeId", NODE_ID_FIELDS);
         match self.query_body(token, &query, variables).await {
-            Ok(body) => parse_node_ids(&body, batch.len()),
-            Err(err) => vec![Err(err.to_string()); batch.len()],
+            Ok((body, _)) => Ok(parse_node_ids(&body, batch.len())),
+            Err(GithubError::Unauthorized) => Err(GithubError::Unauthorized),
+            Err(err) => Ok(vec![Err(err.to_string()); batch.len()]),
         }
     }
 
     /// Closes the PR with node id `id`. A refusal (no write access, say) is GitHub's message.
     pub async fn close(&self, token: &str, id: &str) -> Result<(), GithubError> {
-        let body = self
+        let (body, _) = self
             .query_body(token, CLOSE_MUTATION, json!({ "id": id }))
             .await?;
         let closed = body
@@ -258,17 +292,29 @@ impl Github {
         query: &str,
         variables: Value,
     ) -> Result<Value, GithubError> {
-        data(self.query_body(token, query, variables).await?)
+        Ok(self.query_with_scopes(token, query, variables).await?.0)
+    }
+
+    /// [`Github::query`], with the response's `X-OAuth-Scopes` header, if it has one.
+    async fn query_with_scopes(
+        &self,
+        token: &str,
+        query: &str,
+        variables: Value,
+    ) -> Result<(Value, Option<String>), GithubError> {
+        let (body, scopes) = self.query_body(token, query, variables).await?;
+        Ok((data(body)?, scopes))
     }
 
     /// Posts one GraphQL query and returns the whole response body, `data` and `errors`,
-    /// trying again after each of `RETRY_WAITS` while it fails for a reason that may pass.
+    /// with its `X-OAuth-Scopes` header, trying again after each of `RETRY_WAITS` while it
+    /// fails for a reason that may pass.
     async fn query_body(
         &self,
         token: &str,
         query: &str,
         variables: Value,
-    ) -> Result<Value, GithubError> {
+    ) -> Result<(Value, Option<String>), GithubError> {
         let mut waits = RETRY_WAITS.iter();
         loop {
             match self.query_once(token, query, variables.clone()).await {
@@ -284,13 +330,14 @@ impl Github {
         }
     }
 
-    /// Posts one GraphQL query once and returns the response body.
+    /// Posts one GraphQL query once and returns the response body and its `X-OAuth-Scopes`
+    /// header.
     async fn query_once(
         &self,
         token: &str,
         query: &str,
         variables: Value,
-    ) -> Result<Value, GithubError> {
+    ) -> Result<(Value, Option<String>), GithubError> {
         let response = self
             .http
             .post(&self.endpoint)
@@ -309,8 +356,22 @@ impl Github {
                 message: message(&body),
             });
         }
-        Ok(response.json().await?)
+        let scopes = response
+            .headers()
+            .get("x-oauth-scopes")
+            .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned());
+        Ok((response.json().await?, scopes))
     }
+}
+
+/// The scopes in an `X-OAuth-Scopes` header: comma-separated, possibly none.
+fn parse_scopes(header: &str) -> Vec<String> {
+    header
+        .split(',')
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 impl GithubError {
@@ -697,6 +758,21 @@ mod tests {
                 "nodes": nodes
             }
         })
+    }
+
+    mod parse_scopes {
+        use super::*;
+
+        #[test]
+        fn should_split_the_header_on_commas() {
+            assert_eq!(parse_scopes("repo, read:org"), ["repo", "read:org"]);
+        }
+
+        #[test]
+        fn should_read_an_empty_header_as_no_scopes() {
+            assert!(parse_scopes("").is_empty());
+            assert!(parse_scopes(" ").is_empty());
+        }
     }
 
     mod parse_search {

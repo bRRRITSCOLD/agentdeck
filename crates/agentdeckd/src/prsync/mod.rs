@@ -8,7 +8,7 @@
 //! pending checks (a finished check run doesn't update a PR) and match inbox PRs to
 //! workspaces again from what's stored.
 //!
-//! - [`token`]: the token, from `gh auth token`.
+//! - [`crate::github_auth`]: the token, from the first source that gives one.
 //! - [`github`]: the GraphQL search and the fetch by number.
 //! - [`matching`]: which workspace holds a clone of a PR's repo with its branch.
 //! - `db::pull_requests`: storing the PRs and moving their tasks.
@@ -19,7 +19,6 @@
 
 pub mod github;
 pub mod matching;
-pub mod token;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -33,6 +32,7 @@ use tokio::time::MissedTickBehavior;
 use crate::config::Config;
 use crate::db::{self, Db};
 use crate::events::Events;
+use crate::github_auth::GithubAuth;
 use crate::model::{GhLogin, PrCloseResult, PrSyncProgress, PrSyncStage, PrSyncStatus};
 use github::{Github, GithubError, RemotePr};
 use matching::Clones;
@@ -74,6 +74,8 @@ struct Inner {
     /// Gets a `changed` event for each task a sync creates or changes.
     events: Events,
     github: Github,
+    /// The token, and whether GitHub accepts it.
+    auth: GithubAuth,
     /// How often a sync is full.
     full_every: Duration,
     /// The settings, read again at each sync: `pr_sync.max_age_days` says which open PRs
@@ -85,8 +87,7 @@ struct Inner {
 }
 
 struct State {
-    /// The token `gh` last printed; `None` until it prints one GitHub hasn't rejected.
-    token: Option<String>,
+    /// The status, but for `login` and `max_age_days`, read as it is asked for.
     status: PrSyncStatus,
     /// When the last good sync began; `None` until one has finished.
     last_good: Option<DateTime<Utc>>,
@@ -106,7 +107,7 @@ struct Synced {
 #[derive(Debug, thiserror::Error)]
 enum SyncError {
     #[error(transparent)]
-    NoToken(#[from] token::NoToken),
+    NoToken(#[from] crate::github_auth::NoToken),
     #[error(transparent)]
     Github(#[from] GithubError),
     #[error("{0}")]
@@ -122,28 +123,31 @@ impl From<db::DbError> for SyncError {
 }
 
 impl PrSync {
-    /// Starts the timer, whose first sync runs now and reads the token with `gh auth token`
-    /// (on the timer's task, so a slow `gh` never holds up the daemon's start). `endpoint` is
-    /// the GraphQL URL; a sync is full every `full_every`; open PRs GitHub last updated more
-    /// than `pr_sync.max_age_days` ago, as `config` says when the sync begins, aren't synced,
-    /// and the status says how many days that is now. Must be called inside a tokio runtime.
+    /// Starts the timer, whose first sync runs now and reads the token's sources (on the
+    /// timer's task, so a slow `gh` never holds up the daemon's start); a token the routes or
+    /// a sign-in change syncs at once too. `github` is the GraphQL client; a sync is full
+    /// every `full_every`; open PRs GitHub last updated more than `pr_sync.max_age_days` ago,
+    /// as `config` says when the sync begins, aren't synced, and the status says how many
+    /// days that is now. Must be called inside a tokio runtime.
     pub fn start(
         db: Db,
         events: Events,
-        endpoint: String,
+        github: Github,
+        auth: GithubAuth,
         full_every: Duration,
         config: Config,
-    ) -> anyhow::Result<PrSync> {
+    ) -> PrSync {
         let max_age_days = config.max_age_days();
+        let mut token_changes = auth.token_changes();
         let sync = PrSync {
             inner: Arc::new(Inner {
                 db,
                 events,
-                github: Github::new(endpoint)?,
+                github,
+                auth,
                 full_every,
                 config,
                 state: Mutex::new(State {
-                    token: None,
                     status: PrSyncStatus {
                         login: GhLogin::LoggedOut,
                         last_synced_at: None,
@@ -162,16 +166,29 @@ impl PrSync {
             let mut interval = tokio::time::interval(INTERVAL);
             interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    changed = token_changes.changed() => {
+                        if changed.is_err() {
+                            // The credentials are gone: the daemon is stopping.
+                            return;
+                        }
+                    }
+                }
                 timer.sync().await;
             }
         });
-        Ok(sync)
+        sync
     }
 
-    /// The `gh` login, the last sync and the age cutoff as it is now.
+    /// The GitHub login, the last sync and the age cutoff as it is now.
     pub fn status(&self) -> PrSyncStatus {
         PrSyncStatus {
+            login: if self.inner.auth.token().is_some() {
+                GhLogin::LoggedIn
+            } else {
+                GhLogin::LoggedOut
+            },
             max_age_days: self.inner.config.max_age_days(),
             ..self.state().status.clone()
         }
@@ -249,26 +266,42 @@ impl PrSync {
         if open.is_empty() {
             return results;
         }
-        let cached = self.state().token.clone();
-        let token = match cached {
-            Some(token) => token,
-            None => match self.refresh_token().await {
-                Ok(token) => token,
-                Err(_) => {
-                    for (i, _) in &open {
-                        results[*i] = PrCloseResult::failed(task_ids[*i], NOT_SIGNED_IN);
-                    }
-                    return results;
-                }
-            },
+        let auth = &self.inner.auth;
+        let token = match auth.token() {
+            Some(token) => Ok(token),
+            None => auth.reread().await,
+        };
+        let Ok(mut token) = token else {
+            for (i, _) in &open {
+                results[*i] = PrCloseResult::failed(task_ids[*i], NOT_SIGNED_IN);
+            }
+            return results;
         };
         let wanted: Vec<(String, i64)> = open.iter().map(|(_, pr)| pr.clone()).collect();
-        let node_ids = self.inner.github.node_ids(&token, &wanted).await;
+        let github = &self.inner.github;
+        let node_ids = match github.node_ids(&token, &wanted).await {
+            Ok(node_ids) => node_ids,
+            // The token may have been refreshed or revoked: read the sources again, once.
+            Err(GithubError::Unauthorized) => match auth.reread().await {
+                Ok(fresh) => {
+                    token = fresh;
+                    github
+                        .node_ids(&token, &wanted)
+                        .await
+                        .unwrap_or_else(|err| {
+                            auth.rejected();
+                            vec![Err(err.to_string()); wanted.len()]
+                        })
+                }
+                Err(_) => vec![Err(NOT_SIGNED_IN.to_owned()); wanted.len()],
+            },
+            Err(err) => vec![Err(err.to_string()); wanted.len()],
+        };
         for ((i, (repo, number)), node_id) in open.into_iter().zip(node_ids) {
             let task_id = task_ids[i];
             results[i] = match node_id {
                 Err(error) => PrCloseResult::failed(task_id, error),
-                Ok(node_id) => match self.inner.github.close(&token, &node_id).await {
+                Ok(node_id) => match github.close(&token, &node_id).await {
                     Err(GithubError::GraphQl(message)) => PrCloseResult::failed(task_id, message),
                     Err(err) => PrCloseResult::failed(task_id, err.to_string()),
                     Ok(()) => {
@@ -321,10 +354,10 @@ impl PrSync {
     async fn sync_once(&self) -> Result<Synced, SyncError> {
         let began = Utc::now();
         let since = self.since(began);
-        let cached = self.state().token.clone();
-        let token = match cached {
+        let auth = &self.inner.auth;
+        let token = match auth.token() {
             Some(token) => token,
-            None => self.refresh_token().await?,
+            None => auth.reread().await?,
         };
         let workspaces = self.workspace_dirs().await?;
         let clones =
@@ -341,11 +374,11 @@ impl PrSync {
         };
         match self.read(&token, &read).await {
             Err(SyncError::Github(GithubError::Unauthorized)) => {
-                // The token may have been refreshed or revoked: ask `gh` again, once.
-                let token = self.refresh_token().await?;
+                // The token may have been refreshed or revoked: read the sources again, once.
+                let token = auth.reread().await?;
                 self.read(&token, &read).await.inspect_err(|err| {
                     if matches!(err, SyncError::Github(GithubError::Unauthorized)) {
-                        self.log_out();
+                        auth.rejected();
                     }
                 })?;
             }
@@ -609,29 +642,6 @@ impl PrSync {
             .filter(|ws| ws.archived_at.is_none())
             .map(|ws| (ws.id, PathBuf::from(ws.dir)))
             .collect())
-    }
-
-    /// Runs `gh auth token` and records the outcome as the login state.
-    async fn refresh_token(&self) -> Result<String, token::NoToken> {
-        let result = token::gh_auth_token().await;
-        match &result {
-            Ok(token) => {
-                let mut state = self.state();
-                state.token = Some(token.clone());
-                state.status.login = GhLogin::LoggedIn;
-            }
-            Err(err) => {
-                tracing::info!("no GitHub token: {err}");
-                self.log_out();
-            }
-        }
-        result
-    }
-
-    fn log_out(&self) {
-        let mut state = self.state();
-        state.token = None;
-        state.status.login = GhLogin::LoggedOut;
     }
 
     fn state(&self) -> MutexGuard<'_, State> {

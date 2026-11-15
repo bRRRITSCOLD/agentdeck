@@ -275,20 +275,20 @@ pub struct InstructionPatch {
     pub body: Option<String>,
 }
 
-/// Whether `gh auth token` gives the daemon a GitHub token.
+/// Whether the daemon has a GitHub token GitHub accepts (spec §8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GhLogin {
-    /// `gh` printed a token GitHub accepted, or one not yet tried.
+    /// A token GitHub accepted, or one it couldn't be asked about yet.
     LoggedIn,
-    /// No `gh`, `gh` not logged in, or GitHub rejected its token. The GUI shows a banner.
+    /// No token from any source, or GitHub rejected the one found. The GUI shows a banner.
     LoggedOut,
 }
 
-/// `GET /v1/prs/status` and `POST /v1/prs/sync`: the `gh` login and the last sync.
+/// `GET /v1/prs/status` and `POST /v1/prs/sync`: the GitHub login and the last sync.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PrSyncStatus {
-    /// The `gh` login state.
+    /// Whether there's a token GitHub accepts.
     pub login: GhLogin,
     /// When the last successful sync finished; `None` until one has.
     pub last_synced_at: Option<String>,
@@ -299,6 +299,101 @@ pub struct PrSyncStatus {
     /// How many days since GitHub last updated an open PR it may be and still sync: the
     /// setting `pr_sync.max_age_days` as it is now; `0` for no cutoff.
     pub max_age_days: u32,
+}
+
+/// Where the daemon's GitHub token comes from (spec §8), the first that gives one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenSource {
+    /// A token saved in the system keyring: pasted, or from Sign in with GitHub.
+    Keyring,
+    /// `GH_TOKEN` or `GITHUB_TOKEN` in the daemon's environment.
+    Env,
+    /// `gh auth token`.
+    Gh,
+    /// No source gives one.
+    None,
+}
+
+/// An environment variable that gives the daemon a GitHub token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum TokenEnvVar {
+    /// `GH_TOKEN`, read first.
+    #[serde(rename = "GH_TOKEN")]
+    GhToken,
+    /// `GITHUB_TOKEN`.
+    #[serde(rename = "GITHUB_TOKEN")]
+    GithubToken,
+}
+
+impl TokenEnvVar {
+    /// The variable's name.
+    pub fn name(self) -> &'static str {
+        match self {
+            TokenEnvVar::GhToken => "GH_TOKEN",
+            TokenEnvVar::GithubToken => "GITHUB_TOKEN",
+        }
+    }
+}
+
+/// `GET /v1/github/auth`: where the GitHub token comes from, and whose it is. Never the token
+/// or the OAuth client ID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct GithubAuthInfo {
+    /// The source the token comes from.
+    pub source: TokenSource,
+    /// `GH_TOKEN` or `GITHUB_TOKEN`, whichever is set (`GH_TOKEN` when both are), also while
+    /// a saved token overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_var: Option<TokenEnvVar>,
+    /// The token's GitHub user; absent while there's no token, GitHub rejected it, or it
+    /// couldn't be asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<String>,
+    /// The token's scopes, from `X-OAuth-Scopes`; absent for a token that sends none (a
+    /// fine-grained one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<Vec<String>>,
+    /// Whether the keyring or `AGENTDECK_GITHUB_CLIENT_ID` gives an OAuth client ID, so
+    /// Sign in with GitHub can start.
+    pub client_id_set: bool,
+}
+
+/// `PUT /v1/github/token`.
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GithubTokenBody {
+    /// A GitHub token: a classic one, or a fine-grained one.
+    pub token: String,
+}
+
+impl std::fmt::Debug for GithubTokenBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GithubTokenBody").finish_non_exhaustive()
+    }
+}
+
+/// `PUT /v1/github/client-id`.
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GithubClientIdBody {
+    /// The client ID of the user's GitHub OAuth App, with Device Flow on.
+    pub client_id: String,
+}
+
+impl std::fmt::Debug for GithubClientIdBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GithubClientIdBody").finish_non_exhaustive()
+    }
+}
+
+/// `POST /v1/github/device`: the code the user enters on GitHub to sign in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DeviceSignIn {
+    /// The code to enter, `ABCD-1234`.
+    pub user_code: String,
+    /// Where to enter it.
+    pub verification_uri: String,
+    /// When the code expires (RFC 3339).
+    pub expires_at: String,
 }
 
 /// How far a running PR sync is through the viewer's PRs.

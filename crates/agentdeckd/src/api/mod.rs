@@ -5,6 +5,7 @@
 //! failure is its own status with an `error_code`; see [`client_error`].
 
 mod comments;
+mod github;
 mod health;
 mod instructions;
 mod panes;
@@ -31,6 +32,7 @@ use crate::auth::bearer_matches;
 use crate::config::Config;
 use crate::db::{Db, DbError};
 use crate::events::Events;
+use crate::github_auth::GithubAuth;
 use crate::prsync::PrSync;
 use crate::terminal::Terminals;
 
@@ -49,6 +51,8 @@ pub struct ApiContext {
     pub scratch_root: PathBuf,
     /// PR sync, for `/v1/prs`.
     pub prs: PrSync,
+    /// The GitHub credentials, for `/v1/github`.
+    pub github: GithubAuth,
     /// The settings in `config.toml`, for `/v1/settings`.
     pub settings: Config,
     /// The live panes.
@@ -92,6 +96,13 @@ pub fn api() -> ApiDescription<ApiContext> {
         api.register(prs::prs_sync),
         api.register(prs::prs_status),
         api.register(prs::prs_close),
+        api.register(github::github_auth_get),
+        api.register(github::github_token_put),
+        api.register(github::github_token_delete),
+        api.register(github::github_client_id_put),
+        api.register(github::github_client_id_delete),
+        api.register(github::github_device_start),
+        api.register(github::github_device_cancel),
         api.register(settings::settings_get),
         api.register(settings::settings_update),
         api.register(panes::pane_create),
@@ -222,7 +233,7 @@ mod tests {
         /// `openapi.json`'s fingerprint when [`agentdeck_core::API_VERSION`] was last set,
         /// and that version. Clients tell an older daemon by its API version, so a route or
         /// field added without a bump would go unnoticed: they would call it and get a 404.
-        const FINGERPRINT_AT_API_VERSION: (u64, u32) = (0x7871_3ba8_a02c_6dfe, 2);
+        const FINGERPRINT_AT_API_VERSION: (u64, u32) = (0x86e5_ebeb_d088_c023, 3);
 
         /// FNV-1a: stable across Rust releases, unlike `DefaultHasher`.
         fn fingerprint(text: &str) -> u64 {

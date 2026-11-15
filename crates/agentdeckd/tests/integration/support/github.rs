@@ -1,5 +1,5 @@
-//! GitHub for PR sync: a stub `gh` on `PATH` and canned GraphQL responses for httpmock
-//! (spec §12). No test reaches the real GitHub.
+//! GitHub for PR sync and sign-in: a stub `gh` on `PATH`, canned GraphQL responses and the
+//! device flow's endpoints for httpmock (spec §12). No test reaches the real GitHub.
 
 use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
@@ -292,6 +292,65 @@ pub fn mock_close_refused<'a>(server: &'a MockServer, pr: &Pr, message: &str) ->
             "data": { "closePullRequest": null },
             "errors": [ { "type": "FORBIDDEN", "path": [ "closePullRequest" ], "message": message } ]
         }));
+    })
+}
+
+/// `viewer { login }` for `token`, answered with `login` and, when `scopes` is `Some`, that
+/// `X-OAuth-Scopes` header (a classic token's; a fine-grained one sends none).
+pub fn mock_viewer<'a>(
+    server: &'a MockServer,
+    token: &str,
+    login: &str,
+    scopes: Option<&str>,
+) -> Mock<'a> {
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .header("authorization", format!("Bearer {token}"))
+            .body_includes("viewer { login }");
+        let then = then
+            .status(200)
+            .json_body(json!({ "data": { "viewer": { "login": login } } }));
+        if let Some(scopes) = scopes {
+            then.header("x-oauth-scopes", scopes);
+        }
+    })
+}
+
+/// `POST /login/device/code` for `client_id` with the `repo` scope, answered with the user
+/// code `ABCD-1234`, a 1 s poll interval and `expires_in` seconds.
+pub fn mock_device_code<'a>(server: &'a MockServer, client_id: &str, expires_in: u64) -> Mock<'a> {
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/login/device/code")
+            .header("accept", "application/json")
+            .form_urlencoded_tuple("client_id", client_id)
+            .form_urlencoded_tuple("scope", "repo");
+        then.status(200).json_body(json!({
+            "device_code": DEVICE_CODE,
+            "user_code": USER_CODE,
+            "verification_uri": "https://github.com/login/device",
+            "expires_in": expires_in,
+            "interval": 1
+        }));
+    })
+}
+
+/// The device code the mocks hand out; it never leaves the daemon.
+pub const DEVICE_CODE: &str = "3584d83530557fdd1f46af8289938c8ef79f9dc5";
+
+/// The user code the mocks hand out.
+pub const USER_CODE: &str = "ABCD-1234";
+
+/// `POST /login/oauth/access_token` for the mocks' device code, answered with `body`.
+pub fn mock_access_token<'a>(server: &'a MockServer, client_id: &str, body: Value) -> Mock<'a> {
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/login/oauth/access_token")
+            .form_urlencoded_tuple("client_id", client_id)
+            .form_urlencoded_tuple("device_code", DEVICE_CODE)
+            .form_urlencoded_tuple("grant_type", "urn:ietf:params:oauth:grant-type:device_code");
+        then.status(200).json_body(body);
     })
 }
 

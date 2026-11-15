@@ -6,12 +6,12 @@ mod pr_status {
     use super::*;
 
     #[test]
-    fn should_report_a_logged_out_gh() {
+    fn should_report_a_logged_out_github_login() {
         let env = TestEnv::new();
 
         let stdout = env.ok(&["pr", "status"]);
 
-        assert!(stdout.starts_with("gh:        logged_out\n"), "{stdout}");
+        assert!(stdout.starts_with("github:    logged_out\n"), "{stdout}");
     }
 }
 

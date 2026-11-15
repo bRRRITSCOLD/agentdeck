@@ -182,7 +182,7 @@ pub fn instruction_saved(instruction: &Instruction) -> String {
 /// `agentdeck pr sync` and `pr status`.
 pub fn pr_status(status: &PrSyncStatus) -> String {
     let mut out = format!(
-        "gh:        {}\nlast sync: {}\n",
+        "github:    {}\nlast sync: {}\n",
         status.login,
         status.last_synced_at.as_deref().unwrap_or("never"),
     );
@@ -482,7 +482,7 @@ mod tests {
 
             assert_eq!(
                 out,
-                "gh:        logged_out\nlast sync: never\nlast error: gh is not logged in\n"
+                "github:    logged_out\nlast sync: never\nlast error: gh is not logged in\n"
             );
         }
     }
@@ -508,7 +508,7 @@ mod tests {
 
             assert_eq!(
                 out,
-                "gh:        logged_in\nlast sync: 2026-11-14T10:00:00.000Z\nsyncing:   100 of 271 PRs\n"
+                "github:    logged_in\nlast sync: 2026-11-14T10:00:00.000Z\nsyncing:   100 of 271 PRs\n"
             );
         }
     }

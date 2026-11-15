@@ -396,7 +396,7 @@ mod post_v1_prs_sync {
             status
                 .last_error
                 .as_deref()
-                .is_some_and(|err| err.contains("no oauth token found")),
+                .is_some_and(|err| err.starts_with("no GitHub token")),
             "{status:?}"
         );
         assert_eq!(status.last_synced_at, None);
@@ -1321,6 +1321,42 @@ mod post_v1_prs_close {
 
         assert_eq!(results, [failed(task.id, "Not signed in to GitHub")]);
         lookup.assert_calls(0);
+    }
+
+    #[tokio::test]
+    async fn should_read_the_token_again_after_a_401_and_close_with_the_new_one_200() {
+        let github = MockServer::start_async().await;
+        let pr = Pr::open(7);
+        let mut old = mock_search(&github, "gho_old", std::slice::from_ref(&pr));
+        let daemon = daemon(&github, Some("gho_old")).await;
+        sync(&daemon.client).await;
+        let task = task_of(&daemon.client, 7).await;
+
+        old.delete();
+        mock_unauthorized(&github, "gho_old");
+        set_gh_token(daemon.root(), Some("gho_new"));
+        let id = pr.node_id();
+        let lookup = github.mock(|when, then| {
+            when.header("authorization", "Bearer gho_new")
+                .body_includes("fragment nodeId on PullRequest");
+            then.status(200).json_body(serde_json::json!({
+                "data": { "p0": { "pullRequest": { "id": id } } }
+            }));
+        });
+        let id = pr.node_id();
+        let close_mock = github.mock(|when, then| {
+            when.header("authorization", "Bearer gho_new")
+                .body_includes("closePullRequest(");
+            then.status(200).json_body(serde_json::json!({
+                "data": { "closePullRequest": { "pullRequest": { "id": id, "state": "CLOSED" } } }
+            }));
+        });
+
+        let results = close(&daemon.client, vec![task.id]).await;
+
+        assert_eq!(results, [ok(&task)]);
+        lookup.assert_calls(1);
+        close_mock.assert_calls(1);
     }
 
     #[tokio::test]

@@ -242,7 +242,7 @@ pub enum AgentCommand {
 pub enum PrCommand {
     /// Sync PR tasks with GitHub now.
     Sync,
-    /// The `gh` login state and the last sync.
+    /// Whether GitHub takes the token, and the last sync.
     Status,
     /// Close the PRs of PR tasks on GitHub, after asking. Closes only: no comment, no branch
     /// delete.

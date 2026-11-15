@@ -75,7 +75,7 @@ pub enum PrSync {
     NotYet,
     /// The most recent sync failed.
     Failed,
-    /// `gh` has no usable login, so no sync can read GitHub.
+    /// No GitHub token GitHub accepts, so no sync can read GitHub.
     LoggedOut,
     /// The last sync finished then.
     SyncedAt(DateTime<Utc>),
@@ -97,7 +97,7 @@ impl PrSync {
         match self {
             PrSync::NotYet => "PRs not synced yet".to_owned(),
             PrSync::Failed => "PR sync failed".to_owned(),
-            PrSync::LoggedOut => "gh logged out".to_owned(),
+            PrSync::LoggedOut => "Not signed in".to_owned(),
             PrSync::SyncedAt(at) => format!("PRs synced {}", ago(now - at)),
             PrSync::Syncing { details: true, .. } => "Syncing PR details…".to_owned(),
             PrSync::Syncing { prs_done, prs, .. } => {
@@ -111,7 +111,7 @@ impl PrSync {
         match self {
             PrSync::NotYet => "Not synced yet".to_owned(),
             PrSync::Failed => "Sync failed".to_owned(),
-            PrSync::LoggedOut => "gh logged out".to_owned(),
+            PrSync::LoggedOut => "Not signed in".to_owned(),
             PrSync::SyncedAt(at) => format!("Synced {}", ago(now - at)),
             PrSync::Syncing { details: true, .. } => "Syncing details…".to_owned(),
             PrSync::Syncing { prs_done, prs, .. } => {
@@ -689,9 +689,9 @@ mod tests {
         }
 
         #[test]
-        fn should_say_gh_is_logged_out_in_both_labels() {
-            assert_eq!(PrSync::LoggedOut.label(at(NOW)), "gh logged out");
-            assert_eq!(PrSync::LoggedOut.short_label(at(NOW)), "gh logged out");
+        fn should_say_not_signed_in_in_both_labels() {
+            assert_eq!(PrSync::LoggedOut.label(at(NOW)), "Not signed in");
+            assert_eq!(PrSync::LoggedOut.short_label(at(NOW)), "Not signed in");
         }
 
         #[test]
