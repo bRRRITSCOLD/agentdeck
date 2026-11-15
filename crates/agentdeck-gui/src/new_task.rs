@@ -42,7 +42,24 @@ pub struct Request {
 }
 
 /// The Select's value for the Inbox.
-const INBOX: &str = "inbox";
+pub(crate) const INBOX: &str = "inbox";
+
+/// Where a task can go besides the Inbox (spec §11): `snapshot`'s unarchived workspaces,
+/// oldest first. New task and the task sheet offer the same list.
+pub(crate) fn places(snapshot: &Snapshot) -> Vec<(WorkspaceId, SharedString)> {
+    (snapshot.workspaces.iter())
+        .filter(|w| w.archived_at.is_none())
+        .map(|w| (w.id, SharedString::from(w.name.clone())))
+        .collect()
+}
+
+/// A workspace Select's list: "Inbox (no workspace)", then `places`.
+pub(crate) fn place_content(places: &[(WorkspaceId, SharedString)]) -> SelectContent {
+    places.iter().fold(
+        SelectContent::new().item(SelectItem::new(INBOX, "Inbox (no workspace)")),
+        |c, (id, name)| c.item(SelectItem::new(id.to_string(), name.clone())),
+    )
+}
 
 /// The dialog, kept by the window.
 pub struct NewTaskDialog {
@@ -98,10 +115,7 @@ impl NewTaskDialog {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.workspaces = (snapshot.workspaces.iter())
-            .filter(|w| w.archived_at.is_none())
-            .map(|w| (w.id, SharedString::from(w.name.clone())))
-            .collect();
+        self.workspaces = places(snapshot);
         self.workspace = preset.filter(|p| self.workspaces.iter().any(|(id, _)| id == p));
         self.title
             .update(cx, |input, cx| input.set_value("", window, cx));
@@ -166,10 +180,7 @@ impl NewTaskDialog {
     fn form(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let workspace = Select::new("new-task-workspace")
             .trigger(SelectTrigger::new().w_full())
-            .content(self.workspaces.iter().fold(
-                SelectContent::new().item(SelectItem::new(INBOX, "Inbox (no workspace)")),
-                |c, (id, name)| c.item(SelectItem::new(id.to_string(), name.clone())),
-            ))
+            .content(place_content(&self.workspaces))
             .value(Some(
                 self.workspace
                     .map_or(SharedString::from(INBOX), |w| w.to_string().into()),

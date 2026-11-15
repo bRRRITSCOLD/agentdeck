@@ -32,7 +32,7 @@ use crate::new_task::NewTask;
 use crate::overview::Snapshot;
 use crate::task_list::{self, Group, Query, Row, Scope};
 use crate::task_row::{self, Layout, Table};
-use crate::task_sheet::OpenTask;
+use crate::task_sheet::{EditTask, OpenTask};
 use crate::workspace::failed;
 
 /// The filter's width, narrow enough for Select to fit beside it at 1200. Raw in Penpot too.
@@ -72,6 +72,7 @@ pub struct TasksView {
 
 impl EventEmitter<NewTask> for TasksView {}
 impl EventEmitter<OpenTask> for TasksView {}
+impl EventEmitter<EditTask> for TasksView {}
 
 impl TasksView {
     /// A view that changes statuses through `api`; it shows nothing until given a snapshot.
@@ -241,7 +242,11 @@ impl TasksView {
                     }),
                 );
                 let open = Box::new(cx.listener(move |_, _, _, cx| cx.emit(OpenTask(task))));
-                let parts = close_prs::row_parts(&self.close, row, cx);
+                let view = cx.weak_entity();
+                let edit = move |_: &mut Window, cx: &mut gpui::App| {
+                    let _ = view.update(cx, |_, cx| cx.emit(EditTask(task)));
+                };
+                let parts = close_prs::row_parts(&self.close, row, edit, cx);
                 task_row::spaced(task_row::wide(
                     row,
                     picker,
@@ -526,6 +531,25 @@ mod tests {
         harness.click("new task", cx);
 
         assert_eq!(*asked.borrow(), [NewTask(None)]);
+    }
+
+    #[gpui::test]
+    fn should_ask_to_edit_a_plain_task_from_its_rows_menu(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::open(board(), cx);
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = asked.clone();
+        let _asks = cx.update(|_, cx| {
+            cx.subscribe(&harness.view, move |_, event: &EditTask, _| {
+                seen.borrow_mut().push(*event)
+            })
+        });
+
+        harness.click(format!("tasks menu {}", id::<TaskId>(2)).leak(), cx);
+        harness.draw(cx);
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+
+        assert_eq!(*asked.borrow(), [EditTask(id(2))]);
     }
 
     #[gpui::test]

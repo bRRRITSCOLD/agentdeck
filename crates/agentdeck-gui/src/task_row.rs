@@ -4,8 +4,8 @@
 //! widths are [`Columns`]'s.
 //!
 //! In Select mode (spec §11, Closing PRs) a row and a group header start with their `Select`
-//! layer, a [`SelectCell`]; a row whose PR can close ends with its `Menu` layer. A row with
-//! neither keeps their space, so the columns line up.
+//! layer, a [`SelectCell`]; every row ends with its `Menu` layer. A row with nothing to select
+//! keeps the `Select` layer's space, so the columns line up.
 //!
 //! Both lists draw only the items in view, through GPUI's [`list`](gpui::list): an inbox holds
 //! hundreds of PRs, and drawing every row made each frame take hundreds of milliseconds.
@@ -218,8 +218,9 @@ impl SelectCell {
 pub struct RowParts {
     /// The `Select` layer.
     pub select: SelectCell,
-    /// The `Menu` layer, for a PR row: Open on GitHub, and Close PR… when its PR can close.
-    pub menu: Option<AnyElement>,
+    /// The `Menu` layer: Edit task…, then on a PR row Open on GitHub, and Close PR… when its
+    /// PR can close.
+    pub menu: AnyElement,
     /// Why its PR didn't close, while it stays selected.
     pub error: Option<SharedString>,
 }
@@ -685,7 +686,7 @@ pub fn wide(
                     .child(none(cx)),
             })
         })
-        .child(cell(Columns::MENU).children(parts.menu))
+        .child(cell(Columns::MENU).child(parts.menu))
         .into_any_element()
 }
 
@@ -761,7 +762,7 @@ pub fn panel(
                             .child(StateDot::new(state_dot::of(agent.state, None)).spin(spin)),
                     )
                 })
-                .children(parts.menu),
+                .child(parts.menu),
         )
         // Penpot `Meta`: picker, spacer, checks, review, `space.2` apart.
         .child(

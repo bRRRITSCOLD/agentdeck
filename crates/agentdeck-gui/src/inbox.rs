@@ -35,7 +35,7 @@ use crate::close_prs::{self, ClosePrs};
 use crate::overview::{PrSync, Snapshot};
 use crate::task_list::{self, Query, Row, Scope};
 use crate::task_row::{self, Layout, Table};
-use crate::task_sheet::OpenTask;
+use crate::task_sheet::{EditTask, OpenTask};
 use crate::workspace::failed;
 
 /// The description's first line.
@@ -84,6 +84,7 @@ pub struct InboxView {
 
 impl EventEmitter<Synced> for InboxView {}
 impl EventEmitter<OpenTask> for InboxView {}
+impl EventEmitter<EditTask> for InboxView {}
 impl EventEmitter<OpenSettings> for InboxView {}
 
 impl InboxView {
@@ -197,7 +198,11 @@ impl InboxView {
             }),
         );
         let open = Box::new(cx.listener(move |_, _, _, cx| cx.emit(OpenTask(task))));
-        let parts = close_prs::row_parts(&self.close, row, cx);
+        let view = cx.weak_entity();
+        let edit = move |_: &mut Window, cx: &mut gpui::App| {
+            let _ = view.update(cx, |_, cx| cx.emit(EditTask(task)));
+        };
+        let parts = close_prs::row_parts(&self.close, row, edit, cx);
         task_row::spaced(task_row::wide(
             row,
             picker,
@@ -1091,12 +1096,12 @@ mod tests {
         }
 
         #[gpui::test]
-        fn should_put_a_menu_on_every_pr_row_and_none_on_a_plain_one(cx: &mut TestAppContext) {
+        fn should_put_a_menu_on_every_row_plain_ones_too(cx: &mut TestAppContext) {
             let (_harness, cx) = Harness::open(prs(), cx);
 
             assert!(shown_at(row_selector("menu", 1), cx));
             assert!(shown_at(row_selector("menu", 2), cx));
-            assert!(!shown_at(row_selector("menu", 3), cx));
+            assert!(shown_at(row_selector("menu", 3), cx));
         }
 
         #[gpui::test]
@@ -1266,7 +1271,7 @@ mod tests {
                 let (_harness, cx) = Harness::open(prs(), cx);
                 let opener = cx.update(|_, cx| crate::terminal::open::fake::install(cx));
 
-                pick(2, 1, cx);
+                pick(2, 2, cx);
 
                 assert_eq!(
                     *opener.started.lock().unwrap(),
@@ -1278,11 +1283,27 @@ mod tests {
             }
 
             #[gpui::test]
-            fn should_open_an_open_prs_page_from_its_first_item(cx: &mut TestAppContext) {
+            fn should_ask_to_edit_the_task_from_its_first_item(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open(prs(), cx);
+                let asked = Rc::new(RefCell::new(Vec::new()));
+                let _subscription = cx.update(|_, cx| {
+                    let asked = asked.clone();
+                    cx.subscribe(&harness.view, move |_, event: &EditTask, _| {
+                        asked.borrow_mut().push(*event);
+                    })
+                });
+
+                pick(3, 1, cx);
+
+                assert_eq!(*asked.borrow(), [EditTask(id(3))]);
+            }
+
+            #[gpui::test]
+            fn should_open_an_open_prs_page_from_its_second_item(cx: &mut TestAppContext) {
                 let (harness, cx) = Harness::open(prs(), cx);
                 let opener = cx.update(|_, cx| crate::terminal::open::fake::install(cx));
 
-                pick(1, 1, cx);
+                pick(1, 2, cx);
 
                 assert_eq!(
                     *opener.started.lock().unwrap(),
@@ -1299,7 +1320,7 @@ mod tests {
                 let (harness, cx) = Harness::open(prs(), cx);
                 let opener = cx.update(|_, cx| crate::terminal::open::fake::install(cx));
 
-                pick(1, 2, cx);
+                pick(1, 3, cx);
 
                 assert!(asking(&harness, cx));
                 assert!(opener.started.lock().unwrap().is_empty());

@@ -15,7 +15,8 @@
 //!
 //! The Tasks view and the right panel ask for the new task dialog with
 //! [`NewTask`], preset to the Inbox or their workspace. They and the Inbox ask for the task
-//! sheet with [`OpenTask`] when a task's title is clicked; the sheet's Start agent asks for
+//! sheet with [`OpenTask`] when a task's title is clicked, and for it editing the task with
+//! [`EditTask`] from a row's **Edit task…**; the sheet's Start agent asks for
 //! the new agent dialog on the task's workspace with [`StartAgentOn`]. Once an agent starts,
 //! the window shows its workspace and tab. A pane header's Link to task… reaches it as the
 //! workspace view's [`LinkPane`] and opens the Link to task dialog on that pane.
@@ -60,7 +61,7 @@ use crate::notifications::{self, Alert as Notification};
 use crate::right_panel::RightPanel;
 use crate::settings::SettingsView;
 use crate::sidebar::{Alerts, Selection, SidebarEvent, SidebarView};
-use crate::task_sheet::{OpenTask, StartAgentOn, TaskSheet};
+use crate::task_sheet::{EditTask, OpenTask, StartAgentOn, TaskSheet};
 use crate::tasks::TasksView;
 use crate::title_bar::{Close, Minimize, TitleBar, ToggleMaximize};
 use crate::top_bar::{
@@ -273,6 +274,15 @@ impl Shell {
                         }),
                         cx.subscribe_in(&panel, window, |shell, _, ask, window, cx| {
                             shell.open_task(*ask, window, cx);
+                        }),
+                        cx.subscribe_in(&tasks, window, |shell, _, ask, window, cx| {
+                            shell.edit_task(*ask, window, cx);
+                        }),
+                        cx.subscribe_in(&inbox, window, |shell, _, ask, window, cx| {
+                            shell.edit_task(*ask, window, cx);
+                        }),
+                        cx.subscribe_in(&panel, window, |shell, _, ask, window, cx| {
+                            shell.edit_task(*ask, window, cx);
                         }),
                         cx.subscribe(&dialog, |shell, _, Created(id), cx| {
                             if let Some(sidebar) = &shell.sidebar {
@@ -533,6 +543,18 @@ impl Shell {
         let snapshot = sidebar.read(cx).snapshot().clone();
         let OpenTask(task) = ask;
         sheet.update(cx, |sheet, cx| sheet.open(task, snapshot, window, cx));
+    }
+
+    /// Opens the task sheet editing the task a row's Edit task… asks for.
+    fn edit_task(&mut self, ask: EditTask, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(sidebar), Some(sheet)) = (&self.sidebar, &self.task_sheet) else {
+            return;
+        };
+        let snapshot = sidebar.read(cx).snapshot().clone();
+        let EditTask(task) = ask;
+        sheet.update(cx, |sheet, cx| {
+            sheet.open_editing(task, snapshot, window, cx)
+        });
     }
 
     /// The selected workspace's id and name, if a workspace is selected.
@@ -1308,6 +1330,55 @@ mod tests {
                     *api.seen.lock().unwrap(),
                     [id::<agentdeck_core::TaskId>(2); 2]
                 );
+            }
+
+            /// Whether the sheet is open on task 2, editing its title, after `ask`.
+            fn editing_after(
+                shell: &Entity<Shell>,
+                ask: impl FnOnce(&mut TestAppContext),
+                cx: &mut TestAppContext,
+            ) -> bool {
+                let sheet = sheet(shell, cx);
+                sheet.update(cx, |sheet, cx| sheet.cancel_edit(cx));
+                ask(cx);
+                cx.run_until_parked();
+                sheet.read_with(cx, |s, _| {
+                    s.is_open()
+                        && s.task() == Some(id(2))
+                        && s.editing() == Some(crate::task_sheet::Editing::Title)
+                })
+            }
+
+            #[gpui::test]
+            fn should_open_the_sheet_editing_the_task_a_rows_edit_task_asks_for(
+                cx: &mut TestAppContext,
+            ) {
+                let connector = Rc::new(FakeConnector::default());
+                let _remote = connector.then_connect_to(daemon());
+                let shell = open(connector, cx);
+                let (tasks, inbox, panel) = shell.read_with(cx, |shell, _| {
+                    (
+                        shell.tasks.clone().unwrap(),
+                        shell.inbox.clone().unwrap(),
+                        shell.panel.clone().unwrap(),
+                    )
+                });
+
+                assert!(editing_after(
+                    &shell,
+                    |cx| tasks.update(cx, |_, cx| cx.emit(EditTask(id(2)))),
+                    cx
+                ));
+                assert!(editing_after(
+                    &shell,
+                    |cx| inbox.update(cx, |_, cx| cx.emit(EditTask(id(2)))),
+                    cx
+                ));
+                assert!(editing_after(
+                    &shell,
+                    |cx| panel.update(cx, |_, cx| cx.emit(EditTask(id(2)))),
+                    cx
+                ));
             }
 
             mod start_agent {
