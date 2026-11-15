@@ -25,7 +25,7 @@ use gpui::{
 
 use crate::connection::{Connection, DaemonEvent};
 use crate::pane_header::PaneHeader;
-use crate::terminal::{TerminalEvent, TerminalView};
+use crate::terminal::{self, TerminalEvent, TerminalView};
 
 /// The agent running in `pane`: an agent pane's, or the one a shell pane hosts (spec §3).
 pub fn running_agent(pane: &Pane) -> Option<Agent> {
@@ -265,7 +265,12 @@ impl Render for PaneView {
             .bg(s.background)
             .child(header)
             .child(Separator::new())
-            .child(div().flex_1().min_h_0().child(self.terminal.clone()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(terminal::cached(self.terminal.clone())),
+            )
     }
 }
 

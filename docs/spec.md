@@ -471,6 +471,7 @@ Built on `brrritscold-core-gpui` (`init`, `Root`, theme preference, toasts). Scr
   - Blocked and a failed exit share red, as in herdr: the label (`blocked` vs `exited 1`) and the StateDot shape (a filled dot vs a red `OctagonX`) tell them apart, so colour is never the only signal.
   - Checks are core-gpui's `Checks`, with the word ("passing", "running", "failing") except in the right panel, which shows the icon alone: passing `success`, pending `info`, failing `destructive`. Pending's `LoaderCircle` spins.
   - A spinning `LoaderCircle` steps 15 times a second, and each step redraws the window. Spinners stop while the window is inactive, drawn at rest, and start again when it's focused, so an unfocused window with working agents costs next to no CPU.
+  - Each pane's terminal is a cached view: a redraw reuses its last frame unless its output, size, selection, scroll, focus or theme changed, so a spinner step doesn't lay out and paint every grid again. The views holding a spinner (sidebar, pane header, task rows) redraw on each step.
   - Review: approved `success`, changes requested `warning`, required `muted-foreground`.
   - Task statuses aren't coloured.
   - The terminal palette follows the theme. Terminal text is JetBrains Mono (`font-family.mono`).

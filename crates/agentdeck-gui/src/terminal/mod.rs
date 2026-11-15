@@ -11,7 +11,7 @@ mod screen;
 mod view;
 
 pub use element::SYMBOL_FAMILIES;
-pub use view::{TerminalEvent, TerminalView};
+pub use view::{TerminalEvent, TerminalView, cached};
 
 /// Registers the terminal's fonts; call once, before the first window.
 pub fn init(cx: &mut gpui::App) {
