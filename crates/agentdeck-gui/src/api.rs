@@ -68,6 +68,10 @@ pub trait Api: Send + Sync {
         cx: &App,
     ) -> Task<anyhow::Result<()>>;
 
+    /// Changes what `patch` sets of `task`: its title, body or workspace, where
+    /// [`TaskPlace::Inbox`](agentdeck_core::TaskPlace::Inbox) moves it to the inbox.
+    fn edit_task(&self, task: TaskId, patch: TaskPatch, cx: &App) -> Task<anyhow::Result<()>>;
+
     /// Syncs PRs now, returning once the sync is done.
     fn sync_prs(&self, cx: &App) -> Task<anyhow::Result<()>>;
 
@@ -286,6 +290,14 @@ impl Api for Daemon {
                 status: Some(status),
                 ..TaskPatch::default()
             };
+            (client.task_update().id(task).body(patch).send().await).map_err(ApiError::from)?;
+            Ok(())
+        })
+    }
+
+    fn edit_task(&self, task: TaskId, patch: TaskPatch, cx: &App) -> Task<anyhow::Result<()>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
             (client.task_update().id(task).body(patch).send().await).map_err(ApiError::from)?;
             Ok(())
         })
@@ -687,6 +699,8 @@ pub(crate) mod fake {
         pub made_tasks: Mutex<Vec<new_task::Request>>,
         /// How many PR syncs were asked for.
         pub syncs: Mutex<usize>,
+        /// The task edits sent, with the task each is for, in order.
+        pub edited_tasks: Mutex<Vec<(TaskId, TaskPatch)>>,
         /// The instructions added, with the workspace each is for.
         pub instructions_added: Mutex<Vec<(WorkspaceId, String)>>,
         /// The instructions sent to panes: the text and the pane.
@@ -1049,6 +1063,26 @@ pub(crate) mod fake {
             if let Some(task) = snapshot.tasks.iter_mut().find(|t| t.id == task) {
                 task.status = status;
             }
+            Task::ready(Ok(()))
+        }
+
+        fn edit_task(&self, task: TaskId, patch: TaskPatch, _cx: &App) -> Task<anyhow::Result<()>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            let mut snapshot = self.snapshot.lock().unwrap();
+            if let Some(held) = snapshot.tasks.iter_mut().find(|t| t.id == task) {
+                if let Some(title) = &patch.title {
+                    held.title = title.clone();
+                }
+                if let Some(body) = &patch.body {
+                    held.body = body.clone();
+                }
+                if let Some(place) = patch.workspace_id {
+                    held.workspace_id = place.workspace();
+                }
+            }
+            self.edited_tasks.lock().unwrap().push((task, patch));
             Task::ready(Ok(()))
         }
 

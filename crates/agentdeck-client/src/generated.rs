@@ -803,12 +803,12 @@ pub mod types {
         ///A new status.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub status: ::std::option::Option<agentdeck_core::TaskStatus>,
-        ///A new title.
+        ///A new title. A PR task's title is GitHub's: only its own title is accepted.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub title: ::std::option::Option<::std::string::String>,
-        ///A workspace to link.
+        ///Where to move it: a workspace that isn't archived, or null for the inbox. Absent leaves it where it is.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub workspace_id: ::std::option::Option<agentdeck_core::WorkspaceId>,
+        pub workspace_id: ::std::option::Option<agentdeck_core::TaskPlace>,
     }
     impl TaskPatch {
         pub fn builder() -> builder::TaskPatch {
@@ -3930,7 +3930,7 @@ pub mod types {
                 ::std::string::String,
             >,
             workspace_id: ::std::result::Result<
-                ::std::option::Option<agentdeck_core::WorkspaceId>,
+                ::std::option::Option<agentdeck_core::TaskPlace>,
                 ::std::string::String,
             >,
         }
@@ -3977,7 +3977,7 @@ pub mod types {
             }
             pub fn workspace_id<T>(mut self, value: T) -> Self
             where
-                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::WorkspaceId>>,
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::TaskPlace>>,
                 T::Error: ::std::fmt::Display,
             {
                 self.workspace_id = value
@@ -4859,6 +4859,8 @@ impl Client {
         builder::TaskDelete::new(self)
     }
     ///Changes a task's title, body, status or workspace
+    ///
+    ///`"workspace_id": null` moves the task to the inbox. Refuses a blank title, or another title for a PR task, whose title is its PR's (`invalid_title`), and a workspace that doesn't exist or is archived (`unknown_workspace`). A PR task's workspace set here sticks: PR sync never moves it again. Moving a task out of a linked pane's workspace unlinks the pane.
     ///
     ///Sends a `PATCH` request to `/v1/tasks/{id}`
     ///

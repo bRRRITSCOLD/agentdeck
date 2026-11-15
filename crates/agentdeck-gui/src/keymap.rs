@@ -24,6 +24,11 @@ pub const TERMINAL: &str = "Terminal";
 /// ([`Submit`]) and Escape cancels ([`CancelEdit`]), where Enter inserts a newline.
 pub const INSTRUCTION_EDITOR: &str = "InstructionEditor";
 
+/// The key context the task sheet sets around a title or description being edited: Ctrl+Enter
+/// saves ([`Submit`]) and Escape cancels ([`CancelEdit`]), instead of closing the sheet. In
+/// the title's input, Enter saves too.
+pub const TASK_EDITOR: &str = "TaskEditor";
+
 /// The key context the task sheet's comment composer sets: Ctrl+Enter in its textarea sends
 /// ([`Submit`]), where Enter inserts a newline.
 pub const COMMENT_COMPOSER: &str = "CommentComposer";
@@ -86,6 +91,7 @@ fn bindings(cx: &App) -> Vec<KeyBinding> {
     // `ctrl-enter` (a newline) and `escape`.
     let instruction_editor = context(&format!("{INSTRUCTION_EDITOR} > Input"));
     let comment_composer = context(&format!("{COMMENT_COMPOSER} > Input"));
+    let task_editor = context(&format!("{TASK_EDITOR} > Input"));
     let mut table: Vec<(String, Box<dyn Action>, _)> = vec![
         ("secondary-shift-q".into(), Box::new(Quit), None),
         ("ctrl-pagedown".into(), Box::new(NextTab), workspace.clone()),
@@ -140,6 +146,12 @@ fn bindings(cx: &App) -> Vec<KeyBinding> {
         ),
         ("escape".into(), Box::new(CancelEdit), instruction_editor),
         ("secondary-enter".into(), Box::new(Submit), comment_composer),
+        (
+            "secondary-enter".into(),
+            Box::new(Submit),
+            task_editor.clone(),
+        ),
+        ("escape".into(), Box::new(CancelEdit), task_editor),
     ];
     table.extend((1..=9).map(|n| {
         let action: Box<dyn Action> = Box::new(SelectTab(n - 1));

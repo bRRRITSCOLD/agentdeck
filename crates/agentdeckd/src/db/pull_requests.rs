@@ -1,7 +1,7 @@
 //! `pull_requests` queries: storing what PR sync saw, and the PR tasks it moves (spec §8).
 
 use agentdeck_core::{
-    ChecksState, PrState, TaskId, TaskKind, TaskStatus, WorkspaceId, pr_task_status,
+    ChecksState, PrState, TaskId, TaskKind, TaskPlace, TaskStatus, WorkspaceId, pr_task_status,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -39,14 +39,31 @@ pub fn open_prs(conn: &Connection) -> Result<Vec<RemotePr>, DbError> {
     stored_where(conn, "p.state = ?1")
 }
 
-/// Every PR stored as open whose task is in the inbox, as last synced, so it can be matched
-/// to a workspace again without asking GitHub; but for those aged out, which storing would
-/// bring back.
+/// Every PR stored as open whose task PR sync may still place ([`sync_places`]), as last
+/// synced, so it can be matched to a workspace again without asking GitHub; but for those
+/// aged out, which storing would bring back.
 pub fn inbox_open(conn: &Connection) -> Result<Vec<RemotePr>, DbError> {
     stored_where(
         conn,
-        "p.state = ?1 AND t.workspace_id IS NULL AND p.aged_out_at IS NULL",
+        "p.state = ?1 AND t.workspace_id IS NULL AND p.workspace_picked_at IS NULL
+         AND p.aged_out_at IS NULL",
     )
+}
+
+/// Whether PR sync may place a PR task in the workspace its clone match found (spec §8):
+/// only while the task is in the inbox and the user hasn't picked its workspace. A user's
+/// pick, the inbox included, sticks; sync never moves the task again.
+fn sync_places(workspace: Option<WorkspaceId>, picked: bool) -> bool {
+    workspace.is_none() && !picked
+}
+
+/// Whether the user picked task `id`'s workspace.
+fn is_picked(conn: &Connection, id: TaskId) -> Result<bool, DbError> {
+    Ok(conn.query_row(
+        "SELECT workspace_picked_at IS NOT NULL FROM pull_requests WHERE task_id = ?1",
+        [id.to_string()],
+        |row| row.get(0),
+    )?)
 }
 
 /// Ages out each stored open PR of `prs` (`(repo, number)`: ones GitHub hasn't updated within
@@ -181,7 +198,7 @@ fn stored(conn: &Connection, id: TaskId) -> Result<Option<RemotePr>, DbError> {
 /// one GitHub no longer shows), in one transaction. Returns the tasks that changed.
 ///
 /// A new PR becomes a PR task; a stored one updates its row and its task. A PR task only
-/// gains a workspace while it's in the inbox, so a workspace never changes under it.
+/// gains a workspace while [`sync_places`] it, so a workspace never changes under it.
 pub fn store(
     conn: &mut Connection,
     prs: &[(RemotePr, Option<WorkspaceId>)],
@@ -259,7 +276,8 @@ fn store_one(
     };
     let status = pr_task_status(Some(before_state), pr.state).filter(|s| *s != task.status);
     let title = Some(pr.title.clone()).filter(|title| *title != task.title);
-    let workspace = workspace.filter(|_| task.workspace_id.is_none());
+    let picked = is_picked(conn, task_id)?;
+    let workspace = workspace.filter(|_| sync_places(task.workspace_id, picked));
     let pr_changed = PullRequest {
         synced_at: before.synced_at.clone(),
         ..after
@@ -276,7 +294,7 @@ fn store_one(
             title,
             body: None,
             status,
-            workspace_id: workspace,
+            workspace_id: workspace.map(TaskPlace::Workspace),
         },
     )?;
     Ok(Some(task_id))

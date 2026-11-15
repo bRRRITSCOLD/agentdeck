@@ -42,7 +42,7 @@ use crate::overview::Snapshot;
 use crate::scrollbar;
 use crate::task_list::{self, Group, Query, Scope};
 use crate::task_row;
-use crate::task_sheet::OpenTask;
+use crate::task_sheet::{EditTask, OpenTask};
 use crate::workspace::failed;
 
 /// The panel's width. Raw in Penpot too: no sizing token is 340px.
@@ -75,6 +75,7 @@ pub struct RightPanel {
 
 impl EventEmitter<NewTask> for RightPanel {}
 impl EventEmitter<OpenTask> for RightPanel {}
+impl EventEmitter<EditTask> for RightPanel {}
 
 impl RightPanel {
     /// A panel that changes statuses through `api`; it lists nothing until given a
@@ -463,7 +464,11 @@ impl Render for RightPanel {
                     }),
                 );
                 let open = Box::new(cx.listener(move |_, _, _, cx| cx.emit(OpenTask(task))));
-                let parts = close_prs::row_parts(&self.close, row, cx);
+                let view = cx.weak_entity();
+                let edit = move |_: &mut Window, cx: &mut gpui::App| {
+                    let _ = view.update(cx, |_, cx| cx.emit(EditTask(task)));
+                };
+                let parts = close_prs::row_parts(&self.close, row, edit, cx);
                 list = list.child(task_row::panel(row, picker, parts, open, spin, cx));
             }
         }
@@ -1169,6 +1174,28 @@ mod tests {
     }
 
     #[gpui::test]
+    fn should_ask_to_edit_a_task_from_its_rows_menu(cx: &mut TestAppContext) {
+        let (panel, cx) = open(cx);
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = asked.clone();
+        let _asks = cx.update(|_, cx| {
+            cx.subscribe(&panel, move |_, event: &EditTask, _| {
+                seen.borrow_mut().push(*event)
+            })
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let menu = format!("panel menu {}", id::<TaskId>(1));
+        let bounds = cx.debug_bounds(menu.leak()).expect("the row's menu shows");
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+
+        assert_eq!(*asked.borrow(), [EditTask(id(1))]);
+    }
+
+    #[gpui::test]
     fn should_ask_for_the_task_sheet_when_a_title_is_clicked(cx: &mut TestAppContext) {
         let (panel, cx) = open(cx);
         let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -1348,7 +1375,8 @@ mod tests {
             );
             assert!(
                 cx.debug_bounds(format!("panel menu {plain}").leak())
-                    .is_none()
+                    .is_some(),
+                "every row has a menu, for Edit task…"
             );
         }
 

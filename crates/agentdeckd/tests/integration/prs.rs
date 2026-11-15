@@ -636,6 +636,142 @@ mod incremental {
     }
 }
 
+mod edited_by_the_user {
+    use agentdeck_client::types::TaskPatch;
+    use agentdeck_core::TaskPlace;
+
+    use super::*;
+    use crate::support::error_response;
+
+    /// Moves `task` to `place`, as the user does in the task sheet.
+    async fn move_to(client: &Client, task: &Task, place: TaskPlace) {
+        client
+            .task_update()
+            .id(task.id)
+            .body(TaskPatch {
+                workspace_id: Some(place),
+                ..TaskPatch::default()
+            })
+            .send()
+            .await
+            .expect("move the task");
+    }
+
+    /// A daemon with PR #7 matched by a clone to the workspace it returns, after a first sync.
+    /// With `full`, every sync is a full one that lists #7 again; else later syncs are
+    /// incremental and their search shows nothing, so only matching the inbox again sees #7.
+    async fn matched(github: &MockServer, full: bool) -> (TestDaemon, Workspace) {
+        let daemon = if full {
+            mock_search(github, TOKEN, &[Pr::open(7)]);
+            full_daemon(github, Some(TOKEN)).await
+        } else {
+            mock_list(github, TOKEN, &[Pr::open(7)]);
+            mock_updated_search(github, TOKEN, &[]);
+            daemon(github, Some(TOKEN)).await
+        };
+        let dir = daemon.new_dir("ws");
+        clone_of(&dir.join("widgets"), "acme/widgets", "feat/sync");
+        let workspace = attach(&daemon.client, &dir).await;
+        sync(&daemon.client).await;
+        assert_eq!(
+            pr_tasks(&daemon.client).await[0].workspace_id,
+            Some(workspace.id)
+        );
+        (daemon, workspace)
+    }
+
+    #[tokio::test]
+    async fn should_keep_a_pr_task_the_user_moved_to_the_inbox_there_in_a_full_sync_200() {
+        let github = MockServer::start_async().await;
+        let (daemon, _) = matched(&github, true).await;
+        let task = pr_tasks(&daemon.client).await.remove(0);
+
+        move_to(&daemon.client, &task, TaskPlace::Inbox).await;
+        sync(&daemon.client).await;
+
+        assert_eq!(pr_tasks(&daemon.client).await[0].workspace_id, None);
+    }
+
+    #[tokio::test]
+    async fn should_keep_a_pr_task_the_user_moved_to_the_inbox_there_in_an_incremental_sync_200() {
+        let github = MockServer::start_async().await;
+        let (daemon, _) = matched(&github, false).await;
+        let task = pr_tasks(&daemon.client).await.remove(0);
+
+        move_to(&daemon.client, &task, TaskPlace::Inbox).await;
+        sync(&daemon.client).await;
+
+        assert_eq!(pr_tasks(&daemon.client).await[0].workspace_id, None);
+    }
+
+    #[tokio::test]
+    async fn should_keep_the_workspace_the_user_picked_200() {
+        let github = MockServer::start_async().await;
+        let (daemon, _) = matched(&github, true).await;
+        let picked = attach(&daemon.client, &daemon.new_dir("picked")).await;
+        let task = pr_tasks(&daemon.client).await.remove(0);
+
+        move_to(&daemon.client, &task, TaskPlace::Workspace(picked.id)).await;
+        sync(&daemon.client).await;
+
+        assert_eq!(
+            pr_tasks(&daemon.client).await[0].workspace_id,
+            Some(picked.id)
+        );
+    }
+
+    #[tokio::test]
+    async fn should_refuse_another_title_for_a_pr_task_400() {
+        let github = MockServer::start_async().await;
+        mock_search(&github, TOKEN, &[Pr::open(7)]);
+        let daemon = daemon(&github, Some(TOKEN)).await;
+        sync(&daemon.client).await;
+        let task = pr_tasks(&daemon.client).await.remove(0);
+
+        let (status, error) = error_response(
+            daemon
+                .client
+                .task_update()
+                .id(task.id)
+                .body(TaskPatch {
+                    title: Some("my name for it".into()),
+                    ..TaskPatch::default()
+                })
+                .send()
+                .await,
+        );
+
+        assert_eq!(status, 400);
+        assert_eq!(error.error_code.as_deref(), Some("invalid_title"));
+    }
+
+    #[tokio::test]
+    async fn should_take_a_pr_tasks_own_title_and_a_description_200() {
+        let github = MockServer::start_async().await;
+        mock_search(&github, TOKEN, &[Pr::open(7)]);
+        let daemon = daemon(&github, Some(TOKEN)).await;
+        sync(&daemon.client).await;
+        let task = pr_tasks(&daemon.client).await.remove(0);
+
+        let edited = daemon
+            .client
+            .task_update()
+            .id(task.id)
+            .body(TaskPatch {
+                title: Some(task.title.clone()),
+                body: Some("Ship after the release.".into()),
+                ..TaskPatch::default()
+            })
+            .send()
+            .await
+            .expect("edit")
+            .into_inner();
+
+        assert_eq!(edited.title, task.title);
+        assert_eq!(edited.body, "Ship after the release.");
+    }
+}
+
 mod full {
     use super::*;
 

@@ -1417,21 +1417,30 @@
             "nullable": true
           },
           "title": {
-            "description": "A new title.",
+            "description": "A new title. A PR task's title is GitHub's: only its own title is accepted.",
             "nullable": true,
             "type": "string"
           },
           "workspace_id": {
             "allOf": [
               {
-                "$ref": "#/components/schemas/WorkspaceId"
+                "$ref": "#/components/schemas/TaskPlace"
               }
             ],
-            "description": "A workspace to link.",
+            "description": "Where to move it: a workspace that isn't archived, or null for the inbox. Absent leaves it where it is.",
             "nullable": true
           }
         },
         "type": "object"
+      },
+      "TaskPlace": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/WorkspaceId"
+          }
+        ],
+        "description": "A workspace's id, or null for the inbox.",
+        "nullable": true
       },
       "TaskStatus": {
         "enum": [
@@ -2547,6 +2556,7 @@
         "summary": "One task."
       },
       "patch": {
+        "description": "`\"workspace_id\": null` moves the task to the inbox. Refuses a blank title, or another title for a PR task, whose title is its PR's (`invalid_title`), and a workspace that doesn't exist or is archived (`unknown_workspace`). A PR task's workspace set here sticks: PR sync never moves it again. Moving a task out of a linked pane's workspace unlinks the pane.",
         "operationId": "task_update",
         "parameters": [
           {

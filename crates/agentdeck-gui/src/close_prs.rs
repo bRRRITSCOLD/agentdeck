@@ -7,9 +7,10 @@
 //! ([`select_all`]) and the [`selection_bar`] along its bottom edge. The dialog renders with
 //! the [`ClosePrs`] view itself, which the list places as a child.
 //!
-//! The row's menu is on every PR row, merged and closed ones too: **Open on GitHub** first
-//! (spec §11, Opening PRs, through [`open_pr`]), then **Close PR…** after a separator when its
-//! PR can close ([`menu_entries`]).
+//! The row's menu is on every row: **Edit task…** first (spec §11, Editing a task), then on
+//! a PR row, merged and closed ones too, **Open on GitHub** (spec §11, Opening PRs, through
+//! [`open_pr`]), then **Close PR…** after a separator when its PR can close
+//! ([`menu_entries`]).
 //!
 //! Penpot "Screens" → "Inbox · select", "Inbox · row menu", "Inbox · row menu · open PR",
 //! "Tasks · row menu · merged PR", "Inbox · close confirm", "Inbox · partial failure" and
@@ -199,9 +200,12 @@ impl Target {
     }
 }
 
-/// One entry in a PR row's `…` menu (spec §11, Opening PRs and Closing PRs).
+/// One entry in a task row's `…` menu (spec §11, Editing a task, Opening PRs and Closing
+/// PRs).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuEntry {
+    /// **Edit task…**, opening the task sheet to edit the task.
+    EditTask,
     /// **Open on GitHub**, opening this URL, the PR's.
     OpenOnGitHub(SharedString),
     /// A line between the entries.
@@ -210,14 +214,15 @@ pub enum MenuEntry {
     ClosePr(Target),
 }
 
-/// `row`'s `…` menu, top to bottom: **Open on GitHub** on every PR row, whatever its PR's
-/// state; then, when its PR can close, a separator and **Close PR…**. Empty, so no menu, for
-/// a plain task and for a PR task the sync hasn't filled in.
+/// `row`'s `…` menu, top to bottom: **Edit task…** on every row; **Open on GitHub** on every
+/// PR row the sync has filled in, whatever its PR's state; then, when its PR can close, a
+/// separator and **Close PR…**.
 pub fn menu_entries(row: &Row) -> Vec<MenuEntry> {
+    let mut entries = vec![MenuEntry::EditTask];
     let Some(pr) = &row.pr else {
-        return Vec::new();
+        return entries;
     };
-    let mut entries = vec![MenuEntry::OpenOnGitHub(pr.url.clone())];
+    entries.push(MenuEntry::OpenOnGitHub(pr.url.clone()));
     if let Some(target) = Target::of(row) {
         entries.extend([MenuEntry::Separator, MenuEntry::ClosePr(target)]);
     }
@@ -603,10 +608,15 @@ pub fn select_all(close: &Entity<ClosePrs>, key: &str, tasks: Vec<TaskId>, cx: &
 }
 
 /// `row`'s `Select` and `Menu` layers and its close error: a checkbox in Select mode, only when
-/// its PR can close, and on every PR row a `…` menu of its [`menu_entries`]: **Open on
-/// GitHub**, then **Close PR…** after a separator when its PR can close. Tests find them as
-/// `<id> select <task>` and `<id> menu <task>`.
-pub fn row_parts(close: &Entity<ClosePrs>, row: &Row, cx: &App) -> RowParts {
+/// its PR can close, and on every row a `…` menu of its [`menu_entries`]: **Edit task…**,
+/// which calls `on_edit`; on a PR row **Open on GitHub**, then **Close PR…** after a separator
+/// when its PR can close. Tests find them as `<id> select <task>` and `<id> menu <task>`.
+pub fn row_parts(
+    close: &Entity<ClosePrs>,
+    row: &Row,
+    on_edit: impl Fn(&mut Window, &mut App) + 'static,
+    cx: &App,
+) -> RowParts {
     let state = close.read(cx);
     let id = state.id;
     let task = row.id;
@@ -632,25 +642,34 @@ pub fn row_parts(close: &Entity<ClosePrs>, row: &Row, cx: &App) -> RowParts {
         }
     };
     let error = state.selection.error(task).cloned();
-    let entries = menu_entries(row);
-    let menu = (!entries.is_empty()).then(|| {
+    let on_edit = std::rc::Rc::new(on_edit);
+    let menu = {
         let content =
-            (entries.into_iter()).fold(DropdownMenuContent::new(), |content, entry| match entry {
-                MenuEntry::OpenOnGitHub(url) => content.item(
-                    DropdownMenuItem::new("Open on GitHub")
-                        .on_click(move |_, window, cx| open_pr::open(&url, window, cx)),
-                ),
-                MenuEntry::Separator => content.separator(DropdownMenuSeparator::new()),
-                MenuEntry::ClosePr(target) => {
-                    let close = close.clone();
-                    content.item(
-                        DropdownMenuItem::new("Close PR…")
-                            .variant(DropdownMenuItemVariant::Destructive)
-                            .on_click(move |_, window, cx| {
-                                let target = target.clone();
-                                close.update(cx, |close, cx| close.ask_one(target, window, cx));
-                            }),
-                    )
+            (menu_entries(row).into_iter()).fold(DropdownMenuContent::new(), |content, entry| {
+                match entry {
+                    MenuEntry::EditTask => {
+                        let on_edit = on_edit.clone();
+                        content.item(
+                            DropdownMenuItem::new("Edit task…")
+                                .on_click(move |_, window, cx| on_edit(window, cx)),
+                        )
+                    }
+                    MenuEntry::OpenOnGitHub(url) => content.item(
+                        DropdownMenuItem::new("Open on GitHub")
+                            .on_click(move |_, window, cx| open_pr::open(&url, window, cx)),
+                    ),
+                    MenuEntry::Separator => content.separator(DropdownMenuSeparator::new()),
+                    MenuEntry::ClosePr(target) => {
+                        let close = close.clone();
+                        content.item(
+                            DropdownMenuItem::new("Close PR…")
+                                .variant(DropdownMenuItemVariant::Destructive)
+                                .on_click(move |_, window, cx| {
+                                    let target = target.clone();
+                                    close.update(cx, |close, cx| close.ask_one(target, window, cx));
+                                }),
+                        )
+                    }
                 }
             });
         div()
@@ -666,7 +685,7 @@ pub fn row_parts(close: &Entity<ClosePrs>, row: &Row, cx: &App) -> RowParts {
                     .content(content),
             )
             .into_any_element()
-    });
+    };
     RowParts {
         select,
         menu,
@@ -815,10 +834,11 @@ mod tests {
         }
 
         #[test]
-        fn should_offer_open_then_close_on_an_open_pr() {
+        fn should_offer_edit_open_then_close_on_an_open_pr() {
             assert_eq!(
                 menu(pr_task(1, "acme/widgets", PrState::Open, None)),
                 [
+                    MenuEntry::EditTask,
                     open_on_github(1),
                     MenuEntry::Separator,
                     MenuEntry::ClosePr(Target {
@@ -831,21 +851,21 @@ mod tests {
         }
 
         #[test]
-        fn should_offer_only_open_on_a_merged_or_closed_pr() {
+        fn should_offer_edit_and_open_on_a_merged_or_closed_pr() {
             assert_eq!(
                 menu(pr_task(2, "acme/widgets", PrState::Merged, None)),
-                [open_on_github(2)]
+                [MenuEntry::EditTask, open_on_github(2)]
             );
             assert_eq!(
                 menu(pr_task(3, "acme/widgets", PrState::Closed, None)),
-                [open_on_github(3)]
+                [MenuEntry::EditTask, open_on_github(3)]
             );
         }
 
         #[test]
-        fn should_offer_nothing_on_a_plain_task_or_an_unsynced_pr() {
-            assert_eq!(menu(task(4, TaskKind::Plain, None)), []);
-            assert_eq!(menu(task(5, TaskKind::Pr, None)), []);
+        fn should_offer_only_edit_on_a_plain_task_or_an_unsynced_pr() {
+            assert_eq!(menu(task(4, TaskKind::Plain, None)), [MenuEntry::EditTask]);
+            assert_eq!(menu(task(5, TaskKind::Pr, None)), [MenuEntry::EditTask]);
         }
     }
 

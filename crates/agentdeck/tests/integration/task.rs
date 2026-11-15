@@ -1,4 +1,4 @@
-//! `agentdeck task ls | add | set | show`.
+//! `agentdeck task ls | add | set | edit | show`.
 
 use crate::support::{TestEnv, text};
 
@@ -90,6 +90,81 @@ mod task_set {
 
         assert_eq!(text(&set, "status"), "done");
         assert!(set["done_at"].is_string());
+    }
+}
+
+mod task_edit {
+    use super::*;
+
+    #[test]
+    fn should_change_the_title_and_body() {
+        let env = TestEnv::new();
+        let task = env.json(&["task", "add", "Fix the build"]);
+
+        let edited = env.json(&[
+            "task",
+            "edit",
+            text(&task, "id"),
+            "--title",
+            "Fix the release build",
+            "--body",
+            "Only the release profile fails.",
+        ]);
+
+        assert_eq!(text(&edited, "title"), "Fix the release build");
+        assert_eq!(text(&edited, "body"), "Only the release profile fails.");
+    }
+
+    #[test]
+    fn should_move_a_task_to_a_workspace_and_back_to_the_inbox() {
+        let env = TestEnv::new();
+        let ws = env.workspace("web");
+        let task = env.json(&["task", "add", "Fix the build"]);
+
+        let moved = env.json(&["task", "edit", text(&task, "id"), "--ws", "web"]);
+        let back = env.json(&["task", "edit", text(&task, "id"), "--inbox"]);
+
+        assert_eq!(moved["workspace_id"], ws["id"]);
+        assert!(back["workspace_id"].is_null(), "{back}");
+        assert_eq!(
+            env.json(&["task", "ls", "--inbox"])
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn should_print_the_task_as_show_does() {
+        let env = TestEnv::new();
+        let task = env.json(&["task", "add", "Fix the build"]);
+
+        let stdout = env.ok(&["task", "edit", text(&task, "id"), "--title", "Ship it"]);
+
+        assert!(stdout.starts_with("Ship it\n"), "{stdout}");
+        assert!(stdout.contains("workspace: inbox"), "{stdout}");
+    }
+
+    #[test]
+    fn should_fail_for_a_blank_title() {
+        let env = TestEnv::new();
+        let task = env.json(&["task", "add", "Fix the build"]);
+
+        let stderr = env.fails(&["task", "edit", text(&task, "id"), "--title", " "]);
+
+        assert!(stderr.contains("(invalid_title)"), "{stderr}");
+    }
+
+    #[test]
+    fn should_fail_for_an_archived_workspace() {
+        let env = TestEnv::new();
+        env.workspace("old");
+        env.ok(&["ws", "archive", "old"]);
+        let task = env.json(&["task", "add", "Fix the build"]);
+
+        let stderr = env.fails(&["task", "edit", text(&task, "id"), "--ws", "old"]);
+
+        assert!(stderr.contains("(unknown_workspace)"), "{stderr}");
     }
 }
 

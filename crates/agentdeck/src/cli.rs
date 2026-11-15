@@ -143,6 +143,26 @@ pub enum TaskCommand {
         #[arg(long, value_name = "S")]
         status: TaskStatus,
     },
+    /// Change a task's title, body or workspace. A PR task's title is its PR's.
+    #[command(group(
+        ArgGroup::new("change").required(true).multiple(true).args(["title", "body", "ws", "inbox"])
+    ))]
+    Edit {
+        /// The task's id.
+        id: TaskId,
+        /// A new title.
+        #[arg(long, value_name = "T")]
+        title: Option<String>,
+        /// A new body.
+        #[arg(long, value_name = "B")]
+        body: Option<String>,
+        /// Move it to this workspace.
+        #[arg(long, value_name = "WS")]
+        ws: Option<String>,
+        /// Move it to the inbox.
+        #[arg(long, conflicts_with = "ws")]
+        inbox: bool,
+    },
     /// Show one task.
     Show {
         /// The task's id.
@@ -347,6 +367,31 @@ mod tests {
         #[test]
         fn should_require_a_status_to_set() {
             assert!(parse(&["task", "set", TASK]).is_err());
+        }
+
+        #[test]
+        fn should_edit_a_title_and_a_workspace() {
+            let cli = parse(&["task", "edit", TASK, "--title", "t", "--ws", "web"]).unwrap();
+
+            let Command::Task(TaskCommand::Edit {
+                title, ws, inbox, ..
+            }) = cli.command
+            else {
+                panic!("not task edit: {:?}", cli.command);
+            };
+            assert_eq!(title.as_deref(), Some("t"));
+            assert_eq!(ws.as_deref(), Some("web"));
+            assert!(!inbox);
+        }
+
+        #[test]
+        fn should_need_something_to_edit() {
+            assert!(parse(&["task", "edit", TASK]).is_err());
+        }
+
+        #[test]
+        fn should_not_move_to_a_workspace_and_the_inbox_at_once() {
+            assert!(parse(&["task", "edit", TASK, "--ws", "web", "--inbox"]).is_err());
         }
     }
 
