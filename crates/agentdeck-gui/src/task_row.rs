@@ -1,6 +1,7 @@
-//! Penpot's page parts for task lists: `TaskRow` (its `wide` layout), `GroupHeader` and
-//! `Checks`, drawn from a [`task_list::Row`](crate::task_list::Row). The Tasks view and the
-//! Inbox lay them out, each as its [`Table`]; their column widths are [`Columns`]'s.
+//! Penpot's page parts for task lists, `TaskRow` (its `wide` layout) and `GroupHeader`, drawn
+//! from a [`task_list::Row`](crate::task_list::Row), with core-gpui's `Checks` for a PR's
+//! checks. The Tasks view and the Inbox lay them out, each as its [`Table`]; their column
+//! widths are [`Columns`]'s.
 //!
 //! In Select mode (spec §11, Closing PRs) a row and a group header start with their `Select`
 //! layer, a [`SelectCell`]; a row whose PR can close ends with its `Menu` layer. A row with
@@ -11,18 +12,19 @@
 
 use agentdeck_core::{ChecksState, ReviewState, TaskKind, TaskStatus};
 use brrritscold_core_gpui::{
-    ActiveTheme as _, Badge, BadgeVariant, Icon, IconName, Select, SelectContent, SelectItem,
-    SelectTrigger, SelectTriggerSize, Tooltip, TooltipContent,
+    ActiveTheme as _, Badge, BadgeVariant, Checks, ChecksState as UiChecksState, Icon, IconName,
+    Select, SelectContent, SelectItem, SelectTrigger, SelectTriggerSize, StateDot, Tooltip,
+    TooltipContent,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, Div, ElementId, Hsla, InteractiveElement as _, IntoElement, ListAlignment,
+    AnyElement, App, Div, ElementId, InteractiveElement as _, IntoElement, ListAlignment,
     ListState, MouseButton, ParentElement as _, Pixels, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, canvas, div, px,
 };
 
-use crate::state_dot::{StateDot, StateDotState};
+use crate::state_dot;
 use crate::task_list::Row;
 
 /// How far past the viewport a list draws, so a short scroll shows rows at once.
@@ -457,23 +459,25 @@ pub fn group_header(
         .into_any_element()
 }
 
-/// Penpot `Checks`: an icon and, unless `icon_only` (the panel's), a word, in the checks
-/// colour (spec §11).
-pub fn checks(state: ChecksState, icon_only: bool, cx: &App) -> Div {
-    let s = cx.theme().semantic();
-    let (icon, label, color): (IconName, &str, Hsla) = match state {
-        ChecksState::Success => (IconName::CircleCheck, "passing", s.success),
-        ChecksState::Pending => (IconName::LoaderCircle, "running", s.info),
-        ChecksState::Failure => (IconName::OctagonX, "failing", s.destructive),
-    };
-    div()
-        .flex()
-        .items_center()
-        .gap(space::S1)
-        .text_size(font_size::XS)
-        .text_color(color)
-        .child(Icon::new(icon).size(px(14.)).text_color(color))
-        .when(!icon_only, |c| c.child(label))
+/// core-gpui's `Checks` state for a PR's checks, and the word beside it (spec §11).
+fn checks_mark(state: ChecksState) -> (UiChecksState, &'static str) {
+    match state {
+        ChecksState::Success => (UiChecksState::Success, "passing"),
+        ChecksState::Pending => (UiChecksState::Pending, "running"),
+        ChecksState::Failure => (UiChecksState::Failure, "failing"),
+    }
+}
+
+/// Penpot `Checks`: the icon and its word, as the Tasks view, the Inbox and the task sheet
+/// show a PR's checks. Running checks turn only while `spin`: the window is active.
+pub fn checks(state: ChecksState, spin: bool) -> Checks {
+    let (mark, word) = checks_mark(state);
+    Checks::new(mark).label(word).spin(spin)
+}
+
+/// Penpot `Checks` as the right panel shows it: the icon alone.
+fn checks_icon(state: ChecksState, spin: bool) -> Checks {
+    Checks::new(checks_mark(state).0).spin(spin)
 }
 
 /// The review cell: a badge in the review colour (spec §11), or muted text while one is
@@ -574,13 +578,15 @@ fn unseen_mark(row: &Row, cx: &App) -> Option<Div> {
 /// agent, PR, draft, checks, review, workspace and its `Menu` layer, `space.3` apart, padded
 /// `space.2`; `layout`'s columns only. `picker` is the row's status picker; clicking the
 /// title runs `on_open`. The title cell ends with the [`unseen_mark`] while the task's agent
-/// comments are unseen. Tests find a cell as `<column> <id>`.
+/// comments are unseen. A working agent's mark and running checks turn only while `spin`,
+/// which the caller sets while its window is active. Tests find a cell as `<column> <id>`.
 pub fn wide(
     row: &Row,
     picker: Select,
     layout: Layout,
     parts: RowParts,
     on_open: OnOpen,
+    spin: bool,
     cx: &App,
 ) -> AnyElement {
     let s = cx.theme().semantic();
@@ -600,7 +606,7 @@ pub fn wide(
     let agent_cell = cell(Columns::AGENT).debug_selector(move || format!("agent {id}"));
     let agent = match &row.agent {
         Some(agent) => agent_cell
-            .child(StateDot::new().state(StateDotState::of(agent.state, None)))
+            .child(StateDot::new(state_dot::of(agent.state, None)).spin(spin))
             .child(muted(agent.name.clone(), font_size::XS)),
         None => agent_cell.child(none(cx)),
     };
@@ -644,7 +650,7 @@ pub fn wide(
                 cell(Columns::CHECKS)
                     .debug_selector(move || format!("checks {id}"))
                     .when_some(pr.and_then(|pr| pr.checks), |c, state| {
-                        c.child(checks(state, false, cx))
+                        c.child(checks(state, spin))
                     }),
             )
         })
@@ -688,8 +694,16 @@ pub fn wide(
 /// its `Menu` layer on top; the status picker, then the checks icon and the review badge
 /// below. Padded `space.2`, the two lines `space.1-5` apart. Clicking the title runs
 /// `on_open`. The [`unseen_mark`] sits just before the agents' mark while the task's agent
-/// comments are unseen. Tests find the agents' mark as `panel agent <id>`.
-pub fn panel(row: &Row, picker: Select, parts: RowParts, on_open: OnOpen, cx: &App) -> AnyElement {
+/// comments are unseen. The agents' mark and the checks turn only while `spin`, as in
+/// [`wide`]. Tests find the agents' mark as `panel agent <id>`.
+pub fn panel(
+    row: &Row,
+    picker: Select,
+    parts: RowParts,
+    on_open: OnOpen,
+    spin: bool,
+    cx: &App,
+) -> AnyElement {
     let s = cx.theme().semantic();
     let kind_icon = match row.kind {
         TaskKind::Plain => IconName::ListTodo,
@@ -744,7 +758,7 @@ pub fn panel(row: &Row, picker: Select, parts: RowParts, on_open: OnOpen, cx: &A
                         div()
                             .debug_selector(move || format!("panel agent {id}"))
                             .flex_none()
-                            .child(StateDot::new().state(StateDotState::of(agent.state, None))),
+                            .child(StateDot::new(state_dot::of(agent.state, None)).spin(spin)),
                     )
                 })
                 .children(parts.menu),
@@ -758,7 +772,7 @@ pub fn panel(row: &Row, picker: Select, parts: RowParts, on_open: OnOpen, cx: &A
                 .child(picker)
                 .child(div().flex_1())
                 .when_some(pr.and_then(|pr| pr.checks), |meta, state| {
-                    meta.child(checks(state, true, cx))
+                    meta.child(checks_icon(state, spin))
                 })
                 .when_some(pr.and_then(|pr| pr.review), |meta, state| {
                     meta.child(review(state, cx))
@@ -843,6 +857,65 @@ mod tests {
                 let layout = Table::Inbox.fit(px(891.), select);
                 assert!(layout.checks && layout.review, "{layout:?}");
             }
+        }
+    }
+
+    mod checks {
+        use gpui::TestAppContext;
+
+        use super::*;
+        use crate::state_dot::tests::{host, redraws_in_one_second};
+
+        #[test]
+        fn should_give_each_state_its_library_state_and_word() {
+            assert_eq!(
+                checks_mark(ChecksState::Success),
+                (UiChecksState::Success, "passing")
+            );
+            assert_eq!(
+                checks_mark(ChecksState::Pending),
+                (UiChecksState::Pending, "running")
+            );
+            assert_eq!(
+                checks_mark(ChecksState::Failure),
+                (UiChecksState::Failure, "failing")
+            );
+        }
+
+        #[gpui::test]
+        fn should_spin_running_checks(cx: &mut TestAppContext) {
+            let (row, cx) = host(
+                |_| checks(ChecksState::Pending, true).into_any_element(),
+                cx,
+            );
+            assert!(redraws_in_one_second(&row, cx) > 0);
+        }
+
+        #[gpui::test]
+        fn should_hold_passing_checks_still(cx: &mut TestAppContext) {
+            let (row, cx) = host(
+                |_| checks_icon(ChecksState::Success, true).into_any_element(),
+                cx,
+            );
+            assert_eq!(redraws_in_one_second(&row, cx), 0);
+        }
+
+        #[gpui::test]
+        fn should_hold_running_checks_still_without_spin(cx: &mut TestAppContext) {
+            let (row, cx) = host(
+                |_| checks(ChecksState::Pending, false).into_any_element(),
+                cx,
+            );
+            assert_eq!(redraws_in_one_second(&row, cx), 0);
+        }
+
+        #[gpui::test]
+        fn should_hold_the_panels_running_checks_still_without_spin(cx: &mut TestAppContext) {
+            let (row, cx) = host(
+                |_| checks_icon(ChecksState::Pending, false).into_any_element(),
+                cx,
+            );
+            assert_eq!(redraws_in_one_second(&row, cx), 0);
         }
     }
 }

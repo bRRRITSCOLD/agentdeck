@@ -15,7 +15,7 @@ use agentdeck_core::ws::ServerMessage;
 use agentdeck_core::{AgentState, WorkspaceId};
 use brrritscold_core_gpui::{
     ActiveTheme as _, Button, ButtonSize, ButtonVariant, Icon, IconName, Separator, Sidebar,
-    SidebarMenuButton,
+    SidebarMenuButton, StateDot, StateDotState,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
@@ -32,7 +32,7 @@ use crate::notifications::{self, Alert, PrBatch};
 use crate::overview::{Counts, Overview, Snapshot, WorkspaceRow};
 use crate::rereads::Rereads;
 use crate::scrollbar;
-use crate::state_dot::{StateDot, StateDotState};
+use crate::state_dot;
 use crate::task_row;
 
 /// The sidebar's width. Raw in Penpot too: no sizing token is 260px.
@@ -267,7 +267,9 @@ impl SidebarView {
             Lead::Icon(icon) => (button.icon(icon), None),
             // The menu button takes an icon, not a part, so the StateDot sits over the gap a
             // 16px icon would leave.
-            Lead::Dot(state) => (button.pl(space::S8), Some(state)),
+            Lead::Dot { state, spin } => {
+                (button.pl(space::S8), Some(StateDot::new(state).spin(spin)))
+            }
         };
         div()
             .id(id)
@@ -278,14 +280,8 @@ impl SidebarView {
             .relative()
             .flex_none()
             .child(button)
-            .when_some(dot, |row, state| {
-                row.child(
-                    div()
-                        .absolute()
-                        .left(space::S2)
-                        .top(space::S2)
-                        .child(StateDot::new().state(state)),
-                )
+            .when_some(dot, |row, dot| {
+                row.child(div().absolute().left(space::S2).top(space::S2).child(dot))
             })
             .when(has_counts, |row| {
                 let bell = format!("muted {name}");
@@ -334,7 +330,11 @@ impl SidebarView {
 /// What sits at a row's left end.
 enum Lead {
     Icon(IconName),
-    Dot(StateDotState),
+    /// A `StateDot`, turning only while `spin`.
+    Dot {
+        state: StateDotState,
+        spin: bool,
+    },
 }
 
 impl EventEmitter<SidebarEvent> for SidebarView {}
@@ -342,8 +342,10 @@ impl EventEmitter<SidebarEvent> for SidebarView {}
 impl EventEmitter<Alerts> for SidebarView {}
 
 impl Render for SidebarView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
+        // A turning mark redraws the window, so it holds still while the window is inactive.
+        let spin = window.is_window_active();
         // Penpot's `Section` and `Footer`: xs muted text, inset 8px across and 4px down.
         let small = || {
             div()
@@ -376,7 +378,10 @@ impl Render for SidebarView {
                 ElementId::Name(format!("workspace-{}", w.id).into()),
                 Selection::Workspace(w.id),
                 w.name,
-                Lead::Dot(StateDotState::of(w.state, None)),
+                Lead::Dot {
+                    state: state_dot::of(w.state, None),
+                    spin,
+                },
                 w.counts,
                 cx,
             )
@@ -681,6 +686,28 @@ mod tests {
             assert!(open.shows("counts a"));
             assert!(!open.shows("counts b"));
             assert!(!open.shows("counts inbox"));
+        }
+    }
+
+    mod spin {
+        use super::*;
+        use crate::state_dot::tests::{activate, deactivate, redraws_in_one_second};
+
+        #[gpui::test]
+        fn should_spin_a_working_workspaces_mark_while_the_window_is_active(
+            cx: &mut TestAppContext,
+        ) {
+            let open = open(two_workspaces(), cx);
+            activate(open.cx);
+            assert!(redraws_in_one_second(&open.sidebar, open.cx) > 0);
+        }
+
+        #[gpui::test]
+        fn should_hold_it_still_while_the_window_is_inactive(cx: &mut TestAppContext) {
+            let open = open(two_workspaces(), cx);
+            activate(open.cx);
+            deactivate(open.cx);
+            assert_eq!(redraws_in_one_second(&open.sidebar, open.cx), 0);
         }
     }
 

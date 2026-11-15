@@ -2,14 +2,16 @@
 //! terminal (spec §11). Penpot's page "Screens" board "Pane states" shows each state.
 
 use agentdeck_core::AgentState;
-use brrritscold_core_gpui::{ActiveTheme as _, Badge, BadgeVariant, DropdownMenu, Icon, IconName};
+use brrritscold_core_gpui::{
+    ActiveTheme as _, Badge, BadgeVariant, DropdownMenu, Icon, IconName, StateDot, StateDotState,
+};
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _, Window, div,
 };
 
-use crate::state_dot::{StateDot, StateDotState};
+use crate::state_dot;
 use crate::terminal::SYMBOL_FAMILIES;
 
 /// A stretch of a title, and whether it is symbols to set in the symbol font.
@@ -61,7 +63,7 @@ pub fn symbol_runs(text: &str) -> Vec<gpui::Div> {
 /// The `StateBadge` part's variant and label for a pane in `state`; `exit_code` tells a
 /// failed exit from a clean one and is shown when known.
 pub fn state_badge(state: AgentState, exit_code: Option<i64>) -> (BadgeVariant, SharedString) {
-    let variant = match StateDotState::of(state, exit_code) {
+    let variant = match state_dot::of(state, exit_code) {
         StateDotState::Working => BadgeVariant::Info,
         StateDotState::Blocked | StateDotState::ExitedError => BadgeVariant::Destructive,
         StateDotState::Done => BadgeVariant::Success,
@@ -120,9 +122,12 @@ impl PaneHeader {
 }
 
 impl RenderOnce for PaneHeader {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let s = cx.theme().semantic();
         let (variant, label) = state_badge(self.state, self.exit_code);
+        // A turning mark redraws the window, so it holds still while the window is inactive.
+        let dot = StateDot::new(state_dot::of(self.state, self.exit_code))
+            .spin(window.is_window_active());
         let title = symbol_runs(&self.title);
         // Penpot: `card`, 36px high (raw in Penpot too), px `space.3`, `space.2` apart. The
         // pane's corners clip it there; GPUI doesn't clip to a radius, so it rounds its own top.
@@ -135,7 +140,7 @@ impl RenderOnce for PaneHeader {
             .px(space::S3)
             .rounded_t(s.radius_md)
             .bg(s.card)
-            .child(StateDot::new().state(StateDotState::of(self.state, self.exit_code)))
+            .child(dot)
             // Penpot `Title`: sm, medium, `foreground`.
             .child(
                 div()
@@ -267,6 +272,32 @@ mod tests {
                 state_badge(AgentState::Exited, None),
                 (BadgeVariant::Outline, "exited".into())
             );
+        }
+    }
+
+    mod spin {
+        use gpui::{AnyElement, TestAppContext};
+
+        use super::*;
+        use crate::state_dot::tests::{deactivate, host, redraws_in_one_second};
+
+        fn working(_: &Window) -> AnyElement {
+            PaneHeader::new("claude")
+                .state(AgentState::Working, None)
+                .into_any_element()
+        }
+
+        #[gpui::test]
+        fn should_spin_a_working_agents_mark_while_the_window_is_active(cx: &mut TestAppContext) {
+            let (header, cx) = host(working, cx);
+            assert!(redraws_in_one_second(&header, cx) > 0);
+        }
+
+        #[gpui::test]
+        fn should_hold_it_still_while_the_window_is_inactive(cx: &mut TestAppContext) {
+            let (header, cx) = host(working, cx);
+            deactivate(cx);
+            assert_eq!(redraws_in_one_second(&header, cx), 0);
         }
     }
 }

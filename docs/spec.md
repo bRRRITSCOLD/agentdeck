@@ -435,9 +435,10 @@ Built on `brrritscold-core-gpui` (`init`, `Root`, theme preference, toasts). Scr
       - A click runs `terminal.file_opener` (§2) with `{path}` the absolute path and `{line}` / `{col}` from the text, `1` when it has none. The command is split into words before the placeholders are filled, and started straight from those words, never through a shell, detached in its own process group, from the GUI's process, on the user's desktop. A command that doesn't start toasts "Couldn't open <file name>" with why.
   - Input methods and dead keys: a composition shows underlined at the cursor, and only committed text reaches the pane. The candidate window opens at the cursor.
 - **Colours** use semantic tokens only.
-  - Agent state: working `info`, blocked `destructive`, done `success`, idle/unknown/exited-0 `muted-foreground`, exited ≠ 0 `destructive`.
+  - Agent state is core-gpui's `StateDot`: working `info`, blocked `destructive`, done `success`, idle/unknown/exited (code 0, or none read) `muted-foreground`, exited-error (any other code) `destructive`. Working's `LoaderCircle` spins.
   - Blocked and a failed exit share red, as in herdr: the label (`blocked` vs `exited 1`) and the StateDot shape (a filled dot vs a red `OctagonX`) tell them apart, so colour is never the only signal.
-  - Checks: passing `success`, pending `info`, failing `destructive`.
+  - Checks are core-gpui's `Checks`, with the word ("passing", "running", "failing") except in the right panel, which shows the icon alone: passing `success`, pending `info`, failing `destructive`. Pending's `LoaderCircle` spins.
+  - A spinning `LoaderCircle` steps 15 times a second, and each step redraws the window. Spinners stop while the window is inactive, drawn at rest, and start again when it's focused, so an unfocused window with working agents costs next to no CPU.
   - Review: approved `success`, changes requested `warning`, required `muted-foreground`.
   - Task statuses aren't coloured.
   - The terminal palette follows the theme. Terminal text is JetBrains Mono (`font-family.mono`).

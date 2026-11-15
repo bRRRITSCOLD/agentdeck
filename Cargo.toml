@@ -18,10 +18,10 @@ agentdeck-notify = { path = "crates/agentdeck-notify" }
 
 # rust-packages: every brrritscold-* crate at the same tag. A bump is one commit: the new tag
 # plus the GPUI pin block below copied from that tag's Cargo.toml.
-brrritscold-core-gpui = { git = "https://github.com/bRRRITSCOLD/rust-packages", tag = "v0.1.3" }
-brrritscold-core-gpui-tokens = { git = "https://github.com/bRRRITSCOLD/rust-packages", tag = "v0.1.3" }
+brrritscold-core-gpui = { git = "https://github.com/bRRRITSCOLD/rust-packages", tag = "v0.1.5" }
+brrritscold-core-gpui-tokens = { git = "https://github.com/bRRRITSCOLD/rust-packages", tag = "v0.1.5" }
 
-# The GPUI pin, copied as-is from rust-packages v0.1.3's Cargo.toml. `gpui-base` is the one
+# The GPUI pin, copied as-is from rust-packages v0.1.5's Cargo.toml. `gpui-base` is the one
 # choice; every gpui-pre* line is derived from its `=` requirements. If these drift from the
 # tag's, Cargo fails to resolve two `=` pins, and that error is the guard.
 gpui-base = "=0.9.1"

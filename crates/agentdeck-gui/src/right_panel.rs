@@ -359,8 +359,10 @@ impl RightPanel {
 }
 
 impl Render for RightPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
+        // A turning mark redraws the window, so it holds still while the window is inactive.
+        let spin = window.is_window_active();
         // Instructions first: the header with its `+`, each instruction, then Penpot
         // `NewInstruction`.
         let mut list = div()
@@ -462,7 +464,7 @@ impl Render for RightPanel {
                 );
                 let open = Box::new(cx.listener(move |_, _, _, cx| cx.emit(OpenTask(task))));
                 let parts = close_prs::row_parts(&self.close, row, cx);
-                list = list.child(task_row::panel(row, picker, parts, open, cx));
+                list = list.child(task_row::panel(row, picker, parts, open, spin, cx));
             }
         }
         // Penpot `ShowDone`: a link button at xs, at the start of its row, after the groups.
@@ -1363,6 +1365,39 @@ mod tests {
             });
             assert_eq!(picked, [id(5)]);
             assert!(!panel.read_with(cx, |panel, _| panel.is_collapsed(TaskStatus::Review)));
+        }
+    }
+
+    mod spin {
+        use super::*;
+        use crate::state_dot::tests::{activate, deactivate, redraws_in_one_second};
+
+        /// Opens the panel on workspace 1, whose doing task an agent is working on.
+        fn working(cx: &mut TestAppContext) -> (Entity<RightPanel>, &mut VisualTestContext) {
+            let (panel, cx) = open(cx);
+            panel.update(cx, |p, cx| {
+                let mut snapshot = snapshot();
+                snapshot.panes.push(PaneState {
+                    task: Some(id(1)),
+                    ..pane(10, snapshot.workspaces[0].id, AgentState::Working)
+                });
+                p.show(id(1), snapshot, cx);
+            });
+            activate(cx);
+            (panel, cx)
+        }
+
+        #[gpui::test]
+        fn should_spin_a_working_agents_mark_while_the_window_is_active(cx: &mut TestAppContext) {
+            let (panel, cx) = working(cx);
+            assert!(redraws_in_one_second(&panel, cx) > 0);
+        }
+
+        #[gpui::test]
+        fn should_hold_it_still_while_the_window_is_inactive(cx: &mut TestAppContext) {
+            let (panel, cx) = working(cx);
+            deactivate(cx);
+            assert_eq!(redraws_in_one_second(&panel, cx), 0);
         }
     }
 }
