@@ -179,7 +179,7 @@ impl Shell {
                     let api = session.api.clone();
                     let connection = self.connection.clone();
                     let dialog = cx.new(|cx| NewWorkspaceDialog::new(api.clone(), window, cx));
-                    let inbox = cx.new(|_| InboxView::new(api.clone()));
+                    let inbox = cx.new(|cx| InboxView::new(api.clone(), cx));
                     let new_agent = cx.new(|_| NewAgentDialog::new(api.clone()));
                     let link_task = cx.new(|_| LinkTaskDialog::new(api.clone()));
                     let delete = cx.new(|cx| DeleteWorkspaceDialog::new(api.clone(), window, cx));

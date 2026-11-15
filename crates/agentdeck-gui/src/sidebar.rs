@@ -396,6 +396,7 @@ impl Render for SidebarView {
                 "Archived",
                 self.overview.archived.len(),
                 !shown,
+                task_row::SelectCell::Off,
                 cx.listener(|this, _, _, cx| {
                     this.archived_open = !this.archived_open;
                     cx.notify();

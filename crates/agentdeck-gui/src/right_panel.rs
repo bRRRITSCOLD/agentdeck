@@ -9,7 +9,8 @@
 //!
 //! Below a separator come the workspace's tasks and PRs, grouped by status, each with a status
 //! picker. Done tasks hide behind "Show N done". The Tasks & PRs `+` asks the window for the
-//! new task dialog on the workspace ([`NewTask`]).
+//! new task dialog on the workspace ([`NewTask`]). **Select**, before it, turns on Select mode
+//! for closing PRs ([`ClosePrs`]), with the selection bar pinned to the panel's bottom.
 //!
 //! Like the Tasks view it shows the sidebar's [`Snapshot`], passed on by the window; an
 //! instruction added here comes back through the daemon's `changed`.
@@ -24,6 +25,7 @@ use brrritscold_core_gpui::{
     IconName, Input, InputState, Separator, Textarea, TextareaState,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, ScrollHandle, SharedString,
@@ -32,6 +34,7 @@ use gpui::{
 use gpui_base::input::InputEvent;
 
 use crate::api::Api;
+use crate::close_prs::{self, ClosePrs};
 use crate::instruction_list::{self, InstructionRow, SendTarget};
 use crate::keymap::{self, CancelEdit, Submit};
 use crate::new_task::NewTask;
@@ -65,6 +68,9 @@ pub struct RightPanel {
     _editor: Option<Subscription>,
     /// Where the list is scrolled to, for its scrollbar.
     scroll: ScrollHandle,
+    /// Select mode, the selection and the confirm dialog.
+    close: Entity<ClosePrs>,
+    _close: Subscription,
 }
 
 impl EventEmitter<NewTask> for RightPanel {}
@@ -83,6 +89,8 @@ impl RightPanel {
                     this.add_instruction(window, cx);
                 }
             });
+        let close = cx.new(|_| ClosePrs::new(api.clone(), "panel"));
+        let _close = cx.observe(&close, |_, _, cx| cx.notify());
         RightPanel {
             api,
             snapshot: Snapshot::default(),
@@ -96,7 +104,15 @@ impl RightPanel {
             saving: false,
             _editor: None,
             scroll: ScrollHandle::new(),
+            close,
+            _close,
         }
+    }
+
+    /// Select mode, the selection and the confirm dialog.
+    #[cfg(test)]
+    pub fn close_prs(&self) -> &Entity<ClosePrs> {
+        &self.close
     }
 
     /// Adds the instruction typed to the workspace, then empties the field; a failure keeps
@@ -394,26 +410,41 @@ impl Render for RightPanel {
             // Then Separator, the Tasks & PRs header with its `+`, and the groups.
             .child(Separator::new().my(space::S1))
             .child(
-                section_header("Tasks & PRs", s).child(
-                    div().debug_selector(|| "add task".into()).child(
-                        Button::new("add-task")
-                            .variant(ButtonVariant::Ghost)
-                            .size(ButtonSize::IconXs)
-                            .icon(IconName::Plus)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                cx.emit(NewTask(this.workspace));
-                            })),
+                section_header("Tasks & PRs", s)
+                    .child(close_prs::select_toggle(&self.close, cx))
+                    .child(
+                        div().debug_selector(|| "add task".into()).child(
+                            Button::new("add-task")
+                                .variant(ButtonVariant::Ghost)
+                                .size(ButtonSize::IconXs)
+                                .icon(IconName::Plus)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    cx.emit(NewTask(this.workspace));
+                                })),
+                        ),
                     ),
-                ),
             );
-        for group in self.groups() {
+        let groups = self.groups();
+        let rows: Vec<_> = groups.iter().flat_map(|g| g.rows.clone()).collect();
+        let shown = close_prs::selectable(&rows);
+        self.close.update(cx, |close, cx| close.retain(&shown, cx));
+        let bar =
+            close_prs::selection_bar(&self.close, close_prs::picked(&self.close, &rows, cx), cx);
+        for group in groups {
             let status = group.status;
             let collapsed = self.is_collapsed(status);
+            let select = close_prs::select_all(
+                &self.close,
+                status.as_str(),
+                close_prs::selectable(&group.rows),
+                cx,
+            );
             list = list.child(task_row::group_header(
                 status.to_string(),
                 task_row::status_label(status),
                 group.rows.len(),
                 collapsed,
+                select,
                 cx.listener(move |this, _, _, cx| this.toggle(status, cx)),
                 cx,
             ));
@@ -430,7 +461,8 @@ impl Render for RightPanel {
                     }),
                 );
                 let open = Box::new(cx.listener(move |_, _, _, cx| cx.emit(OpenTask(task))));
-                list = list.child(task_row::panel(row, picker, open, cx));
+                let parts = close_prs::row_parts(&self.close, row, cx);
+                list = list.child(task_row::panel(row, picker, parts, open, cx));
             }
         }
         // Penpot `ShowDone`: a link button at xs, at the start of its row, after the groups.
@@ -457,18 +489,22 @@ impl Render for RightPanel {
             );
         }
         // Penpot `RightPanel`: `card`, padded `space.3` down and `space.2` across, rows
-        // `space.1` apart.
+        // `space.1` apart; in Select mode the selection bar sits on its bottom edge.
+        let selecting = bar.is_some();
         div()
             .flex_none()
             .w(px(WIDTH))
             .h_full()
             .flex()
             .flex_col()
-            .py(space::S3)
+            .pt(space::S3)
+            .when(!selecting, |panel| panel.pb(space::S3))
             .px(space::S2)
             .bg(s.card)
             .child(list)
             .child(scrollbar::vertical(&self.scroll, cx))
+            .children(bar)
+            .child(self.close.clone())
     }
 }
 
@@ -1241,6 +1277,91 @@ mod tests {
 
             let list = cx.debug_bounds("panel list").expect("the list");
             assert_eq!(thumb(list, cx), None);
+        }
+    }
+
+    mod closing_prs {
+        use agentdeck_core::PrState;
+
+        use super::*;
+        use crate::overview::fixtures::pr_task;
+
+        /// Workspace 1 with an open PR 5 and a plain task 6, both in review, and a todo task.
+        fn with_prs(panel: &Entity<RightPanel>, cx: &mut VisualTestContext) {
+            let mut snapshot = snapshot();
+            let ws = Some(id(1));
+            snapshot
+                .tasks
+                .push(pr_task(5, "acme/widgets", PrState::Open, ws));
+            snapshot.tasks.push(Task {
+                status: TaskStatus::Review,
+                ..task(6, TaskKind::Plain, ws)
+            });
+            panel.update(cx, |panel, cx| panel.show(id(1), snapshot, cx));
+        }
+
+        fn click(selector: &'static str, cx: &mut VisualTestContext) {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let bounds = cx.debug_bounds(selector).expect(selector);
+            cx.simulate_click(bounds.center(), Modifiers::default());
+            cx.run_until_parked();
+        }
+
+        #[gpui::test]
+        fn should_pin_the_selection_bar_to_the_panels_bottom(cx: &mut TestAppContext) {
+            let (panel, cx) = open(cx);
+            with_prs(&panel, cx);
+
+            click("panel select", cx);
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+
+            let bar = cx.debug_bounds("panel selection bar").expect("the bar");
+            let viewport = cx.update(|window, _| window.viewport_size());
+            assert_eq!(bar.bottom(), viewport.height);
+        }
+
+        #[gpui::test]
+        fn should_check_only_the_groups_and_rows_with_an_open_pr(cx: &mut TestAppContext) {
+            let (panel, cx) = open(cx);
+            with_prs(&panel, cx);
+
+            click("panel select", cx);
+
+            let task: TaskId = id(5);
+            assert!(cx.debug_bounds("panel select all review").is_some());
+            assert!(cx.debug_bounds("panel select all doing").is_none());
+            assert!(
+                cx.debug_bounds(format!("panel select {task}").leak())
+                    .is_some()
+            );
+            let plain: TaskId = id(6);
+            assert!(
+                cx.debug_bounds(format!("panel select {plain}").leak())
+                    .is_none()
+            );
+            assert!(
+                cx.debug_bounds(format!("panel menu {task}").leak())
+                    .is_some()
+            );
+            assert!(
+                cx.debug_bounds(format!("panel menu {plain}").leak())
+                    .is_none()
+            );
+        }
+
+        #[gpui::test]
+        fn should_pick_from_the_group_checkbox_without_folding_the_group(cx: &mut TestAppContext) {
+            let (panel, cx) = open(cx);
+            with_prs(&panel, cx);
+            click("panel select", cx);
+
+            click("panel select all review", cx);
+
+            let picked = panel.read_with(cx, |panel, cx| {
+                panel.close_prs().read(cx).selection().ids().to_vec()
+            });
+            assert_eq!(picked, [id(5)]);
+            assert!(!panel.read_with(cx, |panel, _| panel.is_collapsed(TaskStatus::Review)));
         }
     }
 }

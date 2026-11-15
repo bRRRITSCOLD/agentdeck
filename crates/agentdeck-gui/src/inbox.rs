@@ -9,6 +9,10 @@
 //! a sync that changes no task broadcasts nothing, yet moves the time it last ran.
 //!
 //! Its list draws only the rows in view: an inbox can hold hundreds of PRs.
+//!
+//! **Select**, before the sync label, turns on Select mode for closing PRs ([`ClosePrs`]):
+//! a checkbox on each open PR's row, one in the columns for all of them, and the selection
+//! bar along the bottom.
 
 use std::sync::Arc;
 
@@ -20,12 +24,13 @@ use brrritscold_core_gpui::{
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Context, EventEmitter, InteractiveElement as _, IntoElement, ListState,
-    ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Window, div, list,
+    AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
+    IntoElement, ListState, ParentElement as _, Pixels, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, list,
 };
 
 use crate::api::Api;
+use crate::close_prs::{self, ClosePrs};
 use crate::overview::{PrSync, Snapshot};
 use crate::task_list::{self, Query, Row, Scope};
 use crate::task_row::{self, Layout, Table};
@@ -68,6 +73,9 @@ pub struct InboxView {
     list: ListState,
     /// The columns shown, fitted to the width the table was last drawn at.
     layout: Layout,
+    /// Select mode, the selection and the confirm dialog.
+    close: Entity<ClosePrs>,
+    _close: Subscription,
 }
 
 impl EventEmitter<Synced> for InboxView {}
@@ -77,7 +85,12 @@ impl EventEmitter<OpenSettings> for InboxView {}
 impl InboxView {
     /// A view that syncs and changes statuses through `api`; it shows nothing until given a
     /// snapshot.
-    pub fn new(api: Arc<dyn Api>) -> Self {
+    pub fn new(api: Arc<dyn Api>, cx: &mut Context<Self>) -> Self {
+        let close = cx.new(|_| ClosePrs::new(api.clone(), "inbox"));
+        let _close = cx.observe(&close, |this, _, cx| {
+            this.list.remeasure();
+            cx.notify();
+        });
         InboxView {
             api,
             snapshot: Snapshot::default(),
@@ -85,14 +98,22 @@ impl InboxView {
             shown: Vec::new(),
             list: task_row::list_state(),
             layout: Table::Inbox.widest(),
+            close,
+            _close,
         }
+    }
+
+    /// Select mode, the selection and the confirm dialog.
+    #[cfg(test)]
+    pub fn close_prs(&self) -> &Entity<ClosePrs> {
+        &self.close
     }
 
     /// Fits the columns to the table's `width`, as drawn. A row's height follows its title's
     /// width, so a change measures the rows again. It runs while the frame is drawn, which
     /// ignores a notify, so the redraw is asked for once the frame is done.
     fn fit(&mut self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) {
-        let layout = Table::Inbox.fit(width);
+        let layout = Table::Inbox.fit(width, self.close.read(cx).active());
         if layout != self.layout {
             self.layout = layout;
             self.list.remeasure();
@@ -171,7 +192,27 @@ impl InboxView {
             }),
         );
         let open = Box::new(cx.listener(move |_, _, _, cx| cx.emit(OpenTask(task))));
-        task_row::spaced(task_row::wide(row, picker, self.layout, open, cx))
+        let parts = close_prs::row_parts(&self.close, row, cx);
+        task_row::spaced(task_row::wide(
+            row,
+            picker,
+            self.layout(cx),
+            parts,
+            open,
+            cx,
+        ))
+    }
+
+    /// The columns to draw: the fitted ones, in Select mode while it's on.
+    fn layout(&self, cx: &gpui::App) -> Layout {
+        let select = self.close.read(cx).active();
+        if select == self.layout.select {
+            return self.layout;
+        }
+        Layout {
+            select,
+            ..self.layout
+        }
     }
 
     /// Where PR sync stands, at `now`: how far a running sync is, whoever started it, or
@@ -193,7 +234,7 @@ impl InboxView {
             .collect()
     }
 
-    /// Penpot `Header`: heading, spacer, when PRs last synced, "Sync now".
+    /// Penpot `Header`: heading, spacer, Select, when PRs last synced, "Sync now".
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
         let synced = self.sync_label(chrono::Utc::now());
@@ -235,6 +276,7 @@ impl InboxView {
                     ),
             )
             .child(div().flex_1())
+            .child(close_prs::select_toggle(&self.close, cx))
             .child(
                 div()
                     .text_size(font_size::SM)
@@ -274,7 +316,17 @@ impl Render for InboxView {
         if rows != self.shown {
             task_row::relist(&self.list, rows.len());
             self.shown = rows;
+            let shown = close_prs::selectable(&self.shown);
+            self.close.update(cx, |close, cx| close.retain(&shown, cx));
         }
+        let layout = self.layout(cx);
+        let select_all =
+            close_prs::select_all(&self.close, "inbox", close_prs::selectable(&self.shown), cx);
+        let bar = close_prs::selection_bar(
+            &self.close,
+            close_prs::picked(&self.close, &self.shown, cx),
+            cx,
+        );
         let rows = div()
             .debug_selector(|| "inbox list".into())
             .flex_1()
@@ -292,7 +344,8 @@ impl Render for InboxView {
         let table = task_row::table(
             "inbox-table",
             "inbox table",
-            self.layout,
+            layout,
+            select_all,
             rows,
             &self.list,
             cx.listener(|this, width: &Pixels, window, cx| this.fit(*width, window, cx)),
@@ -340,6 +393,8 @@ impl Render for InboxView {
                         .child("Nothing in the inbox."),
                 )
             })
+            .children(bar)
+            .child(self.close.clone())
     }
 }
 
@@ -352,8 +407,8 @@ mod tests {
     use agentdeck_core::TaskKind;
     use brrritscold_core_gpui::{Root, Theme, ThemePreference};
     use gpui::{
-        AppContext as _, Entity, Modifiers, ScrollDelta, ScrollEvent, TestAppContext,
-        VisualTestContext, point, px, size,
+        Entity, Modifiers, ScrollDelta, ScrollEvent, TestAppContext, VisualTestContext, point, px,
+        size,
     };
 
     use super::*;
@@ -374,9 +429,9 @@ mod tests {
             let mut view = None;
             let window = cx.add_window(|window, cx| {
                 let api: Arc<dyn Api> = api.clone();
-                let inbox = cx.new(|_| InboxView {
+                let inbox = cx.new(|cx| InboxView {
                     snapshot,
-                    ..InboxView::new(api)
+                    ..InboxView::new(api, cx)
                 });
                 view = Some(inbox.clone());
                 Root::new(inbox, window, cx)
@@ -892,6 +947,312 @@ mod tests {
             });
             harness.draw(cx);
             assert!(thumb(table, cx).is_some(), "scrolled sideways");
+        }
+    }
+
+    mod closing_prs {
+        use agentdeck_core::PrState;
+
+        use super::*;
+        use crate::close_prs::Target;
+        use crate::overview::fixtures::pr_task;
+
+        /// Open PRs 1 and 4, merged PR 2 (still in review) and plain task 3, in the inbox.
+        fn prs() -> Snapshot {
+            Snapshot {
+                tasks: vec![
+                    pr_task(1, "acme/widgets", PrState::Open, None),
+                    pr_task(2, "acme/widgets", PrState::Merged, None),
+                    task(3, TaskKind::Plain, None),
+                    pr_task(4, "acme/gadgets", PrState::Open, None),
+                ],
+                ..Snapshot::default()
+            }
+        }
+
+        fn click(selector: String, cx: &mut VisualTestContext) {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let bounds = cx.debug_bounds(selector.clone().leak()).expect(&selector);
+            cx.simulate_click(bounds.center(), Modifiers::default());
+            cx.run_until_parked();
+        }
+
+        fn shown_at(selector: String, cx: &mut VisualTestContext) -> bool {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.debug_bounds(selector.leak()).is_some()
+        }
+
+        fn picked(harness: &Harness, cx: &mut VisualTestContext) -> Vec<TaskId> {
+            harness.view.read_with(cx, |view, cx| {
+                view.close_prs().read(cx).selection().ids().to_vec()
+            })
+        }
+
+        fn selecting(harness: &Harness, cx: &mut VisualTestContext) -> bool {
+            harness
+                .view
+                .read_with(cx, |view, cx| view.close_prs().read(cx).active())
+        }
+
+        fn asking(harness: &Harness, cx: &mut VisualTestContext) -> bool {
+            harness
+                .view
+                .read_with(cx, |view, cx| view.close_prs().read(cx).asking())
+        }
+
+        fn toasts(cx: &mut VisualTestContext) -> Vec<String> {
+            cx.update(|_, cx| crate::notice::shown(cx))
+                .into_iter()
+                .map(|notice| notice.title.to_string())
+                .collect()
+        }
+
+        fn row_selector(what: &str, task: u32) -> String {
+            format!("inbox {what} {}", id::<TaskId>(task))
+        }
+
+        /// Select mode on, PRs 1 and 4 picked from the columns' checkbox, and Close PRs…
+        /// pressed.
+        fn asked_to_close_both(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            click("inbox select".into(), cx);
+            click("inbox select all inbox".into(), cx);
+            click("inbox close prs".into(), cx);
+            (harness, cx)
+        }
+
+        #[gpui::test]
+        fn should_show_a_checkbox_only_on_open_pr_rows_in_select_mode(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open(prs(), cx);
+            assert!(!shown_at(row_selector("select", 1), cx));
+
+            click("inbox select".into(), cx);
+
+            assert!(shown_at(row_selector("select", 1), cx));
+            assert!(shown_at(row_selector("select", 4), cx));
+            assert!(!shown_at(row_selector("select", 2), cx));
+            assert!(!shown_at(row_selector("select", 3), cx));
+            assert!(shown_at("inbox selection bar".into(), cx));
+        }
+
+        #[gpui::test]
+        fn should_keep_titles_aligned_on_rows_with_nothing_to_select(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open(prs(), cx);
+            click("inbox select".into(), cx);
+
+            let left = |task: u32, cx: &mut VisualTestContext| {
+                let selector = format!("task title {}", id::<TaskId>(task));
+                cx.debug_bounds(selector.leak()).expect("a title").left()
+            };
+            assert_eq!(left(1, cx), left(3, cx));
+        }
+
+        #[gpui::test]
+        fn should_put_a_close_menu_only_on_open_pr_rows(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open(prs(), cx);
+
+            assert!(shown_at(row_selector("menu", 1), cx));
+            assert!(!shown_at(row_selector("menu", 2), cx));
+            assert!(!shown_at(row_selector("menu", 3), cx));
+        }
+
+        #[gpui::test]
+        fn should_pick_every_open_pr_from_the_columns_checkbox_then_none(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            click("inbox select".into(), cx);
+
+            click("inbox select all inbox".into(), cx);
+            assert_eq!(picked(&harness, cx), [id(1), id(4)]);
+            click("inbox select all inbox".into(), cx);
+            assert!(picked(&harness, cx).is_empty());
+        }
+
+        #[gpui::test]
+        fn should_pick_all_from_an_indeterminate_columns_checkbox(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            click("inbox select".into(), cx);
+            click(row_selector("select", 4), cx);
+            assert_eq!(picked(&harness, cx), [id(4)]);
+
+            click("inbox select all inbox".into(), cx);
+
+            assert_eq!(picked(&harness, cx), [id(4), id(1)]);
+        }
+
+        #[gpui::test]
+        fn should_ask_before_closing_the_picked_prs(cx: &mut TestAppContext) {
+            let (harness, cx) = asked_to_close_both(cx);
+
+            assert!(asking(&harness, cx));
+            assert!(harness.api.closes.lock().unwrap().is_empty());
+        }
+
+        #[gpui::test]
+        fn should_close_on_enter_then_end_select_mode(cx: &mut TestAppContext) {
+            let (harness, cx) = asked_to_close_both(cx);
+
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+
+            assert_eq!(*harness.api.closes.lock().unwrap(), [vec![id(1), id(4)]]);
+            assert!(!asking(&harness, cx));
+            assert_eq!(toasts(cx).last().map(String::as_str), Some("Closed 2 PRs"));
+            assert!(!selecting(&harness, cx));
+        }
+
+        #[gpui::test]
+        fn should_close_once_from_the_dialogs_close_button(cx: &mut TestAppContext) {
+            let (harness, cx) = asked_to_close_both(cx);
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+
+            let button = cx
+                .debug_bounds("inbox close confirm")
+                .expect("the Close button");
+            cx.simulate_click(button.center(), Modifiers::default());
+            cx.run_until_parked();
+
+            assert_eq!(harness.api.closes.lock().unwrap().len(), 1);
+            assert!(!asking(&harness, cx));
+        }
+
+        #[gpui::test]
+        fn should_close_nothing_when_cancelled(cx: &mut TestAppContext) {
+            let (harness, cx) = asked_to_close_both(cx);
+
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+
+            assert!(!asking(&harness, cx));
+            assert!(harness.api.closes.lock().unwrap().is_empty());
+            assert!(selecting(&harness, cx));
+        }
+
+        #[gpui::test]
+        fn should_keep_the_failed_rows_picked_with_their_error(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            harness
+                .api
+                .refuse_close(id(4), "Resource not accessible by personal access token");
+            click("inbox select".into(), cx);
+            click("inbox select all inbox".into(), cx);
+            click("inbox close prs".into(), cx);
+
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+
+            let shown = cx.update(|_, cx| crate::notice::shown(cx));
+            let toast = shown.last().expect("a toast");
+            assert_eq!(toast.title, "Closed 1 of 2");
+            assert_eq!(toast.description, None);
+            assert!(selecting(&harness, cx));
+            assert_eq!(picked(&harness, cx), [id(4)]);
+            assert!(shown_at(
+                row_selector("close error", 4).replace("inbox ", ""),
+                cx
+            ));
+        }
+
+        #[gpui::test]
+        fn should_say_why_when_the_close_request_fails(cx: &mut TestAppContext) {
+            let (harness, cx) = asked_to_close_both(cx);
+            harness.api.fail_next("connection refused");
+
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+
+            let shown = cx.update(|_, cx| crate::notice::shown(cx));
+            let toast = shown.last().expect("a toast");
+            assert_eq!(toast.title, "Couldn't close PRs");
+            assert_eq!(toast.description.as_deref(), Some("connection refused"));
+            assert_eq!(picked(&harness, cx), [id(1), id(4)]);
+        }
+
+        #[gpui::test]
+        fn should_disable_close_prs_while_nothing_is_picked(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            click("inbox select".into(), cx);
+
+            click("inbox close prs".into(), cx);
+
+            assert!(!asking(&harness, cx));
+        }
+
+        #[gpui::test]
+        fn should_end_select_mode_from_cancel_clearing_the_selection(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            click("inbox select".into(), cx);
+            click(row_selector("select", 1), cx);
+
+            click("inbox cancel select".into(), cx);
+
+            assert!(!selecting(&harness, cx));
+            assert!(picked(&harness, cx).is_empty());
+            assert!(!shown_at("inbox selection bar".into(), cx));
+        }
+
+        #[gpui::test]
+        fn should_drop_a_row_that_leaves_the_list_from_the_selection(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            click("inbox select".into(), cx);
+            click("inbox select all inbox".into(), cx);
+
+            let mut snapshot = prs();
+            snapshot.tasks[0].status = TaskStatus::Done;
+            harness
+                .view
+                .update(cx, |view, cx| view.set_snapshot(snapshot, cx));
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.run_until_parked();
+
+            assert_eq!(picked(&harness, cx), [id(4)]);
+        }
+
+        mod from_a_rows_menu {
+            use super::*;
+
+            fn ask(harness: &Harness, task: u32, cx: &mut VisualTestContext) {
+                let close = harness
+                    .view
+                    .read_with(cx, |view, _| view.close_prs().clone());
+                let row = harness.view.read_with(cx, |view, _| {
+                    (view.rows().into_iter())
+                        .find(|row| row.id == id::<TaskId>(task))
+                        .expect("the row")
+                });
+                let target = Target::of(&row).expect("an open PR");
+                cx.update(|window, cx| {
+                    close.update(cx, |close, cx| close.ask_one(target, window, cx));
+                });
+                cx.run_until_parked();
+            }
+
+            #[gpui::test]
+            fn should_ask_then_close_that_pr_alone(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open(prs(), cx);
+                ask(&harness, 4, cx);
+                assert!(asking(&harness, cx));
+
+                cx.simulate_keystrokes("enter");
+                cx.run_until_parked();
+
+                assert_eq!(*harness.api.closes.lock().unwrap(), [vec![id(4)]]);
+                assert_eq!(toasts(cx).last().map(String::as_str), Some("Closed 1 PR"));
+            }
+
+            #[gpui::test]
+            fn should_name_the_pr_when_github_refuses(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open(prs(), cx);
+                harness.api.refuse_close(id(4), "Must have admin rights");
+                ask(&harness, 4, cx);
+
+                cx.simulate_keystrokes("enter");
+                cx.run_until_parked();
+
+                let shown = cx.update(|_, cx| crate::notice::shown(cx));
+                let toast = shown.last().expect("a toast");
+                assert_eq!(toast.title, "Couldn't close gadgets #4");
+                assert_eq!(toast.description.as_deref(), Some("Must have admin rights"));
+            }
         }
     }
 }
