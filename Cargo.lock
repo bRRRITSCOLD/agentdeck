@@ -118,6 +118,8 @@ dependencies = [
  "anyhow",
  "clap",
  "futures-util",
+ "httpmock",
+ "portable-pty",
  "rmcp",
  "serde",
  "serde_json",

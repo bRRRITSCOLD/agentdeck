@@ -14,6 +14,8 @@
 //! - `db::pull_requests`: storing the PRs and moving their tasks.
 //!
 //! One sync runs at a time: the timer and `POST /v1/prs/sync` queue behind each other.
+//! Closing PRs (`POST /v1/prs/close`) queues behind them too, so a sync that read a PR as
+//! open before the close never stores it open again after.
 
 pub mod github;
 pub mod matching;
@@ -24,14 +26,14 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use agentdeck_core::ws::Entity;
-use agentdeck_core::{ChecksState, PrState, WorkspaceId};
+use agentdeck_core::{ChecksState, PrState, TaskId, WorkspaceId};
 use chrono::{DateTime, SecondsFormat, Utc};
 use tokio::time::MissedTickBehavior;
 
 use crate::config::Config;
 use crate::db::{self, Db};
 use crate::events::Events;
-use crate::model::{GhLogin, PrSyncProgress, PrSyncStage, PrSyncStatus};
+use crate::model::{GhLogin, PrCloseResult, PrSyncProgress, PrSyncStage, PrSyncStatus};
 use github::{Github, GithubError, RemotePr};
 use matching::Clones;
 
@@ -47,6 +49,12 @@ pub const FULL_SYNC_VAR: &str = "AGENTDECK_PR_FULL_SYNC_SECS";
 
 /// How often a sync is full, unless [`FULL_SYNC_VAR`] says otherwise.
 pub const FULL_SYNC_EVERY: Duration = Duration::from_secs(60 * 60);
+
+/// Why a task asked to close isn't closed: it isn't a PR task whose PR is stored open.
+const NOT_AN_OPEN_PR: &str = "Not an open PR";
+
+/// Why no PR closes: there is no token.
+const NOT_SIGNED_IN: &str = "Not signed in to GitHub";
 
 /// The id a [`Entity::PrSync`] event names: there is one sync status.
 const STATUS_ID: &str = "status";
@@ -204,6 +212,89 @@ impl PrSync {
         }
         self.inner.events.changed(Entity::PrSync, STATUS_ID);
         self.status()
+    }
+
+    /// Closes the PRs of `task_ids` on GitHub, after any sync running, and answers one result
+    /// per task in the order asked (spec §8). A task that isn't a PR task whose PR is stored
+    /// open fails without reaching GitHub; with no token, every one fails. The node ids are
+    /// looked up 25 to a request, then each PR is closed on its own, one at a time; one
+    /// GitHub closes is stored closed and its task moves to done at once, with a `changed`
+    /// event. A failure is that PR's alone.
+    pub async fn close(&self, task_ids: Vec<TaskId>) -> Vec<PrCloseResult> {
+        let _running = self.inner.running.lock().await;
+        let ids = task_ids.clone();
+        let prs = match self
+            .inner
+            .db
+            .call(move |conn| db::pull_requests::closable(conn, &ids))
+            .await
+        {
+            Ok(prs) => prs,
+            Err(err) => {
+                return task_ids
+                    .into_iter()
+                    .map(|id| PrCloseResult::failed(id, err.to_string()))
+                    .collect();
+            }
+        };
+        let mut results: Vec<PrCloseResult> = task_ids
+            .iter()
+            .map(|id| PrCloseResult::failed(*id, NOT_AN_OPEN_PR))
+            .collect();
+        let open: Vec<(usize, (String, i64))> = prs
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, pr)| Some((i, pr?)))
+            .collect();
+        if open.is_empty() {
+            return results;
+        }
+        let cached = self.state().token.clone();
+        let token = match cached {
+            Some(token) => token,
+            None => match self.refresh_token().await {
+                Ok(token) => token,
+                Err(_) => {
+                    for (i, _) in &open {
+                        results[*i] = PrCloseResult::failed(task_ids[*i], NOT_SIGNED_IN);
+                    }
+                    return results;
+                }
+            },
+        };
+        let wanted: Vec<(String, i64)> = open.iter().map(|(_, pr)| pr.clone()).collect();
+        let node_ids = self.inner.github.node_ids(&token, &wanted).await;
+        for ((i, (repo, number)), node_id) in open.into_iter().zip(node_ids) {
+            let task_id = task_ids[i];
+            results[i] = match node_id {
+                Err(error) => PrCloseResult::failed(task_id, error),
+                Ok(node_id) => match self.inner.github.close(&token, &node_id).await {
+                    Err(GithubError::GraphQl(message)) => PrCloseResult::failed(task_id, message),
+                    Err(err) => PrCloseResult::failed(task_id, err.to_string()),
+                    Ok(()) => {
+                        self.closed(task_id, &repo, number).await;
+                        PrCloseResult::closed(task_id)
+                    }
+                },
+            };
+        }
+        results
+    }
+
+    /// Stores task `task_id`'s PR, `repo#number`, which GitHub just closed, as closed, and
+    /// tells clients its task changed. A failure only logs: GitHub closed it, and the next
+    /// full sync reads it closed.
+    async fn closed(&self, task_id: TaskId, repo: &str, number: i64) {
+        match self
+            .inner
+            .db
+            .call(move |conn| db::pull_requests::close(conn, task_id))
+            .await
+        {
+            Ok(true) => self.inner.events.changed(Entity::Task, task_id),
+            Ok(false) => {}
+            Err(err) => tracing::warn!("storing {repo}#{number} as closed: {err}"),
+        }
     }
 
     /// Records how far the running sync is, and tells clients.

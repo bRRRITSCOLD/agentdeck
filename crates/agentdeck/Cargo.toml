@@ -22,6 +22,10 @@ serde_json.workspace = true
 tokio = { workspace = true, features = ["io-std"] }
 
 [dev-dependencies]
+# `pr close` asks only on a terminal; its tests run it on one.
+portable-pty.workspace = true
+# `pr close`'s tests: GitHub's GraphQL API, intercepted.
+httpmock.workspace = true
 tempfile.workspace = true
 
 [lints]

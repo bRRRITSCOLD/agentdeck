@@ -87,6 +87,11 @@ impl Pr {
         format!("https://github.com/{}/pull/{}", self.repo, self.number)
     }
 
+    /// The PR's GraphQL node id, as the lookup before a close answers it.
+    pub fn node_id(&self) -> String {
+        format!("PR_{}_{}", self.repo.replace('/', "_"), self.number)
+    }
+
     /// Every field, as a search or a fetch by number returns it.
     fn node(&self) -> Value {
         let mut node = self.light_node();
@@ -226,11 +231,67 @@ pub fn mock_fetch<'a>(server: &'a MockServer, prs: &[Pr]) -> Mock<'a> {
     server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
-            .body_includes("pullRequest(")
+            .body_includes("fragment pr on PullRequest")
             .json_body_includes(
                 json!({ "variables": { "o0": owner, "r0": name, "n0": first.number } }).to_string(),
             );
         then.status(200).json_body(json!({ "data": data }));
+    })
+}
+
+/// One batched lookup of node ids before a close, answered with each of `prs`' ids. It
+/// matches the batch that starts with `prs[0]`, the daemon asking for each as `p<i>`.
+pub fn mock_node_ids<'a>(server: &'a MockServer, prs: &[Pr]) -> Mock<'a> {
+    let first = &prs[0];
+    let (owner, name) = first.repo.split_once('/').expect("owner/name");
+    let data: serde_json::Map<String, Value> = prs
+        .iter()
+        .enumerate()
+        .map(|(i, pr)| {
+            (
+                format!("p{i}"),
+                json!({ "pullRequest": { "id": pr.node_id() } }),
+            )
+        })
+        .collect();
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("fragment nodeId on PullRequest")
+            .json_body_includes(
+                json!({ "variables": { "o0": owner, "r0": name, "n0": first.number } }).to_string(),
+            );
+        then.status(200).json_body(json!({ "data": data }));
+    })
+}
+
+/// The `closePullRequest` mutation for `pr`, answered with the PR closed.
+pub fn mock_close<'a>(server: &'a MockServer, pr: &Pr) -> Mock<'a> {
+    let id = pr.node_id();
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("closePullRequest(")
+            .json_body_includes(json!({ "variables": { "id": id } }).to_string());
+        then.status(200).json_body(json!({
+            "data": { "closePullRequest": { "pullRequest": { "id": id, "state": "CLOSED" } } }
+        }));
+    })
+}
+
+/// The `closePullRequest` mutation for `pr`, refused with GitHub's `message`, as for a token
+/// without write access to its repo.
+pub fn mock_close_refused<'a>(server: &'a MockServer, pr: &Pr, message: &str) -> Mock<'a> {
+    let id = pr.node_id();
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .body_includes("closePullRequest(")
+            .json_body_includes(json!({ "variables": { "id": id } }).to_string());
+        then.status(200).json_body(json!({
+            "data": { "closePullRequest": null },
+            "errors": [ { "type": "FORBIDDEN", "path": [ "closePullRequest" ], "message": message } ]
+        }));
     })
 }
 

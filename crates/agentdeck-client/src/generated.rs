@@ -441,6 +441,44 @@ pub mod types {
             Default::default()
         }
     }
+    ///`POST /v1/prs/close`: the PR tasks whose PRs to close on GitHub.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct PrClose {
+        ///The tasks, each a PR task whose PR is open; the results come back in this order.
+        pub task_ids: ::std::vec::Vec<agentdeck_core::TaskId>,
+    }
+    impl PrClose {
+        pub fn builder() -> builder::PrClose {
+            Default::default()
+        }
+    }
+    ///Whether one PR closed.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct PrCloseResult {
+        ///Why it didn't: GitHub's message, why the request failed, "Not an open PR" or "Not signed in to GitHub". `None` when it closed.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub error: ::std::option::Option<::std::string::String>,
+        ///Whether GitHub closed the PR.
+        pub ok: bool,
+        ///The PR task.
+        pub task_id: agentdeck_core::TaskId,
+    }
+    impl PrCloseResult {
+        pub fn builder() -> builder::PrCloseResult {
+            Default::default()
+        }
+    }
+    ///`POST /v1/prs/close`'s answer: one result per task asked for, in the order asked.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct PrCloseResults {
+        ///Each task's result.
+        pub results: ::std::vec::Vec<PrCloseResult>,
+    }
+    impl PrCloseResults {
+        pub fn builder() -> builder::PrCloseResults {
+            Default::default()
+        }
+    }
     ///`[pr_sync]` in a [`SettingsPatch`]: its schema only, since `config::validate` reads the JSON itself.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
     pub struct PrSyncPatch {
@@ -2329,6 +2367,161 @@ pub mod types {
             }
         }
         #[derive(Clone, Debug)]
+        pub struct PrClose {
+            task_ids: ::std::result::Result<
+                ::std::vec::Vec<agentdeck_core::TaskId>,
+                ::std::string::String,
+            >,
+        }
+        impl ::std::default::Default for PrClose {
+            fn default() -> Self {
+                Self {
+                    task_ids: Err("no value supplied for task_ids".to_string()),
+                }
+            }
+        }
+        impl PrClose {
+            pub fn task_ids<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::vec::Vec<agentdeck_core::TaskId>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.task_ids = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for task_ids: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<PrClose> for super::PrClose {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: PrClose,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    task_ids: value.task_ids?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::PrClose> for PrClose {
+            fn from(value: super::PrClose) -> Self {
+                Self {
+                    task_ids: Ok(value.task_ids),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
+        pub struct PrCloseResult {
+            error: ::std::result::Result<
+                ::std::option::Option<::std::string::String>,
+                ::std::string::String,
+            >,
+            ok: ::std::result::Result<bool, ::std::string::String>,
+            task_id: ::std::result::Result<agentdeck_core::TaskId, ::std::string::String>,
+        }
+        impl ::std::default::Default for PrCloseResult {
+            fn default() -> Self {
+                Self {
+                    error: Ok(Default::default()),
+                    ok: Err("no value supplied for ok".to_string()),
+                    task_id: Err("no value supplied for task_id".to_string()),
+                }
+            }
+        }
+        impl PrCloseResult {
+            pub fn error<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<::std::string::String>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.error = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for error: {e}"));
+                self
+            }
+            pub fn ok<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<bool>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.ok = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for ok: {e}"));
+                self
+            }
+            pub fn task_id<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<agentdeck_core::TaskId>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.task_id = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for task_id: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<PrCloseResult> for super::PrCloseResult {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: PrCloseResult,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    error: value.error?,
+                    ok: value.ok?,
+                    task_id: value.task_id?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::PrCloseResult> for PrCloseResult {
+            fn from(value: super::PrCloseResult) -> Self {
+                Self {
+                    error: Ok(value.error),
+                    ok: Ok(value.ok),
+                    task_id: Ok(value.task_id),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
+        pub struct PrCloseResults {
+            results:
+                ::std::result::Result<::std::vec::Vec<super::PrCloseResult>, ::std::string::String>,
+        }
+        impl ::std::default::Default for PrCloseResults {
+            fn default() -> Self {
+                Self {
+                    results: Err("no value supplied for results".to_string()),
+                }
+            }
+        }
+        impl PrCloseResults {
+            pub fn results<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::vec::Vec<super::PrCloseResult>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.results = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for results: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<PrCloseResults> for super::PrCloseResults {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: PrCloseResults,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    results: value.results?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::PrCloseResults> for PrCloseResults {
+            fn from(value: super::PrCloseResults) -> Self {
+                Self {
+                    results: Ok(value.results),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
         pub struct PrSyncPatch {
             max_age_days: ::std::result::Result<::std::option::Option<u32>, ::std::string::String>,
         }
@@ -3958,6 +4151,21 @@ impl Client {
     pub fn pane_tail(&self) -> builder::PaneTail<'_> {
         builder::PaneTail::new(self)
     }
+    ///Closes PRs on GitHub: only closes them, with no comment and no branch delete. Answers one
+    ///
+    ///result per task, in the order asked, once every PR is tried; 200 even when some failed. A closed PR's task moves to done at once.
+    ///
+    ///Sends a `POST` request to `/v1/prs/close`
+    ///
+    ///```ignore
+    ///let response = client.prs_close()
+    ///    .body(body)
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn prs_close(&self) -> builder::PrsClose<'_> {
+        builder::PrsClose::new(self)
+    }
     ///The `gh` login state and the last sync
     ///
     ///Sends a `GET` request to `/v1/prs/status`
@@ -5110,6 +5318,83 @@ pub mod builder {
             let response = result?;
             match response.status().as_u16() {
                 200u16 => Ok(ResponseValue::stream(response)),
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::prs_close`]
+    ///
+    ///[`Client::prs_close`]: super::Client::prs_close
+    #[derive(Debug, Clone)]
+    pub struct PrsClose<'a> {
+        client: &'a super::Client,
+        body: Result<types::builder::PrClose, String>,
+    }
+    impl<'a> PrsClose<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self {
+                client: client,
+                body: Ok(::std::default::Default::default()),
+            }
+        }
+        pub fn body<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<types::PrClose>,
+            <V as std::convert::TryInto<types::PrClose>>::Error: std::fmt::Display,
+        {
+            self.body = value
+                .try_into()
+                .map(From::from)
+                .map_err(|s| format!("conversion to `PrClose` for body failed: {}", s));
+            self
+        }
+        pub fn body_map<F>(mut self, f: F) -> Self
+        where
+            F: std::ops::FnOnce(types::builder::PrClose) -> types::builder::PrClose,
+        {
+            self.body = self.body.map(f);
+            self
+        }
+        ///Sends a `POST` request to `/v1/prs/close`
+        pub async fn send(
+            self,
+        ) -> Result<ResponseValue<types::PrCloseResults>, Error<types::Error>> {
+            let Self { client, body } = self;
+            let body = body
+                .and_then(|v| types::PrClose::try_from(v).map_err(|e| e.to_string()))
+                .map_err(Error::InvalidRequest)?;
+            let url = format!("{}/v1/prs/close", client.baseurl,);
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .post(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .json(&body)
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "prs_close",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                200u16 => ResponseValue::from_response(response).await,
                 400u16..=499u16 => Err(Error::ErrorResponse(
                     ResponseValue::from_response(response).await?,
                 )),

@@ -91,6 +91,7 @@ pub fn api() -> ApiDescription<ApiContext> {
         api.register(instructions::instruction_delete),
         api.register(prs::prs_sync),
         api.register(prs::prs_status),
+        api.register(prs::prs_close),
         api.register(settings::settings_get),
         api.register(settings::settings_update),
         api.register(panes::pane_create),
@@ -221,7 +222,7 @@ mod tests {
         /// `openapi.json`'s fingerprint when [`agentdeck_core::API_VERSION`] was last set,
         /// and that version. Clients tell an older daemon by its API version, so a route or
         /// field added without a bump would go unnoticed: they would call it and get a 404.
-        const FINGERPRINT_AT_API_VERSION: (u64, u32) = (0x7254_145e_bccd_f508, 1);
+        const FINGERPRINT_AT_API_VERSION: (u64, u32) = (0x7871_3ba8_a02c_6dfe, 2);
 
         /// FNV-1a: stable across Rust releases, unlike `DefaultHasher`.
         fn fingerprint(text: &str) -> u64 {

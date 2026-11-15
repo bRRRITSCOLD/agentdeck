@@ -1,10 +1,13 @@
 //! Human-readable output. `--json` prints the API's own objects instead.
 
 use agentdeck_client::settings;
+use std::collections::{BTreeMap, HashMap};
+
 use agentdeck_client::types::{
-    Comment, DirtyReport, Instruction, Pane, PrSyncStage, PrSyncStatus, Settings, Task, Workspace,
+    Comment, DirtyReport, Instruction, Pane, PrCloseResult, PrSyncStage, PrSyncStatus, PullRequest,
+    Settings, Task, Workspace,
 };
-use agentdeck_core::CommentAuthor;
+use agentdeck_core::{CommentAuthor, TaskId};
 use serde_json::Value;
 
 /// Left-aligned columns two spaces apart, under a header row; `empty` when there are no rows.
@@ -195,6 +198,58 @@ pub fn pr_status(status: &PrSyncStatus) -> String {
     }
     if let Some(error) = &status.last_error {
         out.push_str(&format!("last error: {error}\n"));
+    }
+    out
+}
+
+/// `n` PRs, as a count: "1 PR", "2 PRs".
+fn prs(n: usize) -> String {
+    if n == 1 {
+        "1 PR".into()
+    } else {
+        format!("{n} PRs")
+    }
+}
+
+/// What `pr close` asks before closing `n` PRs, whose repos are `repos` (one entry per PR
+/// task named): the question, a line per repo with its count, then `[y/N]`.
+pub fn close_prompt(n: usize, repos: &[&str]) -> String {
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for repo in repos {
+        *counts.entry(repo).or_default() += 1;
+    }
+    let width = counts.keys().map(|repo| repo.len()).max().unwrap_or(0);
+    let mut out = format!(
+        "Close {} on GitHub? Their repos' owners will see them closed. You can reopen a PR on \
+         GitHub.\n",
+        prs(n)
+    );
+    for (repo, count) in counts {
+        out.push_str(&format!("  {repo:width$}  {}\n", prs(count)));
+    }
+    out.push_str("[y/N] ");
+    out
+}
+
+/// `pr close`'s results: `closed <repo> #<n>` or `failed <repo> #<n>: <error>` per PR, with
+/// the task's id for one that isn't a PR task, then "Closed 12 of 14" when any failed.
+pub fn close_results(results: &[PrCloseResult], prs: &HashMap<TaskId, &PullRequest>) -> String {
+    let mut out = String::new();
+    for result in results {
+        let name = prs.get(&result.task_id).map_or_else(
+            || result.task_id.to_string(),
+            |pr| format!("{} #{}", pr.repo, pr.number),
+        );
+        if result.ok {
+            out.push_str(&format!("closed {name}\n"));
+        } else {
+            let error = result.error.as_deref().unwrap_or("unknown error");
+            out.push_str(&format!("failed {name}: {error}\n"));
+        }
+    }
+    let closed = results.iter().filter(|result| result.ok).count();
+    if closed < results.len() {
+        out.push_str(&format!("Closed {closed} of {}\n", results.len()));
     }
     out
 }
@@ -478,6 +533,94 @@ mod tests {
             });
 
             assert!(out.contains("syncing:   PR details\n"), "{out}");
+        }
+    }
+
+    mod close_prompt {
+        use super::*;
+
+        #[test]
+        fn should_ask_with_a_line_per_repo_and_its_count() {
+            assert_eq!(
+                close_prompt(3, &["acme/widgets", "acme/api", "acme/widgets"]),
+                "Close 3 PRs on GitHub? Their repos' owners will see them closed. You can \
+                 reopen a PR on GitHub.\n  acme/api      1 PR\n  acme/widgets  2 PRs\n[y/N] "
+            );
+        }
+
+        #[test]
+        fn should_say_1_pr() {
+            assert!(close_prompt(1, &["acme/api"]).starts_with("Close 1 PR on GitHub?"));
+        }
+    }
+
+    mod close_results {
+        use super::*;
+
+        fn pr(number: i64) -> PullRequest {
+            PullRequest {
+                checks: None,
+                draft: false,
+                head_ref: "feat".into(),
+                number,
+                repo: "acme/api".into(),
+                review: None,
+                state: agentdeck_core::PrState::Open,
+                synced_at: String::new(),
+                updated_at: String::new(),
+                url: String::new(),
+            }
+        }
+
+        fn id(n: u8) -> TaskId {
+            format!("019a1dd1-5b85-75ae-af0b-6d1a8b2110{n:02}")
+                .parse()
+                .expect("a task id")
+        }
+
+        #[test]
+        fn should_say_what_closed_and_what_failed_then_how_many_closed() {
+            let (seven, eight) = (pr(7), pr(8));
+            let prs = HashMap::from([(id(1), &seven), (id(2), &eight)]);
+            let results = [
+                PrCloseResult {
+                    task_id: id(1),
+                    ok: true,
+                    error: None,
+                },
+                PrCloseResult {
+                    task_id: id(2),
+                    ok: false,
+                    error: Some("Not allowed".into()),
+                },
+                PrCloseResult {
+                    task_id: id(3),
+                    ok: false,
+                    error: Some("Not an open PR".into()),
+                },
+            ];
+
+            assert_eq!(
+                close_results(&results, &prs),
+                format!(
+                    "closed acme/api #7\nfailed acme/api #8: Not allowed\nfailed {}: Not an \
+                     open PR\nClosed 1 of 3\n",
+                    id(3)
+                )
+            );
+        }
+
+        #[test]
+        fn should_not_count_when_every_pr_closed() {
+            let seven = pr(7);
+            let prs = HashMap::from([(id(1), &seven)]);
+            let results = [PrCloseResult {
+                task_id: id(1),
+                ok: true,
+                error: None,
+            }];
+
+            assert_eq!(close_results(&results, &prs), "closed acme/api #7\n");
         }
     }
 

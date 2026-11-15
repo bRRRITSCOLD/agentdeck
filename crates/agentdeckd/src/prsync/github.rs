@@ -1,5 +1,6 @@
 //! GitHub's GraphQL API (spec §8): the list of the viewer's open PRs with light fields, the
-//! search for PRs updated since a time, and PRs by number with every field, in batches.
+//! search for PRs updated since a time, PRs by number with every field, in batches, and
+//! closing a PR: its node id by number, in batches, then one `closePullRequest` each.
 
 use std::time::Duration;
 
@@ -45,6 +46,14 @@ const PR_FIELDS: &str = "fragment pr on PullRequest {
 const LIGHT_FIELDS: &str = "fragment light on PullRequest {
   number title url state isDraft headRefName updatedAt
   repository { nameWithOwner }
+}";
+
+/// Only the node id, which `closePullRequest` takes.
+const NODE_ID_FIELDS: &str = "fragment nodeId on PullRequest { id }";
+
+/// Closes one PR by node id; GitHub has no batch close.
+const CLOSE_MUTATION: &str = "mutation($id: ID!) {
+  closePullRequest(input: { pullRequestId: $id }) { pullRequest { id state } }
 }";
 
 /// A pull request as GitHub reports it.
@@ -184,14 +193,77 @@ impl Github {
         token: &str,
         batch: Vec<(String, i64)>,
     ) -> Result<Vec<Option<RemotePr>>, GithubError> {
-        let (query, variables) = batch_query(&batch);
+        let (query, variables) = batch_query(&batch, "pr", PR_FIELDS);
         let data = self.query(token, &query, variables).await?;
         parse_batch(data, batch.len())
     }
 
-    /// Posts one GraphQL query and returns its `data`, trying again after each of
-    /// `RETRY_WAITS` while it fails for a reason that may pass.
+    /// The node id of each of `wanted` (`(repo, number)`), in order, looked up as fetches by
+    /// number go: `BATCH_SIZE` to a request, `BATCHES_IN_FLIGHT` at once. A failure is each
+    /// PR's own: GitHub's message for one it doesn't show, or why its batch's request failed.
+    pub async fn node_ids(
+        &self,
+        token: &str,
+        wanted: &[(String, i64)],
+    ) -> Vec<Result<String, String>> {
+        use futures_util::StreamExt as _;
+
+        let batches: Vec<Vec<(String, i64)>> =
+            wanted.chunks(BATCH_SIZE).map(<[_]>::to_vec).collect();
+        let lookups = batches
+            .into_iter()
+            .map(|batch| self.node_id_batch(token, batch));
+        let found: Vec<Vec<Result<String, String>>> = futures_util::stream::iter(lookups)
+            .buffered(BATCHES_IN_FLIGHT)
+            .collect()
+            .await;
+        found.into_iter().flatten().collect()
+    }
+
+    /// One request for `batch`'s node ids.
+    async fn node_id_batch(
+        &self,
+        token: &str,
+        batch: Vec<(String, i64)>,
+    ) -> Vec<Result<String, String>> {
+        let (query, variables) = batch_query(&batch, "nodeId", NODE_ID_FIELDS);
+        match self.query_body(token, &query, variables).await {
+            Ok(body) => parse_node_ids(&body, batch.len()),
+            Err(err) => vec![Err(err.to_string()); batch.len()],
+        }
+    }
+
+    /// Closes the PR with node id `id`. A refusal (no write access, say) is GitHub's message.
+    pub async fn close(&self, token: &str, id: &str) -> Result<(), GithubError> {
+        let body = self
+            .query_body(token, CLOSE_MUTATION, json!({ "id": id }))
+            .await?;
+        let closed = body
+            .pointer("/data/closePullRequest/pullRequest")
+            .is_some_and(|pr| !pr.is_null());
+        if closed {
+            Ok(())
+        } else {
+            Err(GithubError::GraphQl(
+                error_messages(&body, |_| true)
+                    .unwrap_or_else(|| "GitHub didn't close the PR".into()),
+            ))
+        }
+    }
+
+    /// Posts one GraphQL query and returns its `data`, as [`Github::query_body`] does.
     async fn query(
+        &self,
+        token: &str,
+        query: &str,
+        variables: Value,
+    ) -> Result<Value, GithubError> {
+        data(self.query_body(token, query, variables).await?)
+    }
+
+    /// Posts one GraphQL query and returns the whole response body, `data` and `errors`,
+    /// trying again after each of `RETRY_WAITS` while it fails for a reason that may pass.
+    async fn query_body(
         &self,
         token: &str,
         query: &str,
@@ -212,7 +284,7 @@ impl Github {
         }
     }
 
-    /// Posts one GraphQL query once and returns its `data`.
+    /// Posts one GraphQL query once and returns the response body.
     async fn query_once(
         &self,
         token: &str,
@@ -237,7 +309,7 @@ impl Github {
                 message: message(&body),
             });
         }
-        data(response.json().await?)
+        Ok(response.json().await?)
     }
 }
 
@@ -263,24 +335,47 @@ fn message(body: &str) -> Option<String> {
 fn data(body: Value) -> Result<Value, GithubError> {
     match body.get("data") {
         Some(data) if !data.is_null() => Ok(data.clone()),
-        _ => {
-            let messages: Vec<&str> = body
-                .get("errors")
-                .and_then(Value::as_array)
-                .map(|errors| {
-                    errors
-                        .iter()
-                        .filter_map(|error| error.get("message").and_then(Value::as_str))
-                        .collect()
-                })
-                .unwrap_or_default();
-            Err(GithubError::GraphQl(if messages.is_empty() {
-                "no data".into()
-            } else {
-                messages.join("; ")
-            }))
-        }
+        _ => Err(GithubError::GraphQl(
+            error_messages(&body, |_| true).unwrap_or_else(|| "no data".into()),
+        )),
     }
+}
+
+/// The messages of a response body's `errors` whose `path` passes `on_path` (`None` for an
+/// error with no path), joined; `None` when there are none.
+fn error_messages(body: &Value, on_path: impl Fn(Option<&Value>) -> bool) -> Option<String> {
+    let messages: Vec<&str> = body
+        .get("errors")
+        .and_then(Value::as_array)
+        .map(|errors| {
+            errors
+                .iter()
+                .filter(|error| on_path(error.get("path")))
+                .filter_map(|error| error.get("message").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    (!messages.is_empty()).then(|| messages.join("; "))
+}
+
+/// The `len` node ids of a lookup's response body, in order. One GitHub doesn't show fails
+/// with the message of the error on its alias `p<i>`.
+fn parse_node_ids(body: &Value, len: usize) -> Vec<Result<String, String>> {
+    (0..len)
+        .map(|i| {
+            let alias = format!("p{i}");
+            body.pointer(&format!("/data/{alias}/pullRequest/id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    error_messages(body, |path| {
+                        path.and_then(|path| path.get(0)).and_then(Value::as_str)
+                            == Some(alias.as_str())
+                    })
+                    .unwrap_or_else(|| "GitHub doesn't show this PR".into())
+                })
+        })
+        .collect()
 }
 
 /// One page of search results.
@@ -385,10 +480,10 @@ fn parse_search(data: Value) -> Result<SearchPage, GithubError> {
     })
 }
 
-/// The query fetching `batch` by number: PR `i` as alias `p<i>`, its owner, name and number
-/// in variables `o<i>`, `r<i>` and `n<i>`. A repo that isn't `owner/name` is asked for under
-/// an empty owner, which GitHub doesn't show.
-fn batch_query(batch: &[(String, i64)]) -> (String, Value) {
+/// The query fetching `batch` by number with fragment `fragment` (named `spread`): PR `i` as
+/// alias `p<i>`, its owner, name and number in variables `o<i>`, `r<i>` and `n<i>`. A repo
+/// that isn't `owner/name` is asked for under an empty owner, which GitHub doesn't show.
+fn batch_query(batch: &[(String, i64)], spread: &str, fragment: &str) -> (String, Value) {
     let mut params = Vec::with_capacity(batch.len());
     let mut fields = Vec::with_capacity(batch.len());
     let mut variables = serde_json::Map::new();
@@ -396,14 +491,14 @@ fn batch_query(batch: &[(String, i64)]) -> (String, Value) {
         let (owner, name) = repo.split_once('/').unwrap_or(("", repo));
         params.push(format!("$o{i}: String!, $r{i}: String!, $n{i}: Int!"));
         fields.push(format!(
-            "  p{i}: repository(owner: $o{i}, name: $r{i}) {{ pullRequest(number: $n{i}) {{ ...pr }} }}"
+            "  p{i}: repository(owner: $o{i}, name: $r{i}) {{ pullRequest(number: $n{i}) {{ ...{spread} }} }}"
         ));
         variables.insert(format!("o{i}"), owner.into());
         variables.insert(format!("r{i}"), name.into());
         variables.insert(format!("n{i}"), (*number).into());
     }
     let query = format!(
-        "query({}) {{\n{}\n}}\n{PR_FIELDS}",
+        "query({}) {{\n{}\n}}\n{fragment}",
         params.join(", "),
         fields.join("\n")
     );
@@ -779,8 +874,11 @@ mod tests {
 
         #[test]
         fn should_ask_for_each_pr_under_its_own_alias_and_variables() {
-            let (query, variables) =
-                batch_query(&[("acme/widgets".into(), 7), ("acme/gadgets".into(), 9)]);
+            let (query, variables) = batch_query(
+                &[("acme/widgets".into(), 7), ("acme/gadgets".into(), 9)],
+                "pr",
+                PR_FIELDS,
+            );
 
             assert!(query.contains(
                 "p1: repository(owner: $o1, name: $r1) { pullRequest(number: $n1) { ...pr } }"
@@ -791,6 +889,46 @@ mod tests {
                     "o0": "acme", "r0": "widgets", "n0": 7,
                     "o1": "acme", "r1": "gadgets", "n1": 9
                 })
+            );
+        }
+    }
+
+    mod parse_node_ids {
+        use super::*;
+
+        #[test]
+        fn should_read_each_node_id_in_order() {
+            let body = json!({ "data": {
+                "p0": { "pullRequest": { "id": "PR_a" } },
+                "p1": { "pullRequest": { "id": "PR_b" } }
+            } });
+
+            assert_eq!(
+                parse_node_ids(&body, 2),
+                [Ok("PR_a".to_owned()), Ok("PR_b".to_owned())]
+            );
+        }
+
+        #[test]
+        fn should_fail_a_missing_pr_with_the_error_on_its_alias() {
+            let body = json!({
+                "data": { "p0": { "pullRequest": { "id": "PR_a" } }, "p1": { "pullRequest": null } },
+                "errors": [ { "path": [ "p1", "pullRequest" ], "message": "Could not resolve" } ]
+            });
+
+            assert_eq!(
+                parse_node_ids(&body, 2),
+                [Ok("PR_a".to_owned()), Err("Could not resolve".to_owned())]
+            );
+        }
+
+        #[test]
+        fn should_say_github_does_not_show_a_missing_pr_without_an_error() {
+            let body = json!({ "data": { "p0": null } });
+
+            assert_eq!(
+                parse_node_ids(&body, 1),
+                [Err("GitHub doesn't show this PR".to_owned())]
             );
         }
     }
