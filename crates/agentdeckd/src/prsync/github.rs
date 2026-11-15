@@ -1,5 +1,6 @@
-//! GitHub's GraphQL API (spec §8): the list of the viewer's open PRs with light fields, the
-//! search for PRs updated since a time, and PRs by number with every field, in batches.
+//! GitHub's GraphQL API (spec §8): the viewer's login and scopes, the list of the viewer's
+//! open PRs with light fields, the search for PRs updated since a time, and PRs by number
+//! with every field, in batches.
 
 use std::time::Duration;
 
@@ -72,6 +73,16 @@ pub struct RemotePr {
     pub updated_at: String,
 }
 
+/// Who a token belongs to, and what it may do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Viewer {
+    /// The token's user.
+    pub login: String,
+    /// A classic token's scopes, from `X-OAuth-Scopes`; `None` when GitHub sends no such
+    /// header, as for a fine-grained token.
+    pub scopes: Option<Vec<String>>,
+}
+
 /// Why a GitHub call failed.
 #[derive(Debug, thiserror::Error)]
 pub enum GithubError {
@@ -112,6 +123,27 @@ impl Github {
             .timeout(Duration::from_secs(30))
             .build()?;
         Ok(Github { http, endpoint })
+    }
+
+    /// Who `token` belongs to, and its scopes. A token GitHub rejects is
+    /// [`GithubError::Unauthorized`].
+    pub async fn viewer(&self, token: &str) -> Result<Viewer, GithubError> {
+        #[derive(Deserialize)]
+        struct Data {
+            viewer: Login,
+        }
+        #[derive(Deserialize)]
+        struct Login {
+            login: String,
+        }
+        let (data, scopes) = self
+            .query_with_scopes(token, "query { viewer { login } }", json!({}))
+            .await?;
+        let data: Data = serde_json::from_value(data)?;
+        Ok(Viewer {
+            login: data.viewer.login,
+            scopes: scopes.as_deref().map(parse_scopes),
+        })
     }
 
     /// The page of the search `q` after cursor `after` (`None` for the first page).
@@ -197,6 +229,16 @@ impl Github {
         query: &str,
         variables: Value,
     ) -> Result<Value, GithubError> {
+        Ok(self.query_with_scopes(token, query, variables).await?.0)
+    }
+
+    /// [`Github::query`], with the response's `X-OAuth-Scopes` header, if it has one.
+    async fn query_with_scopes(
+        &self,
+        token: &str,
+        query: &str,
+        variables: Value,
+    ) -> Result<(Value, Option<String>), GithubError> {
         let mut waits = RETRY_WAITS.iter();
         loop {
             match self.query_once(token, query, variables.clone()).await {
@@ -212,13 +254,13 @@ impl Github {
         }
     }
 
-    /// Posts one GraphQL query once and returns its `data`.
+    /// Posts one GraphQL query once and returns its `data` and `X-OAuth-Scopes` header.
     async fn query_once(
         &self,
         token: &str,
         query: &str,
         variables: Value,
-    ) -> Result<Value, GithubError> {
+    ) -> Result<(Value, Option<String>), GithubError> {
         let response = self
             .http
             .post(&self.endpoint)
@@ -237,8 +279,22 @@ impl Github {
                 message: message(&body),
             });
         }
-        data(response.json().await?)
+        let scopes = response
+            .headers()
+            .get("x-oauth-scopes")
+            .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned());
+        Ok((data(response.json().await?)?, scopes))
     }
+}
+
+/// The scopes in an `X-OAuth-Scopes` header: comma-separated, possibly none.
+fn parse_scopes(header: &str) -> Vec<String> {
+    header
+        .split(',')
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 impl GithubError {
@@ -602,6 +658,21 @@ mod tests {
                 "nodes": nodes
             }
         })
+    }
+
+    mod parse_scopes {
+        use super::*;
+
+        #[test]
+        fn should_split_the_header_on_commas() {
+            assert_eq!(parse_scopes("repo, read:org"), ["repo", "read:org"]);
+        }
+
+        #[test]
+        fn should_read_an_empty_header_as_no_scopes() {
+            assert!(parse_scopes("").is_empty());
+            assert!(parse_scopes(" ").is_empty());
+        }
     }
 
     mod parse_search {

@@ -395,7 +395,7 @@ mod post_v1_prs_sync {
             status
                 .last_error
                 .as_deref()
-                .is_some_and(|err| err.contains("no oauth token found")),
+                .is_some_and(|err| err.starts_with("no GitHub token")),
             "{status:?}"
         );
         assert_eq!(status.last_synced_at, None);

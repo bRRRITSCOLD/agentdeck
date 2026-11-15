@@ -13,6 +13,7 @@ use crate::api::{ApiContext, api};
 use crate::config::{self, Config};
 use crate::db::Db;
 use crate::events::Events;
+use crate::github_auth::{self, GithubAuth, device, keyring};
 use crate::instance::Instance;
 use crate::paths::Paths;
 use crate::prsync::{self, PrSync};
@@ -51,13 +52,25 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
         paths.config_file(),
         std::env::var(config::PR_MAX_AGE_VAR).ok().as_deref(),
     );
+    let github = prsync::github::Github::new(github_api)?;
+    let oauth = device::OAuth::new(
+        std::env::var(device::OAUTH_VAR).unwrap_or_else(|_| device::DEFAULT_OAUTH.into()),
+    )?;
+    let credentials = GithubAuth::new(
+        keyring::from_env(std::env::var(keyring::KEYRING_VAR).ok().as_deref()),
+        github_auth::Env::from_process(),
+        github.clone(),
+        oauth,
+        events.clone(),
+    );
     let prs = PrSync::start(
         db.clone(),
         events.clone(),
-        github_api,
+        github,
+        credentials.clone(),
         full_every,
         settings.clone(),
-    )?;
+    );
     let terminals = Terminals::new(db.clone(), events.clone(), paths.rules_dir());
     terminals.run_state_timer();
     agents::resume::resume_panes(&db, &terminals)
@@ -70,6 +83,7 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
         started: Instant::now(),
         scratch_root: paths.scratch_workspaces(),
         prs,
+        github: credentials,
         settings,
         terminals: terminals.clone(),
         claims: Default::default(),

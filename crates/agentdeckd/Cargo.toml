@@ -17,8 +17,9 @@ chrono.workspace = true
 dropshot.workspace = true
 # PR sync calls GitHub over HTTPS: rustls with the platform verifier (aws-lc-rs, already in the
 # lock through GPUI).
-reqwest = { workspace = true, features = ["rustls"] }
+reqwest = { workspace = true, features = ["form", "rustls"] }
 futures-util.workspace = true
+keyring-core.workspace = true
 nix.workspace = true
 portable-pty.workspace = true
 rusqlite.workspace = true
@@ -36,12 +37,15 @@ tokio-tungstenite.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+zbus-secret-service-keyring-store.workspace = true
 
 [dev-dependencies]
 agentdeck-client.workspace = true
 httpmock.workspace = true
 tempfile.workspace = true
 tokio-tungstenite = { workspace = true, features = ["connect"] }
+# The keyring contract test reads the Secret Service's items itself.
+zbus.workspace = true
 
 [lints]
 workspace = true
