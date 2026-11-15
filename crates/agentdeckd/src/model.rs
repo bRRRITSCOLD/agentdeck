@@ -3,7 +3,7 @@
 
 use agentdeck_core::{
     Agent, AgentState, ChecksState, CommentAuthor, CommentId, InstructionId, Layout, PaneId,
-    PaneKind, PrState, ReviewState, TabId, TaskId, TaskKind, TaskStatus, WorkspaceId,
+    PaneKind, PrState, ReviewState, TabId, TaskId, TaskKind, TaskPlace, TaskStatus, WorkspaceId,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -186,14 +186,31 @@ pub struct NewTask {
 /// `PATCH /v1/tasks/{id}`: the fields to change.
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct TaskPatch {
-    /// A new title.
+    /// A new title. A PR task's title is GitHub's: only its own title is accepted.
     pub title: Option<String>,
     /// A new body.
     pub body: Option<String>,
     /// A new status.
     pub status: Option<TaskStatus>,
-    /// A workspace to link.
-    pub workspace_id: Option<WorkspaceId>,
+    /// Where to move it: a workspace that isn't archived, or null for the inbox. Absent
+    /// leaves it where it is.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub workspace_id: Option<TaskPlace>,
+}
+
+/// A field whose value may be null, read as present: `Some(..)` whatever its value, while
+/// `#[serde(default)]` gives `None` for a field left out. Serde's own `Option` reads null as
+/// `None`, which would make `"workspace_id": null` the same as leaving it out.
+fn present<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 /// `GET /v1/tasks` filters; they combine with AND.

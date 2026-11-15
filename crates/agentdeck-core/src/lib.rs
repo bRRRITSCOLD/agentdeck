@@ -34,7 +34,7 @@ pub use layout::{Layout, LayoutError, Ratio, SplitDirection};
 pub use pane::{Agent, PaneKind};
 pub use pr::{ChecksState, PrState, ReviewState, pr_task_status};
 pub use state::AgentState;
-pub use task::{TaskKind, TaskStatus};
+pub use task::{TaskKind, TaskPlace, TaskStatus};
 pub use text_enum::UnknownValue;
 
 /// What `<program> --version` prints: the program's name, then the workspace version, which

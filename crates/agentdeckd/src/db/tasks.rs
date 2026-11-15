@@ -1,6 +1,6 @@
 //! `tasks` queries.
 
-use agentdeck_core::{TaskId, TaskKind, TaskStatus, WorkspaceId};
+use agentdeck_core::{PaneId, TaskId, TaskKind, TaskPlace, TaskStatus, WorkspaceId};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 
@@ -119,11 +119,13 @@ pub fn create_kind(conn: &Connection, new: &NewTask, kind: TaskKind) -> Result<T
 }
 
 /// Applies the fields `patch` sets and stamps `updated_at`. Moving to done stamps `done_at`;
-/// moving out of done clears it.
+/// moving out of done clears it. A workspace must exist and not be archived
+/// (`unknown_workspace`). PR sync changes tasks through it; the user's edits go through
+/// [`edit`], which adds the user's rules.
 pub fn update(conn: &Connection, id: TaskId, patch: &TaskPatch) -> Result<Task, DbError> {
     let task = get(conn, id)?;
-    if let Some(workspace_id) = patch.workspace_id {
-        check_workspace(conn, workspace_id)?;
+    if let Some(TaskPlace::Workspace(workspace_id)) = patch.workspace_id {
+        check_open_workspace(conn, workspace_id)?;
     }
     let now = now();
     let status = patch.status.unwrap_or(task.status);
@@ -143,13 +145,66 @@ pub fn update(conn: &Connection, id: TaskId, patch: &TaskPatch) -> Result<Task, 
             status.as_str(),
             patch
                 .workspace_id
-                .or(task.workspace_id)
+                .map_or(task.workspace_id, TaskPlace::workspace)
                 .map(|id| id.to_string()),
             now,
             done_at,
         ],
     )?;
     get(conn, id)
+}
+
+/// A task the user edited, and the panes the edit unlinked from it.
+#[derive(Debug)]
+pub struct Edited {
+    /// The task as it is now.
+    pub task: Task,
+    /// The panes that were linked to it in another workspace than its new one.
+    pub unlinked: Vec<PaneId>,
+}
+
+/// The user's edit of task `id` (`PATCH /v1/tasks/{id}`), in one transaction: [`update`],
+/// plus the user's rules (spec §8, §9).
+/// - A PR task's title is GitHub's: another title is `invalid_title`.
+/// - A PR task's workspace the user sets, the inbox included, is picked: PR sync never moves
+///   the task again.
+/// - A task moved out of a pane's workspace unlinks the pane, since a pane links only to a
+///   task in its own workspace.
+pub fn edit(conn: &mut Connection, id: TaskId, patch: &TaskPatch) -> Result<Edited, DbError> {
+    let tx = conn.transaction()?;
+    let before = get(&tx, id)?;
+    if before.kind == TaskKind::Pr
+        && let Some(title) = &patch.title
+        && *title != before.title
+    {
+        return Err(DbError::Invalid {
+            code: "invalid_title",
+            message: "a PR task's title is its PR's: rename the PR on GitHub".into(),
+        });
+    }
+    let task = update(&tx, id, patch)?;
+    let mut unlinked = Vec::new();
+    if let Some(place) = patch.workspace_id {
+        if task.kind == TaskKind::Pr {
+            tx.execute(
+                "UPDATE pull_requests SET workspace_picked_at = ?2 WHERE task_id = ?1",
+                params![id.to_string(), now()],
+            )?;
+        }
+        let mut stmt = tx.prepare(
+            "UPDATE panes SET task_id = NULL
+             WHERE task_id = ?1
+               AND tab_id NOT IN (SELECT id FROM tabs WHERE workspace_id IS ?2)
+             RETURNING id",
+        )?;
+        let rows = stmt.query_map(
+            params![id.to_string(), place.workspace().map(|ws| ws.to_string())],
+            |row| text(row, "id"),
+        )?;
+        unlinked = rows.collect::<rusqlite::Result<_>>()?;
+    }
+    tx.commit()?;
+    Ok(Edited { task, unlinked })
 }
 
 /// Deletes a task; its comments and PR row go with it, and its panes are unlinked.
@@ -165,5 +220,22 @@ fn check_workspace(conn: &Connection, workspace_id: WorkspaceId) -> Result<(), D
         Ok(())
     } else {
         Err(DbError::UnknownReference("workspace"))
+    }
+}
+
+/// A workspace a task can move to: one that exists and isn't archived (`unknown_workspace`).
+fn check_open_workspace(conn: &Connection, workspace_id: WorkspaceId) -> Result<(), DbError> {
+    check_workspace(conn, workspace_id)?;
+    let archived: Option<String> = conn.query_row(
+        "SELECT archived_at FROM workspaces WHERE id = ?1",
+        [workspace_id.to_string()],
+        |row| row.get(0),
+    )?;
+    match archived {
+        None => Ok(()),
+        Some(_) => Err(DbError::Invalid {
+            code: "unknown_workspace",
+            message: format!("workspace {workspace_id} is archived"),
+        }),
     }
 }

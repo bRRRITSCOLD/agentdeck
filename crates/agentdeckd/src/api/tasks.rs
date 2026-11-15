@@ -74,6 +74,11 @@ pub(crate) async fn task_get(
 }
 
 /// Changes a task's title, body, status or workspace.
+///
+/// `"workspace_id": null` moves the task to the inbox. Refuses a blank title, or another title for a PR task, whose title is its PR's
+/// (`invalid_title`), and a workspace that doesn't exist or is archived
+/// (`unknown_workspace`). A PR task's workspace set here sticks: PR sync never moves it again.
+/// Moving a task out of a linked pane's workspace unlinks the pane.
 #[endpoint { method = PATCH, path = "/v1/tasks/{id}" }]
 pub(crate) async fn task_update(
     rqctx: RequestContext<ApiContext>,
@@ -81,16 +86,19 @@ pub(crate) async fn task_update(
     path: Path<IdPath<TaskId>>,
     body: TypedBody<TaskPatch>,
 ) -> Result<HttpResponseOk<Task>, HttpError> {
+    let context = rqctx.context();
     let id = path.into_inner().id;
     let patch = body.into_inner();
     check_title(patch.title.as_deref())?;
-    let task = rqctx
-        .context()
+    let edited = context
         .db
-        .call(move |c| db::tasks::update(c, id, &patch))
+        .call(move |c| db::tasks::edit(c, id, &patch))
         .await?;
-    rqctx.context().events.changed(Entity::Task, task.id);
-    Ok(HttpResponseOk(task))
+    for pane in edited.unlinked {
+        context.events.changed(Entity::Pane, pane);
+    }
+    context.events.changed(Entity::Task, edited.task.id);
+    Ok(HttpResponseOk(edited.task))
 }
 
 /// Deletes a task and its comments.

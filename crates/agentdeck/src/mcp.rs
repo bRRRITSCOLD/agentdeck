@@ -3,7 +3,7 @@
 
 use agentdeck_client::Client;
 use agentdeck_client::types::{NewComment, NewTask, TaskPatch};
-use agentdeck_core::{PaneId, TaskId, TaskStatus, WorkspaceId};
+use agentdeck_core::{PaneId, TaskId, TaskPlace, TaskStatus, WorkspaceId};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig};
@@ -124,6 +124,9 @@ struct TaskUpdate {
     status: Option<String>,
     /// A workspace to move it to (id, slug or name).
     workspace: Option<String>,
+    /// Move it to the inbox, out of any workspace.
+    #[serde(default)]
+    inbox: bool,
 }
 
 /// `task_comments`' arguments.
@@ -291,17 +294,27 @@ impl Server {
     }
 
     #[tool(
-        description = "Change a task's title, body, status (todo, doing, review, done) or workspace."
+        description = "Change a task's title, body, status (todo, doing, review, done) or \
+                          workspace; set `inbox` to move it out of any workspace. A PR task's \
+                          title is its PR's."
     )]
     async fn task_update(&self, Parameters(args): Parameters<TaskUpdate>) -> ToolResult {
         respond(async {
             let client = daemon::connect().await?.client;
             let id: TaskId = parse("task id", &args.id)?;
+            let workspace_id = match (args.workspace.as_deref(), args.inbox) {
+                (Some(_), true) => anyhow::bail!("give either a workspace or inbox, not both"),
+                (Some(reference), false) => Some(TaskPlace::Workspace(
+                    commands::workspace_id(&client, reference).await?,
+                )),
+                (None, true) => Some(TaskPlace::Inbox),
+                (None, false) => None,
+            };
             let patch = TaskPatch {
                 body: args.body,
                 status: parse_opt("status", args.status.as_deref())?,
                 title: args.title,
-                workspace_id: Server::workspace(&client, args.workspace.as_deref()).await?,
+                workspace_id,
             };
             Ok(client
                 .task_update()

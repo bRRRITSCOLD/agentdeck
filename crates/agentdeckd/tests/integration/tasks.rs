@@ -2,7 +2,7 @@
 
 use agentdeck_client::Client;
 use agentdeck_client::types::{NewTask, NewWorkspace, Task, Workspace};
-use agentdeck_core::{TaskKind, TaskStatus};
+use agentdeck_core::{TaskKind, TaskPlace, TaskStatus};
 
 use crate::support::{TestDaemon, error_response};
 
@@ -268,7 +268,7 @@ mod patch_v1_tasks_id {
                 patch
                     .title(Some("new".to_owned()))
                     .body(Some("details".to_owned()))
-                    .workspace_id(Some(ws.id))
+                    .workspace_id(Some(TaskPlace::Workspace(ws.id)))
             })
             .send()
             .await
@@ -279,6 +279,257 @@ mod patch_v1_tasks_id {
         assert_eq!(updated.body, "details");
         assert_eq!(updated.workspace_id, Some(ws.id));
         assert_eq!(updated.status, TaskStatus::Todo);
+    }
+}
+
+mod patch_v1_tasks_id_workspace {
+    use agentdeck_client::types::{PanePatch, TaskPatch};
+    use agentdeck_core::ws::{Entity, ServerMessage};
+
+    use super::*;
+    use crate::support::terminal::{Place, sh};
+    use crate::support::ws::Ws;
+
+    /// The request sending `patch` for `task`.
+    fn patch<'a>(
+        client: &'a Client,
+        task: &Task,
+        patch: TaskPatch,
+    ) -> agentdeck_client::builder::TaskUpdate<'a> {
+        client.task_update().id(task.id).body(patch)
+    }
+
+    fn move_to(place: TaskPlace) -> TaskPatch {
+        TaskPatch {
+            workspace_id: Some(place),
+            ..TaskPatch::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn should_move_a_task_to_the_inbox_given_null_200() {
+        let daemon = TestDaemon::start().await;
+        let ws = workspace(&daemon.client).await;
+        let created = task(&daemon.client, "t", Some(&ws)).await;
+
+        let moved = patch(&daemon.client, &created, move_to(TaskPlace::Inbox))
+            .send()
+            .await
+            .expect("move to the inbox")
+            .into_inner();
+
+        assert_eq!(moved.workspace_id, None);
+        let inbox = daemon
+            .client
+            .task_list()
+            .inbox(true)
+            .send()
+            .await
+            .expect("list the inbox");
+        assert_eq!(inbox.iter().map(|t| t.id).collect::<Vec<_>>(), [created.id]);
+    }
+
+    #[tokio::test]
+    async fn should_leave_the_workspace_as_it_is_without_one_200() {
+        let daemon = TestDaemon::start().await;
+        let ws = workspace(&daemon.client).await;
+        let created = task(&daemon.client, "t", Some(&ws)).await;
+
+        let renamed = patch(
+            &daemon.client,
+            &created,
+            TaskPatch {
+                title: Some("renamed".into()),
+                ..TaskPatch::default()
+            },
+        )
+        .send()
+        .await
+        .expect("rename")
+        .into_inner();
+
+        assert_eq!(renamed.title, "renamed");
+        assert_eq!(renamed.workspace_id, Some(ws.id));
+    }
+
+    #[tokio::test]
+    async fn should_reject_an_unknown_workspace_400() {
+        let daemon = TestDaemon::start().await;
+        let created = task(&daemon.client, "t", None).await;
+
+        let (status, error) = error_response(
+            patch(
+                &daemon.client,
+                &created,
+                move_to(TaskPlace::Workspace(uuid::Uuid::now_v7().into())),
+            )
+            .send()
+            .await,
+        );
+
+        assert_eq!(status, 400);
+        assert_eq!(error.error_code.as_deref(), Some("unknown_workspace"));
+    }
+
+    #[tokio::test]
+    async fn should_reject_an_archived_workspace_400() {
+        let daemon = TestDaemon::start().await;
+        let ws = workspace(&daemon.client).await;
+        daemon
+            .client
+            .workspace_archive()
+            .id(ws.id)
+            .send()
+            .await
+            .expect("archive");
+        let created = task(&daemon.client, "t", None).await;
+
+        let (status, error) = error_response(
+            patch(
+                &daemon.client,
+                &created,
+                move_to(TaskPlace::Workspace(ws.id)),
+            )
+            .send()
+            .await,
+        );
+
+        assert_eq!(status, 400);
+        assert_eq!(error.error_code.as_deref(), Some("unknown_workspace"));
+        let read = daemon
+            .client
+            .task_get()
+            .id(created.id)
+            .send()
+            .await
+            .expect("read");
+        assert_eq!(read.workspace_id, None);
+    }
+
+    #[tokio::test]
+    async fn should_reject_a_blank_title_400() {
+        let daemon = TestDaemon::start().await;
+        let created = task(&daemon.client, "t", None).await;
+
+        let (status, error) = error_response(
+            patch(
+                &daemon.client,
+                &created,
+                TaskPatch {
+                    title: Some("  ".into()),
+                    ..TaskPatch::default()
+                },
+            )
+            .send()
+            .await,
+        );
+
+        assert_eq!(status, 400);
+        assert_eq!(error.error_code.as_deref(), Some("invalid_title"));
+    }
+
+    mod linked_pane {
+        use super::*;
+
+        /// A pane in `place` linked to a new task there.
+        async fn linked(daemon: &TestDaemon, place: &Place) -> (Task, agentdeck_core::PaneId) {
+            let created = task(&daemon.client, "t", Some(&place.workspace)).await;
+            let pane = place.spawn(&daemon.client, &sh("sleep 60")).await;
+            daemon
+                .client
+                .pane_update()
+                .id(pane.id)
+                .body(PanePatch {
+                    task_id: Some(created.id),
+                })
+                .send()
+                .await
+                .expect("link");
+            (created, pane.id)
+        }
+
+        async fn pane_task(
+            daemon: &TestDaemon,
+            pane: agentdeck_core::PaneId,
+        ) -> Option<agentdeck_core::TaskId> {
+            daemon
+                .client
+                .pane_get()
+                .id(pane)
+                .send()
+                .await
+                .expect("read the pane")
+                .into_inner()
+                .task_id
+        }
+
+        #[tokio::test]
+        async fn should_unlink_a_pane_in_the_workspace_it_left_200() {
+            let daemon = TestDaemon::start().await;
+            let place = Place::new(&daemon).await;
+            let other = workspace(&daemon.client).await;
+            let (created, pane) = linked(&daemon, &place).await;
+            let mut ws = Ws::connect(&daemon).await;
+
+            patch(
+                &daemon.client,
+                &created,
+                move_to(TaskPlace::Workspace(other.id)),
+            )
+            .send()
+            .await
+            .expect("move");
+
+            assert_eq!(pane_task(&daemon, pane).await, None);
+            ws.expect(ServerMessage::Changed {
+                entity: Entity::Pane,
+                id: pane.to_string(),
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn should_unlink_it_when_the_task_moves_to_the_inbox_200() {
+            let daemon = TestDaemon::start().await;
+            let place = Place::new(&daemon).await;
+            let (created, pane) = linked(&daemon, &place).await;
+
+            patch(&daemon.client, &created, move_to(TaskPlace::Inbox))
+                .send()
+                .await
+                .expect("move");
+
+            assert_eq!(pane_task(&daemon, pane).await, None);
+        }
+
+        #[tokio::test]
+        async fn should_keep_it_linked_while_the_task_stays_in_its_workspace_200() {
+            let daemon = TestDaemon::start().await;
+            let place = Place::new(&daemon).await;
+            let (created, pane) = linked(&daemon, &place).await;
+
+            patch(
+                &daemon.client,
+                &created,
+                move_to(TaskPlace::Workspace(place.workspace.id)),
+            )
+            .send()
+            .await
+            .expect("pick the same workspace");
+            patch(
+                &daemon.client,
+                &created,
+                TaskPatch {
+                    body: Some("more".into()),
+                    ..TaskPatch::default()
+                },
+            )
+            .send()
+            .await
+            .expect("edit the body");
+
+            assert_eq!(pane_task(&daemon, pane).await, Some(created.id));
+        }
     }
 }
 

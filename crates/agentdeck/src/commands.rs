@@ -10,7 +10,7 @@ use agentdeck_client::types::{
     PrClose, PullRequest, TaskPatch,
 };
 use agentdeck_client::{Client, panes};
-use agentdeck_core::{PaneId, TaskId, TaskKind, WorkspaceId};
+use agentdeck_core::{PaneId, TaskId, TaskKind, TaskPlace, WorkspaceId};
 use anyhow::Context;
 use futures_util::TryStreamExt;
 use serde::Serialize;
@@ -219,6 +219,32 @@ async fn task(client: &Client, command: TaskCommand) -> anyhow::Result<Output> {
                 .body(TaskPatch {
                     status: Some(status),
                     ..TaskPatch::default()
+                })
+                .send()
+                .await
+                .map_err(ApiError::from)?;
+            Output::new(&*task, render::task(&task))
+        }
+        TaskCommand::Edit {
+            id,
+            title,
+            body,
+            ws,
+            inbox,
+        } => {
+            let workspace_id = match (ws, inbox) {
+                (Some(ws), _) => Some(TaskPlace::Workspace(workspace_id(client, &ws).await?)),
+                (None, true) => Some(TaskPlace::Inbox),
+                (None, false) => None,
+            };
+            let task = client
+                .task_update()
+                .id(id)
+                .body(TaskPatch {
+                    title,
+                    body,
+                    status: None,
+                    workspace_id,
                 })
                 .send()
                 .await

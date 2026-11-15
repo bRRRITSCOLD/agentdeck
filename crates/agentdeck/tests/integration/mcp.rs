@@ -92,6 +92,19 @@ mod agentdeck_mcp {
         }
 
         #[test]
+        fn should_move_a_task_to_the_inbox() {
+            let env = TestEnv::new();
+            let ws = env.workspace("web");
+            let task = env.json(&["task", "add", "Fix the build", "--ws", "web"]);
+            let mut mcp = McpClient::start(&env, &[("AGENTDECK_WORKSPACE", text(&ws, "id"))]);
+            mcp.initialize();
+
+            let moved = mcp.call_ok("task_update", json!({ "id": task["id"], "inbox": true }));
+
+            assert!(moved["workspace_id"].is_null(), "{moved}");
+        }
+
+        #[test]
         fn should_comment_on_a_task_as_the_callers_pane_and_list_its_comments() {
             let env = TestEnv::new();
             let ws = env.workspace("web");
