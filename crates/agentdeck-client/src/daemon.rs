@@ -367,7 +367,10 @@ mod tests {
         }
 
         #[test]
-        #[expect(clippy::zombie_processes, reason = "`gone` reaps it, which is the test")]
+        #[expect(
+            clippy::zombie_processes,
+            reason = "`gone` reaps it, which is the test"
+        )]
         fn should_see_an_exited_child_of_this_process_as_gone() {
             // Never waited on, as the GUI never waits on the daemon it started: once it
             // exits it is a zombie, which `kill(pid, 0)` still finds.
