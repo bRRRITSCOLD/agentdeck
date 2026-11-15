@@ -218,5 +218,29 @@ mod tests {
                 "openapi.json is stale: run `cargo xtask openapi` and commit the result"
             );
         }
+        /// `openapi.json`'s fingerprint when [`agentdeck_core::API_VERSION`] was last set,
+        /// and that version. Clients tell an older daemon by its API version, so a route or
+        /// field added without a bump would go unnoticed: they would call it and get a 404.
+        const FINGERPRINT_AT_API_VERSION: (u64, u32) = (0x7254_145e_bccd_f508, 1);
+
+        /// FNV-1a: stable across Rust releases, unlike `DefaultHasher`.
+        fn fingerprint(text: &str) -> u64 {
+            text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+            })
+        }
+
+        #[test]
+        fn should_bump_api_version_when_openapi_json_changes() {
+            let now = (fingerprint(COMMITTED), agentdeck_core::API_VERSION);
+
+            assert!(
+                now == FINGERPRINT_AT_API_VERSION,
+                "openapi.json or API_VERSION changed: if a route or a field was added or \
+                 changed, bump agentdeck_core::API_VERSION (spec §2). Then set \
+                 FINGERPRINT_AT_API_VERSION to ({:#x}, API_VERSION).",
+                now.0
+            );
+        }
     }
 }

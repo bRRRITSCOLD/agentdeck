@@ -90,6 +90,7 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
         token,
         pid: std::process::id(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
+        api_version: agentdeck_core::API_VERSION,
     })?;
     tracing::info!("agentdeckd listening on 127.0.0.1:{port}");
 

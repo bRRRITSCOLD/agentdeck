@@ -2,34 +2,66 @@
 //! its WebSocket, and pass on what it sends.
 //!
 //! [`Connection`] is an entity the views observe for its [`Status`] and subscribe to for
-//! [`DaemonEvent`]s. How it connects is a [`Connector`], so tests hand it a fake.
+//! [`DaemonEvent`]s. It says when the daemon it reached predates the app, and restarts it
+//! when the user asks, never on its own. How it connects and restarts is a [`Connector`], so
+//! tests hand it a fake.
 
 use std::rc::Rc;
 use std::sync::Arc;
 
 use agentdeck_client::daemon;
 use agentdeck_client::ws::{self, Socket};
+use agentdeck_core::DaemonInfo;
 use agentdeck_core::ws::{Channel, ServerMessage};
 use gpui::{App, Context, EventEmitter, SharedString, Task};
 
 use crate::api::Api;
 use crate::runtime;
 
+/// A reached daemon: its API, its open socket and the `daemon.json` it was reached through.
+pub struct Link {
+    /// The daemon's API.
+    pub api: Arc<dyn Api>,
+    /// Its WebSocket.
+    pub socket: Socket,
+    /// What `daemon.json` held: which daemon this is, and its API version.
+    pub daemon: DaemonInfo,
+}
+
 /// Reaches the daemon and opens its socket.
 pub trait Connector {
-    /// The daemon's API and its open socket, or why neither could be had.
-    fn connect(&self, cx: &App) -> Task<anyhow::Result<(Arc<dyn Api>, Socket)>>;
+    /// The daemon, or why it couldn't be reached.
+    fn connect(&self, cx: &App) -> Task<anyhow::Result<Link>>;
+
+    /// Stops `daemon`, then reaches the new one that is started in its place.
+    fn restart(&self, daemon: &DaemonInfo, cx: &App) -> Task<anyhow::Result<Link>>;
 }
 
 /// The real [`Connector`]: `daemon.json`, starting `agentdeckd` when nothing answers.
 pub struct DaemonConnector;
 
+impl DaemonConnector {
+    /// Opens `daemon`'s socket.
+    async fn link(daemon: daemon::Daemon) -> anyhow::Result<Link> {
+        let socket = ws::open(&daemon.info).await?;
+        let info = daemon.info.clone();
+        Ok(Link {
+            api: Arc::new(daemon),
+            socket,
+            daemon: info,
+        })
+    }
+}
+
 impl Connector for DaemonConnector {
-    fn connect(&self, cx: &App) -> Task<anyhow::Result<(Arc<dyn Api>, Socket)>> {
-        runtime::spawn(cx, async {
-            let daemon = daemon::connect().await?;
-            let socket = ws::open(&daemon.info).await?;
-            Ok((Arc::new(daemon) as Arc<dyn Api>, socket))
+    fn connect(&self, cx: &App) -> Task<anyhow::Result<Link>> {
+        runtime::spawn(cx, async { Self::link(daemon::connect().await?).await })
+    }
+
+    fn restart(&self, daemon: &DaemonInfo, cx: &App) -> Task<anyhow::Result<Link>> {
+        let daemon = daemon.clone();
+        runtime::spawn(cx, async move {
+            Self::link(daemon::restart(&daemon).await?).await
         })
     }
 }
@@ -48,6 +80,8 @@ pub struct Session {
 pub enum Status {
     /// Reaching or starting the daemon.
     Connecting,
+    /// Stopping a daemon older than the app and starting a new one, as the user asked.
+    Restarting,
     /// Connected.
     Connected(Session),
     /// Couldn't connect, or the connection was lost; why, for the user.
@@ -67,7 +101,10 @@ pub enum DaemonEvent {
 pub struct Connection {
     connector: Rc<dyn Connector>,
     status: Status,
-    /// Connects, then reads the socket; replaced on each [`Connection::connect`].
+    /// The daemon reached, while connected.
+    daemon: Option<DaemonInfo>,
+    /// Connects, then reads the socket; replaced on each [`Connection::connect`] and
+    /// [`Connection::restart`].
     task: Option<Task<()>>,
     /// The last channel handed out on this socket.
     last_channel: Channel,
@@ -81,6 +118,7 @@ impl Connection {
         let mut connection = Connection {
             connector,
             status: Status::Connecting,
+            daemon: None,
             task: None,
             last_channel: 0,
         };
@@ -93,6 +131,14 @@ impl Connection {
         &self.status
     }
 
+    /// Whether the daemon reached is older than the app, so it may lack what the app asks of
+    /// it (spec §2): its API version is lower than the app's.
+    pub fn daemon_predates_app(&self) -> bool {
+        self.daemon
+            .as_ref()
+            .is_some_and(DaemonInfo::predates_client)
+    }
+
     /// A channel number no attachment on this socket has used yet.
     pub fn open_channel(&mut self) -> Channel {
         self.last_channel += 1;
@@ -101,14 +147,51 @@ impl Connection {
 
     /// Connects again from scratch, dropping any socket held now.
     pub fn connect(&mut self, cx: &mut Context<Self>) {
-        self.last_channel = 0;
-        self.set_status(Status::Connecting, cx);
         let connecting = self.connector.connect(cx);
+        self.follow(
+            Status::Connecting,
+            connecting,
+            "Couldn't reach agentdeckd",
+            cx,
+        );
+    }
+
+    /// Stops the daemon reached and connects to a new one, which resumes its panes (spec §6).
+    /// Only while connected; the old socket's closing isn't a lost connection.
+    pub fn restart(&mut self, cx: &mut Context<Self>) {
+        let Some(daemon) = self.daemon.clone() else {
+            return;
+        };
+        let restarting = self.connector.restart(&daemon, cx);
+        self.follow(
+            Status::Restarting,
+            restarting,
+            "Couldn't restart agentdeckd",
+            cx,
+        );
+    }
+
+    /// Shows `status` until `connecting` reaches a daemon, then reads its socket, dropping
+    /// the one held now. A failure reads `failed: <why>`.
+    fn follow(
+        &mut self,
+        status: Status,
+        connecting: Task<anyhow::Result<Link>>,
+        failed: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        self.last_channel = 0;
+        self.daemon = None;
+        self.set_status(status, cx);
         self.task = Some(cx.spawn(async move |this, cx| {
-            let (api, socket) = match connecting.await {
-                Ok(connected) => connected,
+            let Link {
+                api,
+                socket,
+                daemon,
+            } = match connecting.await {
+                Ok(link) => link,
                 Err(err) => {
-                    let reason = format!("Couldn't reach agentdeckd: {err:#}");
+                    let reason = format!("{failed}: {err:#}");
                     let _ = this.update(cx, |this, cx| {
                         this.set_status(Status::Failed(reason.into()), cx);
                     });
@@ -118,7 +201,10 @@ impl Connection {
             let Socket { sender, mut events } = socket;
             let connected = Status::Connected(Session { api, sender });
             if this
-                .update(cx, |this, cx| this.set_status(connected, cx))
+                .update(cx, |this, cx| {
+                    this.daemon = Some(daemon);
+                    this.set_status(connected, cx);
+                })
                 .is_err()
             {
                 return;
@@ -139,6 +225,7 @@ impl Connection {
                 None => "Lost the connection to agentdeckd".to_owned(),
             };
             let _ = this.update(cx, |this, cx| {
+                this.daemon = None;
                 this.set_status(Status::Failed(reason.into()), cx);
             });
         }));
@@ -157,27 +244,46 @@ pub(crate) mod fake {
     use std::collections::VecDeque;
 
     use agentdeck_client::ws::{Remote, loopback};
+    use agentdeck_core::API_VERSION;
 
     use super::*;
     use crate::api::fake::FakeApi;
 
-    /// What a connect resolves to.
-    type Outcome = anyhow::Result<(Arc<dyn Api>, Socket)>;
+    /// What a connect or a restart resolves to.
+    type Outcome = anyhow::Result<Link>;
 
-    /// Answers each connect with the next scripted outcome, and counts the calls.
+    /// Answers each connect and restart with the next scripted outcome, and counts the calls.
     #[derive(Default)]
     pub struct FakeConnector {
         outcomes: RefCell<VecDeque<Outcome>>,
         pub calls: RefCell<usize>,
+        /// The daemon each restart was asked to stop.
+        pub restarts: RefCell<Vec<DaemonInfo>>,
+    }
+
+    /// A `daemon.json` at `api_version`.
+    fn daemon(api_version: u32) -> DaemonInfo {
+        DaemonInfo {
+            port: 1,
+            token: "fake".into(),
+            pid: 1,
+            version: "0.1.0".into(),
+            api_version,
+        }
     }
 
     impl FakeConnector {
         /// Scripts a failure with `reason`.
         pub fn then_fail(self, reason: &str) -> Self {
+            self.push_failure(reason);
+            self
+        }
+
+        /// Scripts a failure with `reason`, on a shared connector.
+        pub fn push_failure(&self, reason: &str) {
             self.outcomes
                 .borrow_mut()
                 .push_back(Err(anyhow::anyhow!(reason.to_owned())));
-            self
         }
 
         /// Scripts a success to a daemon with nothing in it; the returned [`Remote`] plays
@@ -188,17 +294,45 @@ pub(crate) mod fake {
 
         /// Scripts a success to `api`; the returned [`Remote`] plays the daemon's socket.
         pub fn then_connect_to(&self, api: Arc<FakeApi>) -> Remote {
+            self.push(api, daemon(API_VERSION))
+        }
+
+        /// Scripts a success to a daemon with nothing in it, from before the app's API
+        /// version.
+        pub fn then_connect_older(&self) -> Remote {
+            self.then_connect_older_to(Arc::new(FakeApi::default()))
+        }
+
+        /// Scripts a success to `api`, from before the app's API version.
+        pub fn then_connect_older_to(&self, api: Arc<FakeApi>) -> Remote {
+            self.push(api, daemon(0))
+        }
+
+        fn push(&self, api: Arc<FakeApi>, daemon: DaemonInfo) -> Remote {
             let (socket, remote) = loopback();
-            self.outcomes.borrow_mut().push_back(Ok((api, socket)));
+            self.outcomes.borrow_mut().push_back(Ok(Link {
+                api,
+                socket,
+                daemon,
+            }));
             remote
+        }
+
+        fn next(&self) -> Task<Outcome> {
+            let outcome = self.outcomes.borrow_mut().pop_front();
+            Task::ready(outcome.expect("a scripted outcome for every connect and restart"))
         }
     }
 
     impl Connector for FakeConnector {
         fn connect(&self, _cx: &App) -> Task<Outcome> {
             *self.calls.borrow_mut() += 1;
-            let outcome = self.outcomes.borrow_mut().pop_front();
-            Task::ready(outcome.expect("a scripted outcome for every connect"))
+            self.next()
+        }
+
+        fn restart(&self, daemon: &DaemonInfo, _cx: &App) -> Task<Outcome> {
+            self.restarts.borrow_mut().push(daemon.clone());
+            self.next()
         }
     }
 }
@@ -269,6 +403,123 @@ mod tests {
 
             assert!(is_connected(&connection, cx));
             assert_eq!(*connector.calls.borrow(), 2);
+        }
+    }
+
+    mod older_daemon {
+        use super::*;
+
+        fn predates_app(connection: &Entity<Connection>, cx: &TestAppContext) -> bool {
+            connection.read_with(cx, |connection, _| connection.daemon_predates_app())
+        }
+
+        #[gpui::test]
+        fn should_say_a_daemon_older_than_the_app_is(cx: &mut TestAppContext) {
+            let connector = Rc::new(FakeConnector::default());
+            let _remote = connector.then_connect_older();
+
+            let connection = connection(&connector, cx);
+
+            assert!(is_connected(&connection, cx));
+            assert!(predates_app(&connection, cx));
+        }
+
+        #[gpui::test]
+        fn should_not_say_so_of_a_daemon_as_new_as_the_app(cx: &mut TestAppContext) {
+            let connector = Rc::new(FakeConnector::default());
+            let _remote = connector.then_connect();
+
+            let connection = connection(&connector, cx);
+
+            assert!(!predates_app(&connection, cx));
+        }
+
+        #[gpui::test]
+        fn should_never_restart_it_unasked(cx: &mut TestAppContext) {
+            let connector = Rc::new(FakeConnector::default());
+            let _remote = connector.then_connect_older();
+
+            let _connection = connection(&connector, cx);
+            cx.run_until_parked();
+
+            assert!(connector.restarts.borrow().is_empty());
+        }
+
+        mod restart {
+            use super::*;
+
+            #[gpui::test]
+            fn should_restart_the_daemon_it_reached_and_connect_to_the_new_one(
+                cx: &mut TestAppContext,
+            ) {
+                let connector = Rc::new(FakeConnector::default());
+                let _old = connector.then_connect_older();
+                let connection = connection(&connector, cx);
+                let _new = connector.then_connect();
+
+                connection.update(cx, |connection, cx| connection.restart(cx));
+                cx.run_until_parked();
+
+                let restarted: Vec<u32> = connector
+                    .restarts
+                    .borrow()
+                    .iter()
+                    .map(|daemon| daemon.api_version)
+                    .collect();
+                assert_eq!(restarted, [0]);
+                assert!(is_connected(&connection, cx));
+                assert!(!predates_app(&connection, cx));
+            }
+
+            #[gpui::test]
+            fn should_say_it_is_restarting_until_the_new_daemon_answers(cx: &mut TestAppContext) {
+                let connector = Rc::new(FakeConnector::default());
+                let _old = connector.then_connect_older();
+                let connection = connection(&connector, cx);
+                let _new = connector.then_connect();
+
+                connection.update(cx, |connection, cx| connection.restart(cx));
+
+                let restarting = connection.read_with(cx, |connection, _| {
+                    matches!(connection.status(), Status::Restarting)
+                });
+                assert!(restarting);
+            }
+
+            #[gpui::test]
+            fn should_not_take_the_old_socket_closing_for_a_lost_connection(
+                cx: &mut TestAppContext,
+            ) {
+                let connector = Rc::new(FakeConnector::default());
+                let old = connector.then_connect_older();
+                let connection = connection(&connector, cx);
+                let _new = connector.then_connect();
+
+                connection.update(cx, |connection, cx| connection.restart(cx));
+                let _ = old
+                    .events
+                    .try_send(ws::Event::Closed(Some("shutting down".into())));
+                drop(old);
+                cx.run_until_parked();
+
+                assert!(is_connected(&connection, cx));
+            }
+
+            #[gpui::test]
+            fn should_fail_with_the_reason_when_the_restart_fails(cx: &mut TestAppContext) {
+                let connector = Rc::new(FakeConnector::default());
+                let _old = connector.then_connect_older();
+                let connection = connection(&connector, cx);
+                connector.push_failure("agentdeckd (pid 7) was still running");
+
+                connection.update(cx, |connection, cx| connection.restart(cx));
+                cx.run_until_parked();
+
+                assert_eq!(
+                    failure(&connection, cx).as_deref(),
+                    Some("Couldn't restart agentdeckd: agentdeckd (pid 7) was still running")
+                );
+            }
         }
     }
 

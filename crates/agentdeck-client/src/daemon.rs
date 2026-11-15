@@ -1,5 +1,6 @@
 //! Reaching the daemon (spec §2): read `daemon.json`, and start `agentdeckd` detached when
-//! nothing answers there. The CLI and the GUI both connect through [`connect`].
+//! nothing answers there. The CLI and the GUI both connect through [`connect`], and
+//! [`restart`] replaces a daemon older than them.
 
 use std::ffi::OsString;
 use std::os::unix::process::CommandExt;
@@ -9,7 +10,8 @@ use std::time::{Duration, Instant};
 
 use agentdeck_core::DaemonInfo;
 use nix::errno::Errno;
-use nix::sys::signal::kill;
+use nix::sys::signal::{Signal, kill};
+use nix::sys::wait::{WaitPidFlag, waitpid};
 use nix::unistd::Pid;
 
 use crate::Client;
@@ -23,6 +25,10 @@ const START_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long to keep looking after the started daemon exited, in case another client's daemon
 /// won the lock and is still starting.
 const LOST_RACE_GRACE: Duration = Duration::from_secs(2);
+
+/// How long a stopped daemon gets to exit: it hangs up its panes and finishes the queries in
+/// flight first.
+const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 const POLL: Duration = Duration::from_millis(25);
 
@@ -72,6 +78,21 @@ pub enum DaemonError {
         /// How it exited.
         status: ExitStatus,
     },
+    /// SIGTERM couldn't be sent to the daemon being restarted.
+    #[error("stopping agentdeckd (pid {pid})")]
+    Stop {
+        /// The daemon's pid.
+        pid: u32,
+        /// Why the signal wasn't sent.
+        #[source]
+        source: Errno,
+    },
+    /// The daemon being restarted was still running 10 s after SIGTERM.
+    #[error("agentdeckd (pid {pid}) was still running {STOP_TIMEOUT:?} after it was asked to stop")]
+    StillRunning {
+        /// The daemon's pid.
+        pid: u32,
+    },
     /// The started `agentdeckd` is still running but never answered.
     #[error("{} didn't write {} in {START_TIMEOUT:?}", program.display(), daemon_json.display())]
     Timeout {
@@ -95,6 +116,58 @@ pub async fn connect() -> Result<Daemon, DaemonError> {
         |path| path.is_file(),
     );
     start(&program, &daemon_json).await
+}
+
+/// Stops the daemon `connected` names, as `kill -TERM <pid>` would, then reaches a new one
+/// through [`connect`], which starts it; its panes resume (spec §6). Only that daemon is
+/// signalled, and only while `daemon.json` still names it: once another has replaced it,
+/// this connects to that one. Never called on its own: the user chooses when, since every
+/// running agent is re-spawned.
+pub async fn restart(connected: &DaemonInfo) -> Result<Daemon, DaemonError> {
+    let daemon_json = daemon_json(std::env::var_os("XDG_RUNTIME_DIR"))?;
+    if let Some(pid) = to_stop(read(&daemon_json), connected) {
+        stop(pid).await?;
+    }
+    connect().await
+}
+
+/// The pid to stop: `connected`'s, while `daemon.json` still names that daemon by its pid and
+/// token. A pid alone could have been reused by another process since.
+fn to_stop(current: Option<DaemonInfo>, connected: &DaemonInfo) -> Option<u32> {
+    current
+        .filter(|current| current.pid == connected.pid && current.token == connected.token)
+        .map(|current| current.pid)
+}
+
+/// Sends SIGTERM to `pid` and waits until it has exited, so its lock is free for the next
+/// daemon.
+async fn stop(pid: u32) -> Result<(), DaemonError> {
+    let Ok(raw) = i32::try_from(pid) else {
+        return Ok(());
+    };
+    match kill(Pid::from_raw(raw), Signal::SIGTERM) {
+        Ok(()) | Err(Errno::ESRCH) => {}
+        Err(source) => return Err(DaemonError::Stop { pid, source }),
+    }
+    let deadline = Instant::now() + STOP_TIMEOUT;
+    while !gone(pid) {
+        if Instant::now() >= deadline {
+            return Err(DaemonError::StillRunning { pid });
+        }
+        tokio::time::sleep(POLL).await;
+    }
+    Ok(())
+}
+
+/// Whether `pid` has exited. A daemon this process started (the GUI's, say) is its child, and
+/// once it exits it stays a zombie that [`alive`] still sees until it is reaped, so this reaps
+/// it first; for any other pid the reap fails harmlessly.
+fn gone(pid: u32) -> bool {
+    let Ok(raw) = i32::try_from(pid) else {
+        return true;
+    };
+    let _ = waitpid(Pid::from_raw(raw), Some(WaitPidFlag::WNOHANG));
+    !alive(pid)
 }
 
 /// `$XDG_RUNTIME_DIR/agentdeck/daemon.json`.
@@ -124,14 +197,19 @@ fn program(
 /// The daemon, when `daemon.json` names a live process that answers `/v1/health`. A missing
 /// or unreadable file, a dead pid and a refused connection all mean no daemon.
 async fn reachable(daemon_json: &Path) -> Option<Daemon> {
-    let text = std::fs::read_to_string(daemon_json).ok()?;
-    let info: DaemonInfo = serde_json::from_str(&text).ok()?;
+    let info = read(daemon_json)?;
     if !alive(info.pid) {
         return None;
     }
     let client = crate::authenticated(&info.base_url(), &info.token).ok()?;
     client.health().send().await.ok()?;
     Some(Daemon { client, info })
+}
+
+/// What `daemon_json` holds; `None` when it is missing or unreadable.
+fn read(daemon_json: &Path) -> Option<DaemonInfo> {
+    let text = std::fs::read_to_string(daemon_json).ok()?;
+    serde_json::from_str(&text).ok()
 }
 
 /// Whether a process with this pid exists; one owned by another user still counts.
@@ -237,6 +315,72 @@ mod tests {
             let program = program(Some(OsString::new()), Some(EXE.into()), |_| false);
 
             assert_eq!(program, PathBuf::from("agentdeckd"));
+        }
+    }
+
+    mod to_stop {
+        use super::*;
+
+        fn info(pid: u32, token: &str) -> DaemonInfo {
+            DaemonInfo {
+                port: 4242,
+                token: token.into(),
+                pid,
+                version: "0.1.0".into(),
+                api_version: 0,
+            }
+        }
+
+        #[test]
+        fn should_be_the_daemon_connected_to_while_daemon_json_still_names_it() {
+            let connected = info(7, "t0k");
+
+            assert_eq!(to_stop(Some(info(7, "t0k")), &connected), Some(7));
+        }
+
+        #[test]
+        fn should_be_none_once_another_daemon_replaced_it() {
+            let connected = info(7, "t0k");
+
+            assert_eq!(to_stop(Some(info(8, "new")), &connected), None);
+        }
+
+        #[test]
+        fn should_be_none_when_a_reused_pid_carries_another_token() {
+            let connected = info(7, "t0k");
+
+            assert_eq!(to_stop(Some(info(7, "new")), &connected), None);
+        }
+
+        #[test]
+        fn should_be_none_without_a_daemon_json() {
+            assert_eq!(to_stop(None, &info(7, "t0k")), None);
+        }
+    }
+
+    mod gone {
+        use super::*;
+
+        #[test]
+        fn should_not_see_this_process_as_gone() {
+            assert!(!gone(std::process::id()));
+        }
+
+        #[test]
+        #[expect(
+            clippy::zombie_processes,
+            reason = "`gone` reaps it, which is the test"
+        )]
+        fn should_see_an_exited_child_of_this_process_as_gone() {
+            // Never waited on, as the GUI never waits on the daemon it started: once it
+            // exits it is a zombie, which `kill(pid, 0)` still finds.
+            let child = Command::new("true").spawn().expect("running true");
+            let deadline = Instant::now() + Duration::from_secs(5);
+
+            while !gone(child.id()) {
+                assert!(Instant::now() < deadline, "true never exited");
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
     }
 

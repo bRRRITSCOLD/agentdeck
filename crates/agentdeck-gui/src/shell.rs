@@ -1,5 +1,6 @@
 //! The main window's content: what the daemon connection allows. Until it connects, a
-//! centred status; once it does, the sidebar beside the selected view: a workspace's pane,
+//! centred status; once it does, the sidebar beside the selected view, under a banner with a
+//! Restart while the daemon predates the app: a workspace's pane,
 //! the Tasks view, the Inbox or Settings, and the new workspace dialog the
 //! sidebar's `+` opens. Settings is made as the window connects, so the saved theme applies
 //! from the start. When the compositor leaves decorations to the app, a title bar and
@@ -34,6 +35,7 @@ use brrritscold_core_gpui::{
     ActiveTheme as _, Alert, AlertAction, AlertDescription, AlertTitle, AlertVariant, Button,
     ButtonSize, ButtonVariant, IconName, Separator, SeparatorOrientation,
 };
+use brrritscold_core_gpui_tokens::primitive::space;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Decorations, Entity, FocusHandle,
@@ -279,7 +281,7 @@ impl Shell {
                     self.follow_selection(window, cx);
                 }
             }
-            Status::Connecting | Status::Failed(_) => {
+            Status::Connecting | Status::Restarting | Status::Failed(_) => {
                 self.sidebar = None;
                 self._selection = None;
                 self.new_workspace = None;
@@ -531,7 +533,7 @@ impl Shell {
     fn api(&self, cx: &App) -> Option<Arc<dyn Api>> {
         match self.connection.read(cx).status() {
             Status::Connected(session) => Some(session.api.clone()),
-            Status::Connecting | Status::Failed(_) => None,
+            Status::Connecting | Status::Restarting | Status::Failed(_) => None,
         }
     }
 
@@ -649,6 +651,44 @@ impl Shell {
         .detach();
     }
 
+    /// The banner over the window while the daemon predates the app (spec §11): Penpot has
+    /// no design for it, so it is the Inbox's gh banner (a default `Alert` with the `Info`
+    /// icon) with the failure alert's outline sm action. Restart is the user's choice, since
+    /// every running agent is re-spawned.
+    fn older_daemon_banner(&self) -> impl IntoElement {
+        let connection = self.connection.clone();
+        let restart = Button::new("restart-daemon")
+            .variant(ButtonVariant::Outline)
+            .size(ButtonSize::Sm)
+            .label("Restart")
+            .on_click(move |_, _, cx| {
+                connection.update(cx, |connection, cx| connection.restart(cx));
+            });
+        div()
+            .flex_none()
+            .debug_selector(|| "older daemon banner".into())
+            .child(
+                div().px(space::S6).py(space::S4).child(
+                    Alert::new()
+                        .icon(IconName::Info)
+                        .title(AlertTitle::new(
+                            "agentdeck's background service is older than this app",
+                        ))
+                        .description(AlertDescription::new(
+                            "Restart it to use new features. Your agents resume after the restart.",
+                        ))
+                        .action(
+                            AlertAction::new().child(
+                                div()
+                                    .debug_selector(|| "restart daemon".into())
+                                    .child(restart),
+                            ),
+                        ),
+                ),
+            )
+            .child(Separator::new())
+    }
+
     /// What the connection allows, filling the space under the title bar.
     fn content(&self, cx: &mut Context<Self>) -> AnyElement {
         let s = cx.theme().semantic();
@@ -658,6 +698,11 @@ impl Shell {
                 .text_sm()
                 .text_color(s.muted_foreground)
                 .child("Connecting to agentdeckd…")
+                .into_any_element(),
+            Status::Restarting => centred
+                .text_sm()
+                .text_color(s.muted_foreground)
+                .child("Restarting agentdeck's background service…")
                 .into_any_element(),
             Status::Failed(reason) => {
                 let connection = self.connection.clone();
@@ -680,44 +725,51 @@ impl Shell {
                     )
                     .into_any_element()
             }
-            // Penpot "Main window" `Body`: Sidebar | Separator | the selected view.
+            // The older-daemon banner, if any, over Penpot "Main window" `Body`.
             Status::Connected(_) => div()
                 .flex_1()
                 .min_h_0()
                 .flex()
-                .children(self.sidebar.clone())
-                .child(Separator::new().orientation(SeparatorOrientation::Vertical))
-                .map(|body| match self.selection {
-                    Some(Selection::Workspace(_)) if self.workspace.is_some() => {
-                        body.children(self.workspace.clone()).when_some(
-                            self.panel.clone().filter(|_| self.panel_open),
-                            |body, panel| {
-                                body.child(
-                                    Separator::new().orientation(SeparatorOrientation::Vertical),
-                                )
-                                .child(panel)
-                            },
-                        )
-                    }
-                    Some(Selection::Tasks) if self.tasks.is_some() => {
-                        body.children(self.tasks.clone())
-                    }
-                    Some(Selection::Inbox) if self.inbox.is_some() => {
-                        body.children(self.inbox.clone())
-                    }
-                    Some(Selection::Settings) if self.settings.is_some() => {
-                        body.children(self.settings.clone())
-                    }
-                    _ => body.child(div().flex_1()),
+                .flex_col()
+                .when(self.connection.read(cx).daemon_predates_app(), |content| {
+                    content.child(self.older_daemon_banner())
                 })
-                .children(self.new_workspace.clone())
-                .children(self.new_agent.clone())
-                .children(self.delete_workspace.clone())
-                .children(self.new_task.clone())
-                .children(self.task_sheet.clone())
-                .children(self.link_task.clone())
+                .child(self.body())
                 .into_any_element(),
         }
+    }
+
+    /// Penpot "Main window" `Body`: Sidebar | Separator | the selected view, and the dialogs.
+    fn body(&self) -> impl IntoElement {
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .children(self.sidebar.clone())
+            .child(Separator::new().orientation(SeparatorOrientation::Vertical))
+            .map(|body| match self.selection {
+                Some(Selection::Workspace(_)) if self.workspace.is_some() => {
+                    body.children(self.workspace.clone()).when_some(
+                        self.panel.clone().filter(|_| self.panel_open),
+                        |body, panel| {
+                            body.child(Separator::new().orientation(SeparatorOrientation::Vertical))
+                                .child(panel)
+                        },
+                    )
+                }
+                Some(Selection::Tasks) if self.tasks.is_some() => body.children(self.tasks.clone()),
+                Some(Selection::Inbox) if self.inbox.is_some() => body.children(self.inbox.clone()),
+                Some(Selection::Settings) if self.settings.is_some() => {
+                    body.children(self.settings.clone())
+                }
+                _ => body.child(div().flex_1()),
+            })
+            .children(self.new_workspace.clone())
+            .children(self.new_agent.clone())
+            .children(self.delete_workspace.clone())
+            .children(self.new_task.clone())
+            .children(self.task_sheet.clone())
+            .children(self.link_task.clone())
     }
 }
 
@@ -776,17 +828,16 @@ mod tests {
     use std::rc::Rc;
     use std::sync::Arc;
 
-    use agentdeck_client::ws::Socket;
+    use agentdeck_core::DaemonInfo;
     use brrritscold_core_gpui::{Root, Theme, ThemePreference};
     use gpui::{App, Task, TestAppContext, VisualTestContext};
 
     use agentdeck_core::WorkspaceId;
 
     use super::*;
-    use crate::api::Api;
     use crate::api::fake::FakeApi;
-    use crate::connection::Connector;
     use crate::connection::fake::FakeConnector;
+    use crate::connection::{Connector, Link};
     use crate::notifications::fake::FakeNotifier;
     use crate::overview::Snapshot;
     use crate::overview::fixtures::{id, tab, workspace};
@@ -795,7 +846,11 @@ mod tests {
     struct Pending;
 
     impl Connector for Pending {
-        fn connect(&self, cx: &App) -> Task<anyhow::Result<(Arc<dyn Api>, Socket)>> {
+        fn connect(&self, cx: &App) -> Task<anyhow::Result<Link>> {
+            cx.background_spawn(std::future::pending())
+        }
+
+        fn restart(&self, _: &DaemonInfo, cx: &App) -> Task<anyhow::Result<Link>> {
             cx.background_spawn(std::future::pending())
         }
     }
@@ -803,10 +858,16 @@ mod tests {
     /// Opens a `Root` window on a [`Shell`] over a connection through `connector`, and draws
     /// it in light, then dark.
     fn draw_in_both_themes(connector: Rc<dyn Connector>, cx: &mut TestAppContext) {
+        let connection = cx.update(|cx| cx.new(|cx| Connection::new(connector, cx)));
+        draw_connection_in_both_themes(connection, cx);
+    }
+
+    /// Opens a `Root` window on a [`Shell`] over `connection`, and draws it in light, then
+    /// dark.
+    fn draw_connection_in_both_themes(connection: Entity<Connection>, cx: &mut TestAppContext) {
         cx.update(brrritscold_core_gpui::init);
         cx.update(crate::terminal::init);
         let window = cx.add_window(|window, cx| {
-            let connection = cx.new(|cx| Connection::new(connector, cx));
             let shell =
                 cx.new(|cx| Shell::new(connection, Rc::new(FakeNotifier::default()), window, cx));
             Root::new(shell, window, cx)
@@ -838,6 +899,29 @@ mod tests {
             let _remote = connector.then_connect();
 
             draw_in_both_themes(connector, cx);
+        }
+
+        #[gpui::test]
+        fn should_draw_the_older_daemon_banner_in_both_themes(cx: &mut TestAppContext) {
+            let connector = Rc::new(FakeConnector::default());
+            let _remote = connector.then_connect_older();
+
+            draw_in_both_themes(connector, cx);
+        }
+
+        #[gpui::test]
+        fn should_draw_while_restarting_in_both_themes(cx: &mut TestAppContext) {
+            let connector = Rc::new(FakeConnector::default());
+            let _remote = connector.then_connect_older();
+            let connection = cx.update(|cx| {
+                let connector: Rc<dyn Connector> = connector.clone();
+                cx.new(|cx| Connection::new(connector, cx))
+            });
+            cx.run_until_parked();
+            let _new = connector.then_connect();
+            connection.update(cx, |connection, cx| connection.restart(cx));
+
+            draw_connection_in_both_themes(connection, cx);
         }
 
         #[gpui::test]
@@ -1355,6 +1439,69 @@ mod tests {
                     Some(TopBar::new("renamed", "/w/renamed"))
                 );
             }
+        }
+    }
+
+    mod older_daemon {
+        use gpui::Modifiers;
+
+        use super::*;
+
+        /// A `Root` window on a [`Shell`] over `connector`, drawn.
+        fn open(connector: Rc<FakeConnector>, cx: &mut TestAppContext) -> &mut VisualTestContext {
+            cx.update(brrritscold_core_gpui::init);
+            cx.update(crate::terminal::init);
+            let window = cx.add_window(|window, cx| {
+                let connection = cx.new(|cx| Connection::new(connector, cx));
+                let shell = cx
+                    .new(|cx| Shell::new(connection, Rc::new(FakeNotifier::default()), window, cx));
+                Root::new(shell, window, cx)
+            });
+            let cx = VisualTestContext::from_window(*window, cx).into_mut();
+            settle(cx);
+            cx
+        }
+
+        fn settle(cx: &mut VisualTestContext) {
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+
+        #[gpui::test]
+        fn should_show_the_banner_while_the_daemon_predates_the_app(cx: &mut TestAppContext) {
+            let connector = Rc::new(FakeConnector::default());
+            let _remote = connector.then_connect_older();
+
+            let cx = open(connector, cx);
+
+            assert!(cx.debug_bounds("older daemon banner").is_some());
+        }
+
+        #[gpui::test]
+        fn should_not_show_it_for_a_daemon_as_new_as_the_app(cx: &mut TestAppContext) {
+            let connector = Rc::new(FakeConnector::default());
+            let _remote = connector.then_connect();
+
+            let cx = open(connector, cx);
+
+            assert!(cx.debug_bounds("older daemon banner").is_none());
+        }
+
+        #[gpui::test]
+        fn should_restart_the_daemon_when_restart_is_clicked(cx: &mut TestAppContext) {
+            let connector = Rc::new(FakeConnector::default());
+            let _old = connector.then_connect_older();
+            let _new = connector.then_connect();
+            let cx = open(connector.clone(), cx);
+
+            let restart = cx
+                .debug_bounds("restart daemon")
+                .expect("the Restart button");
+            cx.simulate_click(restart.center(), Modifiers::default());
+            settle(cx);
+
+            assert_eq!(connector.restarts.borrow().len(), 1);
+            assert!(cx.debug_bounds("older daemon banner").is_none());
         }
     }
 

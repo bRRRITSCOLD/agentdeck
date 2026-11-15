@@ -32,7 +32,7 @@ pub fn parse_frame(frame: &[u8]) -> Option<(Channel, &[u8])> {
     Some((Channel::from_be_bytes(*channel), bytes))
 }
 
-/// A text frame from a client.
+/// A text frame from a client. A new message or field bumps [`crate::API_VERSION`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum ClientMessage {
@@ -68,7 +68,7 @@ pub enum ClientMessage {
     },
 }
 
-/// A text frame from the daemon.
+/// A text frame from the daemon. A new message or field bumps [`crate::API_VERSION`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum ServerMessage {
@@ -144,7 +144,8 @@ pub enum ServerMessage {
     },
 }
 
-/// The kinds of entity a [`ServerMessage::Changed`] names.
+/// The kinds of entity a [`ServerMessage::Changed`] names. A new one bumps
+/// [`crate::API_VERSION`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Entity {

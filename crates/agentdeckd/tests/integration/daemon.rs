@@ -32,6 +32,13 @@ mod agentdeckd {
         }
 
         #[tokio::test]
+        async fn should_name_the_api_version_clients_compare_with_theirs() {
+            let daemon = TestDaemon::start().await;
+
+            assert_eq!(daemon.info.api_version, agentdeck_core::API_VERSION);
+        }
+
+        #[tokio::test]
         async fn should_be_removed_on_sigterm() {
             let daemon = TestDaemon::start().await;
             let runtime_dir = daemon.runtime_dir();

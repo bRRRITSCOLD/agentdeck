@@ -4,6 +4,12 @@ use std::fmt;
 
 use crate::types;
 
+/// What a bare 404 or 405 says: the daemon has no such route or method, so it predates the
+/// client that called it (spec §2). dropshot answers an unknown route with no `error_code`,
+/// and every domain failure carries one, so the two can't be confused.
+pub const OLDER_DAEMON: &str = "agentdeck's background service is older than this app and \
+    can't do this yet. Restart it to use new features; your agents resume after the restart.";
+
 /// A failed API call: what the daemon said, with its `error_code` when it gave one.
 #[derive(Debug)]
 pub struct ApiError {
@@ -46,8 +52,15 @@ impl<E: ErrorBody> From<crate::Error<E>> for ApiError {
     fn from(err: crate::Error<E>) -> ApiError {
         match err {
             crate::Error::ErrorResponse(response) => {
+                let unrouted = matches!(response.status().as_u16(), 404 | 405);
                 let (message, code) = response.into_inner().parts();
-                ApiError { message, code }
+                match code {
+                    None if unrouted => ApiError {
+                        message: OLDER_DAEMON.to_owned(),
+                        code: None,
+                    },
+                    code => ApiError { message, code },
+                }
             }
             other => ApiError {
                 message: format!("talking to agentdeckd: {other}"),
@@ -72,6 +85,39 @@ mod tests {
             };
 
             assert_eq!(err.to_string(), "no such task (not_found)");
+        }
+
+        fn error_response(status: u16, code: Option<&str>, message: &str) -> ApiError {
+            let body = types::Error {
+                error_code: code.map(str::to_owned),
+                message: message.to_owned(),
+                request_id: "r".into(),
+            };
+            let status = reqwest::StatusCode::from_u16(status).unwrap();
+            let response = progenitor_client::ResponseValue::new(body, status, Default::default());
+            ApiError::from(crate::Error::ErrorResponse(response))
+        }
+
+        #[test]
+        fn should_say_the_daemon_is_older_for_a_route_it_doesnt_have_404() {
+            let err = error_response(404, None, "Not Found");
+
+            assert_eq!(err.message, OLDER_DAEMON);
+            assert_eq!(err.code, None);
+        }
+
+        #[test]
+        fn should_say_the_daemon_is_older_for_a_method_it_doesnt_have_405() {
+            let err = error_response(405, None, "Method Not Allowed");
+
+            assert_eq!(err.message, OLDER_DAEMON);
+        }
+
+        #[test]
+        fn should_keep_the_daemons_words_for_a_missing_entity_404() {
+            let err = error_response(404, Some("not_found"), "no task t");
+
+            assert_eq!(err.to_string(), "no task t (not_found)");
         }
 
         #[test]

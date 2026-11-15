@@ -55,7 +55,7 @@ pub async fn run(client: &Client, command: Command) -> anyhow::Result<Output> {
         Command::Pr(command) => pr(client, command).await,
         Command::Config(command) => config(client, command).await,
         Command::Tail { pane, bytes } => tail(client, pane, bytes).await,
-        Command::Mcp => unreachable!("main serves mcp"),
+        Command::Mcp | Command::Daemon(_) => unreachable!("main runs mcp and daemon"),
     }
 }
 
