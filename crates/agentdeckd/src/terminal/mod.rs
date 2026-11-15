@@ -2,7 +2,7 @@
 //! live pane.
 //!
 //! - [`Terminals`]: the live panes by id. It spawns and kills them, runs the state timer,
-//!   and persists state changes and exits.
+//!   and persists state changes, exits and the agents shell panes host.
 //! - [`pane`]: one live pane. Its `Term` is the only thing that answers the program's
 //!   terminal queries.
 //! - [`fanout`]: a pane's attached WebSocket clients: output, `lagged`, the primary rule.
@@ -25,12 +25,15 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use agentdeck_core::PaneId;
+use agentdeck_core::state::HOSTABLE;
+use agentdeck_core::ws::Entity;
+use agentdeck_core::{Agent, PaneId};
 use nix::sys::signal::Signal;
 use tokio::runtime::Handle;
+use tokio::sync::broadcast;
 
 use self::fanout::SubscriberId;
-use self::pane::{Launch, Pane, SpawnError};
+use self::pane::{Launch, Observed, Pane, Rules, SpawnError};
 use crate::db::{self, Db};
 use crate::events::Events;
 
@@ -58,6 +61,8 @@ struct Shared {
     /// can be resumed (spec §6).
     closing: AtomicBool,
     next_subscriber: AtomicU64,
+    /// Each shell pane that just started hosting an agent, once that is saved.
+    hosting: broadcast::Sender<PaneId>,
 }
 
 impl Terminals {
@@ -74,6 +79,7 @@ impl Terminals {
                 runtime: Handle::current(),
                 closing: AtomicBool::new(false),
                 next_subscriber: AtomicU64::new(1),
+                hosting: broadcast::channel(64).0,
             }),
         }
     }
@@ -86,9 +92,28 @@ impl Terminals {
     }
 
     /// Starts `launch` as pane `id`, whose row the caller has already written, with the
-    /// state rules named `rules` (an agent's name, or `shell`).
+    /// state rules named `rules` (an agent's name, or `shell` for a resumed agent pane that
+    /// comes back as a shell), for good.
     pub fn spawn(&self, id: PaneId, launch: Launch, rules: &str) -> Result<(), SpawnError> {
-        let rules = rules::load(&self.shared.rules_dir, rules);
+        let rules = Rules::Fixed(rules::load(&self.shared.rules_dir, rules));
+        self.start(id, launch, rules)
+    }
+
+    /// Starts `launch` as shell pane `id`, whose row the caller has already written: the
+    /// `shell` rules, or the rules of the agent it hosts while one is its foreground process
+    /// (spec §7).
+    pub fn spawn_shell(&self, id: PaneId, launch: Launch) -> Result<(), SpawnError> {
+        let dir = &self.shared.rules_dir;
+        let rules = Rules::Shell {
+            shell: rules::load(dir, "shell"),
+            agents: (HOSTABLE.iter())
+                .map(|agent| (*agent, rules::load(dir, agent.as_str())))
+                .collect(),
+        };
+        self.start(id, launch, rules)
+    }
+
+    fn start(&self, id: PaneId, launch: Launch, rules: Rules) -> Result<(), SpawnError> {
         let shared = Arc::clone(&self.shared);
         let on_exit = Box::new(move |id, code, title: String| shared.persist_exit(id, code, title));
         let pane = Pane::spawn(id, launch, rules, self.shared.events.clone(), on_exit)?;
@@ -136,6 +161,11 @@ impl Terminals {
         Ok(())
     }
 
+    /// Tells of each shell pane that starts hosting an agent, once its row says so.
+    pub fn hosting(&self) -> broadcast::Receiver<PaneId> {
+        self.shared.hosting.subscribe()
+    }
+
     /// A fresh id for one client attachment.
     pub fn subscriber(&self) -> SubscriberId {
         SubscriberId(self.shared.next_subscriber.fetch_add(1, Ordering::Relaxed))
@@ -159,18 +189,44 @@ impl Terminals {
         let now = self.shared.origin.elapsed();
         let panes: Vec<Arc<Pane>> = self.panes().values().cloned().collect();
         for pane in panes {
-            let Some((state, title)) = pane.observe(now) else {
-                continue;
-            };
+            let Observed { state, hosted } = pane.observe(now);
             let id = pane.id();
-            let saved = self
-                .shared
-                .db
-                .call(move |c| db::panes::set_state(c, id, state, &title))
-                .await;
-            if let Err(err) = saved {
-                tracing::warn!("saving pane {id}'s state: {err}");
+            if let Some((state, title)) = state {
+                let saved = self
+                    .shared
+                    .db
+                    .call(move |c| db::panes::set_state(c, id, state, &title))
+                    .await;
+                if let Err(err) = saved {
+                    tracing::warn!("saving pane {id}'s state: {err}");
+                }
             }
+            if let Some(hosted) = hosted {
+                self.hosted(id, hosted).await;
+            }
+        }
+    }
+
+    /// Saves the agent shell pane `id` hosts now, then tells clients, and the comment delivery
+    /// when it started hosting one (spec §7, §9).
+    async fn hosted(&self, id: PaneId, agent: Option<Agent>) {
+        let saved = self
+            .shared
+            .db
+            .call(move |c| db::panes::set_hosted_agent(c, id, agent))
+            .await;
+        if let Err(err) = saved {
+            tracing::warn!("saving the agent pane {id} hosts: {err}");
+            return;
+        }
+        match agent {
+            Some(agent) => tracing::info!("pane {id} hosts {agent}"),
+            None => tracing::info!("pane {id} hosts no agent"),
+        }
+        self.shared.events.changed(Entity::Pane, id);
+        if agent.is_some() {
+            // Nobody listening (no delivery yet, at start) is fine: nothing waits on it.
+            let _ = self.shared.hosting.send(id);
         }
     }
 

@@ -24,9 +24,11 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use agentdeck_core::state::{Observation, OscScanner, RuleSet, StateTracker, screen};
+use agentdeck_core::state::{
+    Foreground, Observation, OscScanner, RuleSet, StateTracker, hosted_agent, screen,
+};
 use agentdeck_core::ws::{Channel, ServerMessage};
-use agentdeck_core::{AgentState, PaneId, WorkspaceId};
+use agentdeck_core::{Agent, AgentState, PaneId, WorkspaceId};
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::term::test::TermSize;
@@ -75,6 +77,51 @@ impl Launch {
             size: INITIAL_SIZE,
         }
     }
+}
+
+/// The state rules a pane runs (spec §7).
+pub enum Rules {
+    /// An agent pane's, or a resumed agent pane's shell's: the same rules for good.
+    Fixed(RuleSet),
+    /// A shell pane's: `shell` until an agent in `agents` is its foreground process, then that
+    /// agent's while it is.
+    Shell {
+        /// The `shell` rules.
+        shell: RuleSet,
+        /// Each agent a shell can host, with its rules.
+        agents: Vec<(Agent, RuleSet)>,
+    },
+}
+
+/// A shell pane's rules for itself and for each agent it can host, and the agent it hosts.
+struct Hosting {
+    shell: RuleSet,
+    agents: Vec<(Agent, RuleSet)>,
+    hosted: Option<Agent>,
+}
+
+impl Hosting {
+    /// The agent `foreground` makes the pane host, with the rules to run, when that differs
+    /// from the one it hosts now.
+    fn change(&self, foreground: &Foreground) -> Option<(Option<Agent>, RuleSet)> {
+        let hosted = hosted_agent(foreground, &self.agents);
+        if hosted == self.hosted {
+            return None;
+        }
+        let rules = hosted
+            .and_then(|agent| self.agents.iter().find(|(a, _)| *a == agent))
+            .map_or(&self.shell, |(_, rules)| rules);
+        Some((hosted, rules.clone()))
+    }
+}
+
+/// What one observation of a pane changed, for the daemon to save.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Observed {
+    /// The newly published state, with the title it was seen under.
+    pub state: Option<(AgentState, String)>,
+    /// The agent the shell pane hosts now, when that changed.
+    pub hosted: Option<Option<Agent>>,
 }
 
 /// When `input` reaches the PTY.
@@ -213,6 +260,8 @@ pub struct Status {
     pub state: AgentState,
     /// The exit code, once the process has exited and it could be read.
     pub exit_code: Option<i64>,
+    /// The agent a shell pane hosts.
+    pub hosted: Option<Agent>,
 }
 
 /// Called once when the pane's process exits, with its exit code and last title, before the
@@ -242,6 +291,8 @@ struct Live {
     size: Size,
     last_output: Option<Instant>,
     tracker: StateTracker,
+    /// A shell pane's hosting; `None` for an agent pane.
+    hosting: Option<Hosting>,
     /// `input` waiting for its state, in the order it came.
     queued: Vec<Queued>,
     exit_code: Option<i64>,
@@ -263,7 +314,7 @@ impl Pane {
     pub fn spawn(
         id: PaneId,
         launch: Launch,
-        rules: RuleSet,
+        rules: Rules,
         events: Events,
         on_exit: OnExit,
     ) -> Result<Arc<Pane>, SpawnError> {
@@ -294,6 +345,17 @@ impl Pane {
 
         let (input, typed) = channel::<Typing>();
         let (term_events, term_events_rx) = channel();
+        let (rules, hosting) = match rules {
+            Rules::Fixed(rules) => (rules, None),
+            Rules::Shell { shell, agents } => {
+                let hosting = Hosting {
+                    shell: shell.clone(),
+                    agents,
+                    hosted: None,
+                };
+                (shell, Some(hosting))
+            }
+        };
         let term = Term::new(
             Config::default(),
             &TermSize::new(launch.size.cols.into(), launch.size.rows.into()),
@@ -311,6 +373,7 @@ impl Pane {
                 size: launch.size,
                 last_output: None,
                 tracker: StateTracker::new(rules),
+                hosting,
                 queued: Vec::new(),
                 exit_code: None,
                 fanout: Fanout::default(),
@@ -417,6 +480,9 @@ impl Pane {
         on_exit(self.id, code, title);
         let mut live = self.live();
         live.queued.clear();
+        if let Some(hosting) = &mut live.hosting {
+            hosting.hosted = None;
+        }
         let Some(state) = live.tracker.exit() else {
             return;
         };
@@ -432,20 +498,33 @@ impl Pane {
     }
 
     /// Takes one observation of the screen at `now` (the daemon's clock), publishing a new
-    /// state when one has settled and delivering queued input if it is idle. Returns the new
-    /// state with the title it was seen under, to persist.
-    pub fn observe(&self, now: Duration) -> Option<(AgentState, String)> {
-        let process = self.foreground_process();
+    /// state when one has settled and delivering queued input if it is idle. A shell pane
+    /// first checks which agent, if any, its foreground process makes it host (spec §7). Returns
+    /// what changed, to persist.
+    pub fn observe(&self, now: Duration) -> Observed {
+        let foreground = self.foreground();
         let mut live = self.live();
+        let mut observed = Observed::default();
+        if let Some(hosted) = foreground
+            .as_ref()
+            .and_then(|fg| self.rehost(&mut live, fg))
+        {
+            observed.hosted = Some(hosted);
+            if live.tracker.state() == AgentState::Unknown {
+                observed.state = Some((AgentState::Unknown, live.title.clone()));
+            }
+        }
         let observation = Observation {
-            process,
+            process: foreground.map(|foreground| foreground.name),
             title: live.title.clone(),
             rows: screen::rows(&live.term),
             progress: live.osc.progress(),
             program_state: live.osc.program_state(),
             since_output: live.last_output.map(|at| at.elapsed()),
         };
-        let state = live.tracker.observe(&observation, now)?;
+        let Some(state) = live.tracker.observe(&observation, now) else {
+            return observed;
+        };
         self.events.publish(ServerMessage::State {
             pane: self.id,
             state,
@@ -458,7 +537,27 @@ impl Pane {
         for queued in ready {
             self.typed(queued, bracketed);
         }
-        Some((state, live.title.clone()))
+        observed.state = Some((state, live.title.clone()));
+        observed
+    }
+
+    /// Hosts the agent `foreground` is, if that changed: switches to its rules (or back to
+    /// the shell's), which starts the state over, and drops the queued input, so nothing meant
+    /// for the agent is typed into the shell, nor the other way round. Returns the agent hosted
+    /// now when it changed.
+    fn rehost(&self, live: &mut Live, foreground: &Foreground) -> Option<Option<Agent>> {
+        let (hosted, rules) = live.hosting.as_ref()?.change(foreground)?;
+        if let Some(hosting) = &mut live.hosting {
+            hosting.hosted = hosted;
+        }
+        live.queued.clear();
+        if let Some(state) = live.tracker.switch_rules(rules) {
+            self.events.publish(ServerMessage::State {
+                pane: self.id,
+                state,
+            });
+        }
+        Some(hosted)
     }
 
     /// Types `bytes` into the PTY, now or once the pane's state accepts `when`: as they are,
@@ -476,8 +575,14 @@ impl Pane {
 
     /// Submits `text` as a message followed by Enter once the agent waits at its prompt
     /// ([`When::Prompt`]), if `claim`, asked right before, still says yes. The receiver is told
-    /// when it is typed; it errs if the process exits first or `claim` says no.
-    pub fn deliver(&self, text: &[u8], claim: Claim) -> Result<oneshot::Receiver<()>, Exited> {
+    /// when it is typed; it errs if the process exits first, the shell pane's hosted agent
+    /// leaves first, or `claim` says no. `None` when there is no agent to take it: the process
+    /// has exited, or a shell pane hosts none.
+    pub fn deliver(&self, text: &[u8], claim: Claim) -> Option<oneshot::Receiver<()>> {
+        let hosts_none = (self.live().hosting.as_ref()).is_some_and(|h| h.hosted.is_none());
+        if hosts_none {
+            return None;
+        }
         let (typed, delivered) = oneshot::channel();
         self.enqueue(Queued {
             when: When::Prompt,
@@ -485,8 +590,9 @@ impl Pane {
             submit: true,
             typed: Some(typed),
             claim: Some(claim),
-        })?;
-        Ok(delivered)
+        })
+        .ok()?;
+        Some(delivered)
     }
 
     fn enqueue(&self, queued: Queued) -> Result<bool, Exited> {
@@ -609,6 +715,7 @@ impl Pane {
             title: live.title.clone(),
             state: live.tracker.state(),
             exit_code: live.exit_code,
+            hosted: live.hosting.as_ref().and_then(|hosting| hosting.hosted),
         }
     }
 
@@ -629,11 +736,19 @@ impl Pane {
         }
     }
 
-    /// The name of the process in the foreground, from `/proc`.
-    fn foreground_process(&self) -> Option<String> {
+    /// The process in the foreground, from `/proc`: `None` when its name can't be read.
+    fn foreground(&self) -> Option<Foreground> {
         let leader = self.master().process_group_leader()?;
         let name = std::fs::read_to_string(format!("/proc/{leader}/comm")).ok()?;
-        Some(name.trim_end().to_owned())
+        let cmdline = std::fs::read(format!("/proc/{leader}/cmdline")).unwrap_or_default();
+        let args = (cmdline.split(|byte| *byte == 0))
+            .filter(|arg| !arg.is_empty())
+            .map(|arg| String::from_utf8_lossy(arg).into_owned())
+            .collect();
+        Some(Foreground {
+            name: name.trim_end().to_owned(),
+            args,
+        })
     }
 }
 
@@ -750,7 +865,7 @@ mod integration_tests {
             let id = uuid::Uuid::now_v7().into();
             let argv = ["sh", "-c", "exit 3"].map(String::from).to_vec();
             let launch = Launch::pane(id, uuid::Uuid::now_v7().into(), argv, std::env::temp_dir());
-            let rules = crate::terminal::rules::resolve("shell", None);
+            let rules = Rules::Fixed(crate::terminal::rules::resolve("shell", None));
             let pane = Pane::spawn(id, launch, rules, events, on_exit).expect("spawn sh");
 
             // on_exit is where the daemon saves the exit: while it runs, nothing may read the

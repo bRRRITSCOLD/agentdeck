@@ -93,14 +93,15 @@ fn exited(id: PaneId) -> HttpError {
     )
 }
 
-/// The stored pane, with the live title, state and exit code while this daemon holds it
-/// (they reach the database a little later).
+/// The stored pane, with the live title, state, exit code and hosted agent while this daemon
+/// holds it (they reach the database a little later).
 fn with_live_status(context: &ApiContext, mut pane: Pane) -> Pane {
     if let Some(live) = context.terminals.get(pane.id) {
         let status = live.status();
         pane.title = status.title;
         pane.state = status.state;
         pane.exit_code = status.exit_code;
+        pane.hosted_agent = status.hosted;
     }
     pane
 }
@@ -122,7 +123,6 @@ pub(crate) async fn pane_create(
     let new = body.into_inner();
     let command = command(&new)?;
     let cwd = check_cwd(&new.cwd)?;
-    let rules = new.agent.map_or("shell", Agent::as_str);
     let claims = context.claims.clone();
     let (pane, workspace, prompted) = context
         .db
@@ -158,7 +158,11 @@ pub(crate) async fn pane_create(
                 .collect();
             (dir, before)
         });
-    if let Err(err) = context.terminals.spawn(pane.id, launch, rules) {
+    let spawned = match pane.agent {
+        Some(agent) => context.terminals.spawn(pane.id, launch, agent.as_str()),
+        None => context.terminals.spawn_shell(pane.id, launch),
+    };
+    if let Err(err) = spawned {
         let id = pane.id;
         tracing::warn!("pane {id} couldn't start: {}", err.detail());
         delivery::launch_failed(&context.claims, &prompted);

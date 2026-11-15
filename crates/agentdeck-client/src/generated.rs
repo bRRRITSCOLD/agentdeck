@@ -452,6 +452,9 @@ pub mod types {
         ///The exit code, once the process has exited.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub exit_code: ::std::option::Option<i64>,
+        ///The agent a shell pane hosts: `claude` or `codex` while the user's own is its foreground process, else null. Its kind stays `shell`; it runs that agent's state rules and takes the task's comments meanwhile (spec §3, §7).
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub hosted_agent: ::std::option::Option<agentdeck_core::Agent>,
         ///The pane's id.
         pub id: agentdeck_core::PaneId,
         ///An agent or a shell.
@@ -2511,6 +2514,10 @@ pub mod types {
             created_at: ::std::result::Result<::std::string::String, ::std::string::String>,
             cwd: ::std::result::Result<::std::string::String, ::std::string::String>,
             exit_code: ::std::result::Result<::std::option::Option<i64>, ::std::string::String>,
+            hosted_agent: ::std::result::Result<
+                ::std::option::Option<agentdeck_core::Agent>,
+                ::std::string::String,
+            >,
             id: ::std::result::Result<agentdeck_core::PaneId, ::std::string::String>,
             kind: ::std::result::Result<agentdeck_core::PaneKind, ::std::string::String>,
             session_id: ::std::result::Result<
@@ -2533,6 +2540,7 @@ pub mod types {
                     created_at: Err("no value supplied for created_at".to_string()),
                     cwd: Err("no value supplied for cwd".to_string()),
                     exit_code: Ok(Default::default()),
+                    hosted_agent: Ok(Default::default()),
                     id: Err("no value supplied for id".to_string()),
                     kind: Err("no value supplied for kind".to_string()),
                     session_id: Ok(Default::default()),
@@ -2592,6 +2600,16 @@ pub mod types {
                 self.exit_code = value
                     .try_into()
                     .map_err(|e| format!("error converting supplied value for exit_code: {e}"));
+                self
+            }
+            pub fn hosted_agent<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::Agent>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.hosted_agent = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for hosted_agent: {e}"));
                 self
             }
             pub fn id<T>(mut self, value: T) -> Self
@@ -2674,6 +2692,7 @@ pub mod types {
                     created_at: value.created_at?,
                     cwd: value.cwd?,
                     exit_code: value.exit_code?,
+                    hosted_agent: value.hosted_agent?,
                     id: value.id?,
                     kind: value.kind?,
                     session_id: value.session_id?,
@@ -2692,6 +2711,7 @@ pub mod types {
                     created_at: Ok(value.created_at),
                     cwd: Ok(value.cwd),
                     exit_code: Ok(value.exit_code),
+                    hosted_agent: Ok(value.hosted_agent),
                     id: Ok(value.id),
                     kind: Ok(value.kind),
                     session_id: Ok(value.session_id),

@@ -50,17 +50,22 @@ printf '\033[?2004h\033]0;codex\007'
 /// earlier, cooked. A read that is a lone CR is Enter: it submits the prompt, appending it and
 /// a newline to `stdin`. Any other read, CRs included, is a paste: it goes into the prompt,
 /// less the paste's brackets, and submits nothing, so text typed with its Enter in one write
-/// is never submitted (issue #184). Its twin is in `agentdeck/tests/integration/support`.
+/// is never submitted (issue #184). A submitted `/exit` ends it as it ends Claude Code and
+/// Codex, handing the terminal back cooked, so a shell it was started from carries on (#183).
+/// Its twin is in `agentdeck/tests/integration/support`.
 const READ_LIKE_A_TUI: &str = r#"
 : > "$log/prompt"
 while dd bs=65536 count=1 of="$log/read" 2>/dev/null && [ -s "$log/read" ]; do
   if [ "$(od -An -tx1 "$log/read" | tr -d ' \n')" = 0d ]; then
+    [ "$(cat "$log/prompt")" = /exit ] && break
     { cat "$log/prompt"; echo; } >> "$log/stdin"
     : > "$log/prompt"
   else
     sed 's/\x1b\[20[01]~//g' "$log/read" >> "$log/prompt"
   fi
 done
+stty sane 2>/dev/null
+printf '\033[?2004l\033]0;\007' 2>/dev/null
 "#;
 
 /// Writes the stub agents into `bin`, the dir the stub `gh` is in.

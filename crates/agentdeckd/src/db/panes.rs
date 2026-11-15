@@ -2,14 +2,14 @@
 
 use std::collections::HashSet;
 
-use agentdeck_core::{AgentState, PaneId, TaskId, TaskStatus, WorkspaceId};
+use agentdeck_core::{Agent, AgentState, PaneId, TaskId, TaskStatus, WorkspaceId};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::{DbError, exists, new_id, now, opt_text, text};
 use crate::model::{NewPane, Pane};
 
-const COLUMNS: &str = "id, tab_id, kind, agent, argv, cwd, session_id, task_id, state, title, \
-                       exit_code, created_at";
+const COLUMNS: &str = "id, tab_id, kind, agent, hosted_agent, argv, cwd, session_id, task_id, \
+                       state, title, exit_code, created_at";
 
 fn from_row(row: &Row<'_>) -> rusqlite::Result<Pane> {
     let argv: String = row.get("argv")?;
@@ -21,6 +21,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Pane> {
         tab_id: text(row, "tab_id")?,
         kind: text(row, "kind")?,
         agent: opt_text(row, "agent")?,
+        hosted_agent: opt_text(row, "hosted_agent")?,
         argv,
         cwd: row.get("cwd")?,
         session_id: row.get("session_id")?,
@@ -108,10 +109,11 @@ pub fn resumable(conn: &Connection) -> Result<Vec<(Pane, WorkspaceId)>, DbError>
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// The agent panes linked to `task`, newest first.
+/// The agent panes linked to `task`, newest first, shell panes hosting an agent included.
 pub fn agents_on_task(conn: &Connection, task: TaskId) -> Result<Vec<PaneId>, DbError> {
     let mut stmt = conn.prepare(
-        "SELECT id FROM panes WHERE task_id = ?1 AND kind = 'agent'
+        "SELECT id FROM panes
+         WHERE task_id = ?1 AND (kind = 'agent' OR hosted_agent IS NOT NULL)
          ORDER BY created_at DESC, id DESC",
     )?;
     let rows = stmt.query_map([task.to_string()], |row| text(row, "id"))?;
@@ -191,7 +193,30 @@ pub fn set_state(
     Ok(())
 }
 
-/// Records that the pane's process exited.
+/// Records the agent a shell pane hosts now, or `None` once it hosts none (spec §7).
+pub fn set_hosted_agent(
+    conn: &Connection,
+    id: PaneId,
+    agent: Option<Agent>,
+) -> Result<(), DbError> {
+    conn.execute(
+        "UPDATE panes SET hosted_agent = ?2 WHERE id = ?1",
+        params![id.to_string(), agent.map(Agent::as_str)],
+    )?;
+    Ok(())
+}
+
+/// Forgets every hosted agent, as the daemon starts: a shell pane comes back as its shell
+/// alone (spec §6).
+pub fn forget_hosted_agents(conn: &Connection) -> Result<(), DbError> {
+    conn.execute(
+        "UPDATE panes SET hosted_agent = NULL WHERE hosted_agent IS NOT NULL",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Records that the pane's process exited; it hosts no agent any more.
 pub fn set_exited(
     conn: &Connection,
     id: PaneId,
@@ -199,7 +224,8 @@ pub fn set_exited(
     title: &str,
 ) -> Result<(), DbError> {
     conn.execute(
-        "UPDATE panes SET state = 'exited', exit_code = ?2, title = ?3 WHERE id = ?1",
+        "UPDATE panes SET state = 'exited', exit_code = ?2, title = ?3, hosted_agent = NULL
+         WHERE id = ?1",
         params![id.to_string(), code, title],
     )?;
     Ok(())
