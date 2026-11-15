@@ -54,7 +54,7 @@ httpmock = { version = "=0.9.0", default-features = false }
 futures-channel = { version = "=0.3.34", default-features = false, features = ["std"] }
 # For `StreamExt` / `SinkExt` on the WebSocket; already in the lockfile through dropshot.
 futures-util = { version = "=0.3.34", default-features = false, features = ["sink", "std"] }
-# SIGHUP / SIGKILL to a pane's process group, SIGTERM to a daemon being restarted and reaping it,
+# SIGHUP / SIGKILL to a pane's process group, SIGTERM to a daemon being restarted,
 # without `unsafe`; portable-pty's own nix line.
 nix = { version = "=0.28.0", default-features = false, features = ["process", "signal"] }
 openapiv3 = "=2.2.0"

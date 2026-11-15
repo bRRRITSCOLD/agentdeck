@@ -231,6 +231,29 @@ impl TestEnv {
     }
 }
 
+/// The state letter in `/proc/<pid>/stat` (`R`, `S`, `Z` for a zombie, …); `None` once no
+/// process has this pid, a zombie included once it is reaped.
+pub fn process_state(pid: u32) -> Option<char> {
+    stat_after_comm(pid)?.trim_start().chars().next()
+}
+
+/// The parent pid in `/proc/<pid>/stat`, while the process exists.
+pub fn parent_pid(pid: u32) -> Option<u32> {
+    stat_after_comm(pid)?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
+/// `/proc/<pid>/stat` after the command name, which is in parentheses and may itself hold `)`
+/// or spaces.
+fn stat_after_comm(pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, after_comm) = stat.rsplit_once(')')?;
+    Some(after_comm.to_owned())
+}
+
 /// Whether a process with this pid exists.
 pub fn alive(pid: u32) -> bool {
     Command::new("kill")
