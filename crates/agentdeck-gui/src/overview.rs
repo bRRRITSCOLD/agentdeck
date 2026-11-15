@@ -249,9 +249,11 @@ impl Snapshot {
 /// Builders for snapshots in tests.
 #[cfg(test)]
 pub(crate) mod fixtures {
-    use agentdeck_client::types::{Comment, Instruction, PrSyncStatus, Task, Workspace};
+    use agentdeck_client::types::{
+        Comment, Instruction, PrSyncStatus, PullRequest, Task, Workspace,
+    };
     use agentdeck_core::{
-        AgentState, CommentAuthor, PaneId, TaskId, TaskKind, TaskStatus, WorkspaceId,
+        AgentState, CommentAuthor, PaneId, PrState, TaskId, TaskKind, TaskStatus, WorkspaceId,
     };
 
     use super::{PaneState, Snapshot};
@@ -335,6 +337,26 @@ pub(crate) mod fixtures {
             title: format!("task {n}"),
             updated_at: CREATED.into(),
             workspace_id: workspace,
+        }
+    }
+
+    /// A PR task in review for PR `n` of `repo` (`owner/name`), stored as `state`.
+    pub fn pr_task(n: u32, repo: &str, state: PrState, workspace: Option<WorkspaceId>) -> Task {
+        Task {
+            status: TaskStatus::Review,
+            pr: Some(PullRequest {
+                checks: None,
+                draft: false,
+                head_ref: "feat/x".into(),
+                number: i64::from(n),
+                repo: repo.into(),
+                review: None,
+                state,
+                synced_at: CREATED.into(),
+                updated_at: CREATED.into(),
+                url: format!("https://github.com/{repo}/pull/{n}"),
+            }),
+            ..task(n, TaskKind::Pr, workspace)
         }
     }
 

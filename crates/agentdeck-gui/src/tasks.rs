@@ -7,6 +7,10 @@
 //! nothing itself. A status picked is sent at once; the daemon's `changed` brings it back.
 //!
 //! Its list draws only the headers and rows in view: the inbox's PRs alone can be hundreds.
+//!
+//! **Select**, before Show done, turns on Select mode for closing PRs ([`ClosePrs`]): a
+//! checkbox on each open PR's row and on each group header over one, and the selection bar
+//! along the bottom.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -23,6 +27,7 @@ use gpui::{
 use gpui_base::input::InputEvent;
 
 use crate::api::Api;
+use crate::close_prs::{self, ClosePrs};
 use crate::new_task::NewTask;
 use crate::overview::Snapshot;
 use crate::task_list::{self, Group, Query, Row, Scope};
@@ -30,8 +35,8 @@ use crate::task_row::{self, Layout, Table};
 use crate::task_sheet::OpenTask;
 use crate::workspace::failed;
 
-/// The filter's width. Raw in Penpot too.
-const FILTER_WIDTH: f32 = 180.;
+/// The filter's width, narrow enough for Select to fit beside it at 1200. Raw in Penpot too.
+const FILTER_WIDTH: f32 = 128.;
 
 /// One item of the list: a group's header, or a row under it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +45,8 @@ enum Item {
         status: TaskStatus,
         count: usize,
         collapsed: bool,
+        /// Its rows whose PR can close, folded or not: what its checkbox picks.
+        selectable: Vec<TaskId>,
     },
     Row(Row),
 }
@@ -57,7 +64,10 @@ pub struct TasksView {
     list: ListState,
     /// The columns shown, fitted to the width the table was last drawn at.
     layout: Layout,
+    /// Select mode, the selection and the confirm dialog.
+    close: Entity<ClosePrs>,
     _filter: Subscription,
+    _close: Subscription,
 }
 
 impl EventEmitter<NewTask> for TasksView {}
@@ -72,6 +82,11 @@ impl TasksView {
                 cx.notify();
             }
         });
+        let close = cx.new(|_| ClosePrs::new(api.clone(), "tasks"));
+        let _close = cx.observe(&close, |this, _, cx| {
+            this.list.remeasure();
+            cx.notify();
+        });
         TasksView {
             api,
             snapshot: Snapshot::default(),
@@ -81,7 +96,23 @@ impl TasksView {
             shown: Vec::new(),
             list: task_row::list_state(),
             layout: Table::Tasks.widest(),
+            close,
             _filter,
+            _close,
+        }
+    }
+
+    /// Select mode, the selection and the confirm dialog.
+    #[cfg(test)]
+    pub fn close_prs(&self) -> &Entity<ClosePrs> {
+        &self.close
+    }
+
+    /// The columns to draw: the fitted ones, in Select mode while it's on.
+    fn layout(&self, cx: &gpui::App) -> Layout {
+        Layout {
+            select: self.close.read(cx).active(),
+            ..self.layout
         }
     }
 
@@ -89,7 +120,7 @@ impl TasksView {
     /// width, so a change measures the rows again. It runs while the frame is drawn, which
     /// ignores a notify, so the redraw is asked for once the frame is done.
     fn fit(&mut self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) {
-        let layout = Table::Tasks.fit(width);
+        let layout = Table::Tasks.fit(width, self.close.read(cx).active());
         if layout != self.layout {
             self.layout = layout;
             self.list.remeasure();
@@ -135,15 +166,21 @@ impl TasksView {
         .detach();
     }
 
-    /// The groups shown, with their rows; a folded group has none.
-    pub fn groups(&self, cx: &gpui::App) -> Vec<Group> {
+    /// The groups the filter and Show done leave, each with all its rows, folded or not.
+    fn unfolded(&self, cx: &gpui::App) -> Vec<Group> {
         let filter = self.filter.read(cx).value();
         let query = Query {
             scope: Scope::All,
             filter: &filter,
             show_done: self.show_done,
         };
-        let mut groups = task_list::groups(&self.snapshot, &query);
+        task_list::groups(&self.snapshot, &query)
+    }
+
+    /// The groups shown, with their rows; a folded group has none.
+    #[cfg(test)]
+    pub fn groups(&self, cx: &gpui::App) -> Vec<Group> {
+        let mut groups = self.unfolded(cx);
         for group in &mut groups {
             if self.collapsed.contains(&group.status) {
                 group.rows.clear();
@@ -152,34 +189,21 @@ impl TasksView {
         groups
     }
 
-    /// The count each group header shows: its rows before folding.
-    fn counts(&self, cx: &gpui::App) -> Vec<(TaskStatus, usize)> {
-        let filter = self.filter.read(cx).value();
-        let query = Query {
-            scope: Scope::All,
-            filter: &filter,
-            show_done: self.show_done,
-        };
-        (task_list::groups(&self.snapshot, &query).iter())
-            .map(|g| (g.status, g.rows.len()))
-            .collect()
-    }
-
     /// The list's items: each group's header, then its rows unless folded.
     fn items(&self, cx: &gpui::App) -> Vec<Item> {
-        let counts = self.counts(cx);
         let mut items = Vec::new();
-        for group in self.groups(cx) {
+        for group in self.unfolded(cx) {
             let status = group.status;
-            let count = (counts.iter())
-                .find(|(s, _)| *s == status)
-                .map_or(0, |(_, n)| *n);
+            let collapsed = self.collapsed.contains(&status);
             items.push(Item::Header {
                 status,
-                count,
-                collapsed: self.collapsed.contains(&status),
+                count: group.rows.len(),
+                collapsed,
+                selectable: close_prs::selectable(&group.rows),
             });
-            items.extend(group.rows.into_iter().map(Item::Row));
+            if !collapsed {
+                items.extend(group.rows.into_iter().map(Item::Row));
+            }
         }
         items
     }
@@ -188,18 +212,25 @@ impl TasksView {
     /// picker.
     fn item(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         match self.shown.get(ix) {
-            Some(&Item::Header {
+            Some(Item::Header {
                 status,
                 count,
                 collapsed,
-            }) => task_row::spaced(task_row::group_header(
-                status.to_string(),
-                task_row::status_label(status),
-                count,
-                collapsed,
-                cx.listener(move |this, _, _, cx| this.toggle(status, cx)),
-                cx,
-            )),
+                selectable,
+            }) => {
+                let status = *status;
+                let select =
+                    close_prs::select_all(&self.close, status.as_str(), selectable.clone(), cx);
+                task_row::spaced(task_row::group_header(
+                    status.to_string(),
+                    task_row::status_label(status),
+                    *count,
+                    *collapsed,
+                    select,
+                    cx.listener(move |this, _, _, cx| this.toggle(status, cx)),
+                    cx,
+                ))
+            }
             Some(Item::Row(row)) => {
                 let task = row.id;
                 let picker = task_row::status_picker(
@@ -210,13 +241,22 @@ impl TasksView {
                     }),
                 );
                 let open = Box::new(cx.listener(move |_, _, _, cx| cx.emit(OpenTask(task))));
-                task_row::spaced(task_row::wide(row, picker, self.layout, open, cx))
+                let parts = close_prs::row_parts(&self.close, row, cx);
+                task_row::spaced(task_row::wide(
+                    row,
+                    picker,
+                    self.layout(cx),
+                    parts,
+                    open,
+                    cx,
+                ))
             }
             None => div().into_any_element(),
         }
     }
 
-    /// Penpot `Header`: heading, spacer, filter, "Show done", "New task", `space.3` apart.
+    /// Penpot `Header`: heading, spacer, filter, Select, "Show done", "New task", `space.3`
+    /// apart.
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
         let show_done = cx.listener(|this, checked: &bool, _, cx| this.set_show_done(*checked, cx));
@@ -251,6 +291,7 @@ impl TasksView {
             )
             .child(div().flex_1())
             .child(div().w(px(FILTER_WIDTH)).child(Input::new(&self.filter)))
+            .child(close_prs::select_toggle(&self.close, cx))
             .child(
                 div()
                     .flex()
@@ -281,7 +322,20 @@ impl Render for TasksView {
         if items != self.shown {
             task_row::relist(&self.list, items.len());
             self.shown = items;
+            let shown = (self.unfolded(cx).iter())
+                .flat_map(|group| close_prs::selectable(&group.rows))
+                .collect::<Vec<_>>();
+            self.close.update(cx, |close, cx| close.retain(&shown, cx));
         }
+        let all_rows: Vec<Row> = (self.unfolded(cx).into_iter())
+            .flat_map(|group| group.rows)
+            .collect();
+        let bar = close_prs::selection_bar(
+            &self.close,
+            close_prs::picked(&self.close, &all_rows, cx),
+            cx,
+        );
+        let layout = self.layout(cx);
         let rows = div()
             .debug_selector(|| "task list".into())
             .flex_1()
@@ -299,7 +353,8 @@ impl Render for TasksView {
         let table = task_row::table(
             "task-table",
             "task table",
-            self.layout,
+            layout,
+            task_row::SelectCell::Off,
             rows,
             &self.list,
             cx.listener(|this, width: &Pixels, window, cx| this.fit(*width, window, cx)),
@@ -327,6 +382,9 @@ impl Render for TasksView {
                         .child("No tasks to show."),
                 )
             })
+            .children(bar)
+            // The confirm dialog's host: out of the flow, so it takes no gap.
+            .child(div().absolute().child(self.close.clone()))
     }
 }
 
@@ -735,7 +793,7 @@ mod tests {
             harness.draw(cx);
 
             let list = list(cx);
-            assert!(thumb(list, cx).is_some());
+            assert!(thumb(task_row::scrollbar_area(list), cx).is_some());
         }
 
         #[gpui::test]
@@ -744,7 +802,7 @@ mod tests {
             harness.draw(cx);
 
             let list = list(cx);
-            assert_eq!(thumb(list, cx), None);
+            assert_eq!(thumb(task_row::scrollbar_area(list), cx), None);
         }
 
         #[gpui::test]
@@ -752,7 +810,7 @@ mod tests {
             let (harness, cx) = Harness::open(crowded(300), cx);
             harness.draw(cx);
             let list = list(cx);
-            let before = thumb(list, cx).expect("a thumb");
+            let before = thumb(task_row::scrollbar_area(list), cx).expect("a thumb");
 
             cx.simulate_event(ScrollEvent {
                 position: list.center(),
@@ -761,7 +819,7 @@ mod tests {
             });
             harness.draw(cx);
 
-            let after = thumb(list, cx).expect("a thumb");
+            let after = thumb(task_row::scrollbar_area(list), cx).expect("a thumb");
             assert!(after.origin.y > before.origin.y);
         }
 
@@ -778,7 +836,7 @@ mod tests {
                 "the table fits the window"
             );
 
-            let shown = thumb(table, cx).expect("a thumb in view");
+            let shown = thumb(task_row::scrollbar_area(table), cx).expect("a thumb in view");
             let list = list(cx);
             assert!(shown.top() >= list.top() && shown.bottom() <= list.bottom());
             cx.simulate_event(ScrollEvent {
@@ -787,7 +845,90 @@ mod tests {
                 ..ScrollEvent::default()
             });
             harness.draw(cx);
-            assert!(thumb(table, cx).is_some(), "scrolled sideways");
+            assert!(
+                thumb(task_row::scrollbar_area(table), cx).is_some(),
+                "scrolled sideways"
+            );
+        }
+    }
+
+    mod closing_prs {
+        use agentdeck_core::PrState;
+
+        use super::*;
+        use crate::overview::fixtures::pr_task;
+
+        /// Open PRs 1 and 2 and a plain task 3 in review; a doing plain task 4.
+        fn prs() -> Snapshot {
+            Snapshot {
+                tasks: vec![
+                    pr_task(1, "acme/widgets", PrState::Open, None),
+                    pr_task(2, "acme/gadgets", PrState::Open, None),
+                    Task {
+                        status: TaskStatus::Review,
+                        ..task(3, TaskKind::Plain, None)
+                    },
+                    Task {
+                        status: TaskStatus::Doing,
+                        ..task(4, TaskKind::Plain, None)
+                    },
+                ],
+                ..Snapshot::default()
+            }
+        }
+
+        fn picked(harness: &Harness, cx: &mut VisualTestContext) -> Vec<TaskId> {
+            harness.view.read_with(cx, |view, cx| {
+                view.close_prs().read(cx).selection().ids().to_vec()
+            })
+        }
+
+        #[gpui::test]
+        fn should_pick_a_groups_open_prs_from_its_header_without_folding_it(
+            cx: &mut TestAppContext,
+        ) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            harness.click("tasks select", cx);
+
+            harness.click("tasks select all review", cx);
+
+            assert_eq!(picked(&harness, cx), [id(1), id(2)]);
+            assert_eq!(
+                harness.shown(cx)[1],
+                (TaskStatus::Review, vec![id(1), id(2), id(3)])
+            );
+        }
+
+        #[gpui::test]
+        fn should_give_a_group_with_no_open_pr_no_checkbox(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            harness.click("tasks select", cx);
+
+            assert!(cx.debug_bounds("tasks select all doing").is_none());
+        }
+
+        #[gpui::test]
+        fn should_put_select_between_the_filter_and_show_done(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            harness.draw(cx);
+
+            let select = cx.debug_bounds("tasks select").expect("Select");
+            let new_task = cx.debug_bounds("new task").expect("New task");
+            assert!(select.right() < new_task.left());
+        }
+
+        #[gpui::test]
+        fn should_draw_select_mode_in_both_themes(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            harness.click("tasks select", cx);
+            harness.click("tasks select 00000000-0000-7000-8000-000000000001", cx);
+
+            for preference in [ThemePreference::Light, ThemePreference::Dark] {
+                cx.update(|_, cx| Theme::set_preference(preference, cx));
+                cx.run_until_parked();
+                harness.draw(cx);
+            }
+            assert!(cx.debug_bounds("tasks selection bar").is_some());
         }
     }
 }

@@ -84,6 +84,55 @@ pub fn age_out(conn: &mut Connection, prs: &[(String, i64)]) -> Result<Vec<TaskI
     Ok(changed)
 }
 
+/// `(repo, number)` of each of `ids`' PR, in order, while it is a PR task whose PR is stored
+/// open, aged out or not; `None` for any other task, or no task.
+pub fn closable(conn: &Connection, ids: &[TaskId]) -> Result<Vec<Option<(String, i64)>>, DbError> {
+    let mut stmt =
+        conn.prepare("SELECT repo, number FROM pull_requests WHERE task_id = ?1 AND state = ?2")?;
+    ids.iter()
+        .map(|id| {
+            Ok(stmt
+                .query_row(params![id.to_string(), PrState::Open.as_str()], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .optional()?)
+        })
+        .collect()
+}
+
+/// Stores task `id`'s PR as closed, as GitHub closed it, no longer aged out, and moves the
+/// task to `done`, in one transaction, so no sync fetches it by number again. Returns whether
+/// anything changed: `false` when it was no longer stored open.
+pub fn close(conn: &mut Connection, id: TaskId) -> Result<bool, DbError> {
+    let tx = conn.transaction()?;
+    let closed = tx.execute(
+        "UPDATE pull_requests SET state = ?2, synced_at = ?3, aged_out_at = NULL
+         WHERE task_id = ?1 AND state = ?4",
+        params![
+            id.to_string(),
+            PrState::Closed.as_str(),
+            now(),
+            PrState::Open.as_str()
+        ],
+    )?;
+    if closed == 0 {
+        return Ok(false);
+    }
+    // A task already done keeps its `done_at`.
+    tasks::update(
+        &tx,
+        id,
+        &TaskPatch {
+            title: None,
+            body: None,
+            status: Some(TaskStatus::Done),
+            workspace_id: None,
+        },
+    )?;
+    tx.commit()?;
+    Ok(true)
+}
+
 /// Whether task `id`'s PR is aged out.
 fn is_aged_out(conn: &Connection, id: TaskId) -> Result<bool, DbError> {
     Ok(conn.query_row(

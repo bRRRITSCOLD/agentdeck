@@ -872,6 +872,65 @@
         ],
         "type": "object"
       },
+      "PrClose": {
+        "description": "`POST /v1/prs/close`: the PR tasks whose PRs to close on GitHub.",
+        "properties": {
+          "task_ids": {
+            "description": "The tasks, each a PR task whose PR is open; the results come back in this order.",
+            "items": {
+              "$ref": "#/components/schemas/TaskId"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "task_ids"
+        ],
+        "type": "object"
+      },
+      "PrCloseResult": {
+        "description": "Whether one PR closed.",
+        "properties": {
+          "error": {
+            "description": "Why it didn't: GitHub's message, why the request failed, \"Not an open PR\" or \"Not signed in to GitHub\". `None` when it closed.",
+            "nullable": true,
+            "type": "string"
+          },
+          "ok": {
+            "description": "Whether GitHub closed the PR.",
+            "type": "boolean"
+          },
+          "task_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TaskId"
+              }
+            ],
+            "description": "The PR task."
+          }
+        },
+        "required": [
+          "ok",
+          "task_id"
+        ],
+        "type": "object"
+      },
+      "PrCloseResults": {
+        "description": "`POST /v1/prs/close`'s answer: one result per task asked for, in the order asked.",
+        "properties": {
+          "results": {
+            "description": "Each task's result.",
+            "items": {
+              "$ref": "#/components/schemas/PrCloseResult"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "results"
+        ],
+        "type": "object"
+      },
       "PrState": {
         "enum": [
           "open",
@@ -2112,6 +2171,41 @@
           }
         },
         "summary": "The pane's raw output: the last `bytes` bytes of the 256 KiB it keeps. Empty for a pane"
+      }
+    },
+    "/v1/prs/close": {
+      "post": {
+        "description": "result per task, in the order asked, once every PR is tried; 200 even when some failed. A closed PR's task moves to done at once.",
+        "operationId": "prs_close",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrClose"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrCloseResults"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Closes PRs on GitHub: only closes them, with no comment and no branch delete. Answers one"
       }
     },
     "/v1/prs/status": {

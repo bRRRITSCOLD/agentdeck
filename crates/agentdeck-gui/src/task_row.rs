@@ -2,20 +2,24 @@
 //! `Checks`, drawn from a [`task_list::Row`](crate::task_list::Row). The Tasks view and the
 //! Inbox lay them out, each as its [`Table`]; their column widths are [`Columns`]'s.
 //!
+//! In Select mode (spec §11, Closing PRs) a row and a group header start with their `Select`
+//! layer, a [`SelectCell`]; a row whose PR can close ends with its `Menu` layer. A row with
+//! neither keeps their space, so the columns line up.
+//!
 //! Both lists draw only the items in view, through GPUI's [`list`](gpui::list): an inbox holds
 //! hundreds of PRs, and drawing every row made each frame take hundreds of milliseconds.
 
 use agentdeck_core::{ChecksState, ReviewState, TaskKind, TaskStatus};
 use brrritscold_core_gpui::{
     ActiveTheme as _, Badge, BadgeVariant, Icon, IconName, Select, SelectContent, SelectItem,
-    SelectTrigger, SelectTriggerSize,
+    SelectTrigger, SelectTriggerSize, Tooltip, TooltipContent,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Div, ElementId, Hsla, InteractiveElement as _, IntoElement, ListAlignment,
-    ListState, ParentElement as _, Pixels, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Window, canvas, div, px,
+    ListState, MouseButton, ParentElement as _, Pixels, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, canvas, div, px,
 };
 
 use crate::state_dot::{StateDot, StateDotState};
@@ -24,6 +28,10 @@ use crate::task_list::Row;
 /// How far past the viewport a list draws, so a short scroll shows rows at once.
 const OVERDRAW: Pixels = px(200.);
 
+/// How far right of the list its scrollbar's track ends: Penpot puts the track in the
+/// content's `space.6` padding, 2px in from the window's edge, clear of the rows' `Menu`.
+const SCROLLBAR_OUTSET: Pixels = px(22.);
+
 /// The state of a list of rows, empty until [`relist`]ed.
 pub fn list_state() -> ListState {
     ListState::new(0, ListAlignment::Top, OVERDRAW)
@@ -31,15 +39,18 @@ pub fn list_state() -> ListState {
 
 /// Columns over `rows`, `list`'s rows, as wide as the area allows and never narrower than
 /// `layout`: a narrower area scrolls them sideways together, by a sideways wheel only. The
-/// list's scrollbar sits over the area's right edge, outside that scroll, so it stays in
-/// view at any width; a hidden copy of the columns keeps it level with the list.
+/// list's scrollbar sits just right of the area, in the content's padding and outside that
+/// scroll, so it stays in view at any width; a hidden copy of the columns keeps it level
+/// with the list.
 ///
 /// Each frame tells `on_width` the area's width, so the view can [`Table::fit`] its layout
-/// to it for the next.
+/// to it for the next. `select` leads the columns in Select mode.
+#[allow(clippy::too_many_arguments)]
 pub fn table(
     id: &'static str,
     selector: &'static str,
     layout: Layout,
+    select: SelectCell,
     rows: impl IntoElement,
     list: &ListState,
     on_width: impl Fn(&Pixels, &mut Window, &mut App) + 'static,
@@ -62,18 +73,26 @@ pub fn table(
                 .flex()
                 .flex_col()
                 .gap(space::S4)
-                .child(columns(layout, cx))
+                .child(columns(layout, select, cx))
                 .child(rows),
         );
-    // As wide as the area, not the table: the copy of the columns overflows it, unseen.
+    // As wide as the area and its scrollbar, not the table: the copy of the columns
+    // overflows it, unseen.
     let scrollbar = div()
         .absolute()
-        .inset_0()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .right(-SCROLLBAR_OUTSET)
         .overflow_hidden()
         .flex()
         .flex_col()
         .gap(space::S4)
-        .child(columns(layout, cx).min_w(layout.min_width()).invisible())
+        .child(
+            columns(layout, SelectCell::Space, cx)
+                .min_w(layout.min_width())
+                .invisible(),
+        )
         .child(
             div()
                 .flex_1()
@@ -97,6 +116,15 @@ pub fn table(
             .absolute()
             .inset_0(),
         )
+}
+
+/// Where a table's scrollbar track sits for a list or table at `area`: just right of it.
+#[cfg(test)]
+pub fn scrollbar_area(area: gpui::Bounds<Pixels>) -> gpui::Bounds<Pixels> {
+    gpui::Bounds {
+        size: gpui::size(area.size.width + SCROLLBAR_OUTSET, area.size.height),
+        ..area
+    }
 }
 
 /// Makes `list` hold `count` items, keeping its scroll position, and measures them again: a
@@ -143,10 +171,55 @@ impl Columns {
     pub const REVIEW: Pixels = px(128.);
     /// Workspace.
     pub const WORKSPACE: Pixels = px(140.);
+    /// The `Menu` layer's slot: a ghost icon-xs button, or its space.
+    pub const MENU: Pixels = px(24.);
+    /// The `Select` layer's slot in Select mode: a checkbox, or its space.
+    pub const SELECT: Pixels = px(16.);
     /// The title's least width. Below it a column drops ([`Table::fit`]), and below the
     /// narrowest layout the table scrolls sideways, so a narrow window never squeezes the
-    /// title to nothing. Penpot "Tasks · 1200" fits beside the sidebar with it.
-    pub const TITLE_MIN: Pixels = px(200.);
+    /// title to nothing. Penpot "Tasks · 1200" fits beside the sidebar with it, in Select
+    /// mode too (spec §11, Table width).
+    pub const TITLE_MIN: Pixels = px(160.);
+}
+
+/// A row's or a group header's `Select` layer.
+pub enum SelectCell {
+    /// Not in Select mode: no slot.
+    Off,
+    /// In Select mode, with nothing to select: the slot's space, so titles stay aligned.
+    Space,
+    /// In Select mode: this checkbox.
+    Checkbox(AnyElement),
+}
+
+impl SelectCell {
+    /// The slot, `Columns::SELECT` square; `None` when off. A click in it stays in it, so a
+    /// group header's checkbox doesn't fold the group too.
+    fn slot(self) -> Option<Div> {
+        let slot = div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(Columns::SELECT)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        match self {
+            SelectCell::Off => None,
+            SelectCell::Space => Some(slot),
+            SelectCell::Checkbox(checkbox) => Some(slot.child(checkbox)),
+        }
+    }
+}
+
+/// What a row shows beyond its task: its `Select` and `Menu` layers, and the error its PR's
+/// close failed with, shown on its title on hover.
+pub struct RowParts {
+    /// The `Select` layer.
+    pub select: SelectCell,
+    /// The `Menu` layer, for a row whose PR can close.
+    pub menu: Option<AnyElement>,
+    /// Why its PR didn't close, while it stays selected.
+    pub error: Option<SharedString>,
 }
 
 /// Which list a table is: the Inbox's has no agent or workspace column and names the others
@@ -160,12 +233,14 @@ pub enum Table {
 }
 
 impl Table {
-    /// Its layouts, widest first: each drops one more column, in the order the table gives
-    /// them up when it doesn't fit. Tasks drops Agent, then Checks; Review and Workspace
-    /// stay. The Inbox, which has neither Agent nor Workspace, drops Checks, then Review.
-    fn layouts(self) -> [Layout; 3] {
+    /// Its layouts, widest first, in Select mode or not: each drops one more column, in the
+    /// order the table gives them up when it doesn't fit. Tasks drops Agent, then Checks;
+    /// Review and Workspace stay. The Inbox, which has neither Agent nor Workspace, drops
+    /// Checks, then Review.
+    fn layouts(self, select: bool) -> [Layout; 3] {
         let layout = |agent, checks, review| Layout {
             table: self,
+            select,
             agent,
             checks,
             review,
@@ -185,15 +260,15 @@ impl Table {
         }
     }
 
-    /// Every column the table has.
+    /// Every column the table has, out of Select mode.
     pub fn widest(self) -> Layout {
-        self.layouts()[0]
+        self.layouts(false)[0]
     }
 
-    /// The widest layout that fits `width`; below the narrowest, the narrowest, which then
-    /// scrolls sideways.
-    pub fn fit(self, width: Pixels) -> Layout {
-        let layouts = self.layouts();
+    /// The widest layout that fits `width`, in Select mode or not; below the narrowest, the
+    /// narrowest, which then scrolls sideways.
+    pub fn fit(self, width: Pixels, select: bool) -> Layout {
+        let layouts = self.layouts(select);
         let narrowest = layouts[layouts.len() - 1];
         (layouts.into_iter())
             .find(|layout| layout.min_width() <= width)
@@ -208,6 +283,8 @@ impl Table {
 pub struct Layout {
     /// Which list it is, which names the columns.
     pub table: Table,
+    /// Select mode: every row and the header start with a `Select` slot.
+    pub select: bool,
     /// Linked agent (Tasks only).
     pub agent: bool,
     /// Checks.
@@ -228,8 +305,10 @@ impl Layout {
             Columns::TITLE_MIN,
             Columns::PR,
             Columns::DRAFT,
+            Columns::MENU,
         ];
         let optional = [
+            (self.select, Columns::SELECT),
             (self.agent, Columns::AGENT),
             (self.checks, Columns::CHECKS),
             (self.review, Columns::REVIEW),
@@ -272,8 +351,9 @@ fn none(cx: &App) -> Div {
 }
 
 /// Penpot `Columns`: the column names over the rows, xs medium muted; `layout`'s columns
-/// only. Tests find a named column as `column <name>`.
-pub fn columns(layout: Layout, cx: &App) -> Div {
+/// only, starting with `select` in Select mode (the Inbox's select-all) and ending with the
+/// `Menu` layer's space. Tests find a named column as `column <name>`.
+pub fn columns(layout: Layout, select: SelectCell, cx: &App) -> Div {
     let s = cx.theme().semantic();
     let name = |width: Option<Pixels>, text: &'static str| {
         let cell = match width {
@@ -291,6 +371,7 @@ pub fn columns(layout: Layout, cx: &App) -> Div {
         .text_size(font_size::XS)
         .font_weight(font_weight::MEDIUM)
         .text_color(s.muted_foreground)
+        .children(select_slot(layout, select))
         .child(name(Some(Columns::STATUS), "Status"))
         .child(name(Some(Columns::ICON), ""))
         .map(|row| match layout.table {
@@ -314,15 +395,27 @@ pub fn columns(layout: Layout, cx: &App) -> Div {
         .when(layout.workspace, |row| {
             row.child(name(Some(Columns::WORKSPACE), "Workspace"))
         })
+        .child(cell(Columns::MENU))
 }
 
-/// Penpot `GroupHeader`: a chevron, `label` and a `secondary` count badge. Clicking it runs
-/// `on_toggle`. `key` names it: its id is `group-<key>`, and tests find it as `group <key>`.
+/// `select`'s slot as `layout` has it: none out of Select mode, at least its space in it.
+fn select_slot(layout: Layout, select: SelectCell) -> Option<Div> {
+    match (layout.select, select) {
+        (false, _) => None,
+        (true, SelectCell::Off) => SelectCell::Space.slot(),
+        (true, select) => select.slot(),
+    }
+}
+
+/// Penpot `GroupHeader`: its `Select` layer in Select mode, a chevron, `label` and a
+/// `secondary` count badge. Clicking it, but for its checkbox, runs `on_toggle`. `key` names
+/// it: its id is `group-<key>`, and tests find it as `group <key>`.
 pub fn group_header(
     key: impl Into<SharedString>,
     label: impl Into<SharedString>,
     count: usize,
     collapsed: bool,
+    select: SelectCell,
     on_toggle: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> AnyElement {
@@ -339,6 +432,7 @@ pub fn group_header(
         .py(space::S1_5)
         .cursor_pointer()
         .on_click(on_toggle)
+        .children(select.slot())
         .child(
             Icon::new(if collapsed {
                 IconName::ChevronRight
@@ -431,10 +525,11 @@ pub fn status_picker(
 /// What clicking a row's title does: open the task sheet on it.
 pub type OnOpen = Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static>;
 
-/// A row's title, sm: clicking it runs `on_open`. Tests find it as `task title <id>`.
-fn title(row: &Row, on_open: OnOpen, cx: &App) -> gpui::Stateful<Div> {
+/// A row's title, sm: clicking it runs `on_open`. With an `error`, why its PR didn't close,
+/// it shows the error in a tooltip on hover. Tests find it as `task title <id>`.
+fn title(row: &Row, on_open: OnOpen, error: Option<SharedString>, cx: &App) -> AnyElement {
     let id = row.id;
-    div()
+    let title = div()
         .id(SharedString::from(format!("task-title-{id}")))
         .debug_selector(move || format!("task title {id}"))
         .min_w_0()
@@ -442,7 +537,19 @@ fn title(row: &Row, on_open: OnOpen, cx: &App) -> gpui::Stateful<Div> {
         .text_size(font_size::SM)
         .text_color(cx.theme().semantic().foreground)
         .on_click(on_open)
-        .child(row.title.clone())
+        .child(row.title.clone());
+    match error {
+        Some(error) => div()
+            .min_w_0()
+            .debug_selector(move || format!("close error {id}"))
+            .child(
+                Tooltip::new(SharedString::from(format!("close-error-{id}")))
+                    .trigger(title)
+                    .content(TooltipContent::new(error)),
+            )
+            .into_any_element(),
+        None => title.into_any_element(),
+    }
 }
 
 /// Penpot `TaskRow`'s `Unseen` layer, while an agent's comments on the task are unseen: a
@@ -463,12 +570,19 @@ fn unseen_mark(row: &Row, cx: &App) -> Option<Div> {
     })
 }
 
-/// Penpot `TaskRow` (`wide`): picker, kind icon, title, agent, PR, draft, checks, review and
-/// workspace, `space.3` apart, padded `space.2`; `layout`'s columns only. `picker` is the
-/// row's status picker; clicking the title runs `on_open`. The title cell ends with the
-/// [`unseen_mark`] while the task's agent comments are unseen. Tests find a cell as
-/// `<column> <id>`.
-pub fn wide(row: &Row, picker: Select, layout: Layout, on_open: OnOpen, cx: &App) -> AnyElement {
+/// Penpot `TaskRow` (`wide`): its `Select` layer in Select mode, picker, kind icon, title,
+/// agent, PR, draft, checks, review, workspace and its `Menu` layer, `space.3` apart, padded
+/// `space.2`; `layout`'s columns only. `picker` is the row's status picker; clicking the
+/// title runs `on_open`. The title cell ends with the [`unseen_mark`] while the task's agent
+/// comments are unseen. Tests find a cell as `<column> <id>`.
+pub fn wide(
+    row: &Row,
+    picker: Select,
+    layout: Layout,
+    parts: RowParts,
+    on_open: OnOpen,
+    cx: &App,
+) -> AnyElement {
     let s = cx.theme().semantic();
     let muted = |text: SharedString, size: gpui::Rems| {
         div()
@@ -499,6 +613,7 @@ pub fn wide(row: &Row, picker: Select, layout: Layout, on_open: OnOpen, cx: &App
         .gap(space::S3)
         .p(space::S2)
         .rounded(s.radius_md)
+        .children(select_slot(layout, parts.select))
         .child(cell(Columns::STATUS).child(picker))
         .child(
             cell(Columns::ICON)
@@ -512,7 +627,7 @@ pub fn wide(row: &Row, picker: Select, layout: Layout, on_open: OnOpen, cx: &App
                 .flex()
                 .items_center()
                 .gap(space::S1_5)
-                .child(title(row, on_open, cx))
+                .child(title(row, on_open, parts.error, cx))
                 .children(unseen_mark(row, cx)),
         )
         .when(layout.agent, |r| r.child(agent))
@@ -564,16 +679,17 @@ pub fn wide(row: &Row, picker: Select, layout: Layout, on_open: OnOpen, cx: &App
                     .child(none(cx)),
             })
         })
+        .child(cell(Columns::MENU).children(parts.menu))
         .into_any_element()
 }
 
-/// Penpot `TaskRow` (`panel`), for the right panel's narrow column: the kind icon, the title
-/// over the PR reference and the agents' `StateDot` on top; the status picker, then the
-/// checks icon and the review badge below. Padded `space.2`, the two lines `space.1-5` apart.
-/// Clicking the title runs `on_open`. The [`unseen_mark`] sits just before the agents' mark
-/// while the task's agent comments are unseen. Tests find the agents' mark as
-/// `panel agent <id>`.
-pub fn panel(row: &Row, picker: Select, on_open: OnOpen, cx: &App) -> AnyElement {
+/// Penpot `TaskRow` (`panel`), for the right panel's narrow column: its `Select` layer in
+/// Select mode, the kind icon, the title over the PR reference, the agents' `StateDot` and
+/// its `Menu` layer on top; the status picker, then the checks icon and the review badge
+/// below. Padded `space.2`, the two lines `space.1-5` apart. Clicking the title runs
+/// `on_open`. The [`unseen_mark`] sits just before the agents' mark while the task's agent
+/// comments are unseen. Tests find the agents' mark as `panel agent <id>`.
+pub fn panel(row: &Row, picker: Select, parts: RowParts, on_open: OnOpen, cx: &App) -> AnyElement {
     let s = cx.theme().semantic();
     let kind_icon = match row.kind {
         TaskKind::Plain => IconName::ListTodo,
@@ -589,12 +705,13 @@ pub fn panel(row: &Row, picker: Select, on_open: OnOpen, cx: &App) -> AnyElement
         .gap(space::S1_5)
         .p(space::S2)
         .rounded(s.radius_md)
-        // Penpot `Top`: icon, Text, unseen, agent, `space.2` apart.
+        // Penpot `Top`: select, icon, Text, unseen, agent, menu, `space.2` apart.
         .child(
             div()
                 .flex()
                 .items_start()
                 .gap(space::S2)
+                .children(parts.select.slot())
                 .child(
                     div()
                         .flex_none()
@@ -608,7 +725,7 @@ pub fn panel(row: &Row, picker: Select, on_open: OnOpen, cx: &App) -> AnyElement
                         .flex()
                         .flex_col()
                         .gap(space::S0_5)
-                        .child(title(row, on_open, cx))
+                        .child(title(row, on_open, parts.error, cx))
                         .when_some(pr, |text, pr| {
                             text.child(
                                 div()
@@ -629,7 +746,8 @@ pub fn panel(row: &Row, picker: Select, on_open: OnOpen, cx: &App) -> AnyElement
                             .flex_none()
                             .child(StateDot::new().state(StateDotState::of(agent.state, None))),
                     )
-                }),
+                })
+                .children(parts.menu),
         )
         // Penpot `Meta`: picker, spacer, checks, review, `space.2` apart.
         .child(
@@ -657,62 +775,74 @@ mod tests {
         use super::*;
 
         #[test]
-        fn should_fit_every_column_the_title_at_its_least_and_the_gaps() {
-            // Penpot's Tasks board: 1131 wide with a 267px title, so 1064 with a 200px one.
-            assert_eq!(Table::Tasks.widest().min_width(), px(1064.));
-            // Penpot's Inbox board: 1131 wide with a 527px title.
-            assert_eq!(Table::Inbox.widest().min_width(), px(1131. - 527. + 200.));
+        fn should_fit_every_column_the_title_at_its_least_the_menu_and_the_gaps() {
+            // Penpot's Tasks board: 1131 wide with a 231px title, so 1060 with a 160px one.
+            assert_eq!(Table::Tasks.widest().min_width(), px(1060.));
+            // Penpot's Inbox board: 1131 wide with a 491px title.
+            assert_eq!(Table::Inbox.widest().min_width(), px(1131. - 491. + 160.));
+        }
+
+        #[test]
+        fn should_make_room_for_the_checkboxes_in_select_mode() {
+            let select = Table::Tasks.fit(px(2000.), true);
+            assert!(select.select);
+            assert_eq!(select.min_width(), px(1060. + 16. + 12.));
         }
 
         #[test]
         fn should_show_every_column_in_a_wide_window() {
-            let layout = Table::Tasks.fit(px(1064.));
+            let layout = Table::Tasks.fit(px(1060.), false);
             assert_eq!(layout, Table::Tasks.widest());
             assert!(layout.agent && layout.checks && layout.review && layout.workspace);
         }
 
         #[test]
         fn should_drop_the_agent_column_first_when_the_table_does_not_fit() {
-            let layout = Table::Tasks.fit(px(1063.));
+            let layout = Table::Tasks.fit(px(1059.), false);
             assert!(!layout.agent);
             assert!(layout.checks);
-            assert_eq!(layout.min_width(), px(956.));
+            assert_eq!(layout.min_width(), px(952.));
         }
 
         #[test]
         fn should_drop_checks_after_agent() {
-            let layout = Table::Tasks.fit(px(955.));
+            let layout = Table::Tasks.fit(px(951.), false);
             assert!(!layout.agent && !layout.checks);
-            assert_eq!(layout.min_width(), px(864.));
+            assert_eq!(layout.min_width(), px(860.));
         }
 
         #[test]
         fn should_keep_review_and_workspace() {
-            let layout = Table::Tasks.fit(px(400.));
+            let layout = Table::Tasks.fit(px(400.), false);
             assert!(layout.review && layout.workspace);
-            assert_eq!(layout.min_width(), px(864.));
+            assert_eq!(layout.min_width(), px(860.));
         }
 
         #[test]
-        fn should_fit_the_tasks_table_beside_the_sidebar_at_1200() {
+        fn should_fit_the_tasks_table_beside_the_sidebar_at_1200_in_select_mode_too() {
             // 1200 less the sidebar (261) and the content's padding (48).
-            assert!(Table::Tasks.fit(px(891.)).min_width() <= px(891.));
+            for select in [false, true] {
+                assert!(Table::Tasks.fit(px(891.), select).min_width() <= px(891.));
+            }
         }
 
         #[test]
         fn should_drop_checks_then_review_in_the_inbox() {
             let inbox = Table::Inbox;
             assert!(!inbox.widest().agent && !inbox.widest().workspace);
-            let narrower = inbox.fit(px(803.));
+            let narrower = inbox.fit(px(799.), false);
             assert!(!narrower.checks && narrower.review);
-            let narrowest = inbox.fit(px(711.));
+            let narrowest = inbox.fit(px(707.), false);
             assert!(!narrowest.checks && !narrowest.review);
-            assert_eq!(narrowest.min_width(), px(572.));
+            assert_eq!(narrowest.min_width(), px(568.));
         }
 
         #[test]
-        fn should_show_every_inbox_column_at_1200() {
-            assert_eq!(Table::Inbox.fit(px(891.)), Table::Inbox.widest());
+        fn should_show_every_inbox_column_at_1200_in_select_mode_too() {
+            for select in [false, true] {
+                let layout = Table::Inbox.fit(px(891.), select);
+                assert!(layout.checks && layout.review, "{layout:?}");
+            }
         }
     }
 }

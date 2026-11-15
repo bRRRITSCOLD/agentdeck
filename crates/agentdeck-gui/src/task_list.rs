@@ -7,7 +7,7 @@
 
 use agentdeck_client::types::Task;
 use agentdeck_core::{
-    AgentState, ChecksState, ReviewState, TaskId, TaskKind, TaskStatus, WorkspaceId,
+    AgentState, ChecksState, PrState, ReviewState, TaskId, TaskKind, TaskStatus, WorkspaceId,
 };
 use gpui::SharedString;
 
@@ -33,6 +33,8 @@ pub struct AgentCell {
 /// A PR task's PR, for its row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrCell {
+    /// The repository's name without its owner: `ts-packages`.
+    pub repo: SharedString,
     /// The repository's name without its owner, then the number: `ts-packages #142`.
     pub reference: SharedString,
     /// Whether it is a draft.
@@ -62,6 +64,9 @@ pub struct Row {
     pub workspace: Option<SharedString>,
     /// Whether an agent commented on it since the user last opened it: the row's unseen mark.
     pub unseen: bool,
+    /// Whether its PR can be closed from here: a PR task whose PR is stored open, aged out or
+    /// not (spec §11, Closing PRs). Only such a row is selectable and has a menu.
+    pub closable: bool,
 }
 
 /// The rows of one status.
@@ -154,6 +159,7 @@ fn row(snapshot: &Snapshot, task: &Task) -> Row {
     let pr = task.pr.as_ref().map(|pr| {
         let repo = pr.repo.rsplit('/').next().unwrap_or(&pr.repo);
         PrCell {
+            repo: repo.to_owned().into(),
             reference: format!("{repo} #{}", pr.number).into(),
             draft: pr.draft,
             checks: pr.checks,
@@ -174,13 +180,14 @@ fn row(snapshot: &Snapshot, task: &Task) -> Row {
         pr,
         workspace,
         unseen: task.unseen_agent_comments > 0,
+        closable: task.pr.as_ref().is_some_and(|pr| pr.state == PrState::Open),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use agentdeck_client::types::PullRequest;
-    use agentdeck_core::{Agent, PrState};
+    use agentdeck_core::Agent;
 
     use super::*;
     use crate::overview::fixtures::{id, pane, task, workspace};
@@ -379,12 +386,36 @@ mod tests {
             assert_eq!(
                 row.pr,
                 Some(PrCell {
+                    repo: "rust-packages".into(),
                     reference: "rust-packages #61".into(),
                     draft: true,
                     checks: Some(ChecksState::Failure),
                     review: Some(ReviewState::ChangesRequested),
                 })
             );
+        }
+
+        #[test]
+        fn should_make_only_an_open_pr_closable() {
+            let with_state = |n: u32, state: PrState| Task {
+                pr: Some(PullRequest {
+                    state,
+                    ..pr("acme/widgets", i64::from(n))
+                }),
+                ..task(n, TaskKind::Pr, None)
+            };
+            let snapshot = Snapshot {
+                tasks: vec![
+                    with_state(1, PrState::Open),
+                    with_state(2, PrState::Merged),
+                    with_state(3, PrState::Closed),
+                    task(4, TaskKind::Plain, None),
+                ],
+                ..Snapshot::default()
+            };
+
+            let closable: Vec<bool> = rows(&snapshot, &all()).iter().map(|r| r.closable).collect();
+            assert_eq!(closable, [true, false, false, false]);
         }
 
         #[test]

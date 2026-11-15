@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 use agentdeck_client::Client;
 use agentdeck_client::types::{
-    GhLogin, NewWorkspace, PrSyncProgress, PrSyncStage, PrSyncStatus, Task, Workspace,
+    GhLogin, NewTask, NewWorkspace, PrClose, PrCloseResult, PrSyncProgress, PrSyncStage,
+    PrSyncStatus, Task, Workspace,
 };
 use agentdeck_core::{ChecksState, PrState, ReviewState, TaskKind, TaskStatus};
 use httpmock::{Mock, MockServer};
@@ -15,8 +16,8 @@ use agentdeck_core::ws::{Entity, ServerMessage};
 
 use crate::support::git::git;
 use crate::support::github::{
-    BATCH, Pr, days_ago, mock_fetch, mock_list, mock_list_page, mock_search, mock_unauthorized,
-    mock_updated_search, set_gh_token,
+    BATCH, Pr, days_ago, mock_close, mock_close_refused, mock_fetch, mock_list, mock_list_page,
+    mock_node_ids, mock_search, mock_unauthorized, mock_updated_search, set_gh_token,
 };
 use crate::support::ws::{Frame, Ws};
 use crate::support::{TestDaemon, set_daemon_env};
@@ -767,7 +768,7 @@ mod max_age {
     /// A daemon that stored `open` with no cutoff, restarted with a 90-day one. Its
     /// `gh` is logged out until a test logs it in, so nothing syncs before the test's own
     /// mocks are up; the first daemon's mocks are deleted.
-    async fn restarted_with_cutoff(github: &MockServer, open: &[Pr]) -> TestDaemon {
+    pub(super) async fn restarted_with_cutoff(github: &MockServer, open: &[Pr]) -> TestDaemon {
         let mut first = mock_list(github, TOKEN, open);
         let daemon =
             TestDaemon::start_with_github(dirs_with_cutoff("0"), &github.url("/graphql")).await;
@@ -787,11 +788,11 @@ mod max_age {
     }
 
     /// GitHub's list of open PRs, most recently updated first, as one page.
-    fn mock_open<'a>(github: &'a MockServer, prs: &[Pr]) -> Mock<'a> {
+    pub(super) fn mock_open<'a>(github: &'a MockServer, prs: &[Pr]) -> Mock<'a> {
         mock_list_page(github, TOKEN, prs, None, None, prs.len(), Duration::ZERO)
     }
 
-    async fn task_of(client: &Client, number: i64) -> Task {
+    pub(super) async fn task_of(client: &Client, number: i64) -> Task {
         pr_tasks(client)
             .await
             .into_iter()
@@ -1071,5 +1072,337 @@ mod timer {
             .expect("status")
             .into_inner();
         assert_eq!(status.login, GhLogin::LoggedIn);
+    }
+}
+
+mod post_v1_prs_close {
+    use super::max_age::{mock_open, restarted_with_cutoff, task_of};
+    use super::*;
+    use agentdeck_core::TaskId;
+
+    /// Closes `task_ids`, which must answer 200, and returns the results.
+    async fn close(client: &Client, task_ids: Vec<TaskId>) -> Vec<PrCloseResult> {
+        let response = client
+            .prs_close()
+            .body(PrClose { task_ids })
+            .send()
+            .await
+            .expect("close");
+        assert_eq!(response.status().as_u16(), 200);
+        response.into_inner().results
+    }
+
+    /// A daemon that has synced `open` into PR tasks; every sync after is full.
+    async fn synced(github: &MockServer, open: &[Pr]) -> TestDaemon {
+        mock_search(github, TOKEN, open);
+        let daemon = full_daemon(github, Some(TOKEN)).await;
+        sync(&daemon.client).await;
+        assert_eq!(pr_tasks(&daemon.client).await.len(), open.len());
+        daemon
+    }
+
+    fn ok(task: &Task) -> PrCloseResult {
+        PrCloseResult {
+            task_id: task.id,
+            ok: true,
+            error: None,
+        }
+    }
+
+    fn failed(task_id: TaskId, error: &str) -> PrCloseResult {
+        PrCloseResult {
+            task_id,
+            ok: false,
+            error: Some(error.into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn should_close_each_pr_and_move_its_task_to_done_200() {
+        let github = MockServer::start_async().await;
+        let prs = [Pr::open(7), Pr::open(8)];
+        let daemon = synced(&github, &prs).await;
+        // Looked up in the order asked.
+        let lookup = mock_node_ids(&github, &[prs[1].clone(), prs[0].clone()]);
+        let closes: Vec<_> = prs.iter().map(|pr| mock_close(&github, pr)).collect();
+        let seven = task_of(&daemon.client, 7).await;
+        let eight = task_of(&daemon.client, 8).await;
+
+        let results = close(&daemon.client, vec![eight.id, seven.id]).await;
+
+        assert_eq!(results, [ok(&eight), ok(&seven)]);
+        lookup.assert_calls(1);
+        for mock in &closes {
+            mock.assert_calls(1);
+        }
+        for number in [7, 8] {
+            let task = task_of(&daemon.client, number).await;
+            assert_eq!(task.status, TaskStatus::Done);
+            assert!(task.done_at.is_some());
+            assert_eq!(task.pr.expect("the task's PR").state, PrState::Closed);
+        }
+    }
+
+    #[tokio::test]
+    async fn should_tell_websocket_clients_the_closed_task_changed_200() {
+        let github = MockServer::start_async().await;
+        let pr = Pr::open(7);
+        let daemon = synced(&github, std::slice::from_ref(&pr)).await;
+        mock_node_ids(&github, std::slice::from_ref(&pr));
+        mock_close(&github, &pr);
+        let task = task_of(&daemon.client, 7).await;
+        let mut ws = Ws::connect(&daemon).await;
+
+        close(&daemon.client, vec![task.id]).await;
+
+        ws.until(|frame| match frame {
+            Frame::Message(ServerMessage::Changed {
+                entity: Entity::Task,
+                id,
+            }) if id == task.id.to_string() => Some(()),
+            _ => None,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn should_look_up_node_ids_25_to_a_request_200() {
+        let github = MockServer::start_async().await;
+        let prs: Vec<Pr> = (1..=30).map(Pr::open).collect();
+        let daemon = synced(&github, &prs).await;
+        let lookups: Vec<_> = prs
+            .chunks(BATCH)
+            .map(|batch| mock_node_ids(&github, batch))
+            .collect();
+        for pr in &prs {
+            mock_close(&github, pr);
+        }
+        let mut tasks = pr_tasks(&daemon.client).await;
+        tasks.sort_by_key(|task| task.pr.as_ref().expect("the task's PR").number);
+        let ids: Vec<TaskId> = tasks.iter().map(|task| task.id).collect();
+
+        let results = close(&daemon.client, ids).await;
+
+        assert!(results.iter().all(|result| result.ok), "{results:?}");
+        assert_eq!(lookups.len(), 2);
+        for lookup in &lookups {
+            lookup.assert_calls(1);
+        }
+    }
+
+    #[tokio::test]
+    async fn should_keep_closing_after_github_refuses_one_and_give_its_message_200() {
+        let github = MockServer::start_async().await;
+        let prs = [Pr::open(7), Pr::open(8), Pr::open(9)];
+        let daemon = synced(&github, &prs).await;
+        mock_node_ids(&github, &prs);
+        mock_close(&github, &prs[0]);
+        let refusal = "octocat does not have the correct permissions to execute `ClosePullRequest`";
+        mock_close_refused(&github, &prs[1], refusal);
+        let last = mock_close(&github, &prs[2]);
+        let tasks = [
+            task_of(&daemon.client, 7).await,
+            task_of(&daemon.client, 8).await,
+            task_of(&daemon.client, 9).await,
+        ];
+
+        let results = close(&daemon.client, tasks.iter().map(|task| task.id).collect()).await;
+
+        assert_eq!(
+            results,
+            [ok(&tasks[0]), failed(tasks[1].id, refusal), ok(&tasks[2])]
+        );
+        last.assert_calls(1);
+        let refused = task_of(&daemon.client, 8).await;
+        assert_eq!(refused.status, TaskStatus::Review);
+        assert_eq!(refused.pr.expect("the task's PR").state, PrState::Open);
+    }
+
+    #[tokio::test]
+    async fn should_fail_a_pr_github_does_not_show_with_githubs_message_200() {
+        let github = MockServer::start_async().await;
+        let pr = Pr::open(7);
+        let daemon = synced(&github, std::slice::from_ref(&pr)).await;
+        let message = "Could not resolve to a PullRequest with the number of 7.";
+        github.mock(|when, then| {
+            when.body_includes("fragment nodeId on PullRequest");
+            then.status(200).json_body(serde_json::json!({
+                "data": { "p0": { "pullRequest": null } },
+                "errors": [ { "type": "NOT_FOUND", "path": [ "p0", "pullRequest" ], "message": message } ]
+            }));
+        });
+        let any_close = github.mock(|when, then| {
+            when.body_includes("closePullRequest(");
+            then.status(500);
+        });
+        let task = task_of(&daemon.client, 7).await;
+
+        let results = close(&daemon.client, vec![task.id]).await;
+
+        assert_eq!(results, [failed(task.id, message)]);
+        any_close.assert_calls(0);
+    }
+
+    #[tokio::test]
+    async fn should_fail_the_prs_of_a_lookup_that_fails_with_why_200() {
+        let github = MockServer::start_async().await;
+        let pr = Pr::open(7);
+        let daemon = synced(&github, std::slice::from_ref(&pr)).await;
+        github.mock(|when, then| {
+            when.body_includes("fragment nodeId on PullRequest");
+            then.status(502)
+                .json_body(serde_json::json!({ "message": "Server Error" }));
+        });
+        let task = task_of(&daemon.client, 7).await;
+
+        let results = close(&daemon.client, vec![task.id]).await;
+
+        assert_eq!(
+            results,
+            [failed(task.id, "GitHub answered 502: Server Error")]
+        );
+    }
+
+    #[tokio::test]
+    async fn should_fail_a_task_that_is_not_an_open_pr_without_asking_github_200() {
+        let github = MockServer::start_async().await;
+        let merged = Pr {
+            state: "MERGED",
+            ..Pr::open(8)
+        };
+        let daemon = synced(&github, &[Pr::open(7), merged]).await;
+        let plain = daemon
+            .client
+            .task_create()
+            .body(NewTask {
+                body: None,
+                status: None,
+                title: "Write docs".into(),
+                workspace_id: None,
+            })
+            .send()
+            .await
+            .expect("create a task")
+            .into_inner();
+        let lookup = github.mock(|when, then| {
+            when.body_includes("fragment nodeId on PullRequest");
+            then.status(500);
+        });
+        let merged = task_of(&daemon.client, 8).await;
+        let unknown: TaskId = uuid::Uuid::now_v7().into();
+
+        let results = close(&daemon.client, vec![plain.id, merged.id, unknown]).await;
+
+        assert_eq!(
+            results,
+            [
+                failed(plain.id, "Not an open PR"),
+                failed(merged.id, "Not an open PR"),
+                failed(unknown, "Not an open PR"),
+            ]
+        );
+        lookup.assert_calls(0);
+    }
+
+    #[tokio::test]
+    async fn should_fail_every_pr_without_a_token_200() {
+        let github = MockServer::start_async().await;
+        let daemon = synced(&github, &[Pr::open(7)]).await;
+        let task = task_of(&daemon.client, 7).await;
+        let (_, dirs) = daemon.terminate();
+        set_gh_token(dirs.path(), None);
+        let daemon = TestDaemon::start_with_github(dirs, &github.url("/graphql")).await;
+        let lookup = github.mock(|when, then| {
+            when.body_includes("fragment nodeId on PullRequest");
+            then.status(500);
+        });
+
+        let results = close(&daemon.client, vec![task.id]).await;
+
+        assert_eq!(results, [failed(task.id, "Not signed in to GitHub")]);
+        lookup.assert_calls(0);
+    }
+
+    #[tokio::test]
+    async fn should_read_the_token_again_after_a_401_and_close_with_the_new_one_200() {
+        let github = MockServer::start_async().await;
+        let pr = Pr::open(7);
+        let mut old = mock_search(&github, "gho_old", std::slice::from_ref(&pr));
+        let daemon = daemon(&github, Some("gho_old")).await;
+        sync(&daemon.client).await;
+        let task = task_of(&daemon.client, 7).await;
+
+        old.delete();
+        mock_unauthorized(&github, "gho_old");
+        set_gh_token(daemon.root(), Some("gho_new"));
+        let id = pr.node_id();
+        let lookup = github.mock(|when, then| {
+            when.header("authorization", "Bearer gho_new")
+                .body_includes("fragment nodeId on PullRequest");
+            then.status(200).json_body(serde_json::json!({
+                "data": { "p0": { "pullRequest": { "id": id } } }
+            }));
+        });
+        let id = pr.node_id();
+        let close_mock = github.mock(|when, then| {
+            when.header("authorization", "Bearer gho_new")
+                .body_includes("closePullRequest(");
+            then.status(200).json_body(serde_json::json!({
+                "data": { "closePullRequest": { "pullRequest": { "id": id, "state": "CLOSED" } } }
+            }));
+        });
+
+        let results = close(&daemon.client, vec![task.id]).await;
+
+        assert_eq!(results, [ok(&task)]);
+        lookup.assert_calls(1);
+        close_mock.assert_calls(1);
+    }
+
+    #[tokio::test]
+    async fn should_close_an_aged_out_pr_200() {
+        let github = MockServer::start_async().await;
+        let old = aged(8, 400);
+        let daemon = restarted_with_cutoff(&github, std::slice::from_ref(&old)).await;
+        mock_open(&github, std::slice::from_ref(&old));
+        set_gh_token(daemon.root(), Some(TOKEN));
+        sync(&daemon.client).await;
+        let task = task_of(&daemon.client, 8).await;
+        assert_eq!(task.status, TaskStatus::Done);
+        mock_node_ids(&github, std::slice::from_ref(&old));
+        mock_close(&github, &old);
+
+        let results = close(&daemon.client, vec![task.id]).await;
+
+        assert_eq!(results, [ok(&task)]);
+        let task = task_of(&daemon.client, 8).await;
+        assert_eq!(task.pr.expect("the task's PR").state, PrState::Closed);
+    }
+
+    #[tokio::test]
+    async fn should_not_fetch_a_closed_pr_by_number_on_the_next_sync_200() {
+        let github = MockServer::start_async().await;
+        let pr = Pr::open(7);
+        mock_search(&github, TOKEN, std::slice::from_ref(&pr));
+        let daemon = full_daemon(&github, Some(TOKEN)).await;
+        sync(&daemon.client).await;
+        mock_node_ids(&github, std::slice::from_ref(&pr));
+        mock_close(&github, &pr);
+        let task = task_of(&daemon.client, 7).await;
+        close(&daemon.client, vec![task.id]).await;
+
+        github.reset_async().await;
+        mock_list(&github, TOKEN, &[]);
+        let fetch = mock_fetch(
+            &github,
+            &[Pr {
+                state: "CLOSED",
+                ..pr
+            }],
+        );
+        sync(&daemon.client).await;
+
+        fetch.assert_calls(0);
+        assert_eq!(task_of(&daemon.client, 7).await.status, TaskStatus::Done);
     }
 }

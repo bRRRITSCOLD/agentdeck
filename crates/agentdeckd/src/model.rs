@@ -417,6 +417,53 @@ pub enum PrSyncStage {
     Details,
 }
 
+/// `POST /v1/prs/close`: the PR tasks whose PRs to close on GitHub.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct PrClose {
+    /// The tasks, each a PR task whose PR is open; the results come back in this order.
+    pub task_ids: Vec<TaskId>,
+}
+
+/// `POST /v1/prs/close`'s answer: one result per task asked for, in the order asked.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct PrCloseResults {
+    /// Each task's result.
+    pub results: Vec<PrCloseResult>,
+}
+
+/// Whether one PR closed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PrCloseResult {
+    /// The PR task.
+    pub task_id: TaskId,
+    /// Whether GitHub closed the PR.
+    pub ok: bool,
+    /// Why it didn't: GitHub's message, why the request failed, "Not an open PR" or "Not
+    /// signed in to GitHub". `None` when it closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl PrCloseResult {
+    /// The result for a PR GitHub closed.
+    pub fn closed(task_id: TaskId) -> PrCloseResult {
+        PrCloseResult {
+            task_id,
+            ok: true,
+            error: None,
+        }
+    }
+
+    /// The result for a PR that didn't close, and why.
+    pub fn failed(task_id: TaskId, error: impl Into<String>) -> PrCloseResult {
+        PrCloseResult {
+            task_id,
+            ok: false,
+            error: Some(error.into()),
+        }
+    }
+}
+
 /// A terminal in a tab, running an agent CLI or a shell.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Pane {

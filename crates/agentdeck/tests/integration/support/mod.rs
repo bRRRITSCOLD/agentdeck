@@ -1,9 +1,12 @@
 //! The integration harness: the real `agentdeck` binary in temp `$XDG_*` dirs, against the
-//! real `agentdeckd` that it starts itself (spec §2, §12). Nothing reaches GitHub: `gh` is a
-//! logged-out stub and the GraphQL URL points at a closed port. `claude` and `codex` are stubs
-//! first on `PATH`, so no test runs a real agent.
+//! real `agentdeckd` that it starts itself (spec §2, §12). Nothing reaches the real GitHub:
+//! `gh` is a logged-out stub and the GraphQL URL points at a closed port, unless a test
+//! points it at httpmock with [`TestEnv::with_github`]. `claude` and `codex` are stubs first
+//! on `PATH`, so no test runs a real agent.
 
+pub mod github;
 pub mod mcp;
+pub mod pty;
 
 use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
@@ -50,6 +53,9 @@ cat >> "$log/stdin"
 /// A `gh` that is never logged in.
 const STUB_GH: &str = "#!/bin/sh\necho \"no oauth token found for github.com\" >&2\nexit 1\n";
 
+/// A `gh` whose `auth token` prints `<root>/gh-token`.
+const STUB_GH_LOGGED_IN: &str = "#!/bin/sh\ncat \"$(dirname \"$0\")/../gh-token\"\n";
+
 /// The `agentdeckd` beside the `agentdeck` under test. `cargo test-integration` builds every
 /// workspace binary, so a missing one is a build problem, not a reason to skip.
 pub fn daemon_binary() -> PathBuf {
@@ -68,6 +74,8 @@ pub fn daemon_binary() -> PathBuf {
 pub struct TestEnv {
     // Removed after Drop has stopped the daemon.
     root: TempDir,
+    /// The GraphQL URL the daemon calls, when a test set one with [`TestEnv::with_github`].
+    github_api: Option<String>,
 }
 
 /// What one `agentdeck` run did.
@@ -104,7 +112,21 @@ impl TestEnv {
                 .expect("making a stub executable");
         }
         std::fs::create_dir_all(root.path().join("home")).expect("creating $HOME");
-        TestEnv { root }
+        TestEnv {
+            root,
+            github_api: None,
+        }
+    }
+
+    /// A fresh world whose `gh` is logged in with `token` and whose daemon calls GitHub's
+    /// GraphQL API at `github_api` (httpmock), with no PR age cutoff.
+    pub fn with_github(github_api: &str, token: &str) -> TestEnv {
+        let mut env = TestEnv::new();
+        env.github_api = Some(github_api.to_owned());
+        let gh = env.root().join("bin/gh");
+        std::fs::write(&gh, STUB_GH_LOGGED_IN).expect("writing the stub gh");
+        std::fs::write(env.root().join("gh-token"), token).expect("writing the gh token");
+        env
     }
 
     /// The temp root.
@@ -176,9 +198,15 @@ impl TestEnv {
             .env("XDG_STATE_HOME", root.join("state"))
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("AGENTDECK_GITHUB_API", UNREACHABLE)
+            .env(
+                "AGENTDECK_GITHUB_API",
+                self.github_api.as_deref().unwrap_or(UNREACHABLE),
+            )
             .env("AGENTDECK_DAEMON", daemon_binary())
             .stdin(Stdio::null());
+        if self.github_api.is_some() {
+            command.env("AGENTDECK_PR_MAX_AGE_DAYS", "0");
+        }
         command
     }
 

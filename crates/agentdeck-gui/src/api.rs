@@ -9,8 +9,8 @@ use agentdeck_client::instructions;
 use agentdeck_client::panes::{self, pane_if_any};
 use agentdeck_client::types::{
     Comment, DeviceSignIn, DirtyReport, GithubAuthInfo, GithubClientIdBody, GithubTokenBody,
-    InstructionPatch, NewComment, NewInstruction, NewTask, NewWorkspace, Pane, Settings,
-    SettingsPatch, Tab, TaskPatch,
+    InstructionPatch, NewComment, NewInstruction, NewTask, NewWorkspace, Pane, PrClose,
+    PrCloseResult, Settings, SettingsPatch, Tab, TaskPatch,
 };
 use agentdeck_client::{ApiError, Client};
 use agentdeck_core::{
@@ -70,6 +70,11 @@ pub trait Api: Send + Sync {
 
     /// Syncs PRs now, returning once the sync is done.
     fn sync_prs(&self, cx: &App) -> Task<anyhow::Result<()>>;
+
+    /// Closes the PRs of the PR tasks `tasks` on GitHub (spec §8): one result per task, in
+    /// order, each saying whether it closed and why not. Only a request that fails as a whole
+    /// is an error.
+    fn close_prs(&self, tasks: Vec<TaskId>, cx: &App) -> Task<anyhow::Result<Vec<PrCloseResult>>>;
 
     /// Starts an agent as `launch` says and places it in a tab (spec §6): the workspace's
     /// first empty tab, or a new one. A refusal is an [`ApiError`]; `invalid_argv` means the
@@ -282,6 +287,19 @@ impl Api for Daemon {
         runtime::spawn(cx, async move {
             client.prs_sync().send().await.map_err(ApiError::from)?;
             Ok(())
+        })
+    }
+
+    fn close_prs(&self, tasks: Vec<TaskId>, cx: &App) -> Task<anyhow::Result<Vec<PrCloseResult>>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            let closed = (client
+                .prs_close()
+                .body(PrClose { task_ids: tasks })
+                .send()
+                .await)
+                .map_err(ApiError::from)?;
+            Ok(closed.into_inner().results)
         })
     }
 
@@ -683,6 +701,10 @@ pub(crate) mod fake {
         settings_reads: Mutex<usize>,
         /// The settings patches sent, in order.
         pub settings_patches: Mutex<Vec<SettingsPatch>>,
+        /// Each close asked for: the tasks, in order.
+        pub closes: Mutex<Vec<Vec<TaskId>>>,
+        /// The PRs GitHub refuses to close, with its message.
+        refusals: Mutex<HashMap<TaskId, String>>,
         /// Where the GitHub token comes from; none and no client ID when unset.
         github: Mutex<Option<GithubAuthInfo>>,
         /// The login a pasted token belongs to, and its scopes.
@@ -785,6 +807,14 @@ pub(crate) mod fake {
         /// Answers later reads with `settings`, as if another client had changed them.
         pub fn set_settings(&self, settings: Settings) {
             *self.settings.lock().unwrap() = Some(settings);
+        }
+
+        /// Makes GitHub refuse to close `task`'s PR with `message`.
+        pub fn refuse_close(&self, task: TaskId, message: &str) {
+            self.refusals
+                .lock()
+                .unwrap()
+                .insert(task, message.to_owned());
         }
 
         /// How many times the settings were read.
@@ -1002,6 +1032,43 @@ pub(crate) mod fake {
             }
             *self.syncs.lock().unwrap() += 1;
             Task::ready(Ok(()))
+        }
+
+        fn close_prs(
+            &self,
+            tasks: Vec<TaskId>,
+            _cx: &App,
+        ) -> Task<anyhow::Result<Vec<PrCloseResult>>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            self.closes.lock().unwrap().push(tasks.clone());
+            let refusals = self.refusals.lock().unwrap();
+            let mut snapshot = self.snapshot.lock().unwrap();
+            let results = (tasks.into_iter())
+                .map(|task_id| {
+                    if let Some(message) = refusals.get(&task_id) {
+                        return PrCloseResult {
+                            task_id,
+                            ok: false,
+                            error: Some(message.clone()),
+                        };
+                    }
+                    // GitHub closed it: the daemon stores it closed and its task done.
+                    if let Some(task) = snapshot.tasks.iter_mut().find(|t| t.id == task_id) {
+                        task.status = TaskStatus::Done;
+                        if let Some(pr) = &mut task.pr {
+                            pr.state = agentdeck_core::PrState::Closed;
+                        }
+                    }
+                    PrCloseResult {
+                        task_id,
+                        ok: true,
+                        error: None,
+                    }
+                })
+                .collect();
+            Task::ready(Ok(results))
         }
 
         fn launch_agent(&self, launch: Launch, _cx: &App) -> Task<anyhow::Result<Launched>> {

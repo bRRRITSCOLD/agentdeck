@@ -44,14 +44,18 @@ fn main() -> ExitCode {
         Err(err) => return fail(&anyhow::anyhow!("starting tokio: {err}")),
     };
     match runtime.block_on(run(cli)) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(true) => ExitCode::SUCCESS,
+        // The command printed why, as `pr close` does for each PR that didn't close.
+        Ok(false) => ExitCode::FAILURE,
         Err(err) => fail(&err),
     }
 }
 
-async fn run(cli: Cli) -> anyhow::Result<()> {
+/// Runs the command and prints its output; `false` when it failed after printing.
+async fn run(cli: Cli) -> anyhow::Result<bool> {
     if let Command::Mcp = cli.command {
-        return mcp::serve().await;
+        mcp::serve().await?;
+        return Ok(true);
     }
     let daemon = daemon::connect().await?;
     let output = match cli.command {
@@ -71,16 +75,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         stdout.write_all(&output.human)?;
     }
     stdout.flush()?;
-    Ok(())
+    Ok(!output.failed)
 }
 
 /// `agentdeck daemon restart`: stops the daemon `connected` names and starts a new one.
 async fn restart(connected: &DaemonInfo) -> anyhow::Result<Output> {
     let new = daemon::restart(connected).await?.info;
-    Ok(Output {
-        json: json!({ "pid": new.pid, "version": new.version, "api_version": new.api_version }),
-        human: format!("restarted agentdeckd, now pid {}\n", new.pid).into_bytes(),
-    })
+    Output::new(
+        &json!({ "pid": new.pid, "version": new.version, "api_version": new.api_version }),
+        format!("restarted agentdeckd, now pid {}\n", new.pid),
+    )
 }
 
 fn fail(err: &anyhow::Error) -> ExitCode {

@@ -2,12 +2,15 @@
 
 use std::path::Path;
 
+use std::collections::HashMap;
+use std::io::{IsTerminal, Write};
+
 use agentdeck_client::types::{
     InputWhen, InstructionPatch, NewComment, NewInstruction, NewTask, NewWorkspace, PaneInput,
-    TaskPatch,
+    PrClose, PullRequest, TaskPatch,
 };
 use agentdeck_client::{Client, panes};
-use agentdeck_core::{PaneId, WorkspaceId};
+use agentdeck_core::{PaneId, TaskId, TaskKind, WorkspaceId};
 use anyhow::Context;
 use futures_util::TryStreamExt;
 use serde::Serialize;
@@ -33,13 +36,16 @@ pub struct Output {
     pub json: Value,
     /// The human-readable form; raw bytes for `tail`.
     pub human: Vec<u8>,
+    /// Whether the CLI exits 1 after printing it: `pr close` when any PR didn't close.
+    pub failed: bool,
 }
 
 impl Output {
-    fn new(json: &impl Serialize, human: String) -> anyhow::Result<Output> {
+    pub fn new(json: &impl Serialize, human: String) -> anyhow::Result<Output> {
         Ok(Output {
             json: serde_json::to_value(json)?,
             human: human.into_bytes(),
+            failed: false,
         })
     }
 }
@@ -371,9 +377,56 @@ async fn pr(client: &Client, command: PrCommand) -> anyhow::Result<Output> {
     let status = match command {
         PrCommand::Sync => client.prs_sync().send().await,
         PrCommand::Status => client.prs_status().send().await,
+        PrCommand::Close { ids, yes } => return close_prs(client, ids, yes).await,
     }
     .map_err(ApiError::from)?;
     Output::new(&*status, render::pr_status(&status))
+}
+
+/// `pr close`: asks first unless `yes`, on a terminal only, then closes the PRs of the tasks
+/// `ids` with `POST /v1/prs/close`, printing a line per PR. Fails when any didn't close.
+async fn close_prs(client: &Client, ids: Vec<TaskId>, yes: bool) -> anyhow::Result<Output> {
+    let tasks = client
+        .task_list()
+        .kind(TaskKind::Pr)
+        .send()
+        .await
+        .map_err(ApiError::from)?;
+    let prs: HashMap<TaskId, &PullRequest> = tasks
+        .iter()
+        .filter_map(|task| Some((task.id, task.pr.as_ref()?)))
+        .collect();
+    if !yes {
+        if !std::io::stdin().is_terminal() {
+            anyhow::bail!(
+                "pr close asks before closing PRs, and stdin isn't a terminal; pass --yes to \
+                 close them without asking"
+            );
+        }
+        let repos: Vec<&str> = ids
+            .iter()
+            .filter_map(|id| prs.get(id).map(|pr| pr.repo.as_str()))
+            .collect();
+        eprint!("{}", render::close_prompt(ids.len(), &repos));
+        std::io::stderr().flush()?;
+        let mut answer = String::new();
+        std::io::stdin()
+            .read_line(&mut answer)
+            .context("reading the answer")?;
+        if answer.trim() != "y" {
+            return Output::new(&json!({ "results": [] }), "Closed nothing\n".into());
+        }
+    }
+    let closed = client
+        .prs_close()
+        .body(PrClose { task_ids: ids })
+        .send()
+        .await
+        .map_err(ApiError::from)?
+        .into_inner();
+    let mut output = Output::new(&closed, render::close_results(&closed.results, &prs))?;
+    output.failed = closed.results.iter().any(|result| !result.ok);
+    Ok(output)
 }
 
 async fn config(client: &Client, command: ConfigCommand) -> anyhow::Result<Output> {
@@ -414,5 +467,6 @@ async fn tail(client: &Client, pane: PaneId, bytes: Option<u64>) -> anyhow::Resu
     Ok(Output {
         json: json!({ "pane": pane, "output": String::from_utf8_lossy(&output) }),
         human: output,
+        failed: false,
     })
 }

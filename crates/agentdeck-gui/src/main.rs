@@ -4,6 +4,7 @@
 //! daemon, starting `agentdeckd` when nothing answers (spec §2).
 
 mod api;
+mod close_prs;
 mod connection;
 mod count;
 mod delete_workspace;

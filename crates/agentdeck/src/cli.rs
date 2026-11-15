@@ -242,8 +242,18 @@ pub enum AgentCommand {
 pub enum PrCommand {
     /// Sync PR tasks with GitHub now.
     Sync,
-    /// The `gh` login state and the last sync.
+    /// Whether GitHub takes the token, and the last sync.
     Status,
+    /// Close the PRs of PR tasks on GitHub, after asking. Closes only: no comment, no branch
+    /// delete.
+    Close {
+        /// The PR tasks' ids.
+        #[arg(required = true, value_name = "ID")]
+        ids: Vec<TaskId>,
+        /// Close them without asking.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 /// `agentdeck config …`. A `<key>` is dotted: `appearance.theme`, `pr_sync.max_age_days`.
@@ -453,6 +463,23 @@ mod tests {
         fn should_need_exactly_one_of_task_and_none_to_link() {
             assert!(parse(&["agent", "link", TASK]).is_err());
             assert!(parse(&["agent", "link", TASK, "--task", TASK, "--none"]).is_err());
+        }
+
+        #[test]
+        fn should_close_several_prs_and_take_yes() {
+            let id = "019a1dd1-5b85-75ae-af0b-6d1a8b211cc0";
+            let cli = parse(&["pr", "close", id, id, "--yes"]).unwrap();
+
+            let Command::Pr(PrCommand::Close { ids, yes }) = cli.command else {
+                panic!("not pr close: {cli:?}");
+            };
+            assert_eq!(ids.len(), 2);
+            assert!(yes);
+        }
+
+        #[test]
+        fn should_need_a_task_to_close() {
+            assert!(parse(&["pr", "close"]).is_err());
         }
 
         #[test]
