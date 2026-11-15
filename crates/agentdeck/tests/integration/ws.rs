@@ -1,4 +1,4 @@
-//! `agentdeck ws ls | new | archive | mute | unmute | rm`.
+//! `agentdeck ws ls | new | rename | archive | mute | unmute | rm`.
 
 use std::process::Command;
 
@@ -84,6 +84,55 @@ mod ws_ls {
         let env = TestEnv::new();
 
         assert_eq!(env.ok(&["ws", "ls"]), "no workspaces\n");
+    }
+}
+
+mod ws_rename {
+    use super::*;
+
+    #[test]
+    fn should_rename_by_slug_and_print_it_as_ws_ls_does() {
+        let env = TestEnv::new();
+        let ws = env.workspace("web");
+
+        let stdout = env.ok(&["ws", "rename", text(&ws, "slug"), "Web app"]);
+
+        assert_eq!(stdout, env.ok(&["ws", "ls"]));
+        assert!(stdout.contains("Web app"), "{stdout}");
+    }
+
+    #[test]
+    fn should_keep_the_slug_and_dir_so_the_old_slug_still_finds_it() {
+        let env = TestEnv::new();
+        let ws = env.workspace("web");
+
+        let renamed = env.json(&["ws", "rename", "web", "Web app"]);
+
+        assert_eq!(renamed["id"], ws["id"]);
+        assert_eq!(text(&renamed, "name"), "Web app");
+        assert_eq!(renamed["slug"], ws["slug"]);
+        assert_eq!(renamed["dir"], ws["dir"]);
+        env.ok(&["ws", "mute", text(&ws, "slug")]);
+    }
+
+    #[test]
+    fn should_refuse_a_blank_name() {
+        let env = TestEnv::new();
+        env.workspace("web");
+
+        let stderr = env.fails(&["ws", "rename", "web", " "]);
+
+        assert!(stderr.contains("invalid_name"), "{stderr}");
+        assert_eq!(text(&env.json(&["ws", "ls"])[0], "name"), "web");
+    }
+
+    #[test]
+    fn should_fail_for_an_unknown_workspace() {
+        let env = TestEnv::new();
+
+        let stderr = env.fails(&["ws", "rename", "nope", "x"]);
+
+        assert!(stderr.contains("unknown_workspace"), "{stderr}");
     }
 }
 

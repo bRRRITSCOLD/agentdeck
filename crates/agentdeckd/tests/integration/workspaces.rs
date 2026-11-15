@@ -235,6 +235,27 @@ mod patch_v1_workspaces_id {
     }
 
     #[tokio::test]
+    async fn should_reject_a_blank_name_and_keep_the_old_one_400() {
+        let daemon = TestDaemon::start().await;
+        let created = create(&daemon.client, "old", None).await;
+
+        let (status, error) = error_response(
+            daemon
+                .client
+                .workspace_update()
+                .id(created.id)
+                .body_map(|patch| patch.name(Some(" ".to_owned())))
+                .send()
+                .await,
+        );
+
+        assert_eq!(status, 400);
+        assert_eq!(error.error_code.as_deref(), Some("invalid_name"));
+        let kept = daemon.client.workspace_get().id(created.id).send().await;
+        assert_eq!(kept.expect("get").into_inner().name, "old");
+    }
+
+    #[tokio::test]
     async fn should_answer_not_found_for_an_unknown_id_404() {
         let daemon = TestDaemon::start().await;
 
