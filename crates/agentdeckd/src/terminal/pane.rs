@@ -3,7 +3,7 @@
 //!
 //! Two OS threads serve each pane, since `portable-pty`'s reads and writes block:
 //! - the **reader** feeds every chunk of output through [`Pane::output`], then waits for the
-//!   process and reports its exit;
+//!   process, records its exit and only then reports it;
 //! - the **writer** writes input in order: typed bytes, delivered `input`, and the `Term`'s
 //!   answers to terminal queries.
 //!
@@ -179,7 +179,9 @@ pub struct Status {
     pub exit_code: Option<i64>,
 }
 
-/// Called once when the pane's process exits, with its exit code and last title.
+/// Called once when the pane's process exits, with its exit code and last title, before the
+/// pane reads as exited: the daemon saves the exit in it, so nothing sees `exited` before the
+/// pane's row says so (spec §7).
 pub type OnExit = Box<dyn FnOnce(PaneId, Option<i64>, String) + Send>;
 
 /// A live pane.
@@ -221,7 +223,7 @@ impl EventListener for Listener {
 
 impl Pane {
     /// Starts `launch` in a new PTY. `rules` derive the pane's state; `events` gets its
-    /// `state` and `exit` events; `on_exit` runs once the process has exited.
+    /// `state` and `exit` events; `on_exit` runs once the process has exited, before they do.
     pub fn spawn(
         id: PaneId,
         launch: Launch,
@@ -311,9 +313,7 @@ impl Pane {
                     .wait()
                     .ok()
                     .map(|status| i64::from(status.exit_code()));
-                if let Some(title) = reading.exit(code) {
-                    on_exit(reading.id, code, title);
-                }
+                reading.exit(code, on_exit);
             })
             .map_err(|err| SpawnError::Pty(err.into()))?;
         Ok(pane)
@@ -366,12 +366,17 @@ impl Pane {
         }
     }
 
-    /// The process exited: publishes `exited` and `exit`, drops queued input. Returns the
-    /// last title the first time, `None` after.
-    fn exit(&self, code: Option<i64>) -> Option<String> {
+    /// The process exited: runs `on_exit` with the last title, then publishes `exited` and
+    /// `exit` and drops queued input. `on_exit` runs outside the lock, since it waits on the
+    /// database.
+    fn exit(&self, code: Option<i64>, on_exit: OnExit) {
+        let title = self.live().title.clone();
+        on_exit(self.id, code, title);
         let mut live = self.live();
         live.queued.clear();
-        let state = live.tracker.exit()?;
+        let Some(state) = live.tracker.exit() else {
+            return;
+        };
         live.exit_code = code;
         self.events.publish(ServerMessage::State {
             pane: self.id,
@@ -381,7 +386,6 @@ impl Pane {
             pane: self.id,
             code,
         });
-        Some(live.title.clone())
     }
 
     /// Takes one observation of the screen at `now` (the daemon's clock), publishing a new
@@ -627,6 +631,63 @@ mod tests {
         #[test]
         fn should_never_type_prompt_input_into_a_blocked_pane() {
             assert_eq!(accepted(When::Prompt), [AgentState::Done, AgentState::Idle]);
+        }
+    }
+}
+
+/// A pane over a real PTY running `sh`. `Pane` is crate-private and the daemon is a binary,
+/// so `tests/integration` can't reach it; the integration nextest profile runs this module,
+/// and the unit one skips it.
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+
+    mod exit {
+        use super::*;
+
+        fn is_exit(event: &ServerMessage) -> bool {
+            matches!(
+                event,
+                ServerMessage::Exit { .. }
+                    | ServerMessage::State {
+                        state: AgentState::Exited,
+                        ..
+                    }
+            )
+        }
+
+        #[test]
+        fn should_report_an_exit_only_once_on_exit_has_returned() {
+            let events = Events::new();
+            let mut feed = events.subscribe();
+            let (exited, on_exit_called) = channel();
+            let (release, released) = channel::<()>();
+            let on_exit: OnExit = Box::new(move |_, code, _| {
+                exited.send(code).expect("the test waits for on_exit");
+                released.recv().expect("the test releases on_exit");
+            });
+            let id = uuid::Uuid::now_v7().into();
+            let argv = ["sh", "-c", "exit 3"].map(String::from).to_vec();
+            let launch = Launch::pane(id, uuid::Uuid::now_v7().into(), argv, std::env::temp_dir());
+            let rules = crate::terminal::rules::resolve("shell", None);
+            let pane = Pane::spawn(id, launch, rules, events, on_exit).expect("spawn sh");
+
+            // on_exit is where the daemon saves the exit: while it runs, nothing may read the
+            // pane as exited, or archiving its workspace is refused (#172).
+            let code = on_exit_called.recv().expect("on_exit runs once sh exits");
+            assert_eq!(code, Some(3));
+            assert_ne!(pane.status().state, AgentState::Exited);
+            let early: Vec<_> = std::iter::from_fn(|| feed.try_recv().ok()).collect();
+            assert!(
+                !early.iter().any(is_exit),
+                "published before on_exit returned: {early:?}"
+            );
+
+            release.send(()).expect("on_exit is waiting");
+            let event = feed.blocking_recv().expect("the exit is published");
+            assert!(is_exit(&event), "{event:?}");
+            assert_eq!(pane.status().state, AgentState::Exited);
+            assert_eq!(pane.status().exit_code, Some(3));
         }
     }
 }
