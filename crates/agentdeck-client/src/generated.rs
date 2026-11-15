@@ -81,6 +81,21 @@ pub mod types {
             Default::default()
         }
     }
+    ///`POST /v1/github/device`: the code the user enters on GitHub to sign in.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct DeviceSignIn {
+        ///When the code expires (RFC 3339).
+        pub expires_at: ::std::string::String,
+        ///The code to enter, `ABCD-1234`.
+        pub user_code: ::std::string::String,
+        ///Where to enter it.
+        pub verification_uri: ::std::string::String,
+    }
+    impl DeviceSignIn {
+        pub fn builder() -> builder::DeviceSignIn {
+            Default::default()
+        }
+    }
     ///One dirty git repo.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct DirtyRepo {
@@ -120,7 +135,7 @@ pub mod types {
             Default::default()
         }
     }
-    ///Whether `gh auth token` gives the daemon a GitHub token.
+    ///Whether the daemon has a GitHub token GitHub accepts (spec §8).
     #[derive(
         ::serde::Deserialize,
         ::serde::Serialize,
@@ -134,10 +149,10 @@ pub mod types {
         PartialOrd,
     )]
     pub enum GhLogin {
-        ///`gh` printed a token GitHub accepted, or one not yet tried.
+        ///A token GitHub accepted, or one it couldn't be asked about yet.
         #[serde(rename = "logged_in")]
         LoggedIn,
-        ///No `gh`, `gh` not logged in, or GitHub rejected its token. The GUI shows a banner.
+        ///No token from any source, or GitHub rejected the one found. The GUI shows a banner.
         #[serde(rename = "logged_out")]
         LoggedOut,
     }
@@ -171,6 +186,50 @@ pub mod types {
             value: ::std::string::String,
         ) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
+        }
+    }
+    ///`GET /v1/github/auth`: where the GitHub token comes from, and whose it is. Never the token or the OAuth client ID.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct GithubAuthInfo {
+        ///Whether the keyring or `AGENTDECK_GITHUB_CLIENT_ID` gives an OAuth client ID, so Sign in with GitHub can start.
+        pub client_id_set: bool,
+        ///`GH_TOKEN` or `GITHUB_TOKEN`, whichever is set (`GH_TOKEN` when both are), also while a saved token overrides it.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub env_var: ::std::option::Option<TokenEnvVar>,
+        ///The token's GitHub user; absent while there's no token, GitHub rejected it, or it couldn't be asked.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub login: ::std::option::Option<::std::string::String>,
+        ///The token's scopes, from `X-OAuth-Scopes`; absent for a token that sends none (a fine-grained one).
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub scopes: ::std::option::Option<::std::vec::Vec<::std::string::String>>,
+        ///The source the token comes from.
+        pub source: TokenSource,
+    }
+    impl GithubAuthInfo {
+        pub fn builder() -> builder::GithubAuthInfo {
+            Default::default()
+        }
+    }
+    ///`PUT /v1/github/client-id`.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct GithubClientIdBody {
+        ///The client ID of the user's GitHub OAuth App, with Device Flow on.
+        pub client_id: ::std::string::String,
+    }
+    impl GithubClientIdBody {
+        pub fn builder() -> builder::GithubClientIdBody {
+            Default::default()
+        }
+    }
+    ///`PUT /v1/github/token`.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct GithubTokenBody {
+        ///A GitHub token: a classic one, or a fine-grained one.
+        pub token: ::std::string::String,
+    }
+    impl GithubTokenBody {
+        pub fn builder() -> builder::GithubTokenBody {
+            Default::default()
         }
     }
     ///`GET /v1/health`.
@@ -532,7 +591,7 @@ pub mod types {
             value.parse()
         }
     }
-    ///`GET /v1/prs/status` and `POST /v1/prs/sync`: the `gh` login and the last sync.
+    ///`GET /v1/prs/status` and `POST /v1/prs/sync`: the GitHub login and the last sync.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct PrSyncStatus {
         ///Why the most recent sync failed; `None` when it succeeded or none has run.
@@ -541,7 +600,7 @@ pub mod types {
         ///When the last successful sync finished; `None` until one has.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub last_synced_at: ::std::option::Option<::std::string::String>,
-        ///The `gh` login state.
+        ///Whether there's a token GitHub accepts.
         pub login: GhLogin,
         ///How many days since GitHub last updated an open PR it may be and still sync: the setting `pr_sync.max_age_days` as it is now; `0` for no cutoff.
         pub max_age_days: u32,
@@ -789,6 +848,122 @@ pub mod types {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String> for ThemePreference {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///An environment variable that gives the daemon a GitHub token.
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum TokenEnvVar {
+        ///`GH_TOKEN`, read first.
+        #[serde(rename = "GH_TOKEN")]
+        GhToken,
+        ///`GITHUB_TOKEN`.
+        #[serde(rename = "GITHUB_TOKEN")]
+        GithubToken,
+    }
+    impl ::std::fmt::Display for TokenEnvVar {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::GhToken => f.write_str("GH_TOKEN"),
+                Self::GithubToken => f.write_str("GITHUB_TOKEN"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for TokenEnvVar {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "GH_TOKEN" => Ok(Self::GhToken),
+                "GITHUB_TOKEN" => Ok(Self::GithubToken),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for TokenEnvVar {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for TokenEnvVar {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///Where the daemon's GitHub token comes from (spec §8), the first that gives one.
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum TokenSource {
+        ///A token saved in the system keyring: pasted, or from Sign in with GitHub.
+        #[serde(rename = "keyring")]
+        Keyring,
+        ///`GH_TOKEN` or `GITHUB_TOKEN` in the daemon's environment.
+        #[serde(rename = "env")]
+        Env,
+        ///`gh auth token`.
+        #[serde(rename = "gh")]
+        Gh,
+        ///No source gives one.
+        #[serde(rename = "none")]
+        None,
+    }
+    impl ::std::fmt::Display for TokenSource {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Keyring => f.write_str("keyring"),
+                Self::Env => f.write_str("env"),
+                Self::Gh => f.write_str("gh"),
+                Self::None => f.write_str("none"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for TokenSource {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "keyring" => Ok(Self::Keyring),
+                "env" => Ok(Self::Env),
+                "gh" => Ok(Self::Gh),
+                "none" => Ok(Self::None),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for TokenSource {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for TokenSource {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -1191,6 +1366,74 @@ pub mod types {
             }
         }
         #[derive(Clone, Debug)]
+        pub struct DeviceSignIn {
+            expires_at: ::std::result::Result<::std::string::String, ::std::string::String>,
+            user_code: ::std::result::Result<::std::string::String, ::std::string::String>,
+            verification_uri: ::std::result::Result<::std::string::String, ::std::string::String>,
+        }
+        impl ::std::default::Default for DeviceSignIn {
+            fn default() -> Self {
+                Self {
+                    expires_at: Err("no value supplied for expires_at".to_string()),
+                    user_code: Err("no value supplied for user_code".to_string()),
+                    verification_uri: Err("no value supplied for verification_uri".to_string()),
+                }
+            }
+        }
+        impl DeviceSignIn {
+            pub fn expires_at<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::string::String>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.expires_at = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for expires_at: {e}"));
+                self
+            }
+            pub fn user_code<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::string::String>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.user_code = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for user_code: {e}"));
+                self
+            }
+            pub fn verification_uri<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::string::String>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.verification_uri = value.try_into().map_err(|e| {
+                    format!("error converting supplied value for verification_uri: {e}")
+                });
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<DeviceSignIn> for super::DeviceSignIn {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: DeviceSignIn,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    expires_at: value.expires_at?,
+                    user_code: value.user_code?,
+                    verification_uri: value.verification_uri?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::DeviceSignIn> for DeviceSignIn {
+            fn from(value: super::DeviceSignIn) -> Self {
+                Self {
+                    expires_at: Ok(value.expires_at),
+                    user_code: Ok(value.user_code),
+                    verification_uri: Ok(value.verification_uri),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
         pub struct DirtyRepo {
             path: ::std::result::Result<::std::string::String, ::std::string::String>,
             uncommitted: ::std::result::Result<
@@ -1372,6 +1615,193 @@ pub mod types {
                     error_code: Ok(value.error_code),
                     message: Ok(value.message),
                     request_id: Ok(value.request_id),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
+        pub struct GithubAuthInfo {
+            client_id_set: ::std::result::Result<bool, ::std::string::String>,
+            env_var: ::std::result::Result<
+                ::std::option::Option<super::TokenEnvVar>,
+                ::std::string::String,
+            >,
+            login: ::std::result::Result<
+                ::std::option::Option<::std::string::String>,
+                ::std::string::String,
+            >,
+            scopes: ::std::result::Result<
+                ::std::option::Option<::std::vec::Vec<::std::string::String>>,
+                ::std::string::String,
+            >,
+            source: ::std::result::Result<super::TokenSource, ::std::string::String>,
+        }
+        impl ::std::default::Default for GithubAuthInfo {
+            fn default() -> Self {
+                Self {
+                    client_id_set: Err("no value supplied for client_id_set".to_string()),
+                    env_var: Ok(Default::default()),
+                    login: Ok(Default::default()),
+                    scopes: Ok(Default::default()),
+                    source: Err("no value supplied for source".to_string()),
+                }
+            }
+        }
+        impl GithubAuthInfo {
+            pub fn client_id_set<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<bool>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.client_id_set = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for client_id_set: {e}"));
+                self
+            }
+            pub fn env_var<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<super::TokenEnvVar>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.env_var = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for env_var: {e}"));
+                self
+            }
+            pub fn login<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<::std::string::String>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.login = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for login: {e}"));
+                self
+            }
+            pub fn scopes<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<
+                        ::std::option::Option<::std::vec::Vec<::std::string::String>>,
+                    >,
+                T::Error: ::std::fmt::Display,
+            {
+                self.scopes = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for scopes: {e}"));
+                self
+            }
+            pub fn source<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<super::TokenSource>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.source = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for source: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<GithubAuthInfo> for super::GithubAuthInfo {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: GithubAuthInfo,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    client_id_set: value.client_id_set?,
+                    env_var: value.env_var?,
+                    login: value.login?,
+                    scopes: value.scopes?,
+                    source: value.source?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::GithubAuthInfo> for GithubAuthInfo {
+            fn from(value: super::GithubAuthInfo) -> Self {
+                Self {
+                    client_id_set: Ok(value.client_id_set),
+                    env_var: Ok(value.env_var),
+                    login: Ok(value.login),
+                    scopes: Ok(value.scopes),
+                    source: Ok(value.source),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
+        pub struct GithubClientIdBody {
+            client_id: ::std::result::Result<::std::string::String, ::std::string::String>,
+        }
+        impl ::std::default::Default for GithubClientIdBody {
+            fn default() -> Self {
+                Self {
+                    client_id: Err("no value supplied for client_id".to_string()),
+                }
+            }
+        }
+        impl GithubClientIdBody {
+            pub fn client_id<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::string::String>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.client_id = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for client_id: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<GithubClientIdBody> for super::GithubClientIdBody {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: GithubClientIdBody,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    client_id: value.client_id?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::GithubClientIdBody> for GithubClientIdBody {
+            fn from(value: super::GithubClientIdBody) -> Self {
+                Self {
+                    client_id: Ok(value.client_id),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
+        pub struct GithubTokenBody {
+            token: ::std::result::Result<::std::string::String, ::std::string::String>,
+        }
+        impl ::std::default::Default for GithubTokenBody {
+            fn default() -> Self {
+                Self {
+                    token: Err("no value supplied for token".to_string()),
+                }
+            }
+        }
+        impl GithubTokenBody {
+            pub fn token<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::string::String>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.token = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for token: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<GithubTokenBody> for super::GithubTokenBody {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: GithubTokenBody,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    token: value.token?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::GithubTokenBody> for GithubTokenBody {
+            fn from(value: super::GithubTokenBody) -> Self {
+                Self {
+                    token: Ok(value.token),
                 }
             }
         }
@@ -3810,6 +4240,100 @@ impl Client {
     pub fn comment_delete(&self) -> builder::CommentDelete<'_> {
         builder::CommentDelete::new(self)
     }
+    ///Where the GitHub token comes from, whose it is and what it may do, and whether an OAuth
+    ///
+    ///client ID is set. Never the token or the client ID.
+    ///
+    ///Sends a `GET` request to `/v1/github/auth`
+    ///
+    ///```ignore
+    ///let response = client.github_auth_get()
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn github_auth_get(&self) -> builder::GithubAuthGet<'_> {
+        builder::GithubAuthGet::new(self)
+    }
+    ///Saves the OAuth client ID Sign in with GitHub uses in the system keyring. Write-only: no
+    ///
+    ///route reads it back. A blank one is 400 `invalid_client_id`; no keyring is 503 `no_keyring`.
+    ///
+    ///Sends a `PUT` request to `/v1/github/client-id`
+    ///
+    ///```ignore
+    ///let response = client.github_client_id_put()
+    ///    .body(body)
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn github_client_id_put(&self) -> builder::GithubClientIdPut<'_> {
+        builder::GithubClientIdPut::new(self)
+    }
+    ///Deletes the saved OAuth client ID
+    ///
+    ///Sends a `DELETE` request to `/v1/github/client-id`
+    ///
+    ///```ignore
+    ///let response = client.github_client_id_delete()
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn github_client_id_delete(&self) -> builder::GithubClientIdDelete<'_> {
+        builder::GithubClientIdDelete::new(self)
+    }
+    ///Starts Sign in with GitHub (the OAuth device flow, scope `repo`), cancelling one already
+    ///
+    ///running, and answers with the code the user enters on GitHub. How it ends comes as a `github_auth` WebSocket event. No client ID is 409 `no_client_id`, no keyring 503 `no_keyring`, and GitHub refusing 502 `github_error`.
+    ///
+    ///Sends a `POST` request to `/v1/github/device`
+    ///
+    ///```ignore
+    ///let response = client.github_device_start()
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn github_device_start(&self) -> builder::GithubDeviceStart<'_> {
+        builder::GithubDeviceStart::new(self)
+    }
+    ///Cancels the sign-in running now, if any. No event
+    ///
+    ///Sends a `DELETE` request to `/v1/github/device`
+    ///
+    ///```ignore
+    ///let response = client.github_device_cancel()
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn github_device_cancel(&self) -> builder::GithubDeviceCancel<'_> {
+        builder::GithubDeviceCancel::new(self)
+    }
+    ///Checks a pasted token with GitHub and saves it in the system keyring, replacing any saved
+    ///
+    ///one; PR sync syncs at once. A blank token, or one GitHub answers 401 for, is 422 `invalid_token`; no keyring is 503 `no_keyring`; any other GitHub failure is 502 `github_error`.
+    ///
+    ///Sends a `PUT` request to `/v1/github/token`
+    ///
+    ///```ignore
+    ///let response = client.github_token_put()
+    ///    .body(body)
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn github_token_put(&self) -> builder::GithubTokenPut<'_> {
+        builder::GithubTokenPut::new(self)
+    }
+    ///Deletes the saved token (sign out); the token then comes from the next source, if any
+    ///
+    ///Sends a `DELETE` request to `/v1/github/token`
+    ///
+    ///```ignore
+    ///let response = client.github_token_delete()
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn github_token_delete(&self) -> builder::GithubTokenDelete<'_> {
+        builder::GithubTokenDelete::new(self)
+    }
     ///The daemon's version and uptime
     ///
     ///Sends a `GET` request to `/v1/health`
@@ -4431,6 +4955,413 @@ pub mod builder {
             let response = result?;
             match response.status().as_u16() {
                 204u16 => Ok(ResponseValue::empty(response)),
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::github_auth_get`]
+    ///
+    ///[`Client::github_auth_get`]: super::Client::github_auth_get
+    #[derive(Debug, Clone)]
+    pub struct GithubAuthGet<'a> {
+        client: &'a super::Client,
+    }
+    impl<'a> GithubAuthGet<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self { client: client }
+        }
+        ///Sends a `GET` request to `/v1/github/auth`
+        pub async fn send(
+            self,
+        ) -> Result<ResponseValue<types::GithubAuthInfo>, Error<types::Error>> {
+            let Self { client } = self;
+            let url = format!("{}/v1/github/auth", client.baseurl,);
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .get(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "github_auth_get",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                200u16 => ResponseValue::from_response(response).await,
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::github_client_id_put`]
+    ///
+    ///[`Client::github_client_id_put`]: super::Client::github_client_id_put
+    #[derive(Debug, Clone)]
+    pub struct GithubClientIdPut<'a> {
+        client: &'a super::Client,
+        body: Result<types::builder::GithubClientIdBody, String>,
+    }
+    impl<'a> GithubClientIdPut<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self {
+                client: client,
+                body: Ok(::std::default::Default::default()),
+            }
+        }
+        pub fn body<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<types::GithubClientIdBody>,
+            <V as std::convert::TryInto<types::GithubClientIdBody>>::Error: std::fmt::Display,
+        {
+            self.body = value
+                .try_into()
+                .map(From::from)
+                .map_err(|s| format!("conversion to `GithubClientIdBody` for body failed: {}", s));
+            self
+        }
+        pub fn body_map<F>(mut self, f: F) -> Self
+        where
+            F: std::ops::FnOnce(
+                    types::builder::GithubClientIdBody,
+                ) -> types::builder::GithubClientIdBody,
+        {
+            self.body = self.body.map(f);
+            self
+        }
+        ///Sends a `PUT` request to `/v1/github/client-id`
+        pub async fn send(
+            self,
+        ) -> Result<ResponseValue<types::GithubAuthInfo>, Error<types::Error>> {
+            let Self { client, body } = self;
+            let body = body
+                .and_then(|v| types::GithubClientIdBody::try_from(v).map_err(|e| e.to_string()))
+                .map_err(Error::InvalidRequest)?;
+            let url = format!("{}/v1/github/client-id", client.baseurl,);
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .put(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .json(&body)
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "github_client_id_put",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                200u16 => ResponseValue::from_response(response).await,
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::github_client_id_delete`]
+    ///
+    ///[`Client::github_client_id_delete`]: super::Client::github_client_id_delete
+    #[derive(Debug, Clone)]
+    pub struct GithubClientIdDelete<'a> {
+        client: &'a super::Client,
+    }
+    impl<'a> GithubClientIdDelete<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self { client: client }
+        }
+        ///Sends a `DELETE` request to `/v1/github/client-id`
+        pub async fn send(
+            self,
+        ) -> Result<ResponseValue<types::GithubAuthInfo>, Error<types::Error>> {
+            let Self { client } = self;
+            let url = format!("{}/v1/github/client-id", client.baseurl,);
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .delete(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "github_client_id_delete",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                200u16 => ResponseValue::from_response(response).await,
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::github_device_start`]
+    ///
+    ///[`Client::github_device_start`]: super::Client::github_device_start
+    #[derive(Debug, Clone)]
+    pub struct GithubDeviceStart<'a> {
+        client: &'a super::Client,
+    }
+    impl<'a> GithubDeviceStart<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self { client: client }
+        }
+        ///Sends a `POST` request to `/v1/github/device`
+        pub async fn send(self) -> Result<ResponseValue<types::DeviceSignIn>, Error<types::Error>> {
+            let Self { client } = self;
+            let url = format!("{}/v1/github/device", client.baseurl,);
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .post(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "github_device_start",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                200u16 => ResponseValue::from_response(response).await,
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::github_device_cancel`]
+    ///
+    ///[`Client::github_device_cancel`]: super::Client::github_device_cancel
+    #[derive(Debug, Clone)]
+    pub struct GithubDeviceCancel<'a> {
+        client: &'a super::Client,
+    }
+    impl<'a> GithubDeviceCancel<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self { client: client }
+        }
+        ///Sends a `DELETE` request to `/v1/github/device`
+        pub async fn send(self) -> Result<ResponseValue<()>, Error<types::Error>> {
+            let Self { client } = self;
+            let url = format!("{}/v1/github/device", client.baseurl,);
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .delete(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "github_device_cancel",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                204u16 => Ok(ResponseValue::empty(response)),
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::github_token_put`]
+    ///
+    ///[`Client::github_token_put`]: super::Client::github_token_put
+    #[derive(Debug, Clone)]
+    pub struct GithubTokenPut<'a> {
+        client: &'a super::Client,
+        body: Result<types::builder::GithubTokenBody, String>,
+    }
+    impl<'a> GithubTokenPut<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self {
+                client: client,
+                body: Ok(::std::default::Default::default()),
+            }
+        }
+        pub fn body<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<types::GithubTokenBody>,
+            <V as std::convert::TryInto<types::GithubTokenBody>>::Error: std::fmt::Display,
+        {
+            self.body = value
+                .try_into()
+                .map(From::from)
+                .map_err(|s| format!("conversion to `GithubTokenBody` for body failed: {}", s));
+            self
+        }
+        pub fn body_map<F>(mut self, f: F) -> Self
+        where
+            F: std::ops::FnOnce(types::builder::GithubTokenBody) -> types::builder::GithubTokenBody,
+        {
+            self.body = self.body.map(f);
+            self
+        }
+        ///Sends a `PUT` request to `/v1/github/token`
+        pub async fn send(
+            self,
+        ) -> Result<ResponseValue<types::GithubAuthInfo>, Error<types::Error>> {
+            let Self { client, body } = self;
+            let body = body
+                .and_then(|v| types::GithubTokenBody::try_from(v).map_err(|e| e.to_string()))
+                .map_err(Error::InvalidRequest)?;
+            let url = format!("{}/v1/github/token", client.baseurl,);
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .put(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .json(&body)
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "github_token_put",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                200u16 => ResponseValue::from_response(response).await,
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::github_token_delete`]
+    ///
+    ///[`Client::github_token_delete`]: super::Client::github_token_delete
+    #[derive(Debug, Clone)]
+    pub struct GithubTokenDelete<'a> {
+        client: &'a super::Client,
+    }
+    impl<'a> GithubTokenDelete<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self { client: client }
+        }
+        ///Sends a `DELETE` request to `/v1/github/token`
+        pub async fn send(
+            self,
+        ) -> Result<ResponseValue<types::GithubAuthInfo>, Error<types::Error>> {
+            let Self { client } = self;
+            let url = format!("{}/v1/github/token", client.baseurl,);
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .delete(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "github_token_delete",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                200u16 => ResponseValue::from_response(response).await,
                 400u16..=499u16 => Err(Error::ErrorResponse(
                     ResponseValue::from_response(response).await?,
                 )),

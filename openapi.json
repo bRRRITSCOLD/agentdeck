@@ -202,6 +202,29 @@
         ],
         "type": "object"
       },
+      "DeviceSignIn": {
+        "description": "`POST /v1/github/device`: the code the user enters on GitHub to sign in.",
+        "properties": {
+          "expires_at": {
+            "description": "When the code expires (RFC 3339).",
+            "type": "string"
+          },
+          "user_code": {
+            "description": "The code to enter, `ABCD-1234`.",
+            "type": "string"
+          },
+          "verification_uri": {
+            "description": "Where to enter it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expires_at",
+          "user_code",
+          "verification_uri"
+        ],
+        "type": "object"
+      },
       "DirtyRepo": {
         "description": "One dirty git repo.",
         "properties": {
@@ -267,23 +290,93 @@
         "type": "object"
       },
       "GhLogin": {
-        "description": "Whether `gh auth token` gives the daemon a GitHub token.",
+        "description": "Whether the daemon has a GitHub token GitHub accepts (spec §8).",
         "oneOf": [
           {
-            "description": "`gh` printed a token GitHub accepted, or one not yet tried.",
+            "description": "A token GitHub accepted, or one it couldn't be asked about yet.",
             "enum": [
               "logged_in"
             ],
             "type": "string"
           },
           {
-            "description": "No `gh`, `gh` not logged in, or GitHub rejected its token. The GUI shows a banner.",
+            "description": "No token from any source, or GitHub rejected the one found. The GUI shows a banner.",
             "enum": [
               "logged_out"
             ],
             "type": "string"
           }
         ]
+      },
+      "GithubAuthInfo": {
+        "description": "`GET /v1/github/auth`: where the GitHub token comes from, and whose it is. Never the token or the OAuth client ID.",
+        "properties": {
+          "client_id_set": {
+            "description": "Whether the keyring or `AGENTDECK_GITHUB_CLIENT_ID` gives an OAuth client ID, so Sign in with GitHub can start.",
+            "type": "boolean"
+          },
+          "env_var": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TokenEnvVar"
+              }
+            ],
+            "description": "`GH_TOKEN` or `GITHUB_TOKEN`, whichever is set (`GH_TOKEN` when both are), also while a saved token overrides it.",
+            "nullable": true
+          },
+          "login": {
+            "description": "The token's GitHub user; absent while there's no token, GitHub rejected it, or it couldn't be asked.",
+            "nullable": true,
+            "type": "string"
+          },
+          "scopes": {
+            "description": "The token's scopes, from `X-OAuth-Scopes`; absent for a token that sends none (a fine-grained one).",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "source": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TokenSource"
+              }
+            ],
+            "description": "The source the token comes from."
+          }
+        },
+        "required": [
+          "client_id_set",
+          "source"
+        ],
+        "type": "object"
+      },
+      "GithubClientIdBody": {
+        "description": "`PUT /v1/github/client-id`.",
+        "properties": {
+          "client_id": {
+            "description": "The client ID of the user's GitHub OAuth App, with Device Flow on.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "client_id"
+        ],
+        "type": "object"
+      },
+      "GithubTokenBody": {
+        "description": "`PUT /v1/github/token`.",
+        "properties": {
+          "token": {
+            "description": "A GitHub token: a classic one, or a fine-grained one.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "type": "object"
       },
       "Health": {
         "description": "`GET /v1/health`.",
@@ -866,7 +959,7 @@
         ]
       },
       "PrSyncStatus": {
-        "description": "`GET /v1/prs/status` and `POST /v1/prs/sync`: the `gh` login and the last sync.",
+        "description": "`GET /v1/prs/status` and `POST /v1/prs/sync`: the GitHub login and the last sync.",
         "properties": {
           "last_error": {
             "description": "Why the most recent sync failed; `None` when it succeeded or none has run.",
@@ -884,7 +977,7 @@
                 "$ref": "#/components/schemas/GhLogin"
               }
             ],
-            "description": "The `gh` login state."
+            "description": "Whether there's a token GitHub accepts."
           },
           "max_age_days": {
             "description": "How many days since GitHub last updated an open PR it may be and still sync: the setting `pr_sync.max_age_days` as it is now; `0` for no cutoff.",
@@ -1335,6 +1428,58 @@
           }
         ]
       },
+      "TokenEnvVar": {
+        "description": "An environment variable that gives the daemon a GitHub token.",
+        "oneOf": [
+          {
+            "description": "`GH_TOKEN`, read first.",
+            "enum": [
+              "GH_TOKEN"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "`GITHUB_TOKEN`.",
+            "enum": [
+              "GITHUB_TOKEN"
+            ],
+            "type": "string"
+          }
+        ]
+      },
+      "TokenSource": {
+        "description": "Where the daemon's GitHub token comes from (spec §8), the first that gives one.",
+        "oneOf": [
+          {
+            "description": "A token saved in the system keyring: pasted, or from Sign in with GitHub.",
+            "enum": [
+              "keyring"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "`GH_TOKEN` or `GITHUB_TOKEN` in the daemon's environment.",
+            "enum": [
+              "env"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "`gh auth token`.",
+            "enum": [
+              "gh"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "No source gives one.",
+            "enum": [
+              "none"
+            ],
+            "type": "string"
+          }
+        ]
+      },
       "UnpushedBranch": {
         "description": "A local branch holding commits that are on no remote.",
         "properties": {
@@ -1462,6 +1607,185 @@
           }
         },
         "summary": "Deletes a comment."
+      }
+    },
+    "/v1/github/auth": {
+      "get": {
+        "description": "client ID is set. Never the token or the client ID.",
+        "operationId": "github_auth_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubAuthInfo"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Where the GitHub token comes from, whose it is and what it may do, and whether an OAuth"
+      }
+    },
+    "/v1/github/client-id": {
+      "delete": {
+        "operationId": "github_client_id_delete",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubAuthInfo"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Deletes the saved OAuth client ID."
+      },
+      "put": {
+        "description": "route reads it back. A blank one is 400 `invalid_client_id`; no keyring is 503 `no_keyring`.",
+        "operationId": "github_client_id_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GithubClientIdBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubAuthInfo"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Saves the OAuth client ID Sign in with GitHub uses in the system keyring. Write-only: no"
+      }
+    },
+    "/v1/github/device": {
+      "delete": {
+        "operationId": "github_device_cancel",
+        "responses": {
+          "204": {
+            "description": "successful deletion"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Cancels the sign-in running now, if any. No event."
+      },
+      "post": {
+        "description": "running, and answers with the code the user enters on GitHub. How it ends comes as a `github_auth` WebSocket event. No client ID is 409 `no_client_id`, no keyring 503 `no_keyring`, and GitHub refusing 502 `github_error`.",
+        "operationId": "github_device_start",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceSignIn"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Starts Sign in with GitHub (the OAuth device flow, scope `repo`), cancelling one already"
+      }
+    },
+    "/v1/github/token": {
+      "delete": {
+        "operationId": "github_token_delete",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubAuthInfo"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Deletes the saved token (sign out); the token then comes from the next source, if any."
+      },
+      "put": {
+        "description": "one; PR sync syncs at once. A blank token, or one GitHub answers 401 for, is 422 `invalid_token`; no keyring is 503 `no_keyring`; any other GitHub failure is 502 `github_error`.",
+        "operationId": "github_token_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GithubTokenBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubAuthInfo"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Checks a pasted token with GitHub and saves it in the system keyring, replacing any saved"
       }
     },
     "/v1/health": {

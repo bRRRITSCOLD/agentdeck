@@ -126,6 +126,17 @@ pub enum ServerMessage {
         /// Its id.
         id: String,
     },
+    /// `GET /v1/github/auth` changed: a token or client ID was saved or deleted, a re-read
+    /// changed the token's source or login, or a sign-in ended. Sent to every client. It
+    /// never carries the token, the client ID or the user code.
+    GithubAuth {
+        /// How a sign-in ended; only when one did.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device: Option<DeviceOutcome>,
+        /// GitHub's message, with [`DeviceOutcome::Failed`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
     /// The client fell more than 1 MiB behind on `channel`, which gets no more output. Attach
     /// again for a fresh snapshot.
     Lagged {
@@ -142,6 +153,20 @@ pub enum ServerMessage {
         /// What went wrong.
         message: String,
     },
+}
+
+/// How a Sign in with GitHub ended, in [`ServerMessage::GithubAuth`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceOutcome {
+    /// The user approved; the token is saved.
+    SignedIn,
+    /// The code expired first.
+    Expired,
+    /// The user denied access on GitHub.
+    Denied,
+    /// Any other failure; the message says what.
+    Failed,
 }
 
 /// The kinds of entity a [`ServerMessage::Changed`] names. A new one bumps
@@ -310,6 +335,28 @@ mod tests {
                         id: "abc".into(),
                     },
                     json!({"t": "changed", "entity": "comment", "id": "abc"}),
+                ),
+                (
+                    ServerMessage::GithubAuth {
+                        device: None,
+                        message: None,
+                    },
+                    json!({"t": "github_auth"}),
+                ),
+                (
+                    ServerMessage::GithubAuth {
+                        device: Some(DeviceOutcome::SignedIn),
+                        message: None,
+                    },
+                    json!({"t": "github_auth", "device": "signed_in"}),
+                ),
+                (
+                    ServerMessage::GithubAuth {
+                        device: Some(DeviceOutcome::Failed),
+                        message: Some("The client_id is not valid.".into()),
+                    },
+                    json!({"t": "github_auth", "device": "failed",
+                           "message": "The client_id is not valid."}),
                 ),
                 (
                     ServerMessage::Changed {

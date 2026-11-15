@@ -13,5 +13,6 @@ sudo apt-get "${apt_opts[@]}" install -y \
   libssl-dev libzstd-dev libasound2-dev \
   vulkan-validationlayers libvulkan1
 
-# Not GPUI's: agentdeck-gui's notification contract test starts a private session bus.
-sudo apt-get "${apt_opts[@]}" install -y dbus-daemon
+# Not GPUI's: agentdeck-notify's notification contract test starts a private session bus, and
+# agentdeckd's keyring contract test runs gnome-keyring-daemon on one.
+sudo apt-get "${apt_opts[@]}" install -y dbus-daemon gnome-keyring

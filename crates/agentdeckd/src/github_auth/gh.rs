@@ -1,11 +1,11 @@
-//! The GitHub token, from `gh auth token` (spec §8). The daemon stores no credentials.
+//! The last token source: `gh auth token` (spec §8).
 
 use std::process::{Command, Output};
 
 /// Why there's no token: `gh` is missing, not logged in, or printed nothing.
 #[derive(Debug, thiserror::Error)]
 #[error("`gh auth token` failed: {0}")]
-pub struct NoToken(String);
+pub struct NoToken(pub String);
 
 /// Runs `gh auth token` on a blocking thread and returns the token it prints.
 pub async fn gh_auth_token() -> Result<String, NoToken> {

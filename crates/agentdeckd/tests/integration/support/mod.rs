@@ -4,6 +4,7 @@
 pub mod agents;
 pub mod git;
 pub mod github;
+pub mod keyring;
 pub mod terminal;
 pub mod ws;
 
