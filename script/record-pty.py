@@ -21,7 +21,8 @@ Steps, one per line (`#` starts a comment):
 
 It answers the terminal queries a TUI waits on at startup (cursor position, device
 attributes, keyboard flags, colours), as the daemon's terminal does. The output is not
-scrubbed: check it for home paths, account names and session ids before committing.
+scrubbed: check it for home paths, account names, the plan label and session ids before
+committing (spec §7, "Recording fixtures").
 """
 
 import argparse
