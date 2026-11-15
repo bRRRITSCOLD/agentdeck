@@ -1,17 +1,19 @@
 //! Reaching the daemon (spec §2): read `daemon.json`, and start `agentdeckd` detached when
 //! nothing answers there. The CLI and the GUI both connect through [`connect`], and
-//! [`restart`] replaces a daemon older than them.
+//! [`restart`] replaces a daemon older than them. A daemon a client starts is its child, so a
+//! thread waits on it and reaps it whenever it exits: a long-lived client such as the GUI
+//! never keeps it as a zombie.
 
 use std::ffi::OsString;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use agentdeck_core::DaemonInfo;
 use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill};
-use nix::sys::wait::{WaitPidFlag, waitpid};
 use nix::unistd::Pid;
 
 use crate::Client;
@@ -150,24 +152,13 @@ async fn stop(pid: u32) -> Result<(), DaemonError> {
         Err(source) => return Err(DaemonError::Stop { pid, source }),
     }
     let deadline = Instant::now() + STOP_TIMEOUT;
-    while !gone(pid) {
+    while alive(pid) {
         if Instant::now() >= deadline {
             return Err(DaemonError::StillRunning { pid });
         }
         tokio::time::sleep(POLL).await;
     }
     Ok(())
-}
-
-/// Whether `pid` has exited. A daemon this process started (the GUI's, say) is its child, and
-/// once it exits it stays a zombie that [`alive`] still sees until it is reaped, so this reaps
-/// it first; for any other pid the reap fails harmlessly.
-fn gone(pid: u32) -> bool {
-    let Ok(raw) = i32::try_from(pid) else {
-        return true;
-    };
-    let _ = waitpid(Pid::from_raw(raw), Some(WaitPidFlag::WNOHANG));
-    !alive(pid)
 }
 
 /// `$XDG_RUNTIME_DIR/agentdeck/daemon.json`.
@@ -212,18 +203,41 @@ fn read(daemon_json: &Path) -> Option<DaemonInfo> {
     serde_json::from_str(&text).ok()
 }
 
-/// Whether a process with this pid exists; one owned by another user still counts.
+/// Whether a process with this pid is running; one owned by another user still counts. A
+/// zombie doesn't: it has exited, though `kill(pid, 0)` finds it until its parent reaps it.
 fn alive(pid: u32) -> bool {
-    let Ok(pid) = i32::try_from(pid) else {
+    let Ok(raw) = i32::try_from(pid) else {
         return false;
     };
-    matches!(kill(Pid::from_raw(pid), None), Ok(()) | Err(Errno::EPERM))
+    matches!(kill(Pid::from_raw(raw), None), Ok(()) | Err(Errno::EPERM)) && !zombie(pid)
+}
+
+/// Whether `/proc/<pid>/stat` gives the process's state as `Z`. The command name before the
+/// state is in parentheses and may itself hold `)` or spaces.
+fn zombie(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| Some(stat.rsplit_once(')')?.1.trim_start().starts_with('Z')))
+        .unwrap_or(false)
+}
+
+/// Waits on `child` on a thread of its own, so it is reaped the moment it exits, whether it
+/// stops, crashes or is killed. The handle gives how it exited; dropping it leaves the thread
+/// waiting.
+fn reap(mut child: Child) -> std::io::Result<JoinHandle<std::io::Result<ExitStatus>>> {
+    std::thread::Builder::new()
+        .name("agentdeckd-reaper".into())
+        .spawn(move || child.wait())
 }
 
 /// Starts `program` in its own process group, with no terminal, and waits until a daemon
-/// answers at `daemon_json`.
+/// answers at `daemon_json`. The started daemon is reaped once it exits, whenever that is.
 async fn start(program: &Path, daemon_json: &Path) -> Result<Daemon, DaemonError> {
-    let mut child = Command::new(program)
+    let poll_error = |source| DaemonError::Poll {
+        program: program.to_owned(),
+        source,
+    };
+    let child = Command::new(program)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -233,18 +247,18 @@ async fn start(program: &Path, daemon_json: &Path) -> Result<Daemon, DaemonError
             program: program.to_owned(),
             source,
         })?;
+    let mut reaper = Some(reap(child).map_err(poll_error)?);
     let mut deadline = Instant::now() + START_TIMEOUT;
     let mut exited = None;
     loop {
         if let Some(daemon) = reachable(daemon_json).await {
             return Ok(daemon);
         }
-        if exited.is_none()
-            && let Some(status) = child.try_wait().map_err(|source| DaemonError::Poll {
-                program: program.to_owned(),
-                source,
-            })?
-        {
+        if let Some(finished) = reaper.take_if(|reaper| reaper.is_finished()) {
+            let status = finished
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                .map_err(poll_error)?;
             exited = Some(status);
             deadline = deadline.min(Instant::now() + LOST_RACE_GRACE);
         }
@@ -358,29 +372,25 @@ mod tests {
         }
     }
 
-    mod gone {
+    mod reap {
         use super::*;
 
         #[test]
-        fn should_not_see_this_process_as_gone() {
-            assert!(!gone(std::process::id()));
-        }
+        fn should_reap_the_child_once_it_exits_and_give_its_status() {
+            let child = Command::new("false").spawn().expect("running false");
+            let stat = format!("/proc/{}/stat", child.id());
 
-        #[test]
-        #[expect(
-            clippy::zombie_processes,
-            reason = "`gone` reaps it, which is the test"
-        )]
-        fn should_see_an_exited_child_of_this_process_as_gone() {
-            // Never waited on, as the GUI never waits on the daemon it started: once it
-            // exits it is a zombie, which `kill(pid, 0)` still finds.
-            let child = Command::new("true").spawn().expect("running true");
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let status = reap(child)
+                .expect("starting the reaper")
+                .join()
+                .expect("the reaper didn't panic")
+                .expect("waiting on false");
 
-            while !gone(child.id()) {
-                assert!(Instant::now() < deadline, "true never exited");
-                std::thread::sleep(Duration::from_millis(10));
-            }
+            assert_eq!(status.code(), Some(1));
+            assert!(
+                !Path::new(&stat).exists(),
+                "false is still in /proc after its reaper finished"
+            );
         }
     }
 
@@ -395,6 +405,28 @@ mod tests {
         #[test]
         fn should_not_see_a_pid_out_of_range() {
             assert!(!alive(u32::MAX));
+        }
+
+        #[test]
+        fn should_not_see_a_zombie() {
+            // Not waited on until the end, so once it exits it is a zombie, which
+            // `kill(pid, 0)` still finds.
+            let mut child = Command::new("true").spawn().expect("running true");
+            let stat = format!("/proc/{}/stat", child.id());
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !std::fs::read_to_string(&stat)
+                .expect("an unreaped child keeps its /proc entry")
+                .rsplit_once(')')
+                .is_some_and(|(_, state)| state.trim_start().starts_with('Z'))
+            {
+                assert!(Instant::now() < deadline, "true never exited");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+
+            let seen = alive(child.id());
+            child.wait().expect("reaping true");
+
+            assert!(!seen, "a zombie counted as alive");
         }
     }
 }

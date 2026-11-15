@@ -7,7 +7,10 @@ use std::process::Command;
 
 use agentdeck_core::DaemonInfo;
 
-use crate::support::{TestEnv, agent_argv, alive, eventually, text};
+use serde_json::json;
+
+use crate::support::mcp::McpClient;
+use crate::support::{TestEnv, agent_argv, alive, eventually, parent_pid, process_state, text};
 
 /// A port nothing listens on: bound, then released.
 fn closed_port() -> u16 {
@@ -208,5 +211,65 @@ mod daemon_restart {
         let info = env.daemon_info().expect("daemon.json after the restart");
         assert!(alive(info.pid));
         assert_eq!(restarted["pid"], info.pid);
+    }
+}
+
+/// A client that outlives the daemon it started, as the GUI does: `agentdeck mcp` connects on
+/// every tool call, so the daemon its first call starts is its child for as long as it runs.
+mod daemon_started_by_a_long_lived_client {
+    use super::*;
+
+    /// Starts `agentdeck mcp` and has it start the daemon; returns the client and that daemon.
+    fn started(env: &TestEnv) -> (McpClient, DaemonInfo) {
+        let mut mcp = McpClient::start(env, &[]);
+        mcp.initialize();
+        mcp.call_ok("prs_status", json!({}));
+        let info = env.daemon_info().expect("daemon.json after the tool call");
+        assert_eq!(
+            parent_pid(info.pid),
+            Some(mcp.pid()),
+            "the daemon isn't the client's child, so the test proves nothing"
+        );
+        (mcp, info)
+    }
+
+    /// SIGKILL to a daemon this test's client started, as a crash would end it.
+    fn kill(pid: u32) {
+        let status = Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status()
+            .expect("running kill");
+        assert!(status.success(), "kill -KILL {pid} failed");
+    }
+
+    #[test]
+    fn should_reap_it_once_it_exits() {
+        let env = TestEnv::new();
+        let (_mcp, info) = started(&env);
+
+        kill(info.pid);
+
+        // A zombie (`Z`) still has its `/proc` entry; only a reaped process loses it.
+        eventually("the killed daemon to be reaped", || {
+            process_state(info.pid).is_none().then_some(())
+        });
+    }
+
+    #[test]
+    fn should_start_a_fresh_daemon_on_the_next_connect() {
+        let env = TestEnv::new();
+        let (mut mcp, old) = started(&env);
+        kill(old.pid);
+        // Exited, reaped or not: until then its lock may still be held, and the daemon the
+        // next call starts would lose the race for it.
+        eventually("the killed daemon to exit", || {
+            matches!(process_state(old.pid), None | Some('Z')).then_some(())
+        });
+
+        mcp.call_ok("prs_status", json!({}));
+
+        let new = env.daemon_info().expect("daemon.json after the next call");
+        assert_ne!(new.pid, old.pid);
+        assert!(alive(new.pid), "the fresh daemon isn't running");
     }
 }

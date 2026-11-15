@@ -54,6 +54,11 @@ impl McpClient {
         }
     }
 
+    /// The server's pid.
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     fn write(&mut self, message: &Value) {
         let stdin = self.stdin.as_mut().expect("stdin is open");
         writeln!(stdin, "{message}").expect("writing to agentdeck mcp");
