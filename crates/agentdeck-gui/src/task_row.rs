@@ -218,7 +218,7 @@ impl SelectCell {
 pub struct RowParts {
     /// The `Select` layer.
     pub select: SelectCell,
-    /// The `Menu` layer, for a row whose PR can close.
+    /// The `Menu` layer, for a PR row: Open on GitHub, and Close PR… when its PR can close.
     pub menu: Option<AnyElement>,
     /// Why its PR didn't close, while it stays selected.
     pub error: Option<SharedString>,
