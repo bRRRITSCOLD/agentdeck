@@ -42,6 +42,9 @@ pub enum Command {
     /// Settings, kept in config.toml; a change applies at once.
     #[command(subcommand)]
     Config(ConfigCommand),
+    /// agentdeck's background service, agentdeckd.
+    #[command(subcommand)]
+    Daemon(DaemonCommand),
     /// Print a pane's recent raw output.
     Tail {
         /// The pane's id.
@@ -52,6 +55,13 @@ pub enum Command {
     },
     /// Serve MCP over stdin and stdout.
     Mcp,
+}
+
+/// `agentdeck daemon …`.
+#[derive(Debug, Subcommand)]
+pub enum DaemonCommand {
+    /// Stop agentdeckd and start it again, as after an update; running agents resume.
+    Restart,
 }
 
 /// `agentdeck ws …`. A `<ws>` is a workspace's id, slug or name.

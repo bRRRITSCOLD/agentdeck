@@ -7,7 +7,7 @@ use std::process::Command;
 
 use agentdeck_core::DaemonInfo;
 
-use crate::support::{TestEnv, alive};
+use crate::support::{TestEnv, agent_argv, alive, eventually, text};
 
 /// A port nothing listens on: bound, then released.
 fn closed_port() -> u16 {
@@ -114,5 +114,99 @@ mod starting_the_daemon {
         assert!(!output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("XDG_RUNTIME_DIR"), "{stderr}");
+    }
+}
+
+/// Rewrites the running daemon's `daemon.json` without `api_version`, as a daemon from before
+/// it existed wrote it.
+fn make_older(env: &TestEnv) -> DaemonInfo {
+    let info = env.daemon_info().expect("a running daemon");
+    let mut json = serde_json::to_value(&info).unwrap();
+    json.as_object_mut().unwrap().remove("api_version");
+    std::fs::write(env.daemon_json(), json.to_string()).expect("writing daemon.json");
+    info
+}
+
+mod older_daemon {
+    use super::*;
+
+    #[test]
+    fn should_warn_in_one_line_on_stderr_and_still_run_the_command() {
+        let env = TestEnv::new();
+        env.ok(&["ws", "ls"]);
+        make_older(&env);
+
+        let run = env.run(&["ws", "ls"]);
+
+        assert!(run.success, "{}", run.stderr);
+        assert_eq!(run.stderr.lines().count(), 1, "{}", run.stderr);
+        assert!(run.stderr.contains("older than this CLI"), "{}", run.stderr);
+        assert!(
+            run.stderr.contains("agentdeck daemon restart"),
+            "{}",
+            run.stderr
+        );
+    }
+
+    #[test]
+    fn should_not_warn_about_a_daemon_as_new_as_the_cli() {
+        let env = TestEnv::new();
+        env.ok(&["ws", "ls"]);
+
+        let run = env.run(&["ws", "ls"]);
+
+        assert!(run.success, "{}", run.stderr);
+        assert_eq!(run.stderr, "");
+    }
+}
+
+mod daemon_restart {
+    use super::*;
+
+    #[test]
+    fn should_stop_the_daemon_and_start_a_new_one_on_the_same_data() {
+        let env = TestEnv::new();
+        env.workspace("web");
+        let old = make_older(&env);
+
+        let run = env.run(&["daemon", "restart"]);
+
+        assert!(run.success, "{}", run.stderr);
+        assert_eq!(
+            run.stderr, "",
+            "restart warned about the daemon it replaces"
+        );
+        assert!(!alive(old.pid), "the old daemon is still running");
+        let new = env.daemon_info().expect("daemon.json after the restart");
+        assert_ne!(new.pid, old.pid);
+        assert_eq!(new.api_version, agentdeck_core::API_VERSION);
+        assert!(run.stdout.contains(&new.pid.to_string()), "{}", run.stdout);
+        assert!(env.ok(&["ws", "ls"]).contains("web"));
+    }
+
+    #[test]
+    fn should_resume_the_agents_in_the_new_daemon() {
+        let env = TestEnv::new();
+        env.workspace("web");
+        let pane = env.json(&["agent", "new", "--ws", "web"]);
+        let (id, session) = (text(&pane, "id"), text(&pane, "session_id"));
+        eventually("the stub agent to start", || agent_argv(&env, id));
+
+        env.ok(&["daemon", "restart"]);
+
+        eventually("the agent to resume", || {
+            agent_argv(&env, id).filter(|argv| argv == &["--resume", session])
+        });
+    }
+
+    #[test]
+    fn should_start_a_daemon_when_none_is_running() {
+        let env = TestEnv::new();
+
+        let restarted = env.json(&["daemon", "restart"]);
+
+        let info = env.daemon_info().expect("daemon.json after the restart");
+        assert!(alive(info.pid));
+        assert_eq!(restarted["pid"], info.pid);
     }
 }
