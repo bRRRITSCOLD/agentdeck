@@ -9,6 +9,7 @@ mod count;
 mod delete_workspace;
 mod form_enter;
 mod frame;
+mod github;
 mod inbox;
 mod instruction_list;
 mod keymap;

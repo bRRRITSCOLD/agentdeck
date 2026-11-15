@@ -1,8 +1,9 @@
 //! The Inbox (spec §11), Penpot "Screens" → "Inbox": tasks with no workspace, mostly PRs,
 //! each with a status picker, and the PR sync's state with a "Sync now" button. Done tasks
-//! are left out. While gh is logged out, an alert over the columns says how to log in. Under
-//! the heading, once the PR sync status is read, a line says which PRs the age cutoff leaves
-//! out, its "Settings" a link that asks the window for Settings with [`OpenSettings`].
+//! are left out. While no GitHub token works, an alert over the columns says so, its **Open
+//! Settings** asking the window for Settings with [`OpenSettings`]. Under the heading, once the
+//! PR sync status is read, a line says which PRs the age cutoff leaves out, its "Settings" a
+//! link that asks for Settings too.
 //!
 //! Like the Tasks view it shows the sidebar's [`Snapshot`], passed on by the window. A sync
 //! asked for here emits [`Synced`] once done, so the window can have the sidebar read again:
@@ -15,7 +16,7 @@ use std::sync::Arc;
 use agentdeck_client::types::GhLogin;
 use agentdeck_core::{TaskId, TaskStatus};
 use brrritscold_core_gpui::{
-    ActiveTheme as _, Alert, AlertDescription, AlertTitle, Button, ButtonVariant, IconName,
+    ActiveTheme as _, Alert, AlertAction, AlertTitle, Button, ButtonSize, ButtonVariant, IconName,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
@@ -53,7 +54,10 @@ fn cutoff(days: u32) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Synced;
 
-/// The cutoff line's "Settings" was clicked: show Settings.
+/// The banner's title while no GitHub token works.
+pub const LOGGED_OUT: &str = "Not signed in to GitHub, so PRs don't sync.";
+
+/// The cutoff line's "Settings" or the banner's Open Settings was clicked: show Settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenSettings;
 
@@ -267,6 +271,30 @@ fn settings_link(cx: &mut Context<InboxView>) -> impl IntoElement {
         .child("Settings")
 }
 
+/// The banner while no GitHub token works: what's wrong, and **Open Settings** to fix it.
+fn logged_out_banner(cx: &mut Context<InboxView>) -> impl IntoElement {
+    div()
+        .flex_none()
+        .debug_selector(|| "logged out banner".into())
+        .child(
+            Alert::new()
+                .icon(IconName::Info)
+                .title(AlertTitle::new(LOGGED_OUT))
+                // Centred on the one-line alert, as Penpot's `Action` sits.
+                .action(
+                    AlertAction::new().top(space::S1_5).child(
+                        div().debug_selector(|| "open settings".into()).child(
+                            Button::new("inbox-open-settings")
+                                .variant(ButtonVariant::Link)
+                                .size(ButtonSize::Sm)
+                                .label("Open Settings")
+                                .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenSettings))),
+                        ),
+                    ),
+                ),
+        )
+}
+
 impl Render for InboxView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
@@ -310,25 +338,11 @@ impl Render for InboxView {
             .p(space::S6)
             .bg(s.background)
             .child(self.header(cx))
-            // Penpot "Inbox · gh logged out": a default `Alert` over the columns.
+            // Penpot "Inbox · logged out": a default `Alert` over the columns, its action a
+            // link to Settings.
             .when(
                 (self.snapshot.pr_sync.as_ref()).is_some_and(|s| s.login == GhLogin::LoggedOut),
-                |content| {
-                    content.child(
-                        div()
-                            .flex_none()
-                            .debug_selector(|| "gh banner".into())
-                            .child(
-                            Alert::new()
-                                .icon(IconName::Info)
-                                .title(AlertTitle::new("GitHub isn't connected"))
-                                .description(AlertDescription::new(
-                                    "PR sync uses the gh login. Run gh auth login in a terminal, \
-                                 then press Sync now.",
-                                )),
-                        ),
-                    )
-                },
+                |content| content.child(logged_out_banner(cx)),
             )
             .child(table)
             .when(self.shown.is_empty(), |content| {
@@ -625,9 +639,30 @@ mod tests {
         let (harness, cx) = Harness::open(logged_out(), cx);
         harness.draw(cx);
 
-        assert!(cx.debug_bounds("gh banner").is_some());
+        assert!(cx.debug_bounds("logged out banner").is_some());
         let label = cx.update(|_, cx| harness.view.read(cx).sync_label(chrono::Utc::now()));
         assert_eq!(label, "Not signed in");
+    }
+
+    #[gpui::test]
+    fn should_ask_for_settings_from_the_banner(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::open(logged_out(), cx);
+        let asked = Rc::new(RefCell::new(0));
+        let seen = asked.clone();
+        let _asks = cx.update(|_, cx| {
+            cx.subscribe(&harness.view, move |_, _: &OpenSettings, _| {
+                *seen.borrow_mut() += 1;
+            })
+        });
+        harness.draw(cx);
+
+        let banner = cx.debug_bounds("logged out banner").expect("the banner");
+        let link = cx.debug_bounds("open settings").expect("Open Settings");
+        assert!(banner.contains(&link.center()), "{link:?} in {banner:?}");
+        cx.simulate_click(link.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        assert_eq!(*asked.borrow(), 1);
     }
 
     #[gpui::test]
@@ -642,7 +677,7 @@ mod tests {
         });
         harness.draw(cx);
 
-        assert!(cx.debug_bounds("gh banner").is_none());
+        assert!(cx.debug_bounds("logged out banner").is_none());
     }
 
     #[gpui::test]
@@ -763,7 +798,7 @@ mod tests {
             let (harness, cx) = Harness::open(snapshot, cx);
             harness.draw(cx);
 
-            assert!(cx.debug_bounds("gh banner").is_some());
+            assert!(cx.debug_bounds("logged out banner").is_some());
             assert_eq!(
                 description(&harness, cx)[1..],
                 ["PRs not updated in the last 30 days are left out; change that in Settings."]
