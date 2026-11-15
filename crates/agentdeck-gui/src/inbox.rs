@@ -394,7 +394,8 @@ impl Render for InboxView {
                 )
             })
             .children(bar)
-            .child(self.close.clone())
+            // The confirm dialog's host: out of the flow, so it takes no gap.
+            .child(div().absolute().child(self.close.clone()))
     }
 }
 
@@ -894,7 +895,7 @@ mod tests {
             harness.draw(cx);
 
             let list = list(cx);
-            assert!(thumb(list, cx).is_some());
+            assert!(thumb(task_row::scrollbar_area(list), cx).is_some());
         }
 
         #[gpui::test]
@@ -903,7 +904,7 @@ mod tests {
             harness.draw(cx);
 
             let list = list(cx);
-            assert_eq!(thumb(list, cx), None);
+            assert_eq!(thumb(task_row::scrollbar_area(list), cx), None);
         }
 
         #[gpui::test]
@@ -911,7 +912,7 @@ mod tests {
             let (harness, cx) = Harness::open(crowded(300), cx);
             harness.draw(cx);
             let list = list(cx);
-            let before = thumb(list, cx).expect("a thumb");
+            let before = thumb(task_row::scrollbar_area(list), cx).expect("a thumb");
 
             cx.simulate_event(ScrollEvent {
                 position: list.center(),
@@ -920,7 +921,7 @@ mod tests {
             });
             harness.draw(cx);
 
-            let after = thumb(list, cx).expect("a thumb");
+            let after = thumb(task_row::scrollbar_area(list), cx).expect("a thumb");
             assert!(after.origin.y > before.origin.y);
         }
 
@@ -937,7 +938,7 @@ mod tests {
                 "the table fits the window"
             );
 
-            let shown = thumb(table, cx).expect("a thumb in view");
+            let shown = thumb(task_row::scrollbar_area(table), cx).expect("a thumb in view");
             let list = list(cx);
             assert!(shown.top() >= list.top() && shown.bottom() <= list.bottom());
             cx.simulate_event(ScrollEvent {
@@ -946,7 +947,10 @@ mod tests {
                 ..ScrollEvent::default()
             });
             harness.draw(cx);
-            assert!(thumb(table, cx).is_some(), "scrolled sideways");
+            assert!(
+                thumb(task_row::scrollbar_area(table), cx).is_some(),
+                "scrolled sideways"
+            );
         }
     }
 

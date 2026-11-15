@@ -504,7 +504,8 @@ impl Render for RightPanel {
             .child(list)
             .child(scrollbar::vertical(&self.scroll, cx))
             .children(bar)
-            .child(self.close.clone())
+            // The confirm dialog's host: out of the flow.
+            .child(div().absolute().child(self.close.clone()))
     }
 }
 

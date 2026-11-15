@@ -382,8 +382,9 @@ impl ClosePrs {
                 .items_center()
                 .justify_between()
                 .h(px(LIST_ROW_HEIGHT))
-                .pl(space::S3)
-                .pr(space::S6)
+                // Penpot's row pads `space.3` in, but its text sits `space.6` in, as wide as
+                // the room kept for the scrollbar at the other end.
+                .px(space::S6)
                 .text_size(font_size::SM)
                 .child(div().text_color(s.foreground).child(repo))
                 .child(div().text_color(s.muted_foreground).child(prs(n)))

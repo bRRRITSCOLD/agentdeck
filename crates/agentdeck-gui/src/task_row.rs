@@ -28,6 +28,10 @@ use crate::task_list::Row;
 /// How far past the viewport a list draws, so a short scroll shows rows at once.
 const OVERDRAW: Pixels = px(200.);
 
+/// How far right of the list its scrollbar's track ends: Penpot puts the track in the
+/// content's `space.6` padding, 2px in from the window's edge, clear of the rows' `Menu`.
+const SCROLLBAR_OUTSET: Pixels = px(22.);
+
 /// The state of a list of rows, empty until [`relist`]ed.
 pub fn list_state() -> ListState {
     ListState::new(0, ListAlignment::Top, OVERDRAW)
@@ -35,8 +39,9 @@ pub fn list_state() -> ListState {
 
 /// Columns over `rows`, `list`'s rows, as wide as the area allows and never narrower than
 /// `layout`: a narrower area scrolls them sideways together, by a sideways wheel only. The
-/// list's scrollbar sits over the area's right edge, outside that scroll, so it stays in
-/// view at any width; a hidden copy of the columns keeps it level with the list.
+/// list's scrollbar sits just right of the area, in the content's padding and outside that
+/// scroll, so it stays in view at any width; a hidden copy of the columns keeps it level
+/// with the list.
 ///
 /// Each frame tells `on_width` the area's width, so the view can [`Table::fit`] its layout
 /// to it for the next. `select` leads the columns in Select mode.
@@ -71,10 +76,14 @@ pub fn table(
                 .child(columns(layout, select, cx))
                 .child(rows),
         );
-    // As wide as the area, not the table: the copy of the columns overflows it, unseen.
+    // As wide as the area and its scrollbar, not the table: the copy of the columns
+    // overflows it, unseen.
     let scrollbar = div()
         .absolute()
-        .inset_0()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .right(-SCROLLBAR_OUTSET)
         .overflow_hidden()
         .flex()
         .flex_col()
@@ -107,6 +116,15 @@ pub fn table(
             .absolute()
             .inset_0(),
         )
+}
+
+/// Where a table's scrollbar track sits for a list or table at `area`: just right of it.
+#[cfg(test)]
+pub fn scrollbar_area(area: gpui::Bounds<Pixels>) -> gpui::Bounds<Pixels> {
+    gpui::Bounds {
+        size: gpui::size(area.size.width + SCROLLBAR_OUTSET, area.size.height),
+        ..area
+    }
 }
 
 /// Makes `list` hold `count` items, keeping its scroll position, and measures them again: a
