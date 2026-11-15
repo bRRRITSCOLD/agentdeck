@@ -21,7 +21,7 @@ use agentdeck_client::types::Tab;
 use agentdeck_client::ws;
 use agentdeck_core::ws::{Entity as Changed, ServerMessage};
 use agentdeck_core::{
-    Agent, AgentState, Layout, PaneId, PaneKind, SplitDirection, TabId, TaskId, WorkspaceId,
+    Agent, AgentState, Layout, PaneId, SplitDirection, TabId, TaskId, WorkspaceId,
 };
 use brrritscold_core_gpui::{
     ActiveTheme as _, AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
@@ -227,7 +227,7 @@ impl WorkspaceView {
                 cx.notify();
             }
             PaneRequest::LinkTask => {
-                let Some(agent) = pane.agent.filter(|_| pane.kind == PaneKind::Agent) else {
+                let Some(agent) = crate::pane::running_agent(pane) else {
                     return;
                 };
                 let tab = (self.read.tabs.iter())
@@ -1500,6 +1500,24 @@ mod tests {
                         pane: id(7),
                         agent: Agent::Claude,
                         task: Some(id(30)),
+                        tab: "tab 1".into(),
+                    }]
+                );
+            }
+
+            #[gpui::test]
+            fn should_ask_the_window_to_link_a_shell_hosting_an_agent(cx: &mut TestAppContext) {
+                let pane = Pane {
+                    hosted_agent: Some(Agent::Codex),
+                    ..shell_pane(7, id(1))
+                };
+
+                assert_eq!(
+                    ask(pane, cx),
+                    [LinkPane {
+                        pane: id(7),
+                        agent: Agent::Codex,
+                        task: None,
                         tab: "tab 1".into(),
                     }]
                 );

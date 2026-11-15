@@ -4,11 +4,14 @@
 //! for what runs there. Its state follows the daemon's `state` and `exit` broadcasts between
 //! reads. Its menu asks the workspace holding it for a split, a close or, for an agent, a
 //! link to a task, as a [`PaneRequest`]: only the workspace knows the tab's layout.
+//!
+//! A shell pane hosting an agent (spec §3, §7) is an agent pane for all of that, and its
+//! header says "in shell" (Penpot "Screens" → "Pane · hosted agent").
 
 use agentdeck_client::types::Pane;
 use agentdeck_client::ws;
 use agentdeck_core::ws::ServerMessage;
-use agentdeck_core::{PaneId, PaneKind, SplitDirection};
+use agentdeck_core::{Agent, PaneId, PaneKind, SplitDirection};
 use brrritscold_core_gpui::{
     ActiveTheme as _, Button, ButtonSize, ButtonVariant, DropdownMenu, DropdownMenuContent,
     DropdownMenuItem, DropdownMenuItemVariant, DropdownMenuSeparator, IconName, Separator,
@@ -24,6 +27,20 @@ use crate::connection::{Connection, DaemonEvent};
 use crate::pane_header::PaneHeader;
 use crate::terminal::{TerminalEvent, TerminalView};
 
+/// The agent running in `pane`: an agent pane's, or the one a shell pane hosts (spec §3).
+pub fn running_agent(pane: &Pane) -> Option<Agent> {
+    match pane.kind {
+        PaneKind::Agent => pane.agent,
+        PaneKind::Shell => pane.hosted_agent,
+    }
+}
+
+/// Whether the header says "in shell": a shell pane hosting an agent, whose shell comes back
+/// once the agent exits.
+pub fn in_shell(pane: &Pane) -> bool {
+    pane.kind == PaneKind::Shell && pane.hosted_agent.is_some()
+}
+
 /// The title a pane's header shows: the first that isn't empty of the terminal's live title
 /// and the one read over REST; else the agent, else the program run.
 pub fn shown_title(live: Option<&str>, pane: &Pane) -> SharedString {
@@ -34,7 +51,7 @@ pub fn shown_title(live: Option<&str>, pane: &Pane) -> SharedString {
     {
         return SharedString::from(title.to_owned());
     }
-    if let Some(agent) = pane.agent {
+    if let Some(agent) = running_agent(pane) {
         return agent.as_str().into();
     }
     let program = pane
@@ -55,9 +72,9 @@ pub enum PaneRequest {
     LinkTask,
 }
 
-/// The menu items before the separator and Close pane, for a pane of `kind`: the splits,
-/// then, for an agent, Link to task….
-pub fn menu_items(kind: PaneKind) -> Vec<(&'static str, IconName, PaneRequest)> {
+/// The menu items before the separator and Close pane for `pane`: the splits, then, for an
+/// agent pane or a shell pane hosting an agent, Link to task….
+pub fn menu_items(pane: &Pane) -> Vec<(&'static str, IconName, PaneRequest)> {
     let mut items = vec![
         (
             "Split right",
@@ -70,7 +87,7 @@ pub fn menu_items(kind: PaneKind) -> Vec<(&'static str, IconName, PaneRequest)> 
             PaneRequest::Split(SplitDirection::Vertical),
         ),
     ];
-    if kind == PaneKind::Agent {
+    if running_agent(pane).is_some() {
         items.push(("Link to task…", IconName::Link, PaneRequest::LinkTask));
     }
     items
@@ -181,7 +198,7 @@ impl PaneView {
                     .icon(IconName::Ellipsis),
             )
             .content(
-                (menu_items(self.pane.kind).into_iter())
+                (menu_items(&self.pane).into_iter())
                     .fold(
                         DropdownMenuContent::new(),
                         |content, (label, icon, request)| content.item(item(label, icon, request)),
@@ -228,6 +245,7 @@ impl Render for PaneView {
         let s = cx.theme().semantic();
         let header = PaneHeader::new(self.title())
             .state(self.pane.state, self.pane.exit_code)
+            .in_shell(in_shell(&self.pane))
             .task(self.task.clone())
             .menu(self.menu(cx));
         // Penpot "Pane A": `background`, a `border` stroke inside, `radius-md`, clipped;
@@ -266,6 +284,7 @@ pub(crate) mod fixtures {
             created_at: "2026-11-12T00:00:00Z".into(),
             cwd: "/w".into(),
             exit_code: None,
+            hosted_agent: None,
             id: id(n),
             kind: PaneKind::Shell,
             session_id: None,
@@ -288,8 +307,8 @@ mod tests {
     mod menu_items {
         use super::*;
 
-        fn labels(kind: PaneKind) -> Vec<&'static str> {
-            menu_items(kind)
+        fn labels(pane: &Pane) -> Vec<&'static str> {
+            menu_items(pane)
                 .into_iter()
                 .map(|(label, ..)| label)
                 .collect()
@@ -297,16 +316,70 @@ mod tests {
 
         #[test]
         fn should_offer_link_to_task_after_the_splits_for_an_agent() {
+            let pane = agent_pane(Agent::Claude);
             assert_eq!(
-                labels(PaneKind::Agent),
+                labels(&pane),
                 ["Split right", "Split down", "Link to task…"]
             );
-            assert_eq!(menu_items(PaneKind::Agent)[2].2, PaneRequest::LinkTask);
+            assert_eq!(menu_items(&pane)[2].2, PaneRequest::LinkTask);
+        }
+
+        #[test]
+        fn should_offer_link_to_task_for_a_shell_while_it_hosts_an_agent() {
+            assert_eq!(
+                labels(&hosting(Agent::Codex)),
+                ["Split right", "Split down", "Link to task…"]
+            );
         }
 
         #[test]
         fn should_offer_only_the_splits_for_a_shell() {
-            assert_eq!(labels(PaneKind::Shell), ["Split right", "Split down"]);
+            assert_eq!(labels(&shell_pane(1, id(1))), ["Split right", "Split down"]);
+        }
+    }
+
+    fn agent_pane(agent: Agent) -> Pane {
+        Pane {
+            kind: PaneKind::Agent,
+            agent: Some(agent),
+            ..shell_pane(1, id(1))
+        }
+    }
+
+    fn hosting(agent: Agent) -> Pane {
+        Pane {
+            hosted_agent: Some(agent),
+            ..shell_pane(1, id(1))
+        }
+    }
+
+    mod running_agent {
+        use super::*;
+
+        #[test]
+        fn should_be_an_agent_panes_agent() {
+            assert_eq!(running_agent(&agent_pane(Agent::Codex)), Some(Agent::Codex));
+        }
+
+        #[test]
+        fn should_be_the_agent_a_shell_hosts() {
+            assert_eq!(running_agent(&hosting(Agent::Claude)), Some(Agent::Claude));
+        }
+
+        #[test]
+        fn should_be_none_for_a_shell_hosting_none() {
+            assert_eq!(running_agent(&shell_pane(1, id(1))), None);
+        }
+    }
+
+    mod in_shell {
+        use super::*;
+
+        #[test]
+        fn should_mark_only_a_shell_hosting_an_agent() {
+            assert!(in_shell(&hosting(Agent::Claude)));
+            assert!(!in_shell(&shell_pane(1, id(1))));
+            assert!(!in_shell(&agent_pane(Agent::Claude)));
         }
     }
 

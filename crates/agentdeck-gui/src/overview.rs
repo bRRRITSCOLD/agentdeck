@@ -19,7 +19,8 @@ pub struct PaneState {
     pub workspace: WorkspaceId,
     /// Its state.
     pub state: AgentState,
-    /// The agent it runs; `None` for a shell.
+    /// The agent it runs, or the one a shell pane hosts (spec §3); `None` for a shell
+    /// hosting none.
     pub agent: Option<Agent>,
     /// The task it links.
     pub task: Option<TaskId>,
