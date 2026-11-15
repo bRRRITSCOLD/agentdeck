@@ -610,7 +610,7 @@ async fn snapshot(client: Client) -> anyhow::Result<Snapshot> {
                     pane: pane.id,
                     workspace: workspace.id,
                     state: pane.state,
-                    agent: pane.agent,
+                    agent: crate::pane::running_agent(&pane),
                     task: pane.task_id,
                     tab: tab.title.clone(),
                 });

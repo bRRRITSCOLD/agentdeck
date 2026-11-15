@@ -7,6 +7,10 @@
 //! typing. Two panes on one task can both be handed a waiting comment (a new comment, then a
 //! link), so the hand-off decides which pane holds it: the newest agent pane linked to the
 //! task, as for a new comment. A launch prompt that carries it takes it from any pane.
+//!
+//! A shell pane counts as an agent pane while it hosts an agent (spec §3, §7): it takes
+//! comments only then, and when an agent starts in it the task's waiting comments are handed
+//! to it as on linking ([`deliver_on_hosting`]).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -20,6 +24,7 @@ use crate::events::Events;
 use crate::model::Comment;
 use crate::terminal::Terminals;
 use crate::terminal::pane::Pane;
+use tokio::sync::broadcast;
 
 /// Which pane each comment on its way to an agent is for, so it reaches only one.
 ///
@@ -164,9 +169,9 @@ pub async fn deliver_to_task_pane(
 }
 
 /// Hands `task`'s user comments no agent has had yet, oldest first, to `pane`, which was just
-/// linked to it, if it is a live agent pane: each is typed and marked delivered as
-/// [`deliver_to_task_pane`] does. A comment another pane holds stays with whichever of the
-/// two is newer.
+/// linked to it or started hosting an agent, if it is a live agent pane or hosts one: each is
+/// typed and marked delivered as [`deliver_to_task_pane`] does. A comment another pane holds
+/// stays with whichever of the two is newer.
 pub async fn deliver_waiting(
     db: &Db,
     claims: &Claims,
@@ -182,12 +187,44 @@ pub async fn deliver_waiting(
         return;
     };
     hand_off(db, claims, events, &live, task, move |c| {
-        if db::panes::get(c, pane)?.kind != PaneKind::Agent {
+        let row = db::panes::get(c, pane)?;
+        if row.kind != PaneKind::Agent && row.hosted_agent.is_none() {
             return Ok(Vec::new());
         }
         db::comments::undelivered(c, task)
     })
     .await;
+}
+
+/// Hands each shell pane that starts hosting an agent its task's waiting comments, as linking
+/// it would (spec §9). Runs until `hosting` closes, with the daemon.
+pub async fn deliver_on_hosting(
+    db: Db,
+    claims: Claims,
+    terminals: Terminals,
+    events: Events,
+    mut hosting: broadcast::Receiver<PaneId>,
+) {
+    loop {
+        let pane = match hosting.recv().await {
+            Ok(pane) => pane,
+            Err(broadcast::error::RecvError::Lagged(missed)) => {
+                tracing::warn!("comment delivery missed {missed} newly hosted agents");
+                continue;
+            }
+            Err(broadcast::error::RecvError::Closed) => return,
+        };
+        let task = match db.call(move |c| db::panes::get(c, pane)).await {
+            Ok(row) => row.task_id,
+            Err(err) => {
+                tracing::warn!("reading pane {pane} for its task: {err}");
+                continue;
+            }
+        };
+        if let Some(task) = task {
+            deliver_waiting(&db, &claims, &terminals, &events, task, pane).await;
+        }
+    }
 }
 
 /// Holds for `pane` each comment `waiting` reads that it wins (see [`Claims::hold`]), in the
@@ -226,7 +263,7 @@ fn deliver(db: &Db, claims: &Claims, events: &Events, pane: &Pane, comment: &Com
     let text = comment.body.trim_end();
     let (id, pane_id, gives) = (comment.id, pane.id(), claims.clone());
     let claim = Box::new(move || gives.give(id, pane_id));
-    let Ok(typed) = pane.deliver(text.as_bytes(), claim) else {
+    let Some(typed) = pane.deliver(text.as_bytes(), claim) else {
         claims.release(id, pane_id);
         return;
     };

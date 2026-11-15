@@ -55,17 +55,22 @@ printf '\033[?2004h\033]0;codex\007'
 /// earlier, cooked. A read that is a lone CR is Enter: it submits the prompt, appending it and
 /// a newline to `stdin`. Any other read, CRs included, is a paste: it goes into the prompt,
 /// less the paste's brackets, and submits nothing, so text typed with its Enter in one write
-/// is never submitted (issue #184). Its twin is in `agentdeckd/tests/integration/support`.
+/// is never submitted (issue #184). A submitted `/exit` ends it as it ends Claude Code and
+/// Codex, handing the terminal back cooked, so a shell it was started from carries on (#183).
+/// Its twin is in `agentdeckd/tests/integration/support`.
 const READ_LIKE_A_TUI: &str = r#"
 : > "$log/prompt"
 while dd bs=65536 count=1 of="$log/read" 2>/dev/null && [ -s "$log/read" ]; do
   if [ "$(od -An -tx1 "$log/read" | tr -d ' \n')" = 0d ]; then
+    [ "$(cat "$log/prompt")" = /exit ] && break
     { cat "$log/prompt"; echo; } >> "$log/stdin"
     : > "$log/prompt"
   else
     sed 's/\x1b\[20[01]~//g' "$log/read" >> "$log/prompt"
   fi
 done
+stty sane 2>/dev/null
+printf '\033[?2004l\033]0;\007' 2>/dev/null
 "#;
 
 /// A `gh` that is never logged in.
@@ -439,6 +444,25 @@ pub fn shell_pane(env: &TestEnv, workspace: &Value, script: &str) -> String {
             .expect("spawn a pane");
         pane.id.to_string()
     })
+}
+
+/// Spawns a shell pane in `workspace` whose foreground process is the stub `agent` (`claude`
+/// or `codex`), as when the user runs it at a shell's prompt, and waits until the daemon has
+/// the pane hosting it (spec §7). Returns the pane's id.
+pub fn hosting_pane(env: &TestEnv, workspace: &Value, agent: agentdeck_core::Agent) -> String {
+    let pane = shell_pane(env, workspace, &format!("exec {agent}"));
+    let info = env.daemon_info().expect("a running daemon");
+    let client = agentdeck_client::authenticated(&info.base_url(), &info.token).expect("a client");
+    let id: agentdeck_core::PaneId = pane.parse().expect("a pane id");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    eventually(&format!("the shell pane to host {agent}"), || {
+        let read = runtime.block_on(client.pane_get().id(id).send());
+        (read.expect("read the pane").hosted_agent == Some(agent)).then_some(())
+    });
+    pane
 }
 
 /// Polls `check` until it returns `Some`, or panics with `what` after 30 s.

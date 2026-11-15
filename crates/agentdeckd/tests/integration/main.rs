@@ -8,6 +8,7 @@ mod comments;
 mod daemon;
 mod github_auth;
 mod health;
+mod hosted;
 mod instructions;
 mod instructions_client;
 mod keyring;

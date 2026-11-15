@@ -84,6 +84,7 @@ pub struct PaneHeader {
     title: SharedString,
     state: AgentState,
     exit_code: Option<i64>,
+    in_shell: bool,
     task: Option<SharedString>,
     menu: Option<DropdownMenu>,
 }
@@ -95,6 +96,7 @@ impl PaneHeader {
             title: title.into(),
             state: AgentState::Idle,
             exit_code: None,
+            in_shell: false,
             task: None,
             menu: None,
         }
@@ -105,6 +107,13 @@ impl PaneHeader {
     pub fn state(mut self, state: AgentState, exit_code: Option<i64>) -> Self {
         self.state = state;
         self.exit_code = exit_code;
+        self
+    }
+
+    /// Whether the pane is a shell hosting an agent: the `Host` part, "in shell", absent
+    /// otherwise (spec §11).
+    pub fn in_shell(mut self, in_shell: bool) -> Self {
+        self.in_shell = in_shell;
         self
     }
 
@@ -152,6 +161,17 @@ impl RenderOnce for PaneHeader {
                     .text_color(s.foreground)
                     .children(title),
             )
+            // Penpot `Host`: xs, `muted-foreground`.
+            .when(self.in_shell, |header| {
+                header.child(
+                    div()
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .text_size(font_size::XS)
+                        .text_color(s.muted_foreground)
+                        .child("in shell"),
+                )
+            })
             .child(
                 div()
                     .flex_none()

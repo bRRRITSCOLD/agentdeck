@@ -492,6 +492,10 @@ pub struct Pane {
     pub kind: PaneKind,
     /// Which agent, for agent panes.
     pub agent: Option<Agent>,
+    /// The agent a shell pane hosts: `claude` or `codex` while the user's own is its
+    /// foreground process, else null. Its kind stays `shell`; it runs that agent's state rules
+    /// and takes the task's comments meanwhile (spec §3, §7).
+    pub hosted_agent: Option<Agent>,
     /// The command as first launched, launch prompt included. A resumed pane runs its
     /// agent's resume command, or a fresh shell, instead.
     pub argv: Vec<String>,

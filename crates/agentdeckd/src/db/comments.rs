@@ -59,7 +59,8 @@ pub fn get(conn: &Connection, id: CommentId) -> Result<Comment, DbError> {
     .ok_or(DbError::NotFound("comment"))
 }
 
-/// Adds a comment to `task`: the user's, or with `pane` that pane's agent's.
+/// Adds a comment to `task`: the user's, or with `pane` that pane's agent's, or the agent the
+/// shell pane hosts (spec §3).
 pub fn create(conn: &Connection, task: TaskId, new: &NewComment) -> Result<Comment, DbError> {
     if !exists(conn, "tasks", task)? {
         return Err(DbError::NotFound("task"));
@@ -69,7 +70,7 @@ pub fn create(conn: &Connection, task: TaskId, new: &NewComment) -> Result<Comme
         Some(pane) => {
             let agent: Option<Option<String>> = conn
                 .query_row(
-                    "SELECT agent FROM panes WHERE id = ?1",
+                    "SELECT COALESCE(agent, hosted_agent) FROM panes WHERE id = ?1",
                     [pane.to_string()],
                     |row| row.get(0),
                 )

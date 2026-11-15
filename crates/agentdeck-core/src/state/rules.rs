@@ -224,6 +224,11 @@ impl RuleSet {
         }
     }
 
+    /// Whether the file's `process` list names `name`.
+    pub fn names_process(&self, name: &str) -> bool {
+        self.process.iter().any(|p| p == name)
+    }
+
     /// The rules apply while a listed process is in front, or when the process is unknown.
     fn applies_to(&self, process: Option<&str>) -> bool {
         match process {

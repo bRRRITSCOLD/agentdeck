@@ -5,18 +5,21 @@
 //! - [`tracker`]: [`StateTracker`] settles those states over time and adds `done` and
 //!   `exited`.
 //! - [`osc`]: reads OSC 9;4 and OSC 7501 out of raw output for the observation, and OSC 7.
+//! - [`hosted`]: which agent, if any, a shell pane's foreground process is.
 //! - `screen` (feature `screen`): reads an `alacritty_terminal` screen into the observation's
 //!   rows.
 
 use crate::text_enum::text_enum;
 
 mod embedded;
+pub mod hosted;
 pub mod osc;
 pub mod rules;
 #[cfg(any(test, feature = "screen"))]
 pub mod screen;
 pub mod tracker;
 
+pub use hosted::{Foreground, HOSTABLE, hosted_agent};
 pub use osc::{OscScanner, ProgramState, Progress};
 pub use rules::{Observation, RuleSet, RuleState, RulesError};
 pub use tracker::StateTracker;

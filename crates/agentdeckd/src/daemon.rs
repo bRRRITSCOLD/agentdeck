@@ -77,6 +77,14 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
         settings.clone(),
     );
     let terminals = Terminals::new(db.clone(), events.clone(), paths.rules_dir());
+    let claims = agents::delivery::Claims::default();
+    tokio::spawn(agents::delivery::deliver_on_hosting(
+        db.clone(),
+        claims.clone(),
+        terminals.clone(),
+        events.clone(),
+        terminals.hosting(),
+    ));
     terminals.run_state_timer();
     agents::resume::resume_panes(&db, &terminals)
         .await
@@ -91,7 +99,7 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
         github: credentials,
         settings,
         terminals: terminals.clone(),
-        claims: Default::default(),
+        claims,
         events,
     };
     let config = ConfigDropshot {

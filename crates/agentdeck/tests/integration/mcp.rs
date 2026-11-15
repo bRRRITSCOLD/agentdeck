@@ -3,7 +3,9 @@
 use serde_json::json;
 
 use crate::support::mcp::McpClient;
-use crate::support::{TestEnv, text};
+use agentdeck_core::Agent;
+
+use crate::support::{TestEnv, hosting_pane, text};
 
 mod agentdeck_mcp {
     use super::*;
@@ -142,6 +144,31 @@ mod agentdeck_mcp {
                 .map(|c| text(c, "body"))
                 .collect();
             assert_eq!(bodies, ["look at the logs", "PR opened"]);
+        }
+
+        #[test]
+        fn should_comment_as_the_agent_the_callers_shell_pane_hosts() {
+            let env = TestEnv::new();
+            let ws = env.workspace("web");
+            let task = env.json(&["task", "add", "Fix the build", "--ws", "web"]);
+            let pane = hosting_pane(&env, &ws, Agent::Claude);
+            let mut mcp = McpClient::start(
+                &env,
+                &[
+                    ("AGENTDECK_WORKSPACE", text(&ws, "id")),
+                    ("AGENTDECK_PANE", &pane),
+                ],
+            );
+            mcp.initialize();
+
+            let comment = mcp.call_ok(
+                "task_comment",
+                json!({ "task": task["id"], "body": "PR opened" }),
+            );
+
+            assert_eq!(comment["author"], "agent");
+            assert_eq!(comment["author_agent"], "claude");
+            assert_eq!(comment["author_pane"], pane.as_str());
         }
 
         #[test]

@@ -758,6 +758,15 @@
             "nullable": true,
             "type": "integer"
           },
+          "hosted_agent": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Agent"
+              }
+            ],
+            "description": "The agent a shell pane hosts: `claude` or `codex` while the user's own is its foreground process, else null. Its kind stays `shell`; it runs that agent's state rules and takes the task's comments meanwhile (spec §3, §7).",
+            "nullable": true
+          },
           "id": {
             "allOf": [
               {

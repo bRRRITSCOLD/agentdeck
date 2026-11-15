@@ -2,7 +2,9 @@
 
 use std::ffi::OsString;
 
-use crate::support::{TestEnv, text};
+use agentdeck_core::Agent;
+
+use crate::support::{TestEnv, hosting_pane, text};
 
 mod comment_add {
     use super::*;
@@ -41,6 +43,24 @@ mod comment_add {
         assert_eq!(comment["author"], "agent");
         assert_eq!(comment["author_agent"], "claude");
         assert_eq!(comment["author_pane"], pane["id"]);
+    }
+
+    #[test]
+    fn should_author_it_by_the_agent_the_callers_shell_pane_hosts() {
+        let env = TestEnv::new();
+        let ws = env.workspace("web");
+        let task = env.json(&["task", "add", "Fix the build", "--ws", "web"]);
+        let pane = hosting_pane(&env, &ws, Agent::Codex);
+        let caller = OsString::from(&pane);
+
+        let comment = env.json_with(
+            &["comment", "add", "PR opened", "--task", text(&task, "id")],
+            &[("AGENTDECK_PANE", &caller)],
+        );
+
+        assert_eq!(comment["author"], "agent");
+        assert_eq!(comment["author_agent"], "codex");
+        assert_eq!(comment["author_pane"], pane.as_str());
     }
 
     #[test]

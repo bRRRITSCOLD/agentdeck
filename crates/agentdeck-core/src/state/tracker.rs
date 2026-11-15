@@ -64,6 +64,17 @@ impl StateTracker {
         Some(self.publish(next))
     }
 
+    /// Runs `rules` from now on, as when an agent starts or stops being hosted in a shell
+    /// pane (spec §7): the state starts over at `unknown`, so what the old rules saw can't turn
+    /// into a `done` under the new ones. Returns `unknown` when the published state changed.
+    /// An exited pane stays exited.
+    pub fn switch_rules(&mut self, rules: RuleSet) -> Option<AgentState> {
+        self.rules = rules;
+        self.pending = None;
+        let starts_over = !matches!(self.published, AgentState::Unknown | AgentState::Exited);
+        starts_over.then(|| self.publish(AgentState::Unknown))
+    }
+
     /// The user focused the pane: a `done` pane turns `idle`. Returns the state when it changed.
     pub fn focus(&mut self) -> Option<AgentState> {
         (self.published == AgentState::Done).then(|| self.publish(AgentState::Idle))
@@ -249,6 +260,56 @@ min_ms = 400
                 let mut tracker = tracker();
                 settle(&mut tracker, &blocked(), 0);
                 assert_eq!(settle(&mut tracker, &idle(), 1_000), Some(AgentState::Idle));
+            }
+        }
+
+        mod switch_rules {
+            use super::*;
+
+            /// Rules under which every observation reads idle.
+            fn always_idle() -> RuleSet {
+                RuleSet::from_toml(
+                    "agent = \"test\"\n[[rule]]\nstate = \"idle\"\ntitle_regex = ''\n",
+                )
+                .expect("parse")
+            }
+
+            #[test]
+            fn should_start_over_at_unknown() {
+                let mut tracker = tracker();
+                settle(&mut tracker, &working(), 0);
+
+                assert_eq!(
+                    tracker.switch_rules(always_idle()),
+                    Some(AgentState::Unknown)
+                );
+                assert_eq!(tracker.state(), AgentState::Unknown);
+            }
+
+            #[test]
+            fn should_not_turn_the_old_rules_working_into_done() {
+                let mut tracker = tracker();
+                settle(&mut tracker, &working(), 0);
+                tracker.switch_rules(always_idle());
+
+                assert_eq!(
+                    settle(&mut tracker, &working(), 1_000),
+                    Some(AgentState::Idle)
+                );
+            }
+
+            #[test]
+            fn should_publish_nothing_when_already_unknown() {
+                assert_eq!(tracker().switch_rules(always_idle()), None);
+            }
+
+            #[test]
+            fn should_leave_an_exited_pane_exited() {
+                let mut tracker = tracker();
+                tracker.exit();
+
+                assert_eq!(tracker.switch_rules(always_idle()), None);
+                assert_eq!(tracker.state(), AgentState::Exited);
             }
         }
 
