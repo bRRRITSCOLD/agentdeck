@@ -27,6 +27,8 @@ pub struct DaemonInfo {
     pub token: String,
     pub pid: u32,
     pub version: String,
+    /// Absent from an older daemon's file, which the harness never starts.
+    pub api_version: u32,
 }
 
 /// A running daemon on its own temp dirs. Dropping it kills the daemon, then removes the

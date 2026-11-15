@@ -24,6 +24,7 @@ fn stale_info(pid: u32) -> DaemonInfo {
         token: "stale".into(),
         pid,
         version: "0.0.0".into(),
+        api_version: agentdeck_core::API_VERSION,
     }
 }
 

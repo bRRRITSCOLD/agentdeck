@@ -14,6 +14,7 @@ fn info(daemon: &TestDaemon, token: &str) -> agentdeck_core::DaemonInfo {
         token: token.into(),
         pid: daemon.info.pid,
         version: daemon.info.version.clone(),
+        api_version: daemon.info.api_version,
     }
 }
 
