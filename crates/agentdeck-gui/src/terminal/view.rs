@@ -45,8 +45,8 @@ use gpui::{
     EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyDownEvent,
     Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
     ParentElement as _, Pixels, Point, Render, ScrollEvent, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, UTF16Selection, Window, canvas,
-    div,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, UTF16Selection,
+    Window, canvas, div,
 };
 
 use super::element::{Layout, Metrics, Pointer, terminal};
@@ -133,6 +133,9 @@ pub struct TerminalView {
     /// The cell under the pointer while `secondary` is held, where a link is underlined.
     hovered: Option<Hit>,
     focus: FocusHandle,
+    /// How often it has rendered, so a test can tell a fresh frame from a cached one.
+    #[cfg(test)]
+    renders: usize,
     _subscriptions: [Subscription; 2],
 }
 
@@ -165,6 +168,8 @@ impl TerminalView {
             marked: None,
             hovered: None,
             focus,
+            #[cfg(test)]
+            renders: 0,
             _subscriptions: [events, activation],
         };
         view.attach();
@@ -792,6 +797,10 @@ impl Focusable for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        {
+            self.renders += 1;
+        }
         let mode = cx.theme().mode();
         let palette = Palette::new(mode);
         let focused = self.focus.is_focused(window);
@@ -867,6 +876,17 @@ impl Render for TerminalView {
     }
 }
 
+/// `terminal`, filling its parent, drawn from its last frame until it changes (spec §11).
+///
+/// GPUI draws a whole window at once, so without the cache every redraw anywhere (a turning
+/// mark, 15 times a second) lays out and paints every visible grid again. A cached view
+/// draws afresh only when it notifies, when its bounds change, or when the window refreshes
+/// (focus, activation, theme). So every change to what a terminal shows must `cx.notify()`
+/// it, and its render may read no other entity's state: a cached view never hears of that.
+pub fn cached(terminal: Entity<TerminalView>) -> impl IntoElement {
+    terminal.cached(StyleRefinement::default().size_full())
+}
+
 /// The button a program can hear of.
 fn heard(button: MouseButton) -> Option<Button> {
     match button {
@@ -893,7 +913,7 @@ mod tests {
     use agentdeck_client::ws::{Event, Outgoing, Remote};
     use agentdeck_core::AgentState;
     use alacritty_terminal::index::Side;
-    use brrritscold_core_gpui::Root;
+    use brrritscold_core_gpui::{Root, StateDot, StateDotState, Theme, ThemePreference};
     use gpui::{
         AppContext as _, ClipboardItem, Modifiers, MouseDownEvent, Pixels, Point, ScrollDelta,
         TestAppContext, VisualTestContext, point, px,
@@ -904,12 +924,23 @@ mod tests {
     use crate::connection::{Connector, Status};
     use crate::overview::fixtures::id;
 
-    /// Holds the terminal the way the workspace view does, so a test can drop it.
+    /// Holds the terminal the way a pane does: cached, under a working agent's turning
+    /// mark. A test can drop it.
     struct Host(Option<Entity<TerminalView>>);
 
     impl Render for Host {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().size_full().children(self.0.clone())
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(StateDot::new(StateDotState::Working))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .children(self.0.clone().map(cached)),
+                )
         }
     }
 
@@ -1414,6 +1445,100 @@ mod tests {
             cx.simulate_keystrokes("a");
 
             assert_eq!(harness.sent(), []);
+        }
+    }
+
+    mod caching {
+        use gpui::size;
+
+        use super::*;
+        use crate::state_dot::tests::redraws_in_one_second;
+
+        fn renders(harness: &Harness, cx: &mut VisualTestContext) -> usize {
+            harness.view(cx).read_with(cx, |view, _| view.renders)
+        }
+
+        /// A live terminal showing numbered lines, more than its grid holds, and how often it
+        /// has rendered so far.
+        fn settled(cx: &mut TestAppContext) -> (Harness, usize, &mut VisualTestContext) {
+            let numbered = (0..40)
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join("\r\n");
+            let (harness, cx) = Harness::live(numbered.as_bytes(), cx);
+            let renders = renders(&harness, cx);
+            (harness, renders, cx)
+        }
+
+        #[gpui::test]
+        fn should_not_render_again_while_only_a_mark_beside_it_turns(cx: &mut TestAppContext) {
+            let (harness, before, cx) = settled(cx);
+
+            let redraws = redraws_in_one_second(&harness.host, cx);
+
+            assert!(redraws > 0, "the mark turns");
+            assert_eq!(renders(&harness, cx), before);
+        }
+
+        #[gpui::test]
+        fn should_render_new_output(cx: &mut TestAppContext) {
+            let (harness, before, cx) = settled(cx);
+
+            harness.deliver(Event::Output(1, b"\r\nmore".to_vec()), cx);
+            harness.draw(cx);
+
+            assert!(renders(&harness, cx) > before);
+        }
+
+        #[gpui::test]
+        fn should_render_again_when_resized(cx: &mut TestAppContext) {
+            let (harness, before, cx) = settled(cx);
+
+            cx.simulate_resize(size(px(640.), px(320.)));
+            harness.draw(cx);
+
+            assert!(renders(&harness, cx) > before);
+        }
+
+        #[gpui::test]
+        fn should_render_again_when_it_loses_focus(cx: &mut TestAppContext) {
+            let (harness, before, cx) = settled(cx);
+
+            cx.update(|window, cx| window.blur(cx));
+            harness.draw(cx);
+
+            assert!(renders(&harness, cx) > before);
+        }
+
+        #[gpui::test]
+        fn should_render_a_selection(cx: &mut TestAppContext) {
+            let (harness, before, cx) = settled(cx);
+            let from = harness.at(0, 0, Side::Left, cx);
+            let to = harness.at(0, 1, Side::Right, cx);
+
+            harness.drag(from, to, 1, Modifiers::default(), cx);
+
+            assert!(renders(&harness, cx) > before);
+        }
+
+        #[gpui::test]
+        fn should_render_a_scroll(cx: &mut TestAppContext) {
+            let (harness, before, cx) = settled(cx);
+            let at = harness.at(0, 0, Side::Left, cx);
+
+            harness.wheel(at, 3., Modifiers::default(), cx);
+
+            assert!(renders(&harness, cx) > before);
+        }
+
+        #[gpui::test]
+        fn should_render_again_when_the_theme_changes(cx: &mut TestAppContext) {
+            let (harness, before, cx) = settled(cx);
+
+            cx.update(|_, cx| Theme::set_preference(ThemePreference::Dark, cx));
+            harness.draw(cx);
+
+            assert!(renders(&harness, cx) > before);
         }
     }
 
