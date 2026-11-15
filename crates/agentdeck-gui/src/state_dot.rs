@@ -1,126 +1,90 @@
-//! The Penpot part `agentdeck / StateDot`: a pane's or a workspace's agent state as a 16px
-//! mark (spec §11). Blocked and a failed exit share red; the shape (a filled dot vs an
-//! `OctagonX`) tells them apart, so colour is never the only signal.
+//! Which core-gpui [`StateDot`](brrritscold_core_gpui::StateDot) a pane's or a workspace's
+//! agent state gets (spec §11). Blocked and a failed exit share red; the shape (a filled dot vs
+//! an `OctagonX`) tells them apart, so colour is never the only signal.
 
 use agentdeck_core::AgentState;
-use brrritscold_core_gpui::{ActiveTheme as _, Icon, IconName};
-use brrritscold_core_gpui_tokens::primitive::space;
-use gpui::{App, Hsla, IntoElement, ParentElement as _, RenderOnce, Styled as _, Window, div};
+use brrritscold_core_gpui::StateDotState;
 
-/// The part's `state` variant property.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum StateDotState {
-    /// `working`: a `LoaderCircle` in `info`.
-    Working,
-    /// `blocked`: an 8px dot in `destructive`.
-    Blocked,
-    /// `done`: a `CircleCheck` in `success`.
-    Done,
-    /// `idle`: an 8px dot in `muted-foreground`.
-    #[default]
-    Idle,
-    /// `exited`, with code 0 or none read: an `X` in `muted-foreground`.
-    Exited,
-    /// `unknown`: a `Circle` in `muted-foreground`.
-    Unknown,
-    /// `exited-error`, any other code: an `OctagonX` in `destructive`.
-    ExitedError,
-}
-
-impl StateDotState {
-    /// The mark for `state`; `exit_code` tells a failed exit from a clean one.
-    pub fn of(state: AgentState, exit_code: Option<i64>) -> Self {
-        match state {
-            AgentState::Working => StateDotState::Working,
-            AgentState::Blocked => StateDotState::Blocked,
-            AgentState::Done => StateDotState::Done,
-            AgentState::Idle => StateDotState::Idle,
-            AgentState::Unknown => StateDotState::Unknown,
-            AgentState::Exited => match exit_code {
-                None | Some(0) => StateDotState::Exited,
-                Some(_) => StateDotState::ExitedError,
-            },
-        }
-    }
-}
-
-/// What a state paints: a filled dot, or an icon.
-enum Mark {
-    Dot(Hsla),
-    Icon(IconName, Hsla),
-}
-
-/// A 16px state mark.
-#[derive(IntoElement, Default)]
-pub struct StateDot {
-    state: StateDotState,
-}
-
-impl StateDot {
-    /// An idle mark.
-    pub fn new() -> Self {
-        StateDot::default()
-    }
-
-    /// Penpot property `state`.
-    pub fn state(mut self, state: StateDotState) -> Self {
-        self.state = state;
-        self
-    }
-}
-
-impl RenderOnce for StateDot {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let s = cx.theme().semantic();
-        let mark = match self.state {
-            StateDotState::Working => Mark::Icon(IconName::LoaderCircle, s.info),
-            StateDotState::Blocked => Mark::Dot(s.destructive),
-            StateDotState::Done => Mark::Icon(IconName::CircleCheck, s.success),
-            StateDotState::Idle => Mark::Dot(s.muted_foreground),
-            StateDotState::Exited => Mark::Icon(IconName::X, s.muted_foreground),
-            StateDotState::Unknown => Mark::Icon(IconName::Circle, s.muted_foreground),
-            StateDotState::ExitedError => Mark::Icon(IconName::OctagonX, s.destructive),
-        };
-        let frame = div()
-            .size(space::S4)
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center();
-        match mark {
-            Mark::Dot(fill) => frame.child(div().size(space::S2).rounded_full().bg(fill)),
-            Mark::Icon(icon, color) => {
-                frame.child(Icon::new(icon).size(space::S4).text_color(color))
-            }
-        }
+/// The mark for `state`; `exit_code` tells a failed exit from a clean one.
+pub fn of(state: AgentState, exit_code: Option<i64>) -> StateDotState {
+    match state {
+        AgentState::Working => StateDotState::Working,
+        AgentState::Blocked => StateDotState::Blocked,
+        AgentState::Done => StateDotState::Done,
+        AgentState::Idle => StateDotState::Idle,
+        AgentState::Unknown => StateDotState::Unknown,
+        AgentState::Exited => match exit_code {
+            None | Some(0) => StateDotState::Exited,
+            Some(_) => StateDotState::ExitedError,
+        },
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
+    use brrritscold_core_gpui::StateDot;
+    use gpui::{AnyElement, Context, IntoElement, Render, TestAppContext, Window};
+
     use super::*;
 
-    mod state_dot_state {
+    /// How many next-frame callbacks one drawn frame of `element` leaves behind: above 0
+    /// while something in it animates.
+    pub fn frames_requested(element: fn() -> AnyElement, cx: &mut TestAppContext) -> usize {
+        struct Host(fn() -> AnyElement);
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                (self.0)()
+            }
+        }
+        cx.update(brrritscold_core_gpui::init);
+        let (_, cx) = cx.add_window_view(|_, _| Host(element));
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.simulate_next_frame(cx)
+        })
+    }
+
+    mod of {
         use super::*;
 
         #[test]
+        fn should_give_each_live_state_its_namesake() {
+            for (state, mark) in [
+                (AgentState::Working, StateDotState::Working),
+                (AgentState::Blocked, StateDotState::Blocked),
+                (AgentState::Done, StateDotState::Done),
+                (AgentState::Idle, StateDotState::Idle),
+                (AgentState::Unknown, StateDotState::Unknown),
+            ] {
+                assert_eq!(of(state, None), mark, "{state:?}");
+            }
+        }
+
+        #[test]
         fn should_mark_a_clean_exit_apart_from_a_failed_one() {
-            assert_eq!(
-                StateDotState::of(AgentState::Exited, Some(0)),
-                StateDotState::Exited
-            );
-            assert_eq!(
-                StateDotState::of(AgentState::Exited, Some(1)),
-                StateDotState::ExitedError
-            );
+            assert_eq!(of(AgentState::Exited, Some(0)), StateDotState::Exited);
+            assert_eq!(of(AgentState::Exited, Some(1)), StateDotState::ExitedError);
         }
 
         #[test]
         fn should_treat_an_unread_exit_code_as_clean() {
-            assert_eq!(
-                StateDotState::of(AgentState::Exited, None),
-                StateDotState::Exited
-            );
+            assert_eq!(of(AgentState::Exited, None), StateDotState::Exited);
+        }
+    }
+
+    mod spin {
+        use super::*;
+
+        #[gpui::test]
+        fn should_spin_a_working_agents_mark(cx: &mut TestAppContext) {
+            let working = || StateDot::new(of(AgentState::Working, None)).into_any_element();
+            assert!(frames_requested(working, cx) > 0);
+        }
+
+        #[gpui::test]
+        fn should_hold_an_idle_agents_mark_still(cx: &mut TestAppContext) {
+            let idle = || StateDot::new(of(AgentState::Idle, None)).into_any_element();
+            assert_eq!(frames_requested(idle, cx), 0);
         }
     }
 }

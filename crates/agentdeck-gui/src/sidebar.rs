@@ -15,7 +15,7 @@ use agentdeck_core::ws::ServerMessage;
 use agentdeck_core::{AgentState, WorkspaceId};
 use brrritscold_core_gpui::{
     ActiveTheme as _, Button, ButtonSize, ButtonVariant, Icon, IconName, Separator, Sidebar,
-    SidebarMenuButton,
+    SidebarMenuButton, StateDot, StateDotState,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
@@ -32,7 +32,7 @@ use crate::notifications::{self, Alert, PrBatch};
 use crate::overview::{Counts, Overview, Snapshot, WorkspaceRow};
 use crate::rereads::Rereads;
 use crate::scrollbar;
-use crate::state_dot::{StateDot, StateDotState};
+use crate::state_dot;
 use crate::task_row;
 
 /// The sidebar's width. Raw in Penpot too: no sizing token is 260px.
@@ -284,7 +284,7 @@ impl SidebarView {
                         .absolute()
                         .left(space::S2)
                         .top(space::S2)
-                        .child(StateDot::new().state(state)),
+                        .child(StateDot::new(state)),
                 )
             })
             .when(has_counts, |row| {
@@ -376,7 +376,7 @@ impl Render for SidebarView {
                 ElementId::Name(format!("workspace-{}", w.id).into()),
                 Selection::Workspace(w.id),
                 w.name,
-                Lead::Dot(StateDotState::of(w.state, None)),
+                Lead::Dot(state_dot::of(w.state, None)),
                 w.counts,
                 cx,
             )

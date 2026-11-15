@@ -562,9 +562,7 @@ fn pr_line(pr: &PrCell, cx: &App) -> AnyElement {
         .when(pr.draft, |line| {
             line.child(Badge::new().variant(BadgeVariant::Outline).label("draft"))
         })
-        .when_some(pr.checks, |line, state| {
-            line.child(task_row::checks(state, false, cx))
-        })
+        .when_some(pr.checks, |line, state| line.child(task_row::checks(state)))
         .when_some(pr.review, |line, state| {
             line.child(task_row::review(state, cx))
         })

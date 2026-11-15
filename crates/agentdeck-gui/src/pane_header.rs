@@ -2,14 +2,16 @@
 //! terminal (spec §11). Penpot's page "Screens" board "Pane states" shows each state.
 
 use agentdeck_core::AgentState;
-use brrritscold_core_gpui::{ActiveTheme as _, Badge, BadgeVariant, DropdownMenu, Icon, IconName};
+use brrritscold_core_gpui::{
+    ActiveTheme as _, Badge, BadgeVariant, DropdownMenu, Icon, IconName, StateDot, StateDotState,
+};
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _, Window, div,
 };
 
-use crate::state_dot::{StateDot, StateDotState};
+use crate::state_dot;
 use crate::terminal::SYMBOL_FAMILIES;
 
 /// A stretch of a title, and whether it is symbols to set in the symbol font.
@@ -61,7 +63,7 @@ pub fn symbol_runs(text: &str) -> Vec<gpui::Div> {
 /// The `StateBadge` part's variant and label for a pane in `state`; `exit_code` tells a
 /// failed exit from a clean one and is shown when known.
 pub fn state_badge(state: AgentState, exit_code: Option<i64>) -> (BadgeVariant, SharedString) {
-    let variant = match StateDotState::of(state, exit_code) {
+    let variant = match state_dot::of(state, exit_code) {
         StateDotState::Working => BadgeVariant::Info,
         StateDotState::Blocked | StateDotState::ExitedError => BadgeVariant::Destructive,
         StateDotState::Done => BadgeVariant::Success,
@@ -135,7 +137,7 @@ impl RenderOnce for PaneHeader {
             .px(space::S3)
             .rounded_t(s.radius_md)
             .bg(s.card)
-            .child(StateDot::new().state(StateDotState::of(self.state, self.exit_code)))
+            .child(StateDot::new(state_dot::of(self.state, self.exit_code)))
             // Penpot `Title`: sm, medium, `foreground`.
             .child(
                 div()
