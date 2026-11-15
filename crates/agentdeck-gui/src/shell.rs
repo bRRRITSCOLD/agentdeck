@@ -8,8 +8,9 @@
 //!
 //! It mutes and unmutes the selected workspace's notifications when the top bar asks, toasting
 //! a failure. It archives and unarchives the selected workspace when the top bar asks, toasting
-//! the outcome; an archive's toast offers Undo. The top bar's Delete workspace… opens the delete
-//! dialog; once a workspace is deleted the selection falls back to the first workspace left,
+//! the outcome; an archive's toast offers Undo. The top bar's Edit workspace… opens the edit
+//! dialog on the selected workspace, and the sidebar reads again once it renames. Its Delete
+//! workspace… opens the delete dialog; once a workspace is deleted the selection falls back to the first workspace left,
 //! else the Inbox.
 //!
 //! The Tasks view and the right panel ask for the new task dialog with
@@ -46,6 +47,7 @@ use gpui::{
 use crate::api::Api;
 use crate::connection::{Connection, Status};
 use crate::delete_workspace::{DeleteEvent, DeleteTarget, DeleteWorkspaceDialog};
+use crate::edit_workspace::{EditTarget, EditWorkspaceDialog, Renamed};
 use crate::frame;
 use crate::inbox::{InboxView, OpenSettings, Synced};
 use crate::keymap::ToggleRightPanel;
@@ -62,7 +64,8 @@ use crate::task_sheet::{OpenTask, StartAgentOn, TaskSheet};
 use crate::tasks::TasksView;
 use crate::title_bar::{Close, Minimize, TitleBar, ToggleMaximize};
 use crate::top_bar::{
-    ArchiveWorkspace, DeleteWorkspace, MuteWorkspace, TopBar, UnarchiveWorkspace, UnmuteWorkspace,
+    ArchiveWorkspace, DeleteWorkspace, EditWorkspace, MuteWorkspace, TopBar, UnarchiveWorkspace,
+    UnmuteWorkspace,
 };
 use crate::workspace::{LinkPane, WorkspaceView, failed};
 
@@ -83,6 +86,8 @@ pub struct Shell {
     new_workspace: Option<Entity<NewWorkspaceDialog>>,
     /// The new agent dialog, while connected.
     new_agent: Option<Entity<NewAgentDialog>>,
+    /// The Edit workspace dialog, while connected.
+    edit_workspace: Option<Entity<EditWorkspaceDialog>>,
     /// The Delete workspace dialog, while connected.
     delete_workspace: Option<Entity<DeleteWorkspaceDialog>>,
     /// The new task dialog, while connected.
@@ -149,6 +154,7 @@ impl Shell {
             _selection: None,
             new_workspace: None,
             new_agent: None,
+            edit_workspace: None,
             delete_workspace: None,
             new_task: None,
             task_sheet: None,
@@ -182,6 +188,7 @@ impl Shell {
                     let inbox = cx.new(|cx| InboxView::new(api.clone(), cx));
                     let new_agent = cx.new(|_| NewAgentDialog::new(api.clone()));
                     let link_task = cx.new(|_| LinkTaskDialog::new(api.clone()));
+                    let edit = cx.new(|cx| EditWorkspaceDialog::new(api.clone(), window, cx));
                     let delete = cx.new(|cx| DeleteWorkspaceDialog::new(api.clone(), window, cx));
                     let new_task = cx.new(|cx| NewTaskDialog::new(api.clone(), window, cx));
                     let panel = cx.new(|cx| RightPanel::new(api.clone(), window, cx));
@@ -232,6 +239,9 @@ impl Shell {
                                 shell.open_new_agent(ask.workspace, Some(ask.task), window, cx);
                             },
                         ),
+                        // The rename also comes back through `changed`; reading now shows it
+                        // at once.
+                        cx.subscribe(&edit, |shell, _, _: &Renamed, cx| shell.refresh(cx)),
                         cx.subscribe_in(&delete, window, |shell, _, event, window, cx| {
                             match event {
                                 DeleteEvent::ArchiveInstead(_) => shell.archive(window, cx),
@@ -274,6 +284,7 @@ impl Shell {
                     self.new_workspace = Some(dialog);
                     self.inbox = Some(inbox);
                     self.new_agent = Some(new_agent);
+                    self.edit_workspace = Some(edit);
                     self.delete_workspace = Some(delete);
                     self.new_task = Some(new_task);
                     self.task_sheet = Some(task_sheet);
@@ -297,6 +308,7 @@ impl Shell {
                 self.settings = None;
                 self.panel = None;
                 self.new_agent = None;
+                self.edit_workspace = None;
                 self.delete_workspace = None;
                 self.new_task = None;
                 self.task_sheet = None;
@@ -612,6 +624,17 @@ impl Shell {
         .detach();
     }
 
+    /// Opens the Edit workspace dialog on the selected workspace, archived or not.
+    fn edit_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some((id, name, _)), Some(dialog)) =
+            (self.selected_workspace(cx), self.edit_workspace.clone())
+        else {
+            return;
+        };
+        let target = EditTarget { id, name };
+        dialog.update(cx, |dialog, cx| dialog.open(target, window, cx));
+    }
+
     /// Opens the Delete workspace dialog on the selected workspace.
     fn delete_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(sidebar), Some(dialog), Some(Selection::Workspace(selected))) =
@@ -770,6 +793,7 @@ impl Shell {
             })
             .children(self.new_workspace.clone())
             .children(self.new_agent.clone())
+            .children(self.edit_workspace.clone())
             .children(self.delete_workspace.clone())
             .children(self.new_task.clone())
             .children(self.task_sheet.clone())
@@ -801,6 +825,9 @@ impl Render for Shell {
             }))
             .on_action(cx.listener(|this, _: &UnmuteWorkspace, window, cx| {
                 this.set_muted(false, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &EditWorkspace, window, cx| {
+                this.edit_workspace(window, cx);
             }))
             .on_action(cx.listener(|this, _: &DeleteWorkspace, window, cx| {
                 this.delete_workspace(window, cx);
@@ -1604,6 +1631,16 @@ mod tests {
             }
         }
 
+        /// Opens the top bar's menu and clicks its item at index `n`, counting from 0.
+        pub fn click_menu_item(harness: &Harness, n: u32, cx: &mut VisualTestContext) {
+            let trigger = cx.debug_bounds("workspace menu").expect("the menu shows");
+            harness.click(trigger.center(), cx);
+            let menu = cx.debug_bounds("dropdown-menu-content").expect("it opens");
+            // The menu's 4px padding, `n` 32px rows, then half the next.
+            let y = 4. + 32. * n as f32 + 16.;
+            harness.click(gpui::point(menu.center().x, menu.top() + gpui::px(y)), cx);
+        }
+
         /// Workspace 1, `agentdeck`, live; workspace 2, `old`, archived.
         pub fn daemon() -> Arc<FakeApi> {
             let old = Workspace {
@@ -1622,13 +1659,9 @@ mod tests {
         use super::*;
         use crate::top_bar::MuteWorkspace;
 
-        /// Opens the top bar's menu and clicks its first item.
-        fn click_first_item(harness: &Harness, cx: &mut VisualTestContext) {
-            let trigger = cx.debug_bounds("workspace menu").expect("the menu shows");
-            harness.click(trigger.center(), cx);
-            let menu = cx.debug_bounds("dropdown-menu-content").expect("it opens");
-            // The menu's 4px padding, then half a 32px row.
-            harness.click(gpui::point(menu.center().x, menu.top() + gpui::px(20.)), cx);
+        /// Opens the top bar's menu and clicks its second item, after Edit workspace….
+        fn click_mute_item(harness: &Harness, cx: &mut VisualTestContext) {
+            support::click_menu_item(harness, 1, cx);
         }
 
         /// Whether the sidebar has workspace `n` as muted, and the top bar shown agrees.
@@ -1647,10 +1680,10 @@ mod tests {
         }
 
         #[gpui::test]
-        fn should_mute_the_selected_workspace_from_the_menus_first_item(cx: &mut TestAppContext) {
+        fn should_mute_the_selected_workspace_from_the_menus_second_item(cx: &mut TestAppContext) {
             let (harness, cx) = Harness::open(daemon(), cx);
 
-            click_first_item(&harness, cx);
+            click_mute_item(&harness, cx);
 
             assert_eq!(*harness.api.muted.lock().unwrap(), [(id(1), true)]);
             assert!(is_muted(&harness, 1, cx));
@@ -1659,9 +1692,9 @@ mod tests {
         #[gpui::test]
         fn should_unmute_a_muted_workspace_from_the_same_item(cx: &mut TestAppContext) {
             let (harness, cx) = Harness::open(daemon(), cx);
-            click_first_item(&harness, cx);
+            click_mute_item(&harness, cx);
 
-            click_first_item(&harness, cx);
+            click_mute_item(&harness, cx);
 
             assert_eq!(
                 *harness.api.muted.lock().unwrap(),
@@ -1683,6 +1716,86 @@ mod tests {
         }
     }
 
+    mod edit {
+        use super::support::{Harness, click_menu_item, daemon};
+        use super::*;
+        use crate::edit_workspace::EditWorkspaceDialog;
+        use crate::top_bar::EditWorkspace;
+
+        fn dialog(harness: &Harness, cx: &mut VisualTestContext) -> Entity<EditWorkspaceDialog> {
+            harness
+                .shell
+                .read_with(cx, |shell, _| shell.edit_workspace.clone().unwrap())
+        }
+
+        fn is_open(harness: &Harness, cx: &mut VisualTestContext) -> bool {
+            dialog(harness, cx).read_with(cx, |d, _| d.is_open())
+        }
+
+        /// What the name field holds.
+        fn name_field(harness: &Harness, cx: &mut VisualTestContext) -> String {
+            let dialog = dialog(harness, cx);
+            cx.update(|_, cx| dialog.read(cx).name(cx))
+        }
+
+        /// The sidebar's name for workspace `n`, and the top bar's, which must agree.
+        fn shown_name(harness: &Harness, n: u32, cx: &mut VisualTestContext) -> SharedString {
+            harness.shell.read_with(cx, |shell, cx| {
+                let sidebar = shell.sidebar.as_ref().unwrap().read(cx);
+                let name = sidebar.overview().workspace(id(n)).unwrap().name.clone();
+                let view = shell
+                    .workspace
+                    .as_ref()
+                    .expect("a workspace shows")
+                    .read(cx);
+                assert_eq!(view.top_bar().name(), &name, "the top bar follows");
+                name
+            })
+        }
+
+        #[gpui::test]
+        fn should_open_on_the_selected_workspace_from_the_menus_first_item(
+            cx: &mut TestAppContext,
+        ) {
+            let (harness, cx) = Harness::open(daemon(), cx);
+
+            click_menu_item(&harness, 0, cx);
+
+            assert!(is_open(&harness, cx));
+            assert_eq!(name_field(&harness, cx), "agentdeck");
+            assert_eq!(*harness.api.muted.lock().unwrap(), []);
+        }
+
+        #[gpui::test]
+        fn should_open_from_an_archived_workspaces_menu(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(), cx);
+            harness.select(2, cx);
+
+            click_menu_item(&harness, 0, cx);
+
+            assert!(is_open(&harness, cx));
+            assert_eq!(name_field(&harness, cx), "old");
+        }
+
+        #[gpui::test]
+        fn should_show_the_new_name_once_renamed(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(), cx);
+            cx.dispatch_action(EditWorkspace);
+            harness.settle(cx);
+
+            cx.simulate_input("deck");
+            cx.simulate_keystrokes("enter");
+            harness.settle(cx);
+
+            assert_eq!(
+                *harness.api.renamed.lock().unwrap(),
+                [(id(1), "deck".into())]
+            );
+            assert!(!is_open(&harness, cx));
+            assert_eq!(shown_name(&harness, 1, cx), "deck");
+        }
+    }
+
     mod archive {
         use super::support::{Harness, daemon};
         use super::*;
@@ -1691,12 +1804,8 @@ mod tests {
         fn should_archive_the_selected_workspace_from_the_top_bar_menu(cx: &mut TestAppContext) {
             let (harness, cx) = Harness::open(daemon(), cx);
 
-            let trigger = cx.debug_bounds("workspace menu").expect("the menu shows");
-            harness.click(trigger.center(), cx);
-            let menu = cx.debug_bounds("dropdown-menu-content").expect("it opens");
-            // The second item, after Mute notifications: the menu's 4px padding, a 32px row,
-            // then half the next.
-            harness.click(gpui::point(menu.center().x, menu.top() + gpui::px(52.)), cx);
+            // The third item, after Edit workspace… and Mute notifications.
+            support::click_menu_item(&harness, 2, cx);
 
             assert_eq!(*harness.api.archived.lock().unwrap(), [id(1)]);
         }
@@ -1828,7 +1937,7 @@ mod tests {
             fn should_open_from_the_top_bar_menu_after_archive(cx: &mut TestAppContext) {
                 let (harness, cx) = Harness::open(daemon(), cx);
 
-                pick_from_menu(&harness, 3, cx);
+                pick_from_menu(&harness, 4, cx);
 
                 assert!(is_open(&harness, cx));
                 assert_eq!(*harness.api.archived.lock().unwrap(), []);
@@ -1839,7 +1948,7 @@ mod tests {
                 let (harness, cx) = Harness::open(daemon(), cx);
                 harness.select(2, cx);
 
-                pick_from_menu(&harness, 1, cx);
+                pick_from_menu(&harness, 2, cx);
 
                 assert!(is_open(&harness, cx));
                 assert_eq!(*harness.api.unarchived.lock().unwrap(), []);

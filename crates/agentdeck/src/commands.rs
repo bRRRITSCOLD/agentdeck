@@ -132,6 +132,17 @@ async fn ws(client: &Client, command: WsCommand) -> anyhow::Result<Output> {
                 .map_err(ApiError::from)?;
             Output::new(&*ws, render::workspace(&ws))
         }
+        WsCommand::Rename { ws, name } => {
+            let id = workspace_id(client, &ws).await?;
+            let ws = client
+                .workspace_update()
+                .id(id)
+                .body_map(|patch| patch.name(Some(name)))
+                .send()
+                .await
+                .map_err(ApiError::from)?;
+            Output::new(&*ws, render::workspaces(std::slice::from_ref(&*ws)))
+        }
         WsCommand::Archive { ws } => {
             let id = workspace_id(client, &ws).await?;
             let ws = client

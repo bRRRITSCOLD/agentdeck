@@ -77,6 +77,13 @@ pub enum WsCommand {
         #[arg(long, value_name = "PATH")]
         dir: Option<PathBuf>,
     },
+    /// Rename a workspace; its slug and dir stay, so its old slug still finds it.
+    Rename {
+        /// The workspace.
+        ws: String,
+        /// The new display name.
+        name: String,
+    },
     /// Archive a workspace; its data is kept.
     Archive {
         /// The workspace.

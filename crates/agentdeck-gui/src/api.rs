@@ -120,6 +120,15 @@ pub trait Api: Send + Sync {
     /// Brings the archived `workspace` back.
     fn unarchive_workspace(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<()>>;
 
+    /// Renames `workspace` to `name`, keeping its slug and dir. A refusal is an [`ApiError`];
+    /// `invalid_name` means the name is blank.
+    fn rename_workspace(
+        &self,
+        workspace: WorkspaceId,
+        name: String,
+        cx: &App,
+    ) -> Task<anyhow::Result<()>>;
+
     /// Mutes `workspace`'s notifications, or unmutes them.
     fn set_muted(&self, workspace: WorkspaceId, muted: bool, cx: &App) -> Task<anyhow::Result<()>>;
 
@@ -417,6 +426,21 @@ impl Api for Daemon {
         })
     }
 
+    fn rename_workspace(
+        &self,
+        workspace: WorkspaceId,
+        name: String,
+        cx: &App,
+    ) -> Task<anyhow::Result<()>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            let patch = client.workspace_update().id(workspace);
+            let patch = patch.body_map(|patch| patch.name(Some(name)));
+            patch.send().await.map_err(ApiError::from)?;
+            Ok(())
+        })
+    }
+
     fn set_muted(&self, workspace: WorkspaceId, muted: bool, cx: &App) -> Task<anyhow::Result<()>> {
         let client = self.client.clone();
         runtime::spawn(cx, async move {
@@ -691,6 +715,8 @@ pub(crate) mod fake {
         pub unarchived: Mutex<Vec<WorkspaceId>>,
         /// The mutes and unmutes asked for: the workspace and whether to mute it, in order.
         pub muted: Mutex<Vec<(WorkspaceId, bool)>>,
+        /// The renames asked for: the workspace and its new name, in order.
+        pub renamed: Mutex<Vec<(WorkspaceId, String)>>,
         /// Each workspace's dirty report; clean when unset.
         dirty: Mutex<HashMap<WorkspaceId, DirtyReport>>,
         /// The workspaces deleted, in order.
@@ -1199,6 +1225,23 @@ pub(crate) mod fake {
             }
             self.set_archived(workspace, false);
             self.unarchived.lock().unwrap().push(workspace);
+            Task::ready(Ok(()))
+        }
+
+        fn rename_workspace(
+            &self,
+            workspace: WorkspaceId,
+            name: String,
+            _cx: &App,
+        ) -> Task<anyhow::Result<()>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            let mut snapshot = self.snapshot.lock().unwrap();
+            if let Some(w) = snapshot.workspaces.iter_mut().find(|w| w.id == workspace) {
+                w.name = name.clone();
+            }
+            self.renamed.lock().unwrap().push((workspace, name));
             Task::ready(Ok(()))
         }
 
