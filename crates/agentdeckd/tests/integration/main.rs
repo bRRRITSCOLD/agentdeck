@@ -10,6 +10,7 @@ mod health;
 mod instructions;
 mod instructions_client;
 mod migrations;
+mod older_daemon;
 mod panes;
 mod panes_client;
 mod prs;
