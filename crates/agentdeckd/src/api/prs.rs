@@ -25,18 +25,10 @@ pub(crate) async fn prs_status(
     Ok(HttpResponseOk(rqctx.context().prs.status()))
 }
 
-/// How large a close request may be: every PR a user has, 40 bytes or so each, where
-/// dropshot's 1 KiB default fits 25.
-const CLOSE_BODY_MAX_BYTES: usize = 1024 * 1024;
-
 /// Closes PRs on GitHub: only closes them, with no comment and no branch delete. Answers one
 /// result per task, in the order asked, once every PR is tried; 200 even when some failed. A
 /// closed PR's task moves to done at once.
-#[endpoint {
-    method = POST,
-    path = "/v1/prs/close",
-    request_body_max_bytes = CLOSE_BODY_MAX_BYTES,
-}]
+#[endpoint { method = POST, path = "/v1/prs/close" }]
 pub(crate) async fn prs_close(
     rqctx: RequestContext<ApiContext>,
     _auth: Authorized,

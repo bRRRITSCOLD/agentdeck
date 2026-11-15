@@ -147,6 +147,45 @@ mod post_v1_tasks_id_comments {
     }
 
     #[tokio::test]
+    async fn should_add_a_comment_far_over_1_kib_201() {
+        let daemon = TestDaemon::start().await;
+        let task = task(&daemon.client).await;
+        let long = "x".repeat(64 * 1024);
+
+        let added = comment(&daemon.client, task.id, &long, None).await;
+
+        assert_eq!(added.body, long);
+    }
+
+    #[tokio::test]
+    async fn should_refuse_a_body_over_1_mib_400() {
+        let daemon = TestDaemon::start().await;
+        let task = task(&daemon.client).await;
+
+        // 1 MiB of comment, plus the JSON around it.
+        let (status, error) = error_response(
+            daemon
+                .client
+                .comment_create()
+                .id(task.id)
+                .body(NewComment {
+                    body: "x".repeat(1024 * 1024),
+                    pane: None,
+                })
+                .send()
+                .await,
+        );
+
+        assert_eq!(status, 400);
+        assert_eq!(error.error_code, None);
+        assert_eq!(
+            error.message,
+            "request body exceeded maximum size of 1048576 bytes"
+        );
+        assert!(list(&daemon.client, task.id).await.is_empty());
+    }
+
+    #[tokio::test]
     async fn should_reject_an_unknown_pane_400() {
         let daemon = TestDaemon::start().await;
         let task = task(&daemon.client).await;

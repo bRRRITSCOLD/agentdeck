@@ -76,6 +76,17 @@ mod post_v1_workspaces_id_instructions {
     }
 
     #[tokio::test]
+    async fn should_add_an_instruction_far_over_1_kib_201() {
+        let daemon = TestDaemon::start().await;
+        let ws = workspace(&daemon.client).await;
+        let long = "x".repeat(64 * 1024);
+
+        let added = instruction(&daemon.client, ws.id, &long).await;
+
+        assert_eq!(added.body, long);
+    }
+
+    #[tokio::test]
     async fn should_answer_not_found_for_an_unknown_workspace_404() {
         let daemon = TestDaemon::start().await;
 

@@ -37,6 +37,11 @@ pub fn run() -> anyhow::Result<()> {
 /// How long queries in flight get to finish at shutdown.
 const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 
+/// The largest request body any route takes (spec §4), where dropshot's default is 1 KiB:
+/// room for a pasted log in a comment, a long instruction or prompt, a layout of many splits
+/// or every PR a user has in one close. The API is loopback-only and authenticated.
+const REQUEST_BODY_MAX_BYTES: usize = 1024 * 1024;
+
 async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
     std::fs::create_dir_all(&paths.data)
         .with_context(|| format!("creating {}", paths.data.display()))?;
@@ -91,6 +96,7 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
     };
     let config = ConfigDropshot {
         bind_address: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        default_request_body_max_bytes: REQUEST_BODY_MAX_BYTES,
         ..Default::default()
     };
     let server = ServerBuilder::new(api(), context, logging::dropshot_logger())
