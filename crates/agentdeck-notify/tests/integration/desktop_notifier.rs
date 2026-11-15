@@ -56,6 +56,13 @@ fn serve(bus: &PrivateBus) -> (tokio::runtime::Runtime, FakeServer) {
 
 const TEST: &str = "desktop_notifier::show::";
 
+/// Threads one app side may have and another not yet, whatever the notifier does. GPUI's sleep
+/// and power-mode listeners each open a system-bus connection at startup, on a zbus executor
+/// thread of its own, and the `blocking` pool starts threads on demand and lets idle ones go;
+/// on a loaded machine any of them can land after the notifications are sent (#141). Far
+/// under the 19 more a thread per notification would add.
+const LATE_THREADS: usize = 4;
+
 mod show {
     use super::*;
 
@@ -94,9 +101,25 @@ mod show {
         if ran_as_app_side() {
             return;
         }
+        let (with_one, _) = showing(1);
+        let (with_twenty, senders) = showing(20);
+        eprintln!("app side threads: {with_one} with 1 notification, {with_twenty} with 20");
+
+        assert_eq!(senders.len(), 1, "one connection: {senders:?}");
+        assert!(
+            with_twenty <= with_one + LATE_THREADS,
+            "{with_one} threads with 1 notification, {with_twenty} with 20"
+        );
+    }
+
+    /// An app side that shows `count` notifications: its thread count once the server has had
+    /// every one, and the connections they came from. Each app side shows its notifications as
+    /// it starts, so comparing two of them counts a thread started by `show` as well as one
+    /// started to send.
+    fn showing(count: usize) -> (usize, HashSet<String>) {
         let bus = PrivateBus::start();
         let (runtime, mut server) = serve(&bus);
-        let tags: Vec<String> = (1..=20).map(|n| format!("n:{n}")).collect();
+        let tags: Vec<String> = (1..=count).map(|n| format!("n:{n}")).collect();
         let tags: Vec<&str> = tags.iter().map(String::as_str).collect();
         let app = AppSide::spawn(
             &format!("{TEST}should_share_one_connection_and_add_no_thread_per_notification"),
@@ -104,25 +127,15 @@ mod show {
             &tags,
         );
 
-        let first = runtime.block_on(server.next_call());
-        let with_one = app.threads();
-        let mut senders = HashSet::from([first.sender]);
-        let mut last = 0;
-        for _ in 2..=20 {
-            let call = runtime.block_on(server.next_call());
-            senders.insert(call.sender);
-            last = call.id;
-        }
-        let with_twenty = app.threads();
+        let calls: Vec<_> = (0..count)
+            .map(|_| runtime.block_on(server.next_call()))
+            .collect();
+        let threads = app.threads();
+        let last = calls.last().expect("a notification").id;
         runtime.block_on(server.invoke(last, "default"));
-        eprintln!("app side threads: {with_one} with 1 notification, {with_twenty} with 20");
 
-        assert_eq!(senders.len(), 1, "one connection: {senders:?}");
-        assert!(
-            with_twenty <= with_one,
-            "{with_one} threads with 1 notification, {with_twenty} with 20"
-        );
-        assert_eq!(app.clicks(), ["clicked n:20"]);
+        assert_eq!(app.clicks(), [format!("clicked n:{count}")]);
+        (threads, calls.into_iter().map(|call| call.sender).collect())
     }
 }
 
