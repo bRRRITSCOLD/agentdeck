@@ -321,18 +321,25 @@ mod comment_delivery {
         pane
     }
 
-    /// Answers `pane`'s trust dialog and returns everything typed into it once it is idle.
-    /// What was waiting for its prompt is typed as it idles; the marker typed after that
-    /// shows it all has arrived.
-    async fn typed_once_released(daemon: &TestDaemon, pane: PaneId) -> String {
-        type_now(&daemon.client, pane, "\r").await;
-        in_state(&daemon.client, pane, AgentState::Idle).await;
+    /// Types a marker into `pane` and returns everything typed into it once the marker has
+    /// reached its stub. A comment is marked delivered once its bytes are queued for the
+    /// pane's writer, before the stub has read them; the writer types in order, so anything
+    /// delivered before the marker was typed has arrived ahead of it.
+    async fn typed_through_marker(daemon: &TestDaemon, pane: PaneId) -> String {
         type_now(&daemon.client, pane, "marker\r").await;
         eventually("the marker to be typed", || async {
             let typed = typed(daemon, pane);
             typed.ends_with("marker\n").then_some(typed)
         })
         .await
+    }
+
+    /// Answers `pane`'s trust dialog and returns everything typed into it once it is idle.
+    /// What was waiting for its prompt is typed as it idles, ahead of the marker.
+    async fn typed_once_released(daemon: &TestDaemon, pane: PaneId) -> String {
+        type_now(&daemon.client, pane, "\r").await;
+        in_state(&daemon.client, pane, AgentState::Idle).await;
+        typed_through_marker(daemon, pane).await
     }
 
     #[tokio::test]
@@ -348,7 +355,10 @@ mod comment_delivery {
         link(&daemon.client, newer.id, Some(task.id)).await;
 
         delivered_to(&daemon.client, task.id, waiting.id, newer.id).await;
-        assert_eq!(typed(&daemon, newer.id), "Also check Firefox\n");
+        assert_eq!(
+            typed_through_marker(&daemon, newer.id).await,
+            "Also check Firefox\nmarker\n"
+        );
         assert_eq!(typed_once_released(&daemon, older.id).await, "marker\n");
         let comment = read_comment(&daemon.client, task.id, waiting.id).await;
         assert_eq!(comment.delivered_to_pane, Some(newer.id));
@@ -367,12 +377,7 @@ mod comment_delivery {
         link(&daemon.client, older.id, Some(task.id)).await;
 
         // The link types at once into an idle pane, so anything it typed precedes the marker.
-        type_now(&daemon.client, older.id, "marker\r").await;
-        eventually("the marker to be typed", || async {
-            typed(&daemon, older.id).ends_with("marker\n").then_some(())
-        })
-        .await;
-        assert_eq!(typed(&daemon, older.id), "marker\n");
+        assert_eq!(typed_through_marker(&daemon, older.id).await, "marker\n");
         assert_eq!(
             typed_once_released(&daemon, newer.id).await,
             "Also check Firefox\nmarker\n"
@@ -435,7 +440,9 @@ mod comment_delivery {
         let created = comment(&daemon.client, &task, "Also check Firefox", None).await;
 
         delivered_to(&daemon.client, task.id, created.id, newer.id).await;
-        assert_eq!(typed(&daemon, older.id), "");
+        // Anything held for the older pane is typed as it idles, ahead of its marker.
+        in_state(&daemon.client, older.id, AgentState::Idle).await;
+        assert_eq!(typed_through_marker(&daemon, older.id).await, "marker\n");
     }
 
     #[tokio::test]
@@ -536,7 +543,10 @@ mod comment_delivery {
         type_now(&daemon.client, pane.id, "\r").await;
         delivered_to(&daemon.client, task.id, created.id, pane.id).await;
         assert_eq!(trust_answer(&daemon, pane.id).as_deref(), Some("\n"));
-        assert_eq!(typed(&daemon, pane.id), "Also check Firefox\n");
+        assert_eq!(
+            typed_through_marker(&daemon, pane.id).await,
+            "Also check Firefox\nmarker\n"
+        );
     }
 }
 
