@@ -189,6 +189,11 @@ impl Spawned {
         stderr(&self.root)
     }
 
+    /// Its process id.
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// How it exited, once it has.
     pub fn try_wait(&mut self) -> Option<ExitStatus> {
         self.child.try_wait().expect("polling agentdeckd")

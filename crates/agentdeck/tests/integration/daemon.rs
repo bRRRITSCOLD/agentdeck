@@ -184,6 +184,41 @@ mod connecting_while_a_daemon_shuts_down {
     }
 }
 
+/// A client that connects while a killed or crashed daemon still exits: it left `daemon.json`
+/// behind and holds the lock until the kernel has closed its files.
+mod connecting_while_a_killed_daemon_exits {
+    use super::*;
+
+    #[test]
+    fn should_start_a_daemon_once_the_killed_one_lets_go_of_the_lock() {
+        let env = TestEnv::new();
+        let lock = env.hold_lock();
+        // This live process stands in for the dying daemon, whose port is already closed.
+        let stale = stale_info(std::process::id());
+        env.write_daemon_info(&stale);
+        let mut cli = env
+            .command()
+            .args(["ws", "ls"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("running agentdeck");
+
+        eventually("the started daemon to wait for the lock", || {
+            let waiting = env.daemon_log().contains("waiting for the agentdeckd");
+            let gave_up = cli.try_wait().expect("polling agentdeck").is_some();
+            (waiting || gave_up).then_some(())
+        });
+        drop(lock);
+        let run = Run::from(cli.wait_with_output().expect("waiting on agentdeck"));
+
+        assert!(run.success, "{}", run.stderr);
+        let info = env.daemon_info().expect("daemon.json after the command");
+        assert_ne!(info.pid, stale.pid);
+        assert!(alive(info.pid), "the daemon it started isn't running");
+    }
+}
+
 /// Rewrites the running daemon's `daemon.json` without `api_version`, as a daemon from before
 /// it existed wrote it.
 fn make_older(env: &TestEnv) -> DaemonInfo {
@@ -323,12 +358,9 @@ mod daemon_started_by_a_long_lived_client {
     fn should_start_a_fresh_daemon_on_the_next_connect() {
         let env = TestEnv::new();
         let (mut mcp, old) = started(&env);
+        // Connecting at once, while the killed daemon may still hold its lock: the daemon
+        // the call starts waits for it.
         kill(old.pid);
-        // Exited, reaped or not: until then its lock may still be held, and the daemon the
-        // next call starts would lose the race for it.
-        eventually("the killed daemon to exit", || {
-            matches!(process_state(old.pid), None | Some('Z')).then_some(())
-        });
 
         mcp.call_ok("prs_status", json!({}));
 
