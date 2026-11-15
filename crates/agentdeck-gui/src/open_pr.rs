@@ -31,7 +31,10 @@ pub fn openable(url: &str) -> bool {
 /// a toast "Couldn't open the PR" when the handler can't start.
 pub fn open(url: &str, window: &mut Window, cx: &mut App) {
     if !openable(url) {
-        tracing::debug!(url, "refused to open a PR link that isn't a GitHub https URL");
+        tracing::debug!(
+            url,
+            "refused to open a PR link that isn't a GitHub https URL"
+        );
         return;
     }
     let argv = open::url_argv(url);

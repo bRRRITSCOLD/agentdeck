@@ -1,7 +1,8 @@
 //! The task sheet (spec §11), Penpot "Screens" → "Task sheet": a right-side `Sheet` on one task.
 //! Its header names the task and who is on it; its body (Penpot `agentdeck/TaskSheetBody`)
-//! holds the status picker and where the task lives, its description, its PR, and the comment
-//! thread, oldest first; its footer (`agentdeck/CommentComposer`) writes a comment for the
+//! holds the status picker and where the task lives, its description, its PR (its reference a
+//! link to the PR on GitHub, Penpot "Task sheet · PR link"), and the comment thread, oldest
+//! first; its footer (`agentdeck/CommentComposer`) writes a comment for the
 //! task's agent. Enter is a newline there; Ctrl+Enter or **Comment** sends.
 //!
 //! While no agent works on the task, the status row ends in **Start agent**, which closes the
@@ -18,9 +19,9 @@ use agentdeck_client::types::{Comment, Task};
 use agentdeck_core::ws::{Entity as Changed, ServerMessage};
 use agentdeck_core::{Agent, AgentState, CommentAuthor, TaskId, TaskStatus, WorkspaceId};
 use brrritscold_core_gpui::{
-    ActiveTheme as _, Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, DialogHandle, Select,
-    SelectTrigger, Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle,
-    Textarea, TextareaState, Tooltip, TooltipContent,
+    ActiveTheme as _, Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, DialogHandle, Icon,
+    IconName, Select, SelectTrigger, Sheet, SheetContent, SheetDescription, SheetFooter,
+    SheetHeader, SheetTitle, Textarea, TextareaState, Tooltip, TooltipContent,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use chrono::{DateTime, Utc};
@@ -36,6 +37,7 @@ use crate::api::Api;
 use crate::connection::{Connection, DaemonEvent};
 use crate::keymap::{self, Submit};
 use crate::new_agent::AGENTS;
+use crate::open_pr;
 use crate::overview::{Snapshot, ago};
 use crate::pane_header;
 use crate::rereads::Rereads;
@@ -548,20 +550,14 @@ impl TaskSheet {
     }
 }
 
-/// The PR line: its reference (sm, muted), a draft badge, its checks and its review. Running
-/// checks turn only while `spin`.
+/// The PR line (Penpot `TaskSheetBody` → `PR`): its reference as a link to the PR, a draft
+/// badge, its checks and its review. Running checks turn only while `spin`.
 fn pr_line(pr: &PrCell, spin: bool, cx: &App) -> AnyElement {
-    let s = cx.theme().semantic();
     div()
         .flex()
         .items_center()
         .gap(space::S2)
-        .child(
-            div()
-                .text_size(font_size::SM)
-                .text_color(s.muted_foreground)
-                .child(pr.reference.clone()),
-        )
+        .child(pr_link(pr, cx))
         .when(pr.draft, |line| {
             line.child(Badge::new().variant(BadgeVariant::Outline).label("draft"))
         })
@@ -571,6 +567,33 @@ fn pr_line(pr: &PrCell, spin: bool, cx: &App) -> AnyElement {
         .when_some(pr.review, |line, state| {
             line.child(task_row::review(state, cx))
         })
+        .into_any_element()
+}
+
+/// Penpot `PR` → `Link`: the PR's reference (sm), `primary` and underlined on hover as
+/// core-gpui's link button is, then a 12px `ExternalLink` `space.1` after it. A click opens
+/// the PR's stored `url` on GitHub (spec §11, Opening PRs). Tests find it as
+/// `task sheet pr link`.
+fn pr_link(pr: &PrCell, cx: &App) -> AnyElement {
+    let s = cx.theme().semantic();
+    let url = pr.url.clone();
+    div()
+        .id("task-sheet-pr-link")
+        .debug_selector(|| "task sheet pr link".into())
+        .flex()
+        .items_center()
+        .gap(space::S1)
+        .text_size(font_size::SM)
+        .text_color(s.primary)
+        .cursor_pointer()
+        .hover(|style| style.underline())
+        .on_click(move |_, window, cx| open_pr::open(&url, window, cx))
+        .child(pr.reference.clone())
+        .child(
+            Icon::new(IconName::ExternalLink)
+                .size(px(12.))
+                .text_color(s.primary),
+        )
         .into_any_element()
 }
 
@@ -1310,6 +1333,86 @@ mod tests {
 
                 assert_eq!(*asked.borrow(), []);
                 assert!(harness.sheet.read_with(cx, |s, _| s.is_open()));
+            }
+        }
+
+        mod pr_link {
+            use super::*;
+            use crate::overview::fixtures::pr_task;
+            use crate::terminal::open::fake::{self, FakeSpawn};
+
+            /// The sheet opened on task 10 as a PR whose stored `url` is `url`, with a fake
+            /// opener.
+            fn open_with<'a>(
+                url: &str,
+                cx: &'a mut TestAppContext,
+            ) -> (Harness, Arc<FakeSpawn>, &'a mut VisualTestContext) {
+                let (harness, cx) = Harness::new(Vec::new(), cx);
+                let opener = cx.update(|_, cx| fake::install(cx));
+                let mut snapshot = snapshot();
+                let ws = snapshot.workspaces[0].id;
+                let mut pr_task = pr_task(10, "acme/widgets", PrState::Open, Some(ws));
+                if let Some(pr) = pr_task.pr.as_mut() {
+                    pr.url = url.into();
+                }
+                snapshot.tasks = vec![pr_task];
+                cx.update(|window, cx| {
+                    (harness.sheet).update(cx, |s, cx| s.open(id(10), snapshot, window, cx));
+                });
+                harness.settle(cx);
+                (harness, opener, cx)
+            }
+
+            fn click(harness: &Harness, cx: &mut VisualTestContext) {
+                let link = cx
+                    .debug_bounds("task sheet pr link")
+                    .expect("the PR link shows");
+                cx.simulate_click(link.center(), Modifiers::default());
+                harness.settle(cx);
+            }
+
+            #[gpui::test]
+            fn should_open_the_prs_stored_url(cx: &mut TestAppContext) {
+                let url = "https://github.com/acme/widgets/pull/10";
+                let (harness, opener, cx) = open_with(url, cx);
+
+                click(&harness, cx);
+
+                assert_eq!(
+                    *opener.started.lock().unwrap(),
+                    [["xdg-open".to_owned(), url.to_owned()]]
+                );
+            }
+
+            #[gpui::test]
+            fn should_open_nothing_for_a_url_off_github(cx: &mut TestAppContext) {
+                let (harness, opener, cx) = open_with("https://evil.io/acme/widgets/pull/10", cx);
+
+                click(&harness, cx);
+
+                assert!(opener.started.lock().unwrap().is_empty());
+            }
+
+            #[gpui::test]
+            fn should_toast_when_the_handler_cant_start(cx: &mut TestAppContext) {
+                let (harness, opener, cx) =
+                    open_with("https://github.com/acme/widgets/pull/10", cx);
+                *opener.failure.lock().unwrap() = Some("No such file or directory".into());
+
+                click(&harness, cx);
+
+                let shown = cx.update(|_, cx| crate::notice::shown(cx));
+                assert_eq!(
+                    shown.last().map(|n| n.title.as_ref()),
+                    Some("Couldn't open the PR")
+                );
+            }
+
+            #[gpui::test]
+            fn should_show_no_link_for_a_plain_task(cx: &mut TestAppContext) {
+                let (_harness, cx) = Harness::open(Vec::new(), cx);
+
+                assert!(cx.debug_bounds("task sheet pr link").is_none());
             }
         }
 

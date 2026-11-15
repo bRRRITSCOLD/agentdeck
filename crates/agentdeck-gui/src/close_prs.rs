@@ -634,8 +634,8 @@ pub fn row_parts(close: &Entity<ClosePrs>, row: &Row, cx: &App) -> RowParts {
     let error = state.selection.error(task).cloned();
     let entries = menu_entries(row);
     let menu = (!entries.is_empty()).then(|| {
-        let content = (entries.into_iter()).fold(DropdownMenuContent::new(), |content, entry| {
-            match entry {
+        let content =
+            (entries.into_iter()).fold(DropdownMenuContent::new(), |content, entry| match entry {
                 MenuEntry::OpenOnGitHub(url) => content.item(
                     DropdownMenuItem::new("Open on GitHub")
                         .on_click(move |_, window, cx| open_pr::open(&url, window, cx)),
@@ -652,8 +652,7 @@ pub fn row_parts(close: &Entity<ClosePrs>, row: &Row, cx: &App) -> RowParts {
                             }),
                     )
                 }
-            }
-        });
+            });
         div()
             .debug_selector(move || format!("{id} menu {task}"))
             .child(
