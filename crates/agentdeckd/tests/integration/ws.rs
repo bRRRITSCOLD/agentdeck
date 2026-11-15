@@ -226,6 +226,7 @@ mod get_v1_ws {
                 .body(agentdeck_client::types::PaneInput {
                     text: "after\r".into(),
                     when: agentdeck_client::types::InputWhen::Now,
+                    submit: false,
                 })
                 .send()
                 .await

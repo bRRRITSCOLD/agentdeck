@@ -3,12 +3,40 @@
 
 use agentdeck_client::instructions::send_instruction;
 use agentdeck_client::types::NewInstruction;
+use agentdeck_core::{Agent, AgentState};
 
 use crate::support::TestDaemon;
-use crate::support::terminal::{Place, printed, sh};
+use crate::support::agents::typed;
+use crate::support::terminal::{Place, eventually, in_state, printed, sh};
 
 mod send_instruction {
     use super::*;
+
+    #[tokio::test]
+    async fn should_submit_it_to_an_agent_that_reads_text_typed_with_its_enter_as_a_paste() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let pane = place.launch(&daemon.client, Agent::Claude, None).await;
+        in_state(&daemon.client, pane.id, AgentState::Idle).await;
+
+        send_instruction(
+            &daemon.client,
+            "Keep the arrow keys in TabsList\nand test them\n",
+            pane.id,
+        )
+        .await
+        .expect("send the instruction");
+
+        eventually("the agent to submit the instruction", || async {
+            let typed = typed(&daemon, pane.id);
+            (!typed.is_empty()).then_some(typed)
+        })
+        .await;
+        assert_eq!(
+            typed(&daemon, pane.id),
+            "Keep the arrow keys in TabsList\nand test them\n"
+        );
+    }
 
     #[tokio::test]
     async fn should_type_the_instruction_with_enter_now_and_keep_it() {

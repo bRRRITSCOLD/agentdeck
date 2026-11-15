@@ -477,7 +477,10 @@ pub mod types {
     ///`POST /v1/panes/{id}/input`.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct PaneInput {
-        ///Typed into the terminal as is; end it with `\r` to press Enter.
+        ///Submits `text` as a message: types it as one bracketed paste when the program turned bracketed paste on (else as is), then presses Enter in a write of its own, after a pause. Claude Code and Codex read text arriving with its Enter as a paste and keep the Enter as a newline. False when absent.
+        #[serde(default)]
+        pub submit: bool,
+        ///Typed into the terminal as is, unless `submit`.
         pub text: ::std::string::String,
         ///`now` when absent.
         #[serde(default = "defaults::pane_input_when")]
@@ -2701,18 +2704,30 @@ pub mod types {
         }
         #[derive(Clone, Debug)]
         pub struct PaneInput {
+            submit: ::std::result::Result<bool, ::std::string::String>,
             text: ::std::result::Result<::std::string::String, ::std::string::String>,
             when: ::std::result::Result<super::InputWhen, ::std::string::String>,
         }
         impl ::std::default::Default for PaneInput {
             fn default() -> Self {
                 Self {
+                    submit: Ok(Default::default()),
                     text: Err("no value supplied for text".to_string()),
                     when: Ok(super::defaults::pane_input_when()),
                 }
             }
         }
         impl PaneInput {
+            pub fn submit<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<bool>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.submit = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for submit: {e}"));
+                self
+            }
             pub fn text<T>(mut self, value: T) -> Self
             where
                 T: ::std::convert::TryInto<::std::string::String>,
@@ -2740,6 +2755,7 @@ pub mod types {
                 value: PaneInput,
             ) -> ::std::result::Result<Self, super::error::ConversionError> {
                 Ok(Self {
+                    submit: value.submit?,
                     text: value.text?,
                     when: value.when?,
                 })
@@ -2748,6 +2764,7 @@ pub mod types {
         impl ::std::convert::From<super::PaneInput> for PaneInput {
             fn from(value: super::PaneInput) -> Self {
                 Self {
+                    submit: Ok(value.submit),
                     text: Ok(value.text),
                     when: Ok(value.when),
                 }
@@ -4639,7 +4656,7 @@ impl Client {
     pub fn pane_update(&self) -> builder::PaneUpdate<'_> {
         builder::PaneUpdate::new(self)
     }
-    ///Types text into the pane: now, or once it is idle, done or blocked (`when: "idle"`)
+    ///Types text into the pane, as is or submitted (`submit`), now or once it is idle (`when`)
     ///
     ///Sends a `POST` request to `/v1/panes/{id}/input`
     ///

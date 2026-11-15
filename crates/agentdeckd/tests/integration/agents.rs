@@ -93,13 +93,24 @@ async fn link(client: &Client, pane: PaneId, task: Option<TaskId>) {
         .expect("link the pane");
 }
 
+/// Types `text` into `pane` at once, as is.
 async fn type_now(client: &Client, pane: PaneId, text: &str) {
+    input_now(client, pane, text, false).await;
+}
+
+/// Submits `text` to `pane` at once: typed, then Enter.
+async fn submit_now(client: &Client, pane: PaneId, text: &str) {
+    input_now(client, pane, text, true).await;
+}
+
+async fn input_now(client: &Client, pane: PaneId, text: &str, submit: bool) {
     client
         .pane_input()
         .id(pane)
         .body(PaneInput {
             text: text.into(),
             when: InputWhen::Now,
+            submit,
         })
         .send()
         .await
@@ -321,12 +332,12 @@ mod comment_delivery {
         pane
     }
 
-    /// Types a marker into `pane` and returns everything typed into it once the marker has
+    /// Submits a marker to `pane` and returns everything typed into it once the marker has
     /// reached its stub. A comment is marked delivered once its bytes are queued for the
     /// pane's writer, before the stub has read them; the writer types in order, so anything
     /// delivered before the marker was typed has arrived ahead of it.
     async fn typed_through_marker(daemon: &TestDaemon, pane: PaneId) -> String {
-        type_now(&daemon.client, pane, "marker\r").await;
+        submit_now(&daemon.client, pane, "marker").await;
         eventually("the marker to be typed", || async {
             let typed = typed(daemon, pane);
             typed.ends_with("marker\n").then_some(typed)
@@ -576,11 +587,9 @@ mod resume_after_restart {
         let resumed = in_state(&daemon.client, claude.id, AgentState::Idle).await;
         assert_eq!(resumed.session_id.as_deref(), Some(claude_session.as_str()));
         assert_eq!(resumed.argv, claude.argv, "argv stays as first launched");
-        type_now(&daemon.client, claude.id, "still here\r").await;
+        submit_now(&daemon.client, claude.id, "still here").await;
         eventually("input to reach the resumed claude", || async {
-            typed(&daemon, claude.id)
-                .contains("still here")
-                .then_some(())
+            (typed(&daemon, claude.id) == "still here\n").then_some(())
         })
         .await;
     }
@@ -628,6 +637,7 @@ mod resume_after_restart {
                 .body(PaneInput {
                     text: "x".into(),
                     when: InputWhen::Now,
+                    submit: false,
                 })
                 .send()
                 .await,
