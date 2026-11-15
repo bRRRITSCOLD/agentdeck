@@ -2,6 +2,10 @@
 //! chooses, so the daemon finds the one it chose: Codex records each session in
 //! `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<timestamp>-<session id>.jsonl`, and a new
 //! pane's session is the newest such file that wasn't there when the pane launched.
+//!
+//! Checked against codex-cli 0.169.0 on 2026-11-14: it writes that file once the first
+//! prompt is sent (none for a session that never gets one), its id is a UUIDv7, and it is the
+//! id `codex resume` takes and Codex prints on exit.
 
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString};
@@ -198,6 +202,13 @@ mod tests {
         fn should_read_the_uuid_after_the_timestamp() {
             let name = format!("rollout-2025-05-07T17-24-21-{ID}.jsonl");
             assert_eq!(session_id(&name).as_deref(), Some(ID));
+        }
+
+        #[test]
+        fn should_read_the_v7_uuid_codex_0_169_0_writes() {
+            let id = "019a8a1c-5b0e-7d3f-9c41-2f6e8b7a1d05";
+            let name = format!("rollout-2026-11-14T17-05-55-{id}.jsonl");
+            assert_eq!(session_id(&name).as_deref(), Some(id));
         }
 
         #[test]

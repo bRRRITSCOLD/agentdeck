@@ -229,7 +229,20 @@ min_ms = 400                   # a new state must hold this long before it is pu
 - **Exit:** a dead process is `exited`, whatever the rules say.
 - **No match:** the state is `unknown`, unless the pane has produced output in the last 2 s, in which case it is `working`.
 - **v1 ships rules for `claude` and `codex`.** The spike captured `claude`'s title and dialog patterns; `codex`'s rules come from recorded sessions.
-- **Tests:** every rule set has unit tests that feed **recorded terminal output** (`tests/fixtures/<agent>/*.bytes` plus the expected state) through a `Term`.
+- **`codex`** (from codex-cli 0.169.0, recorded at 120×40; foreground process `codex`):
+  - OSC 7501 carries every state: `state=idle` at a fresh prompt, `working` while it thinks, streams or runs a command, `done` when a turn finishes, `blocked` (`kind=permission`) on an approval prompt, and `clear` on exit. The rules map `blocked`, `working`, and `idle`/`done`/`error` straight across.
+  - Two dialogs are read from the screen, ahead of OSC 7501, by the key hint on the bottom non-blank row (`bottom:1`), which model output can't reach because the footer holds it otherwise:
+    - the approval prompt (`Would you like to run the following command?` … `Press enter to confirm or esc to cancel`), should OSC 7501 not flag it;
+    - the folder trust dialog (`Trust this folder?` … `enter continue · esc back`), which comes before any OSC 7501.
+  - The OSC 0 title is the folder name, with a Braille spinner in front while working and `[ ! ] Action Required |` in front when blocked. Users can choose what the title shows, so no rule reads it. Codex sends no OSC 9;4.
+  - After `/exit` it sends OSC 7501 `clear` and prints `codex resume <session id>`; no rule matches, and the process exit publishes `exited`.
+- **Tests:** every rule set has unit tests that feed **recorded terminal output** (`tests/fixtures/<agent>/*.bytes` plus the expected state) through a `Term`. `claude`'s fixtures are hand-authored stand-ins until it is recorded.
+- **Recording fixtures:** `script/record-pty.py --out DIR --steps FILE -- <argv>` runs the CLI in a 120×40 PTY with `TERM=xterm-256color`, answers the terminal queries a TUI waits on, types what a steps file says (`wait <regex>`, `sleep`, `send`, `mark <name>`, `end`), and writes the raw bytes since each `mark` to `<name>.bytes`, with each mark's foreground process and OSC sequences in `marks.log`. Each fixture continues the one before it, so a test feeds a chain in order. To re-record `codex`, run the `*.steps` files beside its fixtures, each of which names its flags:
+  - Run it in a throwaway git repo (`mktemp -d /tmp/agentdeck-codex-XXXXXX`: no `.` in the path, since `-c` splits its key on dots), never a real one, with trivial prompts; it uses the account's quota.
+  - Pass everything as flags; don't edit `~/.codex/config.toml`. `-a on-request -s read-only` plus a prompt asking for a command with escalated permissions forces an approval prompt (0.169.0 dropped `untrusted`). `-c 'projects.<dir>.trust_level="trusted"'` skips the trust dialog; the quoted TOML key form doesn't. Record the trust dialog with no flags and end it without answering, since answering saves the choice to `config.toml`.
+  - Sleep a second before sending Enter, or Codex takes the text and the Enter as one paste.
+  - Wait on text the prompt itself doesn't contain.
+  - Scrub before committing: the temp dir's random suffix (also where the renderer split it with a cursor move), session ids (to `00000000-0000-7000-8000-000000000001`), and any home path, user or account name. Keep the bytes otherwise as recorded; trimming is only cutting a chain's last fixture at a frame end (`ESC [ ? 2026 l`).
 
 ## 8. PR sync
 

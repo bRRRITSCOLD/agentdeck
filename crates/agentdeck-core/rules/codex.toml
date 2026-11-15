@@ -1,0 +1,45 @@
+# Codex's state rules (spec §7). First match wins; every condition a rule names must hold.
+#
+# Source: sessions of codex-cli 0.169.0 recorded at 120×40 with `script/record-pty.py`; the
+# fixtures are in `tests/fixtures/codex/`. What they show:
+# - OSC 7501 for every state: `state=idle` at a fresh prompt, `working` while it thinks or
+#   runs a command, `done` when a turn finishes, `blocked` (with `kind=permission`) on an
+#   approval prompt, and `clear` on exit. These rules lean on it.
+# - The OSC 0 title is the folder name, behind a Braille spinner while working and
+#   `[ ! ] Action Required |` when blocked. Users can choose what the title shows, so no rule
+#   reads it.
+# - No OSC 9;4.
+# - The folder trust dialog comes before any OSC 7501, so only its screen text shows it.
+
+agent = "codex"
+# The npm and native installs both run as `codex`.
+process = ["codex"]
+
+# Dialogs end in a key hint on the bottom row. Model output can't reach that row, which the
+# footer holds whenever no dialog is up, so quoting a dialog in a reply doesn't match.
+# The approval prompt, should OSC 7501 not flag it.
+[[rule]]
+state = "blocked"
+rows = "bottom:1"
+contains = ["Press enter to confirm or esc to cancel"]
+
+# The folder trust dialog.
+[[rule]]
+state = "blocked"
+rows = "bottom:1"
+contains = ["enter continue · esc back"]
+
+[[rule]]
+state = "blocked"
+program_status = ["blocked"]
+
+[[rule]]
+state = "working"
+program_status = ["working"]
+
+[[rule]]
+state = "idle"
+program_status = ["idle", "done", "error"]
+
+[settle]
+min_ms = 400

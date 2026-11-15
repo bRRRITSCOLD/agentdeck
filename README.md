@@ -20,6 +20,7 @@ cargo test-unit             # one tier; `cargo test-integration` for the other
 cargo run -p agentdeck-gui  # the GUI
 cargo xtask openapi         # rewrite openapi.json after changing the daemon's API
 cargo xtask client          # then regenerate agentdeck-client from it
+script/record-pty.py        # record an agent CLI's output as state-rule fixtures (spec §7)
 ```
 
 | Crate | Kind | |

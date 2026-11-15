@@ -1,0 +1,6 @@
+# Writes trust-dialog.bytes. In a fresh throwaway git repo, with no flags, so Codex asks:
+#   script/record-pty.py --out DIR --steps trust-dialog.steps -- codex
+# Ends without answering: answering saves the choice to ~/.codex/config.toml.
+sleep 8
+mark trust-dialog
+end
