@@ -82,6 +82,8 @@ pub struct SidebarView {
     picked: Option<Selection>,
     /// Whether the Archived group is unfolded; it shows anyway while it holds the selection.
     archived_open: bool,
+    /// Whether the list still has to scroll the picked workspace's row into view.
+    reveal: bool,
     /// The last read started.
     read: Option<Task<()>>,
     rereads: Rereads,
@@ -119,6 +121,7 @@ impl SidebarView {
             error: None,
             picked: None,
             archived_open: false,
+            reveal: false,
             read: None,
             rereads: Rereads::default(),
             prs: PrBatch::default(),
@@ -174,10 +177,53 @@ impl SidebarView {
         &self.overview
     }
 
-    /// Selects `selection`. A workspace not read yet is selected once a read shows it.
+    /// Selects `selection` and scrolls its row into view. A workspace not read yet is
+    /// selected, and scrolled to, once a read shows it.
     pub fn select(&mut self, selection: Selection, cx: &mut Context<Self>) {
         self.picked = Some(selection);
+        self.reveal = true;
         cx.notify();
+    }
+
+    /// Where the picked workspace's row sits in the list, while it shows.
+    fn picked_item(&self) -> Option<usize> {
+        let Some(Selection::Workspace(picked)) = self.picked else {
+            return None;
+        };
+        let rows = &self.overview.workspaces;
+        if let Some(ix) = rows.iter().position(|w| w.id == picked) {
+            return Some(ix);
+        }
+        let archived = self.overview.archived.iter().position(|w| w.id == picked)?;
+        self.archived_shown().then_some(rows.len() + 1 + archived)
+    }
+
+    /// Scrolls the picked workspace's row into view, unless it is wholly in view already: a
+    /// click on a row in view never moves the list. It waits while the picked workspace isn't
+    /// read yet, and for a frame after `relisted`, until the list has measured the rows it
+    /// gained.
+    fn reveal_picked(&mut self, relisted: bool, window: &mut Window) {
+        if !self.reveal {
+            return;
+        }
+        if !matches!(self.picked, Some(Selection::Workspace(_))) {
+            self.reveal = false;
+            return;
+        }
+        let Some(ix) = self.picked_item() else {
+            return;
+        };
+        if relisted {
+            window.request_animation_frame();
+            return;
+        }
+        self.reveal = false;
+        let view = self.list.viewport_bounds();
+        let in_view = (self.list.bounds_for_item(ix))
+            .is_some_and(|row| row.top() >= view.top() && row.bottom() <= view.bottom());
+        if !in_view {
+            self.list.scroll_to_reveal_item(ix);
+        }
     }
 
     fn on_event(&mut self, event: &DaemonEvent, cx: &mut Context<Self>) {
@@ -223,11 +269,23 @@ impl SidebarView {
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(snapshot) => {
+                        // Archived or brought back, the picked workspace moves to the other
+                        // group: follow it there.
+                        let archived = |overview: &Overview| match this.picked {
+                            Some(Selection::Workspace(id)) => {
+                                overview.workspace(id).map(|w| w.archived)
+                            }
+                            _ => None,
+                        };
+                        let before = archived(&this.overview);
                         let mut alerts = notifications::pane_alerts(&this.snapshot, &snapshot);
                         alerts.extend(this.prs.read(&this.snapshot, &snapshot));
                         this.overview = snapshot.overview();
                         this.snapshot = snapshot;
                         this.error = None;
+                        if before.is_some() && archived(&this.overview) != before {
+                            this.reveal = true;
+                        }
                         if !alerts.is_empty() {
                             cx.emit(Alerts(alerts));
                         }
@@ -458,10 +516,12 @@ impl Render for SidebarView {
             cx,
         );
         let items = self.items();
-        if items != self.listed {
+        let relisted = items != self.listed;
+        if relisted {
             task_row::relist(&self.list, items.count);
             self.listed = items;
         }
+        self.reveal_picked(relisted, window);
         let footer = match &self.error {
             Some(error) => error.clone(),
             None => self.overview.pr_sync.label(chrono::Utc::now()).into(),
@@ -1231,6 +1291,99 @@ mod tests {
             assert!(open.shows("row old"));
             open.click("row old");
             assert_eq!(open.selection(), Selection::Workspace(id(61)));
+        }
+
+        /// Plays the frame after this one, then draws it.
+        fn next_frame(open: &mut Open) {
+            open.cx.update(|window, cx| window.simulate_next_frame(cx));
+            open.settle();
+        }
+
+        /// Selects `selection` from outside the list, as the window does, then plays the frame
+        /// after: a reveal waits a frame for the heights of rows the selection brought in.
+        fn select_from_outside(open: &mut Open, selection: Selection) {
+            (open.sidebar).update(open.cx, |sidebar, cx| sidebar.select(selection, cx));
+            open.settle();
+            next_frame(open);
+        }
+
+        /// Whether the row `selector` sits wholly inside the list.
+        fn wholly_in_view(open: &mut Open, selector: &'static str) -> bool {
+            let list = open.cx.debug_bounds("workspaces").expect("the list");
+            (open.cx.debug_bounds(selector))
+                .is_some_and(|row| row.top() >= list.top() && row.bottom() <= list.bottom())
+        }
+
+        #[gpui::test]
+        fn should_scroll_a_workspace_selected_from_outside_into_view(cx: &mut TestAppContext) {
+            let mut open = open(crowded(), cx);
+
+            select_from_outside(&mut open, Selection::Workspace(id(60)));
+
+            assert!(wholly_in_view(&mut open, "row w60"));
+        }
+
+        #[gpui::test]
+        fn should_scroll_to_a_new_workspace_once_a_read_shows_it(cx: &mut TestAppContext) {
+            let mut open = open(crowded(), cx);
+            select_from_outside(&mut open, Selection::Workspace(id(62)));
+            let mut more = crowded();
+            more.workspaces.push(workspace(62, "w62"));
+            open.api.set(more);
+
+            open.send(ServerMessage::Changed {
+                entity: Changed::Workspace,
+                id: id::<WorkspaceId>(62).to_string(),
+            });
+            next_frame(&mut open);
+
+            assert!(wholly_in_view(&mut open, "row w62"));
+        }
+
+        #[gpui::test]
+        fn should_open_the_archived_group_onto_an_archived_workspace_selected_from_outside(
+            cx: &mut TestAppContext,
+        ) {
+            let mut open = open(crowded(), cx);
+
+            select_from_outside(&mut open, Selection::Workspace(id(61)));
+
+            assert!(wholly_in_view(&mut open, "row old"));
+        }
+
+        #[gpui::test]
+        fn should_scroll_to_the_selected_workspace_once_it_is_archived(cx: &mut TestAppContext) {
+            let mut open = open(crowded(), cx);
+            select_from_outside(&mut open, Selection::Workspace(id(1)));
+            let mut archived = crowded();
+            archived.workspaces[0].archived_at = Some("2026-11-14T00:00:00Z".into());
+            open.api.set(archived);
+
+            open.send(ServerMessage::Changed {
+                entity: Changed::Workspace,
+                id: id::<WorkspaceId>(1).to_string(),
+            });
+            next_frame(&mut open);
+
+            assert!(wholly_in_view(&mut open, "row w01"));
+        }
+
+        #[gpui::test]
+        fn should_not_scroll_for_a_click_on_a_row_in_view(cx: &mut TestAppContext) {
+            let mut open = open(crowded(), cx);
+            // Part of the way down a row, so the top row is cut off.
+            wheel(&mut open, 50.);
+            let last = (1..=60)
+                .map(|n| -> &'static str { format!("row w{n:02}").leak() })
+                .filter(|row| wholly_in_view(&mut open, row))
+                .last()
+                .expect("a row in view");
+            let before = open.cx.debug_bounds(last);
+
+            open.click(last);
+            next_frame(&mut open);
+
+            assert_eq!(open.cx.debug_bounds(last), before);
         }
 
         #[gpui::test]
