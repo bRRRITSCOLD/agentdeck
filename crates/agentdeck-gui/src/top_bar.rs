@@ -1,10 +1,11 @@
 //! Penpot `Centre / TopBar`: the selected workspace's name and directory, above its tabs
 //! (spec §11).
 //!
-//! Its New agent button opens the new agent dialog, its `…` menu mutes or unmutes the
-//! workspace's notifications, archives it or opens the Delete workspace dialog, and its panel
-//! button toggles the right panel, all as actions the window handles. An archived workspace's bar has Unarchive in place of New
-//! agent, and its menu only Delete.
+//! Its New agent button opens the new agent dialog, its `…` menu opens the Edit workspace
+//! dialog, mutes or unmutes the workspace's notifications, archives it or opens the Delete
+//! workspace dialog, and its panel button toggles the right panel, all as actions the window
+//! handles. An archived workspace's bar has Unarchive in place of New agent, and its menu only
+//! Edit and Delete.
 
 use std::path::Path;
 
@@ -25,6 +26,8 @@ use crate::new_agent::NewAgent;
 actions!(
     agentdeck,
     [
+        /// Opens the Edit workspace dialog on the workspace shown.
+        EditWorkspace,
         /// Archives the workspace shown.
         ArchiveWorkspace,
         /// Brings the archived workspace shown back.
@@ -177,13 +180,15 @@ fn outline(name: &'static str, label: &'static str, action: impl Action) -> impl
 }
 
 /// Penpot `WorkspaceMenu`: a ghost icon-sm `Ellipsis` button opening the workspace's actions:
-/// Mute notifications (Unmute notifications once `muted`), Archive workspace, a separator and
-/// the destructive Delete workspace…; only Delete once the workspace is `archived`.
+/// Edit workspace…, Mute notifications (Unmute notifications once `muted`), Archive workspace,
+/// a separator and the destructive Delete workspace…; only Edit and Delete once the workspace
+/// is `archived`.
 fn menu(archived: bool, muted: bool) -> impl IntoElement {
     let item = |label: &'static str, action: Box<dyn Action>| {
         DropdownMenuItem::new(label)
             .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
     };
+    let edit = item("Edit workspace…", Box::new(EditWorkspace));
     let delete = item("Delete workspace…", Box::new(DeleteWorkspace))
         .variant(DropdownMenuItemVariant::Destructive);
     let mute = match muted {
@@ -192,11 +197,15 @@ fn menu(archived: bool, muted: bool) -> impl IntoElement {
     };
     let content = match archived {
         false => DropdownMenuContent::new()
+            .item(edit)
             .item(mute)
             .item(item("Archive workspace", Box::new(ArchiveWorkspace)))
             .separator(DropdownMenuSeparator::new())
             .item(delete),
-        true => DropdownMenuContent::new().item(delete),
+        true => DropdownMenuContent::new()
+            .item(edit)
+            .separator(DropdownMenuSeparator::new())
+            .item(delete),
     };
     div().debug_selector(|| "workspace menu".into()).child(
         DropdownMenu::new("workspace-menu")
