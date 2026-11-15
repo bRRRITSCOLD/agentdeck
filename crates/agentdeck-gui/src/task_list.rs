@@ -43,6 +43,8 @@ pub struct PrCell {
     pub checks: Option<ChecksState>,
     /// Its review, once known.
     pub review: Option<ReviewState>,
+    /// Its GitHub page, as stored: what Open on GitHub and the task sheet's link open.
+    pub url: SharedString,
 }
 
 /// One task's row.
@@ -65,7 +67,8 @@ pub struct Row {
     /// Whether an agent commented on it since the user last opened it: the row's unseen mark.
     pub unseen: bool,
     /// Whether its PR can be closed from here: a PR task whose PR is stored open, aged out or
-    /// not (spec §11, Closing PRs). Only such a row is selectable and has a menu.
+    /// not (spec §11, Closing PRs). Only such a row is selectable, and only its menu holds
+    /// Close PR….
     pub closable: bool,
 }
 
@@ -164,6 +167,7 @@ fn row(snapshot: &Snapshot, task: &Task) -> Row {
             draft: pr.draft,
             checks: pr.checks,
             review: pr.review,
+            url: pr.url.clone().into(),
         }
     });
     let workspace = task.workspace_id.and_then(|ws| {
@@ -373,7 +377,7 @@ mod tests {
         }
 
         #[test]
-        fn should_name_the_pr_by_repository_and_number() {
+        fn should_name_the_pr_by_repository_and_number_and_keep_its_url() {
             let snapshot = Snapshot {
                 tasks: vec![Task {
                     pr: Some(pr("bRRRITSCOLD/rust-packages", 61)),
@@ -391,6 +395,7 @@ mod tests {
                     draft: true,
                     checks: Some(ChecksState::Failure),
                     review: Some(ReviewState::ChangesRequested),
+                    url: "https://github.com/bRRRITSCOLD/rust-packages/pull/61".into(),
                 })
             );
         }

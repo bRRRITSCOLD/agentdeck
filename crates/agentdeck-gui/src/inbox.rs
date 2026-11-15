@@ -1091,11 +1091,11 @@ mod tests {
         }
 
         #[gpui::test]
-        fn should_put_a_close_menu_only_on_open_pr_rows(cx: &mut TestAppContext) {
+        fn should_put_a_menu_on_every_pr_row_and_none_on_a_plain_one(cx: &mut TestAppContext) {
             let (_harness, cx) = Harness::open(prs(), cx);
 
             assert!(shown_at(row_selector("menu", 1), cx));
-            assert!(!shown_at(row_selector("menu", 2), cx));
+            assert!(shown_at(row_selector("menu", 2), cx));
             assert!(!shown_at(row_selector("menu", 3), cx));
         }
 
@@ -1252,6 +1252,58 @@ mod tests {
 
         mod from_a_rows_menu {
             use super::*;
+
+            /// Opens `task`'s `…` menu and picks its `n`th item by keyboard.
+            fn pick(task: u32, n: usize, cx: &mut VisualTestContext) {
+                click(row_selector("menu", task), cx);
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                cx.simulate_keystrokes(&format!("{}enter", "down ".repeat(n)));
+                cx.run_until_parked();
+            }
+
+            #[gpui::test]
+            fn should_open_a_merged_prs_page_on_github(cx: &mut TestAppContext) {
+                let (_harness, cx) = Harness::open(prs(), cx);
+                let opener = cx.update(|_, cx| crate::terminal::open::fake::install(cx));
+
+                pick(2, 1, cx);
+
+                assert_eq!(
+                    *opener.started.lock().unwrap(),
+                    [[
+                        "xdg-open".to_owned(),
+                        "https://github.com/acme/widgets/pull/2".to_owned()
+                    ]]
+                );
+            }
+
+            #[gpui::test]
+            fn should_open_an_open_prs_page_from_its_first_item(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open(prs(), cx);
+                let opener = cx.update(|_, cx| crate::terminal::open::fake::install(cx));
+
+                pick(1, 1, cx);
+
+                assert_eq!(
+                    *opener.started.lock().unwrap(),
+                    [[
+                        "xdg-open".to_owned(),
+                        "https://github.com/acme/widgets/pull/1".to_owned()
+                    ]]
+                );
+                assert!(!asking(&harness, cx));
+            }
+
+            #[gpui::test]
+            fn should_ask_to_close_from_the_item_after_the_separator(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open(prs(), cx);
+                let opener = cx.update(|_, cx| crate::terminal::open::fake::install(cx));
+
+                pick(1, 2, cx);
+
+                assert!(asking(&harness, cx));
+                assert!(opener.started.lock().unwrap().is_empty());
+            }
 
             fn ask(harness: &Harness, task: u32, cx: &mut VisualTestContext) {
                 let close = harness

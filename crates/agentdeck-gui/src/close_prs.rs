@@ -7,8 +7,13 @@
 //! ([`select_all`]) and the [`selection_bar`] along its bottom edge. The dialog renders with
 //! the [`ClosePrs`] view itself, which the list places as a child.
 //!
-//! Penpot "Screens" → "Inbox · select", "Inbox · row menu", "Inbox · close confirm", "Inbox ·
-//! partial failure" and "Right panel · select"; page-local parts `agentdeck/SelectionBar`,
+//! The row's menu is on every PR row, merged and closed ones too: **Open on GitHub** first
+//! (spec §11, Opening PRs, through [`open_pr`]), then **Close PR…** after a separator when its
+//! PR can close ([`menu_entries`]).
+//!
+//! Penpot "Screens" → "Inbox · select", "Inbox · row menu", "Inbox · row menu · open PR",
+//! "Tasks · row menu · merged PR", "Inbox · close confirm", "Inbox · partial failure" and
+//! "Right panel · select"; page-local parts `agentdeck/SelectionBar`,
 //! `agentdeck/CheckboxIndeterminate` and `agentdeck/ClosePrsList`.
 
 use std::collections::HashMap;
@@ -20,7 +25,7 @@ use brrritscold_core_gpui::{
     ActiveTheme as _, AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
     AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, Button,
     ButtonSize, ButtonVariant, Checkbox, DropdownMenu, DropdownMenuContent, DropdownMenuItem,
-    DropdownMenuItemVariant, Icon, IconName, Separator, Toggle, ToggleSize,
+    DropdownMenuItemVariant, DropdownMenuSeparator, Icon, IconName, Separator, Toggle, ToggleSize,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
@@ -34,6 +39,7 @@ use gpui_base::actions::Confirm;
 
 use crate::api::Api;
 use crate::notice::Notice;
+use crate::open_pr;
 use crate::scrollbar;
 use crate::task_list::Row;
 use crate::task_row::{RowParts, SelectCell};
@@ -191,6 +197,31 @@ impl Target {
             reference: pr.reference.clone(),
         })
     }
+}
+
+/// One entry in a PR row's `…` menu (spec §11, Opening PRs and Closing PRs).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MenuEntry {
+    /// **Open on GitHub**, opening this URL, the PR's.
+    OpenOnGitHub(SharedString),
+    /// A line between the entries.
+    Separator,
+    /// **Close PR…**, asking to close this PR.
+    ClosePr(Target),
+}
+
+/// `row`'s `…` menu, top to bottom: **Open on GitHub** on every PR row, whatever its PR's
+/// state; then, when its PR can close, a separator and **Close PR…**. Empty, so no menu, for
+/// a plain task and for a PR task the sync hasn't filled in.
+pub fn menu_entries(row: &Row) -> Vec<MenuEntry> {
+    let Some(pr) = &row.pr else {
+        return Vec::new();
+    };
+    let mut entries = vec![MenuEntry::OpenOnGitHub(pr.url.clone())];
+    if let Some(target) = Target::of(row) {
+        entries.extend([MenuEntry::Separator, MenuEntry::ClosePr(target)]);
+    }
+    entries
 }
 
 /// Each repo among `targets` and how many of them it holds, most first, then in the order
@@ -571,9 +602,10 @@ pub fn select_all(close: &Entity<ClosePrs>, key: &str, tasks: Vec<TaskId>, cx: &
     )
 }
 
-/// `row`'s `Select` and `Menu` layers and its close error: a checkbox in Select mode and a
-/// `…` menu whose one item, Close PR…, asks to close its PR, both only when its PR can close.
-/// Tests find them as `<id> select <task>` and `<id> menu <task>`.
+/// `row`'s `Select` and `Menu` layers and its close error: a checkbox in Select mode, only when
+/// its PR can close, and on every PR row a `…` menu of its [`menu_entries`]: **Open on
+/// GitHub**, then **Close PR…** after a separator when its PR can close. Tests find them as
+/// `<id> select <task>` and `<id> menu <task>`.
 pub fn row_parts(close: &Entity<ClosePrs>, row: &Row, cx: &App) -> RowParts {
     let state = close.read(cx);
     let id = state.id;
@@ -600,8 +632,28 @@ pub fn row_parts(close: &Entity<ClosePrs>, row: &Row, cx: &App) -> RowParts {
         }
     };
     let error = state.selection.error(task).cloned();
-    let menu = target.map(|target| {
-        let close = close.clone();
+    let entries = menu_entries(row);
+    let menu = (!entries.is_empty()).then(|| {
+        let content = (entries.into_iter()).fold(DropdownMenuContent::new(), |content, entry| {
+            match entry {
+                MenuEntry::OpenOnGitHub(url) => content.item(
+                    DropdownMenuItem::new("Open on GitHub")
+                        .on_click(move |_, window, cx| open_pr::open(&url, window, cx)),
+                ),
+                MenuEntry::Separator => content.separator(DropdownMenuSeparator::new()),
+                MenuEntry::ClosePr(target) => {
+                    let close = close.clone();
+                    content.item(
+                        DropdownMenuItem::new("Close PR…")
+                            .variant(DropdownMenuItemVariant::Destructive)
+                            .on_click(move |_, window, cx| {
+                                let target = target.clone();
+                                close.update(cx, |close, cx| close.ask_one(target, window, cx));
+                            }),
+                    )
+                }
+            }
+        });
         div()
             .debug_selector(move || format!("{id} menu {task}"))
             .child(
@@ -612,16 +664,7 @@ pub fn row_parts(close: &Entity<ClosePrs>, row: &Row, cx: &App) -> RowParts {
                             .size(ButtonSize::IconXs)
                             .icon(IconName::Ellipsis),
                     )
-                    .content(
-                        DropdownMenuContent::new().item(
-                            DropdownMenuItem::new("Close PR…")
-                                .variant(DropdownMenuItemVariant::Destructive)
-                                .on_click(move |_, window, cx| {
-                                    let target = target.clone();
-                                    close.update(cx, |close, cx| close.ask_one(target, window, cx));
-                                }),
-                        ),
-                    ),
+                    .content(content),
             )
             .into_any_element()
     });
@@ -744,6 +787,67 @@ mod tests {
             selection.set(id(*task), true);
         }
         selection
+    }
+
+    mod menu_entries {
+        use agentdeck_core::{PrState, TaskKind};
+
+        use super::*;
+        use crate::overview::Snapshot;
+        use crate::overview::fixtures::{pr_task, task};
+        use crate::task_list::{Query, Scope, rows};
+
+        /// The menu of the one row `task` makes.
+        fn menu(task: agentdeck_client::types::Task) -> Vec<MenuEntry> {
+            let snapshot = Snapshot {
+                tasks: vec![task],
+                ..Snapshot::default()
+            };
+            let query = Query {
+                scope: Scope::All,
+                filter: "",
+                show_done: true,
+            };
+            menu_entries(&rows(&snapshot, &query)[0])
+        }
+
+        fn open_on_github(n: u32) -> MenuEntry {
+            MenuEntry::OpenOnGitHub(format!("https://github.com/acme/widgets/pull/{n}").into())
+        }
+
+        #[test]
+        fn should_offer_open_then_close_on_an_open_pr() {
+            assert_eq!(
+                menu(pr_task(1, "acme/widgets", PrState::Open, None)),
+                [
+                    open_on_github(1),
+                    MenuEntry::Separator,
+                    MenuEntry::ClosePr(Target {
+                        id: id(1),
+                        repo: "widgets".into(),
+                        reference: "widgets #1".into(),
+                    }),
+                ]
+            );
+        }
+
+        #[test]
+        fn should_offer_only_open_on_a_merged_or_closed_pr() {
+            assert_eq!(
+                menu(pr_task(2, "acme/widgets", PrState::Merged, None)),
+                [open_on_github(2)]
+            );
+            assert_eq!(
+                menu(pr_task(3, "acme/widgets", PrState::Closed, None)),
+                [open_on_github(3)]
+            );
+        }
+
+        #[test]
+        fn should_offer_nothing_on_a_plain_task_or_an_unsynced_pr() {
+            assert_eq!(menu(task(4, TaskKind::Plain, None)), []);
+            assert_eq!(menu(task(5, TaskKind::Pr, None)), []);
+        }
     }
 
     mod selection {
