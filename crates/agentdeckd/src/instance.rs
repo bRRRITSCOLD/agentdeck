@@ -1,9 +1,10 @@
 //! One daemon per user: the lock, and the `daemon.json` clients read (spec §2).
 
 use std::fs::{DirBuilder, File, OpenOptions, TryLockError};
-use std::io::Write;
+use std::io::{Read, Write};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use agentdeck_core::DaemonInfo;
@@ -16,6 +17,9 @@ const LOCK_WAIT: Duration = Duration::from_secs(10);
 
 const LOCK_POLL: Duration = Duration::from_millis(25);
 
+/// How long the daemon named in `daemon.json` gets to answer `/v1/health`.
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// Holds the single-instance lock until dropped, and removes `daemon.json` then.
 pub struct Instance {
     _lock: File,
@@ -23,10 +27,10 @@ pub struct Instance {
 }
 
 impl Instance {
-    /// Takes the lock on `$XDG_RUNTIME_DIR/agentdeck/lock`, creating the dir (0700). While
-    /// another daemon holds it with no `daemon.json`, that daemon is shutting down (or still
-    /// starting), so this waits up to [`LOCK_WAIT`] for it. Fails at once when another daemon
-    /// holds it and `daemon.json` exists: that one serves.
+    /// Takes the lock on `$XDG_RUNTIME_DIR/agentdeck/lock`, creating the dir (0700). Fails at
+    /// once when another daemon holds it and the daemon in `daemon.json` answers: that one
+    /// serves. Otherwise the holder is shutting down, still starting, or was killed and is
+    /// still exiting (its `daemon.json` left behind), so this waits up to [`LOCK_WAIT`] for it.
     pub fn acquire(paths: &Paths) -> anyhow::Result<Instance> {
         DirBuilder::new()
             .recursive(true)
@@ -52,7 +56,7 @@ impl Instance {
                     return Err(err).with_context(|| format!("locking {}", lock_path.display()));
                 }
             }
-            if daemon_json.exists() {
+            if serves(&daemon_json) {
                 bail!(
                     "another agentdeckd is running (it holds {})",
                     lock_path.display()
@@ -102,6 +106,35 @@ impl Instance {
             .with_context(|| format!("writing {}", self.daemon_json.display()))?;
         Ok(())
     }
+}
+
+/// Whether `daemon_json` names a daemon that answers `/v1/health` with its token. A missing
+/// or unreadable file, a refused connection and no answer in [`HEALTH_TIMEOUT`] all mean no:
+/// a killed daemon leaves its file behind and holds the lock until its exit closes its files.
+/// The pid needs no check: a process that has exited holds no lock.
+fn serves(daemon_json: &Path) -> bool {
+    std::fs::read_to_string(daemon_json)
+        .ok()
+        .and_then(|text| serde_json::from_str::<DaemonInfo>(&text).ok())
+        .is_some_and(|info| answers_health(&info).unwrap_or(false))
+}
+
+/// `GET /v1/health` over plain HTTP/1.1, before the daemon has a runtime for a real client:
+/// whether the status line is `200`.
+fn answers_health(info: &DaemonInfo) -> std::io::Result<bool> {
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, info.port));
+    let mut stream = TcpStream::connect_timeout(&address, HEALTH_TIMEOUT)?;
+    stream.set_read_timeout(Some(HEALTH_TIMEOUT))?;
+    stream.set_write_timeout(Some(HEALTH_TIMEOUT))?;
+    write!(
+        stream,
+        "GET /v1/health HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\n\
+         Connection: close\r\n\r\n",
+        info.token
+    )?;
+    let mut status_line = [0; 12];
+    stream.read_exact(&mut status_line)?;
+    Ok(status_line.starts_with(b"HTTP/1.") && status_line.ends_with(b" 200"))
 }
 
 impl Drop for Instance {

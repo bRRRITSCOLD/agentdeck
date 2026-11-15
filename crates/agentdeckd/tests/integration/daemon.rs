@@ -1,9 +1,27 @@
 //! The daemon's lifecycle: the lock, `daemon.json`, its files and shutdown (spec §2).
 
 use std::os::unix::fs::PermissionsExt;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use crate::support::{Spawned, TestDaemon, eventually_within, hold_lock};
+use crate::support::{DaemonInfo, Spawned, TestDaemon, eventually_within, hold_lock};
+
+/// A `daemon.json` as a killed daemon leaves it: its pid (this live process stands in) and a
+/// port nothing listens on.
+fn stale_daemon_json() -> String {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("binding a port")
+        .local_addr()
+        .unwrap()
+        .port();
+    serde_json::json!({
+        "port": port,
+        "token": "stale",
+        "pid": std::process::id(),
+        "version": "0.0.0",
+        "api_version": agentdeck_core::API_VERSION,
+    })
+    .to_string()
+}
 
 mod agentdeckd {
     use super::*;
@@ -58,9 +76,15 @@ mod agentdeckd {
         async fn should_refuse_a_second_daemon_while_one_runs() {
             let daemon = TestDaemon::start().await;
 
+            let started = Instant::now();
             let (status, stderr) = daemon.run_another();
 
             assert!(!status.success());
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the second daemon waited {:?} before giving up",
+                started.elapsed()
+            );
             assert!(stderr.contains("another agentdeckd is running"), "{stderr}");
             daemon
                 .client
@@ -91,14 +115,19 @@ mod agentdeckd {
                 daemon
             }
 
-            #[test]
-            fn should_give_up_waiting_once_the_other_daemon_serves() {
+            #[tokio::test]
+            async fn should_give_up_waiting_once_the_other_daemon_serves() {
                 let dirs = tempfile::tempdir().expect("a temp dir");
                 let _lock = hold_lock(dirs.path());
                 let mut daemon = waiting(dirs.path());
+                // A daemon that serves, whose daemon.json the holder of the lock now writes.
+                let serving = TestDaemon::start().await;
 
-                std::fs::write(dirs.path().join("run/agentdeck/daemon.json"), "{}")
-                    .expect("writing daemon.json");
+                std::fs::copy(
+                    serving.runtime_dir().join("daemon.json"),
+                    dirs.path().join("run/agentdeck/daemon.json"),
+                )
+                .expect("writing daemon.json");
                 let status =
                     eventually_within("agentdeckd to give up", Duration::from_secs(2), || {
                         daemon.try_wait()
@@ -114,6 +143,68 @@ mod agentdeckd {
                 let dirs = tempfile::tempdir().expect("a temp dir");
                 let _lock = hold_lock(dirs.path());
                 let mut daemon = waiting(dirs.path());
+
+                let status = eventually_within(
+                    "agentdeckd to stop waiting",
+                    Duration::from_secs(20),
+                    || daemon.try_wait(),
+                );
+
+                assert!(!status.success());
+                let stderr = daemon.stderr();
+                assert!(stderr.contains("hasn't exited after 10s"), "{stderr}");
+            }
+        }
+
+        /// The lock held with a `daemon.json` that answers nothing: a daemon that was killed
+        /// or crashed and hasn't finished exiting, so its file is left but its port is closed.
+        mod held_by_a_daemon_whose_daemon_json_answers_nothing {
+            use super::*;
+
+            #[test]
+            fn should_wait_for_the_lock_then_serve_in_its_place() {
+                let dirs = tempfile::tempdir().expect("a temp dir");
+                let lock = hold_lock(dirs.path());
+                let daemon_json = dirs.path().join("run/agentdeck/daemon.json");
+                std::fs::write(&daemon_json, stale_daemon_json()).expect("writing daemon.json");
+                let mut daemon = Spawned::start(dirs.path());
+                eventually_within(
+                    "agentdeckd to wait for the lock",
+                    Duration::from_secs(5),
+                    || {
+                        assert_eq!(daemon.try_wait(), None, "{}", daemon.stderr());
+                        daemon
+                            .stderr()
+                            .contains("waiting for the agentdeckd")
+                            .then_some(())
+                    },
+                );
+
+                drop(lock);
+
+                let info = eventually_within(
+                    "agentdeckd to write its own daemon.json",
+                    Duration::from_secs(10),
+                    || {
+                        assert_eq!(daemon.try_wait(), None, "{}", daemon.stderr());
+                        let text = std::fs::read_to_string(&daemon_json).ok()?;
+                        let info: DaemonInfo = serde_json::from_str(&text).ok()?;
+                        (info.pid == daemon.pid()).then_some(info)
+                    },
+                );
+                assert_ne!(info.port, 0);
+            }
+
+            #[test]
+            fn should_fail_when_the_other_daemon_never_exits() {
+                let dirs = tempfile::tempdir().expect("a temp dir");
+                let _lock = hold_lock(dirs.path());
+                std::fs::write(
+                    dirs.path().join("run/agentdeck/daemon.json"),
+                    stale_daemon_json(),
+                )
+                .expect("writing daemon.json");
+                let mut daemon = Spawned::start(dirs.path());
 
                 let status = eventually_within(
                     "agentdeckd to stop waiting",
