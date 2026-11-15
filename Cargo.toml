@@ -54,6 +54,9 @@ httpmock = { version = "=0.9.0", default-features = false }
 # Service store, on the zbus 5 line GPUI already pulls in (MIT OR Apache-2.0).
 keyring-core = "=1.0.1"
 zbus-secret-service-keyring-store = { version = "=1.0.1", features = ["crypto-rust"] }
+# GPUI's own records, which the GUI's log bridges into `tracing`; its test writes one. Already in
+# the lockfile through GPUI.
+log = "=0.4.35"
 # The desktop notifier's request queue; already in the lockfile through futures-util.
 futures-channel = { version = "=0.3.34", default-features = false, features = ["std"] }
 # For `StreamExt` / `SinkExt` on the WebSocket; already in the lockfile through dropshot.

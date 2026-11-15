@@ -35,7 +35,7 @@ Licence `MIT OR Apache-2.0`.
   - **Environment overrides:** `AGENTDECK_PR_MAX_AGE_DAYS` overrides `pr_sync.max_age_days` (§8). The settings then report the variable's value and list the key in `overridden_by_env`. A PATCH of an overridden key still writes the file and answers 200, but the variable's value stays in use, and the key stays in `overridden_by_env`, until the daemon runs without it.
     - The GitHub variables aren't settings and never show in `overridden_by_env`: `GH_TOKEN` / `GITHUB_TOKEN` give the token and `AGENTDECK_GITHUB_CLIENT_ID` the OAuth client ID, each only while none is saved in the keyring (§8).
 - **DB access:** rusqlite on one owned connection behind a `spawn_blocking` actor. Migrations are embedded SQL run by `rusqlite_migration` at start.
-- **Logging:** `tracing`, to `$XDG_STATE_HOME/agentdeck/agentdeckd.log` and stderr.
+- **Logging:** `tracing`, to `$XDG_STATE_HOME/agentdeck/agentdeckd.log` and stderr. The GUI logs to its own file beside it (§11).
 
 ## 3. Data model
 
@@ -451,6 +451,7 @@ Built on `brrritscold-core-gpui` (`init`, `Root`, theme preference, toasts). Scr
 - **Keymap:** `keymap.rs`, normal app shortcuts, `secondary-` bindings loaded with `KeyBinding::load`.
   - A binding wins over the terminal, so every shortcut is one a shell has no use for, after GNOME Terminal. Plain ctrl-letter, alt-letter, the arrows and the paging keys always reach the pane.
   - Quit `secondary-shift-q`; next / previous tab `ctrl-pagedown` / `ctrl-pageup` (or `ctrl-tab` / `ctrl-shift-tab`); tab 1–9 `alt-1`…`alt-9`; next / previous pane `secondary-shift-down` / `secondary-shift-up`, in layout order; new shell tab `secondary-shift-t`; split the focused pane with a shell right / down `secondary-shift-e` / `secondary-shift-o` (after Terminator); close it `secondary-shift-w`, asking first while it runs. Closing a tab's last pane closes the tab.
+- **Logging:** `tracing`, to `$XDG_STATE_HOME/agentdeck/agentdeck-gui.log` (appended to, beside the daemon's `agentdeckd.log`, §2) and stderr, installed before anything else runs, with GPUI's `log` records bridged in. `RUST_LOG` picks the levels (`RUST_LOG=debug` shows the refused links above); without it, or when it doesn't parse, `info` and above. Without a state dir, or when the file can't be opened, the GUI logs to stderr alone and says why there; logging never stops it from starting.
 
 ## 12. Testing
 

@@ -30,9 +30,13 @@ serde_json.workspace = true
 tokio.workspace = true
 # A debug line for a link a click refuses to open.
 tracing.workspace = true
+# The GUI's log: stderr and `agentdeck-gui.log`, at the levels `RUST_LOG` picks, with GPUI's
+# `log` records bridged in (spec §11).
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+log.workspace = true
 tempfile.workspace = true
 
 [lints]
