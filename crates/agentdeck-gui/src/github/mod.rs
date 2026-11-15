@@ -1,6 +1,7 @@
-//! Settings → GitHub (spec §8, §11), Penpot "Screens" → "Settings · GitHub · …": where the
-//! daemon's GitHub token comes from, Sign in with GitHub, Paste token and Sign out, and the
-//! write-only OAuth client ID field (Penpot part `agentdeck/ClientIdField`).
+//! Settings → GitHub (spec §8, §11), Penpot "Screens" → "Settings · GitHub · …": a card
+//! saying where the daemon's GitHub token comes from, with Sign in with GitHub, Paste token or
+//! Sign out beside it, and the write-only OAuth client ID field (Penpot part
+//! `agentdeck/ClientIdField`).
 //!
 //! It shows `GET /v1/github/auth` and reads it again on each `github_auth` event, which also
 //! tells the sign-in dialog how a sign-in ended. The age cutoff, the section's last field,
@@ -42,7 +43,7 @@ pub const CLIENT_ID_DESCRIPTION: &str = "From the OAuth App you registered on Gi
 /// The client ID input's placeholder while one is saved.
 pub const CLIENT_ID_SAVED: &str = "Saved in the keyring";
 
-/// The account line's first line: who the token signs in, or that none does.
+/// The card's first line: who the token signs in, or that none does.
 pub fn login_line(auth: &GithubAuthInfo) -> String {
     match &auth.login {
         Some(login) => format!("Signed in as {login}"),
@@ -58,7 +59,7 @@ fn var_name(var: TokenEnvVar) -> &'static str {
     }
 }
 
-/// Where the token comes from, under the first line; `None` without a token.
+/// Where the token comes from, under the card's first line; `None` without a token.
 pub fn source_line(auth: &GithubAuthInfo) -> Option<String> {
     match auth.source {
         TokenSource::Keyring => Some("With your saved token.".to_owned()),
@@ -104,6 +105,16 @@ pub fn scope_note(auth: &GithubAuthInfo) -> Option<&'static str> {
         }
         Some(_) => None,
         None => Some("Closing works only on repos you own"),
+    }
+}
+
+/// The label over the actions beside the card. Sign out acts on the card's token, so it needs
+/// none; beside a gh or env token, the actions save agentdeck's own, which then overrides it.
+pub fn actions_label(auth: &GithubAuthInfo) -> Option<&'static str> {
+    match auth.source {
+        TokenSource::Keyring => None,
+        TokenSource::Env | TokenSource::Gh => Some("Use your own token"),
+        TokenSource::None => Some("Sign in"),
     }
 }
 
@@ -330,7 +341,9 @@ impl GithubSection {
             )
     }
 
-    /// Penpot `Account`: the line and its actions, then the hint, override and scope lines.
+    /// Penpot `Account`: the `Status` card, holding the token's lines, then the `Actions`
+    /// column outside it on the right. The row stretches, so the card is never shorter than
+    /// the column.
     fn account(&self, auth: &GithubAuthInfo, cx: &mut Context<Self>) -> gpui::AnyElement {
         let s = cx.theme().semantic();
         let muted = |text: String, selector: &'static str| {
@@ -340,7 +353,54 @@ impl GithubSection {
                 .text_color(s.muted_foreground)
                 .child(text)
         };
-        let actions = div().flex().flex_none().items_center().gap(space::S2);
+        let status = div()
+            .debug_selector(|| "github status".into())
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(space::S0_5)
+            .p(space::S3)
+            .rounded(s.radius_md)
+            .border_1()
+            .border_color(s.border)
+            .child(
+                div()
+                    .debug_selector(|| "github login".into())
+                    .text_size(font_size::SM)
+                    .font_weight(font_weight::MEDIUM)
+                    .text_color(s.foreground)
+                    .child(login_line(auth)),
+            )
+            .when_some(source_line(auth), |lines, line| {
+                lines.child(muted(line, "github source"))
+            })
+            .when_some(hint(auth), |lines, line| {
+                lines.child(muted(line, "github hint"))
+            })
+            .when_some(override_line(auth), |lines, line| {
+                lines.child(muted(line, "github override"))
+            })
+            .when_some(scope_note(auth), |lines, note| {
+                lines.child(muted(note.to_owned(), "github scope note"))
+            });
+        // Stretched, so Sign in with GitHub and Paste token share the wider one's width.
+        let actions = div()
+            .debug_selector(|| "github actions".into())
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap(space::S2)
+            .when_some(actions_label(auth), |actions, label| {
+                actions.child(
+                    div()
+                        .debug_selector(|| "github actions label".into())
+                        .text_size(font_size::SM)
+                        .font_weight(font_weight::MEDIUM)
+                        .text_color(s.muted_foreground)
+                        .child(label),
+                )
+            });
         let actions = if auth.source == TokenSource::Keyring {
             actions.child(
                 div().debug_selector(|| "github sign out".into()).child(
@@ -359,6 +419,7 @@ impl GithubSection {
                             Button::new("github-sign-in")
                                 .size(ButtonSize::Sm)
                                 .label("Sign in with GitHub")
+                                .w_full()
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.open_sign_in(window, cx);
                                 })),
@@ -371,6 +432,7 @@ impl GithubSection {
                             .variant(ButtonVariant::Outline)
                             .size(ButtonSize::Sm)
                             .label("Paste token")
+                            .w_full()
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_paste_token(window, cx);
                             })),
@@ -380,43 +442,10 @@ impl GithubSection {
         div()
             .debug_selector(|| "github account".into())
             .flex()
-            .flex_col()
-            .gap(space::S0_5)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(space::S3)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(space::S0_5)
-                            .child(
-                                div()
-                                    .debug_selector(|| "github login".into())
-                                    .text_size(font_size::SM)
-                                    .font_weight(font_weight::MEDIUM)
-                                    .text_color(s.foreground)
-                                    .child(login_line(auth)),
-                            )
-                            .when_some(source_line(auth), |text, line| {
-                                text.child(muted(line, "github source"))
-                            }),
-                    )
-                    .child(actions),
-            )
-            .when_some(hint(auth), |lines, line| {
-                lines.child(muted(line, "github hint"))
-            })
-            .when_some(override_line(auth), |lines, line| {
-                lines.child(muted(line, "github override"))
-            })
-            .when_some(scope_note(auth), |lines, note| {
-                lines.child(muted(note.to_owned(), "github scope note"))
-            })
+            .items_stretch()
+            .gap(space::S4)
+            .child(status)
+            .child(actions)
             .into_any_element()
     }
 
@@ -646,6 +675,14 @@ mod tests {
         }
     }
 
+    /// Whether `inner` lies within `outer`, edges included.
+    fn inside(inner: gpui::Bounds<gpui::Pixels>, outer: gpui::Bounds<gpui::Pixels>) -> bool {
+        inner.left() >= outer.left()
+            && inner.top() >= outer.top()
+            && inner.right() <= outer.right()
+            && inner.bottom() <= outer.bottom()
+    }
+
     fn refusal(code: &str, message: &str) -> anyhow::Error {
         ApiError {
             message: message.to_owned(),
@@ -665,6 +702,7 @@ mod tests {
             assert!(!harness.shows("github sign in", cx));
             assert!(!harness.shows("github paste token", cx));
             assert!(!harness.shows("github hint", cx));
+            assert!(!harness.shows("github actions label", cx));
         }
 
         #[gpui::test]
@@ -677,7 +715,73 @@ mod tests {
             assert!(harness.shows("github paste token", cx));
             assert!(harness.shows("github hint", cx));
             assert!(harness.shows("github scope note", cx));
+            assert!(harness.shows("github actions label", cx));
             assert!(!harness.shows("github sign out", cx));
+        }
+
+        #[gpui::test]
+        fn should_hold_every_line_in_the_card_and_the_actions_beside_it(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open(env_token(), cx);
+
+            let card = cx.debug_bounds("github status").expect("the card");
+            for line in [
+                "github login",
+                "github source",
+                "github hint",
+                "github scope note",
+            ] {
+                let bounds = cx.debug_bounds(line).expect(line);
+                assert!(inside(bounds, card), "{line} is in the card");
+            }
+            let actions = cx.debug_bounds("github actions").expect("the actions");
+            assert!(actions.left() > card.right());
+            assert_eq!(actions.top(), card.top());
+            for action in [
+                "github actions label",
+                "github sign in",
+                "github paste token",
+            ] {
+                let bounds = cx.debug_bounds(action).expect(action);
+                assert!(inside(bounds, actions), "{action} is in the actions");
+            }
+        }
+
+        #[gpui::test]
+        fn should_stretch_the_card_to_the_actions_height(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open(signed_out(), cx);
+
+            let card = cx.debug_bounds("github status").expect("the card");
+            let actions = cx.debug_bounds("github actions").expect("the actions");
+            assert_eq!(card.size.height, actions.size.height);
+        }
+
+        #[gpui::test]
+        fn should_keep_the_cards_own_height_when_its_text_is_taller(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open(saved_token(), cx);
+
+            let card = cx.debug_bounds("github status").expect("the card");
+            let sign_out = cx.debug_bounds("github sign out").expect("sign out");
+            let source = cx.debug_bounds("github source").expect("the source line");
+            assert!(card.size.height > sign_out.size.height);
+            // Its last line, then the padding and the border.
+            assert_eq!(card.bottom(), source.bottom() + space::S3 + gpui::px(1.));
+        }
+
+        #[gpui::test]
+        fn should_size_sign_in_and_paste_token_alike(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open(env_token(), cx);
+
+            let sign_in = cx.debug_bounds("github sign in").expect("sign in");
+            let paste = cx.debug_bounds("github paste token").expect("paste token");
+            assert_eq!(sign_in.size.width, paste.size.width);
+        }
+
+        #[gpui::test]
+        fn should_label_the_actions_while_not_signed_in(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(signed_out(), cx);
+
+            assert!(harness.shows("github actions label", cx));
+            assert!(harness.shows("github status", cx));
         }
 
         #[gpui::test]
@@ -1042,6 +1146,21 @@ mod tests {
             assert_eq!(hint(&env).as_deref(), Some("Unset GH_TOKEN"));
             assert_eq!(hint(&gh).as_deref(), Some("Run gh auth logout"));
             assert_eq!(hint(&saved_token()), None);
+        }
+
+        #[test]
+        fn should_label_the_actions_by_source() {
+            let label = |source| {
+                actions_label(&GithubAuthInfo {
+                    source,
+                    ..saved_token()
+                })
+            };
+
+            assert_eq!(label(TokenSource::Gh), Some("Use your own token"));
+            assert_eq!(label(TokenSource::Env), Some("Use your own token"));
+            assert_eq!(label(TokenSource::None), Some("Sign in"));
+            assert_eq!(label(TokenSource::Keyring), None);
         }
 
         #[test]
