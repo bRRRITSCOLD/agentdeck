@@ -168,6 +168,71 @@ impl Drop for TestDaemon {
     }
 }
 
+/// An `agentdeckd` started on `root` without waiting for it to serve, killed when dropped:
+/// for the cases where it must not get the lock.
+pub struct Spawned {
+    child: Child,
+    root: PathBuf,
+}
+
+impl Spawned {
+    /// Starts `agentdeckd` on `root`.
+    pub fn start(root: &Path) -> Spawned {
+        Spawned {
+            child: spawn(root, github::UNREACHABLE),
+            root: root.to_owned(),
+        }
+    }
+
+    /// What it has written to stderr so far, its log included.
+    pub fn stderr(&self) -> String {
+        stderr(&self.root)
+    }
+
+    /// How it exited, once it has.
+    pub fn try_wait(&mut self) -> Option<ExitStatus> {
+        self.child.try_wait().expect("polling agentdeckd")
+    }
+}
+
+impl Drop for Spawned {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Takes the daemon's lock under `root`, as a daemon that is still shutting down holds it
+/// after it withdrew `daemon.json`. Released when the file is dropped.
+pub fn hold_lock(root: &Path) -> File {
+    let dir = root.join("run/agentdeck");
+    std::fs::create_dir_all(&dir).expect("creating the runtime dir");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("lock"))
+        .expect("opening the lock file");
+    lock.try_lock().expect("taking the daemon's lock");
+    lock
+}
+
+/// Polls `check` until it returns `Some`, or panics with `what` after `within`.
+pub fn eventually_within<T>(
+    what: &str,
+    within: Duration,
+    mut check: impl FnMut() -> Option<T>,
+) -> T {
+    let deadline = Instant::now() + within;
+    loop {
+        if let Some(value) = check() {
+            return value;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn daemon_json(root: &Path) -> PathBuf {
     root.join("run/agentdeck/daemon.json")
 }

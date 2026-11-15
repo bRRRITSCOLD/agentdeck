@@ -3,14 +3,16 @@
 
 use std::ffi::OsString;
 use std::net::TcpListener;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use agentdeck_core::DaemonInfo;
 
 use serde_json::json;
 
 use crate::support::mcp::McpClient;
-use crate::support::{TestEnv, agent_argv, alive, eventually, parent_pid, process_state, text};
+use crate::support::{
+    Run, TestEnv, agent_argv, alive, eventually, parent_pid, process_state, shell_pane, text,
+};
 
 /// A port nothing listens on: bound, then released.
 fn closed_port() -> u16 {
@@ -117,6 +119,68 @@ mod starting_the_daemon {
         assert!(!output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("XDG_RUNTIME_DIR"), "{stderr}");
+    }
+}
+
+/// A client that connects while a daemon is shutting down: it has withdrawn `daemon.json`
+/// but still holds the lock until it exits, as after `pkill -TERM agentdeckd`.
+mod connecting_while_a_daemon_shuts_down {
+    use super::*;
+
+    #[test]
+    fn should_start_a_daemon_once_the_old_one_lets_go_of_the_lock() {
+        let env = TestEnv::new();
+        let lock = env.hold_lock();
+        let mut cli = env
+            .command()
+            .args(["ws", "ls"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("running agentdeck");
+
+        // The started daemon waits for the lock; one that gave up on it at once has made
+        // the CLI give up too.
+        eventually("the started daemon to wait for the lock", || {
+            let waiting = env.daemon_log().contains("waiting for the agentdeckd");
+            let gave_up = cli.try_wait().expect("polling agentdeck").is_some();
+            (waiting || gave_up).then_some(())
+        });
+        drop(lock);
+        let run = Run::from(cli.wait_with_output().expect("waiting on agentdeck"));
+
+        assert!(run.success, "{}", run.stderr);
+        let info = env.daemon_info().expect("daemon.json after the command");
+        assert!(alive(info.pid), "the daemon it started isn't running");
+    }
+
+    #[test]
+    fn should_start_a_fresh_daemon_while_the_stopped_one_still_exits() {
+        let env = TestEnv::new();
+        let workspace = env.workspace("web");
+        // A live pane holds the database actor, so the stopped daemon's runtime waits its
+        // whole shutdown grace before the daemon lets go of the lock.
+        shell_pane(&env, &workspace, "sleep 60");
+        let old = env.daemon_info().expect("a running daemon");
+        let status = Command::new("kill")
+            .args(["-TERM", &old.pid.to_string()])
+            .status()
+            .expect("running kill");
+        assert!(status.success(), "kill -TERM {} failed", old.pid);
+
+        eventually("the stopped daemon to withdraw daemon.json", || {
+            env.daemon_info().is_none().then_some(())
+        });
+        assert!(
+            matches!(process_state(old.pid), Some(state) if state != 'Z'),
+            "the stopped daemon withdrew daemon.json only as it exited"
+        );
+        let run = env.run(&["ws", "ls"]);
+
+        assert!(run.success, "{}", run.stderr);
+        let new = env.daemon_info().expect("daemon.json after the command");
+        assert_ne!(new.pid, old.pid);
+        assert!(alive(new.pid), "the fresh daemon isn't running");
     }
 }
 

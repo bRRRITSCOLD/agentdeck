@@ -100,6 +100,9 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
         _ = terminate.recv() => {}
     }
     tracing::info!("agentdeckd shutting down");
+    // Clients stop reaching it now, not once it exits; the lock stays held until then, so a
+    // daemon a client starts meanwhile waits for it and resumes no pane twice.
+    instance.withdraw();
     terminals.close();
     server
         .close()

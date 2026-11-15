@@ -21,8 +21,9 @@ use crate::Client;
 /// Replaces the `agentdeckd` a client starts, for tests and unusual installs.
 pub const DAEMON_VAR: &str = "AGENTDECK_DAEMON";
 
-/// How long a started daemon gets to serve.
-const START_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a started daemon gets to serve. It may first wait up to 10 s for a daemon that is
+/// shutting down to let go of the lock (spec §2), then 10 s to start.
+const START_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// How long to keep looking after the started daemon exited, in case another client's daemon
 /// won the lock and is still starting.
