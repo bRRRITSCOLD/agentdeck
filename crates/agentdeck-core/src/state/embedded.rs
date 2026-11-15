@@ -6,13 +6,15 @@ use super::rules::RuleSet;
 use crate::pane::Agent;
 
 const CLAUDE: &str = include_str!("../../rules/claude.toml");
+const CODEX: &str = include_str!("../../rules/codex.toml");
 
 impl RuleSet {
     /// The embedded rules for `agent`, or `None` when agentdeck ships none for it.
     pub fn embedded(agent: Agent) -> Option<RuleSet> {
         let text = match agent {
             Agent::Claude => CLAUDE,
-            Agent::Codex | Agent::Other => return None,
+            Agent::Codex => CODEX,
+            Agent::Other => return None,
         };
         let rules = RuleSet::from_toml(text);
         // A unit test parses every embedded file, so this can't fail in a build that passed.
@@ -34,19 +36,14 @@ mod tests {
     use super::*;
     use crate::state::{AgentState, Observation, OscScanner, StateTracker, screen};
 
-    /// Recorded terminal output replayed through a real `Term` at 100×30, the size the spike
-    /// recorded Claude Code at.
-    ///
-    /// The `tests/fixtures/claude/*.bytes` files are hand-authored stand-ins, not recordings:
-    /// the spike kept no byte logs, and running `claude` to record them costs money. They follow
-    /// what the spike saw of v2.1.322: an inline TUI that redraws by erasing its last frame, the
-    /// OSC 0 title as the state glyph, and an OSC 7501 probe at startup. Replace them with real
-    /// recordings when one is made; the expected states below stay.
+    /// Terminal output replayed through a real `Term` at the size it was made at, read as the
+    /// daemon reads a pane: the screen rows, the title, and OSC 9;4 and 7501 from the raw bytes.
     struct Replay {
         term: Term<Titles>,
         parser: Processor<StdSyncHandler>,
         osc: OscScanner,
         titles: Titles,
+        process: &'static str,
     }
 
     /// The title the program last set, which `Term` reports as an event.
@@ -64,19 +61,24 @@ mod tests {
         }
     }
 
+    /// What a fixture set was made with: the terminal size and the foreground process.
+    struct Recording {
+        columns: usize,
+        lines: usize,
+        process: &'static str,
+    }
+
     impl Replay {
-        fn new() -> Self {
+        fn of(recording: &Recording, fixtures: &[&[u8]]) -> Self {
             let titles = Titles::default();
-            Self {
-                term: Term::new(Config::default(), &TermSize::new(100, 30), titles.clone()),
+            let size = TermSize::new(recording.columns, recording.lines);
+            let mut replay = Self {
+                term: Term::new(Config::default(), &size, titles.clone()),
                 parser: Processor::new(),
                 osc: OscScanner::new(),
                 titles,
-            }
-        }
-
-        fn of(fixtures: &[&[u8]]) -> Self {
-            let mut replay = Self::new();
+                process: recording.process,
+            };
             for bytes in fixtures {
                 replay.feed(bytes);
             }
@@ -90,7 +92,7 @@ mod tests {
 
         fn observation(&self) -> Observation {
             Observation {
-                process: Some("claude".to_owned()),
+                process: Some(self.process.to_owned()),
                 title: self.titles.0.lock().expect("title lock").clone(),
                 rows: screen::rows(&self.term),
                 progress: self.osc.progress(),
@@ -100,37 +102,52 @@ mod tests {
         }
     }
 
-    const IDLE: &[u8] = include_bytes!("../../tests/fixtures/claude/idle.bytes");
-    const WORKING: &[u8] = include_bytes!("../../tests/fixtures/claude/working.bytes");
-    const DONE: &[u8] = include_bytes!("../../tests/fixtures/claude/done.bytes");
-    const PERMISSION_PROMPT: &[u8] =
-        include_bytes!("../../tests/fixtures/claude/permission-prompt.bytes");
-    const TRUST_DIALOG: &[u8] = include_bytes!("../../tests/fixtures/claude/trust-dialog.bytes");
-
-    fn claude() -> RuleSet {
-        RuleSet::embedded(Agent::Claude).expect("claude rules")
-    }
-
-    fn state_after(fixtures: &[&[u8]]) -> AgentState {
-        claude().evaluate(&Replay::of(fixtures).observation())
-    }
-
     mod embedded {
         use super::*;
 
         #[test]
-        fn should_ship_rules_for_claude() {
-            assert_eq!(claude().agent(), "claude");
+        fn should_ship_rules_for_claude_and_codex() {
+            for (agent, name) in [(Agent::Claude, "claude"), (Agent::Codex, "codex")] {
+                let rules = RuleSet::embedded(agent).expect("embedded rules");
+                assert_eq!(rules.agent(), name);
+            }
         }
 
         #[test]
-        fn should_ship_no_rules_for_other_agents_yet() {
-            assert!(RuleSet::embedded(Agent::Codex).is_none());
+        fn should_ship_no_rules_for_other_agents() {
             assert!(RuleSet::embedded(Agent::Other).is_none());
         }
 
+        /// The `tests/fixtures/claude/*.bytes` files are hand-authored stand-ins, not
+        /// recordings: the spike kept no byte logs, and running `claude` to record them costs
+        /// money. They follow what the spike saw of v2.1.322 at 100×30: an inline TUI that
+        /// redraws by erasing its last frame, the OSC 0 title as the state glyph, and an OSC
+        /// 7501 probe at startup. Replace them with real recordings when one is made; the
+        /// expected states below stay.
         mod claude {
             use super::*;
+
+            const CLAUDE: Recording = Recording {
+                columns: 100,
+                lines: 30,
+                process: "claude",
+            };
+
+            const IDLE: &[u8] = include_bytes!("../../tests/fixtures/claude/idle.bytes");
+            const WORKING: &[u8] = include_bytes!("../../tests/fixtures/claude/working.bytes");
+            const DONE: &[u8] = include_bytes!("../../tests/fixtures/claude/done.bytes");
+            const PERMISSION_PROMPT: &[u8] =
+                include_bytes!("../../tests/fixtures/claude/permission-prompt.bytes");
+            const TRUST_DIALOG: &[u8] =
+                include_bytes!("../../tests/fixtures/claude/trust-dialog.bytes");
+
+            fn rules() -> RuleSet {
+                RuleSet::embedded(Agent::Claude).expect("claude rules")
+            }
+
+            fn state_after(fixtures: &[&[u8]]) -> AgentState {
+                rules().evaluate(&Replay::of(&CLAUDE, fixtures).observation())
+            }
 
             #[test]
             fn should_be_idle_at_a_fresh_prompt() {
@@ -146,9 +163,9 @@ mod tests {
             fn should_read_working_from_a_braille_spinner_before_v2_1_228() {
                 let observation = Observation {
                     title: "⠋ Claude Code".to_owned(),
-                    ..Replay::of(&[IDLE]).observation()
+                    ..Replay::of(&CLAUDE, &[IDLE]).observation()
                 };
-                assert_eq!(claude().evaluate(&observation), AgentState::Working);
+                assert_eq!(rules().evaluate(&observation), AgentState::Working);
             }
 
             #[test]
@@ -166,8 +183,8 @@ mod tests {
 
             #[test]
             fn should_publish_done_when_a_turn_finishes() {
-                let mut replay = Replay::of(&[IDLE, WORKING]);
-                let mut tracker = StateTracker::new(claude());
+                let mut replay = Replay::of(&CLAUDE, &[IDLE, WORKING]);
+                let mut tracker = StateTracker::new(rules());
                 let ms = Duration::from_millis;
 
                 tracker.observe(&replay.observation(), ms(0));
@@ -182,6 +199,171 @@ mod tests {
                     tracker.observe(&replay.observation(), ms(1_400)),
                     Some(AgentState::Done)
                 );
+            }
+        }
+
+        /// Real recordings of codex-cli 0.169.0 at 120×40 (spec §7, "Recording fixtures"),
+        /// each fixture the bytes since the one before it, so a test feeds a chain in order:
+        ///
+        /// - `trust-dialog`: startup in a folder Codex hasn't been told to trust.
+        /// - `idle` → `thinking` → `replied` → `command`: a fresh prompt, a reply being
+        ///   written, that reply finished, and a shell command running in the next turn.
+        /// - `permission-idle` → `permission-prompt` → `permission-declined` → `exit`: a
+        ///   second session that asks to run a command outside the sandbox, has it declined
+        ///   with Esc, then quits with `/exit`.
+        mod codex {
+            use super::*;
+
+            const CODEX: Recording = Recording {
+                columns: 120,
+                lines: 40,
+                process: "codex",
+            };
+
+            const TRUST_DIALOG: &[u8] =
+                include_bytes!("../../tests/fixtures/codex/trust-dialog.bytes");
+            const IDLE: &[u8] = include_bytes!("../../tests/fixtures/codex/idle.bytes");
+            const THINKING: &[u8] = include_bytes!("../../tests/fixtures/codex/thinking.bytes");
+            const REPLIED: &[u8] = include_bytes!("../../tests/fixtures/codex/replied.bytes");
+            const COMMAND: &[u8] = include_bytes!("../../tests/fixtures/codex/command.bytes");
+            const PERMISSION_IDLE: &[u8] =
+                include_bytes!("../../tests/fixtures/codex/permission-idle.bytes");
+            const PERMISSION_PROMPT: &[u8] =
+                include_bytes!("../../tests/fixtures/codex/permission-prompt.bytes");
+            const PERMISSION_DECLINED: &[u8] =
+                include_bytes!("../../tests/fixtures/codex/permission-declined.bytes");
+            const EXIT: &[u8] = include_bytes!("../../tests/fixtures/codex/exit.bytes");
+
+            /// The permission session up to its prompt.
+            const PERMISSION: &[&[u8]] = &[PERMISSION_IDLE, PERMISSION_PROMPT];
+
+            fn rules() -> RuleSet {
+                RuleSet::embedded(Agent::Codex).expect("codex rules")
+            }
+
+            fn state_after(fixtures: &[&[u8]]) -> AgentState {
+                rules().evaluate(&Replay::of(&CODEX, fixtures).observation())
+            }
+
+            /// `rows` with `quoted` written where a reply goes: just above the composer, which
+            /// sits four rows from the bottom, with the footer still last.
+            fn with_reply(mut rows: Vec<String>, quoted: &[&str]) -> Vec<String> {
+                let at = rows.len() - 4 - quoted.len();
+                for (row, text) in rows[at..].iter_mut().zip(quoted) {
+                    *row = format!("  {text}");
+                }
+                rows
+            }
+
+            #[test]
+            fn should_be_blocked_on_the_trust_dialog() {
+                assert_eq!(state_after(&[TRUST_DIALOG]), AgentState::Blocked);
+            }
+
+            #[test]
+            fn should_be_idle_at_a_fresh_prompt() {
+                assert_eq!(state_after(&[IDLE]), AgentState::Idle);
+            }
+
+            #[test]
+            fn should_be_working_while_it_writes_a_reply() {
+                assert_eq!(state_after(&[IDLE, THINKING]), AgentState::Working);
+            }
+
+            #[test]
+            fn should_be_idle_once_a_reply_is_written() {
+                assert_eq!(state_after(&[IDLE, THINKING, REPLIED]), AgentState::Idle);
+            }
+
+            #[test]
+            fn should_be_working_while_a_command_runs() {
+                assert_eq!(
+                    state_after(&[IDLE, THINKING, REPLIED, COMMAND]),
+                    AgentState::Working
+                );
+            }
+
+            #[test]
+            fn should_be_blocked_on_a_permission_prompt() {
+                assert_eq!(state_after(PERMISSION), AgentState::Blocked);
+            }
+
+            #[test]
+            fn should_read_a_permission_prompt_from_the_screen_alone() {
+                let observation = Observation {
+                    program_state: None,
+                    ..Replay::of(&CODEX, PERMISSION).observation()
+                };
+                assert_eq!(rules().evaluate(&observation), AgentState::Blocked);
+            }
+
+            #[test]
+            fn should_be_blocked_when_osc_7501_says_so_whatever_the_screen_shows() {
+                let observation = Observation {
+                    rows: Replay::of(&CODEX, &[IDLE]).observation().rows,
+                    ..Replay::of(&CODEX, PERMISSION).observation()
+                };
+                assert_eq!(rules().evaluate(&observation), AgentState::Blocked);
+            }
+
+            #[test]
+            fn should_be_idle_once_a_permission_prompt_is_declined() {
+                let declined = [PERMISSION_IDLE, PERMISSION_PROMPT, PERMISSION_DECLINED];
+                assert_eq!(state_after(&declined), AgentState::Idle);
+            }
+
+            #[test]
+            fn should_publish_done_when_a_turn_finishes() {
+                let mut replay = Replay::of(&CODEX, &[IDLE, THINKING]);
+                let mut tracker = StateTracker::new(rules());
+                let ms = Duration::from_millis;
+
+                tracker.observe(&replay.observation(), ms(0));
+                assert_eq!(
+                    tracker.observe(&replay.observation(), ms(400)),
+                    Some(AgentState::Working)
+                );
+
+                replay.feed(REPLIED);
+                assert_eq!(tracker.observe(&replay.observation(), ms(1_000)), None);
+                assert_eq!(
+                    tracker.observe(&replay.observation(), ms(1_400)),
+                    Some(AgentState::Done)
+                );
+            }
+
+            #[test]
+            fn should_stay_idle_when_a_reply_quotes_a_dialog() {
+                let replied = Replay::of(&CODEX, &[IDLE, THINKING, REPLIED]).observation();
+                let observation = Observation {
+                    rows: with_reply(
+                        replied.rows.clone(),
+                        &[
+                            "Would you like to run the following command?",
+                            "Press enter to confirm or esc to cancel",
+                            "Trust this folder?",
+                            "enter continue · esc back",
+                        ],
+                    ),
+                    ..replied
+                };
+                assert_eq!(rules().evaluate(&observation), AgentState::Idle);
+            }
+
+            #[test]
+            fn should_be_unknown_on_an_empty_screen() {
+                assert_eq!(state_after(&[]), AgentState::Unknown);
+            }
+
+            #[test]
+            fn should_leave_exited_to_the_process_once_it_quits() {
+                let quit = [
+                    PERMISSION_IDLE,
+                    PERMISSION_PROMPT,
+                    PERMISSION_DECLINED,
+                    EXIT,
+                ];
+                assert_eq!(state_after(&quit), AgentState::Unknown);
             }
         }
     }

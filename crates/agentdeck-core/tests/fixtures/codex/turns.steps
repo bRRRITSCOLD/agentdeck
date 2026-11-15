@@ -1,0 +1,28 @@
+# Writes idle, thinking, replied and command.bytes; command.bytes is then cut at the first
+# frame end (ESC [ ? 2026 l) that shows "background terminal running". In a throwaway git
+# repo <dir>:
+#   script/record-pty.py --out DIR --steps turns.steps -- \
+#     codex -a on-request -s read-only -c 'projects.<dir>.trust_level="trusted"'
+# A fresh prompt, once startup has finished.
+wait Ask Codex
+wait state=idle 60
+sleep 2
+mark idle
+# A reply being written.
+send Reply with only the word ok.
+sleep 1
+send \r
+wait Working 30
+sleep 0.5
+mark thinking
+wait state=(idle|done) 90
+sleep 2
+mark replied
+# A shell command running; the read-only sandbox allows it.
+send Run the shell command `sleep 4; echo hi` and then reply with only what it printed.
+sleep 1
+send \r
+wait background terminal running 90
+sleep 1
+mark command
+end

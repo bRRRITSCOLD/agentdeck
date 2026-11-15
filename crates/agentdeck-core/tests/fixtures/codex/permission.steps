@@ -1,0 +1,26 @@
+# Writes permission-idle, permission-prompt, permission-declined and exit.bytes. In a
+# throwaway git repo <dir>:
+#   script/record-pty.py --out DIR --steps permission.steps -- \
+#     codex -a on-request -s read-only -c 'projects.<dir>.trust_level="trusted"'
+wait Ask Codex
+wait state=idle 60
+sleep 2
+mark permission-idle
+# A write the read-only sandbox refuses, asked for with escalation. The wait names dialog
+# text the prompt itself doesn't contain.
+send Run `touch a.txt` in the shell with sandbox_permissions require_escalated. Skip trying it in the sandbox first.
+sleep 1
+send \r
+wait (Would you like|Yes, proceed|\(y\)) 120
+sleep 2
+mark permission-prompt
+send \x1b
+wait state=(idle|done) 90
+sleep 2
+mark permission-declined
+send /exit
+sleep 1
+send \r
+sleep 6
+mark exit
+end
