@@ -612,7 +612,7 @@ mod tests {
         assert_eq!(label, "Syncing… 50 of 271 PRs");
     }
 
-    /// [`inbox`] with gh logged out.
+    /// [`inbox`] signed out of GitHub.
     fn logged_out() -> Snapshot {
         let mut snapshot = inbox();
         pr_sync(&mut snapshot).login = agentdeck_client::types::GhLogin::LoggedOut;
@@ -621,17 +621,17 @@ mod tests {
     }
 
     #[gpui::test]
-    fn should_show_the_gh_banner_while_gh_is_logged_out(cx: &mut TestAppContext) {
+    fn should_show_the_banner_while_not_signed_in(cx: &mut TestAppContext) {
         let (harness, cx) = Harness::open(logged_out(), cx);
         harness.draw(cx);
 
         assert!(cx.debug_bounds("gh banner").is_some());
         let label = cx.update(|_, cx| harness.view.read(cx).sync_label(chrono::Utc::now()));
-        assert_eq!(label, "gh logged out");
+        assert_eq!(label, "Not signed in");
     }
 
     #[gpui::test]
-    fn should_hide_the_gh_banner_once_gh_is_logged_in(cx: &mut TestAppContext) {
+    fn should_hide_the_banner_once_signed_in(cx: &mut TestAppContext) {
         let (harness, cx) = Harness::open(logged_out(), cx);
         harness.draw(cx);
 
