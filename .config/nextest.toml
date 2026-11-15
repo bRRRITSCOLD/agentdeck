@@ -3,18 +3,20 @@ nextest-version = { required = "0.9.151" }
 
 # One profile per tier. The tier is the Cargo target:
 #   unit        -> #[cfg(test)] modules in lib and bin targets (test doubles only)
-#   integration -> the `integration` test target (tests/integration), when a crate has one
+#   integration -> the `integration` test target (tests/integration), when a crate has one,
+#                  plus `mod integration_tests` in a binary's src: a crate-private part that
+#                  needs a real dependency (a PTY) and that tests/integration can't reach
 # There is no e2e tier (spec §12).
 [profile.default]
 slow-timeout = { period = "30s", terminate-after = 4 }
 fail-fast = false
 
 [profile.unit]
-default-filter = "kind(lib) | kind(bin) | kind(proc-macro)"
+default-filter = "(kind(lib) | kind(bin) | kind(proc-macro)) & not test(/(^|::)integration_tests::/)"
 slow-timeout = { period = "30s", terminate-after = 4 }
 fail-fast = false
 
 [profile.integration]
-default-filter = "binary(integration)"
+default-filter = "binary(integration) | test(/(^|::)integration_tests::/)"
 slow-timeout = { period = "60s", terminate-after = 2 }
 fail-fast = false

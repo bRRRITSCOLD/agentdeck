@@ -7,8 +7,10 @@ use agentdeck_client::types::{NewWorkspace, UnpushedBranch, Workspace};
 
 use crate::support::git::{clone_with_pushed_commit, git, init_with_commit};
 use agentdeck_core::AgentState;
+use agentdeck_core::ws::ServerMessage;
 
 use crate::support::terminal::{Place, in_state, sh};
+use crate::support::ws::Ws;
 use crate::support::{TestDaemon, error_response};
 
 async fn create(client: &Client, name: &str, dir: Option<&Path>) -> Workspace {
@@ -312,6 +314,31 @@ mod post_v1_workspaces_id_archive {
             .expect("spawn")
             .into_inner();
         in_state(&daemon.client, pane.id, AgentState::Exited).await;
+
+        let workspace = daemon
+            .client
+            .workspace_archive()
+            .id(place.workspace.id)
+            .send()
+            .await
+            .expect("archive")
+            .into_inner();
+
+        assert!(workspace.archived_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn should_archive_as_soon_as_its_last_pane_exit_is_published_200() {
+        // The exit is saved before it is published, so the archive check sees it (#172).
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let mut ws = Ws::connect(&daemon).await;
+        let pane = place.spawn(&daemon.client, &sh("true")).await;
+        ws.expect(ServerMessage::Exit {
+            pane: pane.id,
+            code: Some(0),
+        })
+        .await;
 
         let workspace = daemon
             .client

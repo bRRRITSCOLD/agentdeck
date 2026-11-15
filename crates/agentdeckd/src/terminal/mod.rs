@@ -181,19 +181,19 @@ impl Terminals {
 }
 
 impl Shared {
-    /// Records an exit. Called on the pane's reader thread.
+    /// Records an exit, and returns once it is saved: the pane reads as exited only after
+    /// this, so the API never reports an exit that archiving can't yet see (spec §7). Called
+    /// on the pane's reader thread, which is outside the runtime and may block.
     fn persist_exit(&self, id: PaneId, code: Option<i64>, title: String) {
         if self.closing.load(Ordering::SeqCst) {
             return;
         }
-        let db = self.db.clone();
-        self.runtime.spawn(async move {
-            let saved = db
-                .call(move |c| db::panes::set_exited(c, id, code, &title))
-                .await;
-            if let Err(err) = saved {
-                tracing::warn!("saving pane {id}'s exit: {err}");
-            }
-        });
+        let saved = self.runtime.block_on(
+            self.db
+                .call(move |c| db::panes::set_exited(c, id, code, &title)),
+        );
+        if let Err(err) = saved {
+            tracing::warn!("saving pane {id}'s exit: {err}");
+        }
     }
 }
