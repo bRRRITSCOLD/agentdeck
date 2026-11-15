@@ -7,6 +7,10 @@
 //! It reads a [`Snapshot`] through the session's [`Api`] when it opens and again whenever the
 //! daemon reports a `changed`; `state` and `exit` messages patch pane states in place. What
 //! changed that the user should hear about goes to the window as [`Alerts`] (spec §11).
+//!
+//! The workspace list draws only the rows in view, through GPUI's [`list`]: each step of a
+//! working workspace's spinner redraws the sidebar, and drawing every row made that step cost
+//! more the more workspaces there were (#199).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,15 +25,15 @@ use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Context, ElementId, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, Window, div, px,
+    ListState, ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window,
+    div, list, px,
 };
 
 use crate::api::Api;
 use crate::connection::{Connection, DaemonEvent};
 use crate::count::Count;
 use crate::notifications::{self, Alert, PrBatch};
-use crate::overview::{Counts, Overview, Snapshot, WorkspaceRow};
+use crate::overview::{Counts, Overview, Snapshot};
 use crate::rereads::Rereads;
 use crate::scrollbar;
 use crate::state_dot;
@@ -85,8 +89,14 @@ pub struct SidebarView {
     prs: PrBatch,
     _events: Subscription,
     _tick: Task<()>,
-    /// Where the workspace list is scrolled to, for its scrollbar.
-    scroll: ScrollHandle,
+    /// The workspace list: where it is scrolled to, and its items' heights.
+    list: ListState,
+    /// The items `list` was last sized for.
+    listed: Items,
+    /// How many workspace list items it has rendered, so a test can tell which rows a frame
+    /// drew.
+    #[cfg(test)]
+    items_rendered: std::cell::Cell<usize>,
 }
 
 impl SidebarView {
@@ -114,7 +124,12 @@ impl SidebarView {
             prs: PrBatch::default(),
             _events: events,
             _tick: tick,
-            scroll: ScrollHandle::new(),
+            // Every item measured once, after each change to the items, so the scrollbar's
+            // thumb is right from the first frame; a redraw then renders the rows in view.
+            list: task_row::list_state().measure_all(),
+            listed: Items::default(),
+            #[cfg(test)]
+            items_rendered: std::cell::Cell::new(0),
         };
         sidebar.reread(cx);
         sidebar
@@ -325,6 +340,75 @@ impl SidebarView {
             }
         }
     }
+
+    /// The workspace list's items: the workspace rows, then the Archived group's header and,
+    /// while it shows them, its rows.
+    fn items(&self) -> Items {
+        let rows = self.overview.workspaces.len();
+        let archived = match self.overview.archived.len() {
+            0 => 0,
+            n if self.archived_shown() => 1 + n,
+            _ => 1,
+        };
+        Items {
+            count: rows + archived,
+            header: (archived > 0).then_some(rows),
+        }
+    }
+
+    /// The workspace list's item at `ix`, spaced from the next one: a list has no gap.
+    fn item(&self, ix: usize, spin: bool, cx: &mut Context<Self>) -> AnyElement {
+        #[cfg(test)]
+        self.items_rendered.set(self.items_rendered.get() + 1);
+        let Items { count, header } = self.items();
+        let rows = &self.overview.workspaces;
+        let item = if header == Some(ix) {
+            // Penpot "Archived": a `GroupHeader` below the workspace rows, folded at first.
+            task_row::group_header(
+                "archived",
+                "Archived",
+                self.overview.archived.len(),
+                !self.archived_shown(),
+                task_row::SelectCell::Off,
+                cx.listener(|this, _, _, cx| {
+                    this.archived_open = !this.archived_open;
+                    cx.notify();
+                }),
+                cx,
+            )
+        } else {
+            let w = match ix.checked_sub(rows.len() + 1) {
+                Some(archived) => self.overview.archived.get(archived),
+                None => rows.get(ix),
+            };
+            let Some(w) = w.cloned() else {
+                return div().into_any_element();
+            };
+            self.row(
+                ElementId::Name(format!("workspace-{}", w.id).into()),
+                Selection::Workspace(w.id),
+                w.name,
+                Lead::Dot {
+                    state: state_dot::of(w.state, None),
+                    spin,
+                },
+                w.counts,
+                cx,
+            )
+        };
+        div()
+            .when(ix + 1 < count, |item| item.pb(space::S1))
+            .child(item)
+            .into_any_element()
+    }
+}
+
+/// How many items the workspace list holds, and which is the Archived group's header. The
+/// header isn't a row's height, so the list measures its items again when either changes.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Items {
+    count: usize,
+    header: Option<usize>,
 }
 
 /// What sits at a row's left end.
@@ -373,46 +457,10 @@ impl Render for SidebarView {
             Counts::default(),
             cx,
         );
-        let workspace_row = |this: &Self, w: WorkspaceRow, cx: &mut Context<Self>| {
-            this.row(
-                ElementId::Name(format!("workspace-{}", w.id).into()),
-                Selection::Workspace(w.id),
-                w.name,
-                Lead::Dot {
-                    state: state_dot::of(w.state, None),
-                    spin,
-                },
-                w.counts,
-                cx,
-            )
-        };
-        let mut workspaces: Vec<_> = self
-            .overview
-            .workspaces
-            .clone()
-            .into_iter()
-            .map(|w| workspace_row(self, w, cx))
-            .collect();
-        // Penpot "Archived": a `GroupHeader` below the workspace rows, folded at first.
-        if !self.overview.archived.is_empty() {
-            let shown = self.archived_shown();
-            workspaces.push(task_row::group_header(
-                "archived",
-                "Archived",
-                self.overview.archived.len(),
-                !shown,
-                task_row::SelectCell::Off,
-                cx.listener(|this, _, _, cx| {
-                    this.archived_open = !this.archived_open;
-                    cx.notify();
-                }),
-                cx,
-            ));
-            if shown {
-                for w in self.overview.archived.clone() {
-                    workspaces.push(workspace_row(self, w, cx));
-                }
-            }
+        let items = self.items();
+        if items != self.listed {
+            task_row::relist(&self.list, items.count);
+            self.listed = items;
         }
         let footer = match &self.error {
             Some(error) => error.clone(),
@@ -468,18 +516,21 @@ impl Render for SidebarView {
             // Penpot's `Spacer` pushes the footer down; the list takes that room and scrolls.
             .child(
                 div()
-                    .id("workspaces")
                     .debug_selector(|| "workspaces".into())
                     .flex()
                     .flex_col()
                     .flex_1()
                     .min_h_0()
-                    .gap(space::S1)
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .children(workspaces),
+                    .child(
+                        list(
+                            self.list.clone(),
+                            cx.processor(move |this, ix, _, cx| this.item(ix, spin, cx)),
+                        )
+                        .flex_1()
+                        .min_h_0(),
+                    ),
             )
-            .child(scrollbar::vertical(&self.scroll, cx))
+            .child(scrollbar::vertical(&self.list, cx))
             // Penpot `Footer`: the sync line, then the Settings gear pushed to the end.
             .child(
                 small()
@@ -1070,6 +1121,133 @@ mod tests {
             });
 
             assert_eq!(*heard.borrow(), []);
+        }
+    }
+
+    mod long_list {
+        use agentdeck_client::types::Workspace;
+        use gpui::{ScrollDelta, ScrollEvent, point};
+
+        use super::*;
+        use crate::state_dot::tests::{activate, redraws_in_one_second};
+
+        /// `w01` to `w60` (ids 1 to 60), each with an agent at work, then `old` (id 61),
+        /// archived.
+        fn crowded() -> Snapshot {
+            let mut workspaces: Vec<_> = (1..=60)
+                .map(|n| workspace(n, &format!("w{n:02}")))
+                .collect();
+            workspaces.push(Workspace {
+                archived_at: Some("2026-11-13T00:00:00Z".into()),
+                ..workspace(61, "old")
+            });
+            Snapshot {
+                panes: (1..=60)
+                    .map(|n| pane(100 + n, id(n), AgentState::Working))
+                    .collect(),
+                workspaces,
+                ..Snapshot::default()
+            }
+        }
+
+        fn rendered(open: &mut Open) -> usize {
+            (open.sidebar).read_with(open.cx, |sidebar, _| sidebar.items_rendered.get())
+        }
+
+        /// How many rows the list's height holds, counting one cut off at either end.
+        fn in_view(open: &mut Open) -> usize {
+            let list = open.cx.debug_bounds("workspaces").expect("the list");
+            (list.size.height / space::S8).ceil() as usize + 1
+        }
+
+        /// Wheels the list down by `by`.
+        fn wheel(open: &mut Open, by: f32) {
+            let list = open.cx.debug_bounds("workspaces").expect("the list");
+            open.cx.simulate_event(ScrollEvent {
+                position: list.center(),
+                delta: ScrollDelta::Pixels(point(px(0.), px(-by))),
+                ..ScrollEvent::default()
+            });
+            open.settle();
+        }
+
+        fn wheel_to_the_end(open: &mut Open) {
+            wheel(open, 10_000.);
+        }
+
+        #[gpui::test]
+        fn should_draw_only_the_rows_in_view(cx: &mut TestAppContext) {
+            let mut open = open(crowded(), cx);
+
+            assert!(open.shows("row w01"));
+            assert!(!open.shows("row w60"));
+        }
+
+        #[gpui::test]
+        fn should_render_only_the_rows_in_view_on_a_spinner_step(cx: &mut TestAppContext) {
+            let mut open = open(crowded(), cx);
+            activate(open.cx);
+            let (before, in_view) = (rendered(&mut open), in_view(&mut open));
+            assert!(in_view < 60, "the window holds {in_view} rows");
+
+            let redraws = redraws_in_one_second(&open.sidebar, open.cx);
+
+            assert!(redraws > 0, "the marks turn");
+            let per_step = (rendered(&mut open) - before) / redraws;
+            assert!(
+                per_step <= in_view,
+                "{per_step} rows a step, {in_view} in view"
+            );
+        }
+
+        #[gpui::test]
+        fn should_draw_the_rows_a_scroll_brings_into_view(cx: &mut TestAppContext) {
+            let mut open = open(crowded(), cx);
+
+            wheel_to_the_end(&mut open);
+
+            assert!(open.shows("row w60"));
+            assert!(!open.shows("row w01"));
+        }
+
+        #[gpui::test]
+        fn should_select_a_row_scrolled_into_view(cx: &mut TestAppContext) {
+            let mut open = open(crowded(), cx);
+            wheel_to_the_end(&mut open);
+
+            open.click("row w60");
+
+            assert_eq!(open.selection(), Selection::Workspace(id(60)));
+        }
+
+        #[gpui::test]
+        fn should_open_the_archived_group_at_the_end(cx: &mut TestAppContext) {
+            let mut open = open(crowded(), cx);
+            wheel_to_the_end(&mut open);
+
+            open.click("group archived");
+            wheel_to_the_end(&mut open);
+
+            assert!(open.shows("row old"));
+            open.click("row old");
+            assert_eq!(open.selection(), Selection::Workspace(id(61)));
+        }
+
+        #[gpui::test]
+        fn should_keep_its_place_when_the_workspaces_change(cx: &mut TestAppContext) {
+            let mut open = open(crowded(), cx);
+            wheel_to_the_end(&mut open);
+            let mut more = crowded();
+            more.workspaces.push(workspace(62, "w62"));
+            open.api.set(more);
+
+            open.send(ServerMessage::Changed {
+                entity: Changed::Workspace,
+                id: id::<WorkspaceId>(62).to_string(),
+            });
+
+            assert!(!open.shows("row w01"));
+            assert!(open.shows("row w60"));
         }
     }
 
