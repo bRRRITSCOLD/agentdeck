@@ -1,7 +1,6 @@
 //! The main window's size, position and maximized state, kept across restarts in
 //! `$XDG_STATE_HOME/agentdeck/window.json` (spec §11). GUI-only, apart from `config.toml`.
 
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
@@ -23,20 +22,6 @@ pub struct SavedWindow {
     pub width: f32,
     pub height: f32,
     pub maximized: bool,
-}
-
-/// `$XDG_STATE_HOME/agentdeck/window.json`, else `~/.local/state/agentdeck/window.json`.
-/// `None` without an absolute `XDG_STATE_HOME` or `HOME`: the window then isn't remembered.
-/// A relative value is ignored, as the XDG spec requires.
-pub fn state_file(var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
-    let absolute = |name: &str| {
-        var(name)
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-    };
-    let state =
-        absolute("XDG_STATE_HOME").or_else(|| Some(absolute("HOME")?.join(".local/state")))?;
-    Some(state.join("agentdeck").join("window.json"))
 }
 
 /// The saved window in `text`, or `None` when it isn't one.
@@ -332,50 +317,6 @@ mod tests {
             assert_eq!(parse(text), None);
             let text = r#"{"x":0,"y":0,"width":1200,"height":-1,"maximized":false}"#;
             assert_eq!(parse(text), None);
-        }
-    }
-
-    mod state_file {
-        use super::*;
-
-        fn vars(
-            pairs: &'static [(&'static str, &'static str)],
-        ) -> impl Fn(&str) -> Option<OsString> {
-            move |name| {
-                pairs
-                    .iter()
-                    .find(|(key, _)| *key == name)
-                    .map(|(_, value)| OsString::from(value))
-            }
-        }
-
-        #[test]
-        fn should_live_under_xdg_state_home() {
-            let path = state_file(vars(&[("XDG_STATE_HOME", "/state"), ("HOME", "/home/me")]));
-            assert_eq!(path, Some(PathBuf::from("/state/agentdeck/window.json")));
-        }
-
-        #[test]
-        fn should_default_to_the_local_state_dir() {
-            let path = state_file(vars(&[("HOME", "/home/me")]));
-            assert_eq!(
-                path,
-                Some(PathBuf::from("/home/me/.local/state/agentdeck/window.json"))
-            );
-        }
-
-        #[test]
-        fn should_ignore_a_relative_xdg_state_home() {
-            let path = state_file(vars(&[("XDG_STATE_HOME", "state"), ("HOME", "/home/me")]));
-            assert_eq!(
-                path,
-                Some(PathBuf::from("/home/me/.local/state/agentdeck/window.json"))
-            );
-        }
-
-        #[test]
-        fn should_be_none_without_a_home() {
-            assert_eq!(state_file(vars(&[])), None);
         }
     }
 

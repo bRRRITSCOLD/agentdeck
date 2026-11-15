@@ -15,6 +15,7 @@ mod inbox;
 mod instruction_list;
 mod keymap;
 mod link_task;
+mod logging;
 mod new_agent;
 mod new_task;
 mod new_workspace;
@@ -30,6 +31,7 @@ mod scrollbar;
 mod settings;
 mod shell;
 mod sidebar;
+mod state_dir;
 mod state_dot;
 mod task_list;
 mod task_row;
@@ -55,6 +57,15 @@ fn main() {
         println!("{}", agentdeck_core::version_line("agentdeck-gui"));
         return;
     }
+    let state_dir = state_dir::state_dir(|name| std::env::var_os(name));
+    // First, so GPUI's start and every later line reach the log (spec §11).
+    logging::init(
+        state_dir
+            .as_ref()
+            .map(|dir| dir.join(logging::FILE))
+            .as_deref(),
+        std::env::var("RUST_LOG").ok().as_deref(),
+    );
     gpui_platform::application().run(|cx: &mut App| {
         brrritscold_core_gpui::init(cx);
         runtime::init(cx);
@@ -66,7 +77,7 @@ fn main() {
         let connection = cx.new(|cx| Connection::new(Rc::new(DaemonConnector), cx));
         // 1440×900, the design's size, fitted to the display; or the bounds saved last time
         // while they still land on a connected display (spec §11).
-        let state_file = window_state::state_file(|name| std::env::var_os(name));
+        let state_file = state_dir.map(|dir| dir.join("window.json"));
         let saved = state_file.as_deref().and_then(window_state::load);
         let displays: Vec<_> = cx
             .displays()
