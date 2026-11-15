@@ -1,0 +1,25 @@
+# Writes fullscreen-idle, fullscreen-working, fullscreen-permission-prompt and
+# fullscreen-declined.bytes: the fullscreen TUI with a status line under the composer, as a
+# user's settings can set them. In a throwaway folder that inherits trust (spec §7):
+#   script/record-pty.py --out DIR --steps fullscreen.steps -- \
+#     claude --setting-sources project,local --strict-mcp-config --model haiku \
+#       --permission-mode manual --session-id <uuid> \
+#       --settings '{"tui":"fullscreen","statusLine":{"type":"command","command":"echo status line"}}'
+wait Claude Code 30
+sleep 4
+mark fullscreen-idle
+send Use the Bash tool to run `touch a.txt`.
+sleep 1
+send \r
+wait \x1b\]0;(?!✳) 30
+sleep 0.3
+mark fullscreen-working
+wait proceed 90
+sleep 1
+mark fullscreen-permission-prompt
+# Declined, so the command never runs. The title already shows the idle glyph on the prompt.
+send \x1b
+wait Interrupted 60
+sleep 2
+mark fullscreen-declined
+end

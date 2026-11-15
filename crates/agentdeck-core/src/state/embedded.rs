@@ -118,45 +118,136 @@ mod tests {
             assert!(RuleSet::embedded(Agent::Other).is_none());
         }
 
-        /// The `tests/fixtures/claude/*.bytes` files are hand-authored stand-ins, not
-        /// recordings: the spike kept no byte logs, and running `claude` to record them costs
-        /// money. They follow what the spike saw of v2.1.322 at 100×30: an inline TUI that
-        /// redraws by erasing its last frame, the OSC 0 title as the state glyph, and an OSC
-        /// 7501 probe at startup. Replace them with real recordings when one is made; the
-        /// expected states below stay.
+        /// Real recordings of Claude Code v2.1.325 at 120×40 (spec §7, "Recording fixtures"),
+        /// each fixture the bytes since the one before it, so a test feeds a chain in order:
+        ///
+        /// - `trust-dialog`: startup in a folder Claude Code hasn't been told to trust.
+        /// - `idle` → `thinking` → `replied` → `permission-prompt` → `command` →
+        ///   `command-done` → `quoted` → `exit`: the default inline TUI with a fresh prompt, a
+        ///   reply being written, that reply finished, a Bash permission prompt, the command
+        ///   running once allowed, that turn finished, a reply quoting a dialog's text, and
+        ///   `/exit`.
+        /// - `fullscreen-idle` → `fullscreen-working` → `fullscreen-permission-prompt` →
+        ///   `fullscreen-declined`: the fullscreen TUI with a status line, a second session
+        ///   whose permission prompt is declined with Esc.
         mod claude {
             use super::*;
 
             const CLAUDE: Recording = Recording {
-                columns: 100,
-                lines: 30,
+                columns: 120,
+                lines: 40,
                 process: "claude",
             };
 
-            const IDLE: &[u8] = include_bytes!("../../tests/fixtures/claude/idle.bytes");
-            const WORKING: &[u8] = include_bytes!("../../tests/fixtures/claude/working.bytes");
-            const DONE: &[u8] = include_bytes!("../../tests/fixtures/claude/done.bytes");
-            const PERMISSION_PROMPT: &[u8] =
-                include_bytes!("../../tests/fixtures/claude/permission-prompt.bytes");
             const TRUST_DIALOG: &[u8] =
                 include_bytes!("../../tests/fixtures/claude/trust-dialog.bytes");
+            const IDLE: &[u8] = include_bytes!("../../tests/fixtures/claude/idle.bytes");
+            const THINKING: &[u8] = include_bytes!("../../tests/fixtures/claude/thinking.bytes");
+            const REPLIED: &[u8] = include_bytes!("../../tests/fixtures/claude/replied.bytes");
+            const PERMISSION_PROMPT: &[u8] =
+                include_bytes!("../../tests/fixtures/claude/permission-prompt.bytes");
+            const COMMAND: &[u8] = include_bytes!("../../tests/fixtures/claude/command.bytes");
+            const COMMAND_DONE: &[u8] =
+                include_bytes!("../../tests/fixtures/claude/command-done.bytes");
+            const QUOTED: &[u8] = include_bytes!("../../tests/fixtures/claude/quoted.bytes");
+            const EXIT: &[u8] = include_bytes!("../../tests/fixtures/claude/exit.bytes");
+
+            /// The inline session, in recording order.
+            const TURNS: &[&[u8]] = &[
+                IDLE,
+                THINKING,
+                REPLIED,
+                PERMISSION_PROMPT,
+                COMMAND,
+                COMMAND_DONE,
+                QUOTED,
+                EXIT,
+            ];
 
             fn rules() -> RuleSet {
                 RuleSet::embedded(Agent::Claude).expect("claude rules")
             }
 
-            fn state_after(fixtures: &[&[u8]]) -> AgentState {
-                rules().evaluate(&Replay::of(&CLAUDE, fixtures).observation())
+            /// The state once the inline session's fixtures up to and including `last` are fed.
+            fn state_through(last: &[u8]) -> AgentState {
+                rules().evaluate(&Replay::of(&CLAUDE, turns_through(last)).observation())
+            }
+
+            fn turns_through(last: &[u8]) -> &'static [&'static [u8]] {
+                let end = TURNS
+                    .iter()
+                    .position(|fixture| std::ptr::eq(*fixture, last))
+                    .expect("a fixture of the inline session");
+                &TURNS[..=end]
+            }
+
+            #[test]
+            fn should_be_blocked_on_the_trust_dialog() {
+                let observation = Replay::of(&CLAUDE, &[TRUST_DIALOG]).observation();
+                assert_eq!(rules().evaluate(&observation), AgentState::Blocked);
             }
 
             #[test]
             fn should_be_idle_at_a_fresh_prompt() {
-                assert_eq!(state_after(&[IDLE]), AgentState::Idle);
+                assert_eq!(state_through(IDLE), AgentState::Idle);
             }
 
             #[test]
-            fn should_be_working_while_the_spinner_runs() {
-                assert_eq!(state_after(&[IDLE, WORKING]), AgentState::Working);
+            fn should_be_working_while_it_writes_a_reply() {
+                assert_eq!(state_through(THINKING), AgentState::Working);
+            }
+
+            #[test]
+            fn should_be_idle_once_a_reply_is_written() {
+                assert_eq!(state_through(REPLIED), AgentState::Idle);
+            }
+
+            #[test]
+            fn should_be_blocked_on_a_permission_prompt_though_the_title_shows_idle() {
+                let observation =
+                    Replay::of(&CLAUDE, turns_through(PERMISSION_PROMPT)).observation();
+                assert!(
+                    observation.title.starts_with('✳'),
+                    "{:?}",
+                    observation.title
+                );
+                assert_eq!(rules().evaluate(&observation), AgentState::Blocked);
+            }
+
+            #[test]
+            fn should_be_working_while_a_command_runs() {
+                assert_eq!(state_through(COMMAND), AgentState::Working);
+            }
+
+            #[test]
+            fn should_be_idle_once_the_command_finishes() {
+                assert_eq!(state_through(COMMAND_DONE), AgentState::Idle);
+            }
+
+            #[test]
+            fn should_stay_idle_when_a_reply_quotes_a_dialog() {
+                assert_eq!(state_through(QUOTED), AgentState::Idle);
+            }
+
+            #[test]
+            fn should_stay_idle_when_a_reply_quotes_the_activity_line() {
+                let quoted = Replay::of(&CLAUDE, turns_through(QUOTED)).observation();
+                let rows = quoted
+                    .rows
+                    .iter()
+                    .map(|row| row.replace("Esc to cancel", "esc to interrupt"))
+                    .collect();
+                let observation = Observation { rows, ..quoted };
+                assert_eq!(rules().evaluate(&observation), AgentState::Idle);
+            }
+
+            #[test]
+            fn should_read_working_from_the_footer_without_a_title() {
+                let observation = Observation {
+                    title: String::new(),
+                    ..Replay::of(&CLAUDE, turns_through(THINKING)).observation()
+                };
+                assert_eq!(rules().evaluate(&observation), AgentState::Working);
             }
 
             #[test]
@@ -169,21 +260,8 @@ mod tests {
             }
 
             #[test]
-            fn should_be_blocked_on_the_trust_dialog() {
-                assert_eq!(state_after(&[TRUST_DIALOG]), AgentState::Blocked);
-            }
-
-            #[test]
-            fn should_be_blocked_on_a_permission_prompt() {
-                assert_eq!(
-                    state_after(&[IDLE, WORKING, PERMISSION_PROMPT]),
-                    AgentState::Blocked
-                );
-            }
-
-            #[test]
             fn should_publish_done_when_a_turn_finishes() {
-                let mut replay = Replay::of(&CLAUDE, &[IDLE, WORKING]);
+                let mut replay = Replay::of(&CLAUDE, &[IDLE, THINKING]);
                 let mut tracker = StateTracker::new(rules());
                 let ms = Duration::from_millis;
 
@@ -193,12 +271,65 @@ mod tests {
                     Some(AgentState::Working)
                 );
 
-                replay.feed(DONE);
+                replay.feed(REPLIED);
                 assert_eq!(tracker.observe(&replay.observation(), ms(1_000)), None);
                 assert_eq!(
                     tracker.observe(&replay.observation(), ms(1_400)),
                     Some(AgentState::Done)
                 );
+            }
+
+            #[test]
+            fn should_be_unknown_on_an_empty_screen() {
+                let observation = Replay::of(&CLAUDE, &[]).observation();
+                assert_eq!(rules().evaluate(&observation), AgentState::Unknown);
+            }
+
+            #[test]
+            fn should_leave_exited_to_the_process_once_it_quits() {
+                assert_eq!(state_through(EXIT), AgentState::Unknown);
+            }
+
+            mod fullscreen {
+                use super::*;
+
+                const IDLE: &[u8] =
+                    include_bytes!("../../tests/fixtures/claude/fullscreen-idle.bytes");
+                const WORKING: &[u8] =
+                    include_bytes!("../../tests/fixtures/claude/fullscreen-working.bytes");
+                const PERMISSION_PROMPT: &[u8] = include_bytes!(
+                    "../../tests/fixtures/claude/fullscreen-permission-prompt.bytes"
+                );
+                const DECLINED: &[u8] =
+                    include_bytes!("../../tests/fixtures/claude/fullscreen-declined.bytes");
+
+                fn state_after(fixtures: &[&[u8]]) -> AgentState {
+                    rules().evaluate(&Replay::of(&CLAUDE, fixtures).observation())
+                }
+
+                #[test]
+                fn should_be_idle_at_a_fresh_prompt() {
+                    assert_eq!(state_after(&[IDLE]), AgentState::Idle);
+                }
+
+                #[test]
+                fn should_be_working_while_it_thinks() {
+                    assert_eq!(state_after(&[IDLE, WORKING]), AgentState::Working);
+                }
+
+                #[test]
+                fn should_be_blocked_on_a_permission_prompt() {
+                    assert_eq!(
+                        state_after(&[IDLE, WORKING, PERMISSION_PROMPT]),
+                        AgentState::Blocked
+                    );
+                }
+
+                #[test]
+                fn should_be_idle_once_a_permission_prompt_is_declined() {
+                    let declined = [IDLE, WORKING, PERMISSION_PROMPT, DECLINED];
+                    assert_eq!(state_after(&declined), AgentState::Idle);
+                }
             }
         }
 
