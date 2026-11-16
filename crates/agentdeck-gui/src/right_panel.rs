@@ -640,7 +640,9 @@ impl RightPanel {
                     .into_any_element()
             }
         };
+        // As wide as the list, as the rows of a column are: a list lays each item out alone.
         div()
+            .w_full()
             .flex()
             .flex_col()
             .when(ix + 1 < self.shown.len(), |item| item.pb(space::S1))
@@ -2120,6 +2122,27 @@ mod tests {
                 per_step <= in_view,
                 "{per_step} items a step, {in_view} in view"
             );
+        }
+
+        #[gpui::test]
+        fn should_stretch_every_item_across_the_list(cx: &mut TestAppContext) {
+            let (panel, cx) = open_crowded(cx);
+            let mut short = crowded();
+            short.tasks[1].title = "x".into();
+            panel.update(cx, |p, cx| p.show(id(1), short, cx));
+            settle(cx);
+
+            let width = |selector: String, cx: &mut VisualTestContext| {
+                cx.debug_bounds(selector.clone().leak())
+                    .expect(&selector)
+                    .size
+                    .width
+            };
+            let field = width("new instruction".into(), cx);
+            let card = width(format!("instruction {}", id::<InstructionId>(200)), cx);
+            let long = width(format!("panel task {}", id::<TaskId>(1)), cx);
+            let short = width(format!("panel task {}", id::<TaskId>(2)), cx);
+            assert_eq!([card, long, short], [field; 3]);
         }
 
         #[gpui::test]
