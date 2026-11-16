@@ -1,6 +1,6 @@
 //! Settings → GitHub (spec §8, §11), Penpot "Screens" → "Settings · GitHub · …": a card
 //! saying where the daemon's GitHub token comes from, with Sign in with GitHub, Paste token or
-//! Sign out beside it, and the write-only OAuth client ID field (Penpot part
+//! Sign out beside it (all three for a saved token GitHub rejected), and the write-only OAuth client ID field (Penpot part
 //! `agentdeck/ClientIdField`).
 //!
 //! It shows `GET /v1/github/auth` and reads it again on each `github_auth` event, which also
@@ -43,10 +43,21 @@ pub const CLIENT_ID_DESCRIPTION: &str = "From the OAuth App you registered on Gi
 /// The client ID input's placeholder while one is saved.
 pub const CLIENT_ID_SAVED: &str = "Saved in the keyring";
 
-/// The card's first line: who the token signs in, or that none does.
+/// The card's hint for a saved token GitHub rejected.
+pub const REJECTED_HINT: &str = "It was revoked or expired. Sign in again or use another token.";
+
+/// Whether the saved token is one GitHub rejected (revoked or expired): agentdeck's to replace
+/// or delete.
+fn saved_but_rejected(auth: &GithubAuthInfo) -> bool {
+    auth.source == TokenSource::Keyring && auth.rejected
+}
+
+/// The card's first line: who the token signs in, that none does, or that GitHub rejected the
+/// saved one.
 pub fn login_line(auth: &GithubAuthInfo) -> String {
     match &auth.login {
         Some(login) => format!("Signed in as {login}"),
+        None if saved_but_rejected(auth) => "GitHub rejected your saved token".to_owned(),
         None => "Not signed in to GitHub".to_owned(),
     }
 }
@@ -59,8 +70,12 @@ fn var_name(var: TokenEnvVar) -> &'static str {
     }
 }
 
-/// Where the token comes from, under the card's first line; `None` without a token.
+/// Where the token comes from, under the card's first line; `None` without a token, and for
+/// a saved token GitHub rejected, whose first line already says so.
 pub fn source_line(auth: &GithubAuthInfo) -> Option<String> {
+    if saved_but_rejected(auth) {
+        return None;
+    }
     match auth.source {
         TokenSource::Keyring => Some("With your saved token.".to_owned()),
         TokenSource::Env => Some(format!(
@@ -72,8 +87,12 @@ pub fn source_line(auth: &GithubAuthInfo) -> Option<String> {
     }
 }
 
-/// What to do instead of Sign out, for a token that isn't agentdeck's to delete.
+/// What to do instead of Sign out, for a token that isn't agentdeck's to delete, or what to
+/// do about a saved token GitHub rejected.
 pub fn hint(auth: &GithubAuthInfo) -> Option<String> {
+    if saved_but_rejected(auth) {
+        return Some(REJECTED_HINT.to_owned());
+    }
     match auth.source {
         TokenSource::Env => Some(format!(
             "Unset {}",
@@ -110,7 +129,11 @@ pub fn scope_note(auth: &GithubAuthInfo) -> Option<&'static str> {
 
 /// The label over the actions beside the card. Sign out acts on the card's token, so it needs
 /// none; beside a gh or env token, the actions save agentdeck's own, which then overrides it.
+/// A saved token GitHub rejected gives no token, as `none`.
 pub fn actions_label(auth: &GithubAuthInfo) -> Option<&'static str> {
+    if saved_but_rejected(auth) {
+        return Some("Sign in");
+    }
     match auth.source {
         TokenSource::Keyring => None,
         TokenSource::Env | TokenSource::Gh => Some("Use your own token"),
@@ -401,16 +424,19 @@ impl GithubSection {
                         .child(label),
                 )
             });
-        let actions = if auth.source == TokenSource::Keyring {
-            actions.child(
-                div().debug_selector(|| "github sign out".into()).child(
-                    Button::new("github-sign-out")
-                        .variant(ButtonVariant::Outline)
-                        .size(ButtonSize::Sm)
-                        .label("Sign out")
-                        .on_click(cx.listener(|this, _, window, cx| this.sign_out(window, cx))),
-                ),
+        // Under Sign in and Paste token for a saved token GitHub rejected, as wide as they are.
+        let sign_out = |cx: &mut Context<Self>| {
+            div().debug_selector(|| "github sign out".into()).child(
+                Button::new("github-sign-out")
+                    .variant(ButtonVariant::Outline)
+                    .size(ButtonSize::Sm)
+                    .label("Sign out")
+                    .w_full()
+                    .on_click(cx.listener(|this, _, window, cx| this.sign_out(window, cx))),
             )
+        };
+        let actions = if auth.source == TokenSource::Keyring && !auth.rejected {
+            actions.child(sign_out(cx))
         } else {
             actions
                 .when(auth.client_id_set, |actions| {
@@ -438,6 +464,9 @@ impl GithubSection {
                             })),
                     ),
                 )
+                .when(saved_but_rejected(auth), |actions| {
+                    actions.child(sign_out(cx))
+                })
         };
         div()
             .debug_selector(|| "github account".into())
@@ -544,7 +573,18 @@ pub mod fixtures {
             env_var: None,
             login: Some("octocat".into()),
             scopes: Some(vec!["repo".into()]),
+            rejected: false,
             client_id_set: true,
+        }
+    }
+
+    /// A saved token GitHub rejected (revoked or expired), a client ID saved.
+    pub fn rejected_token() -> GithubAuthInfo {
+        GithubAuthInfo {
+            login: None,
+            scopes: None,
+            rejected: true,
+            ..saved_token()
         }
     }
 
@@ -563,7 +603,7 @@ mod tests {
     use brrritscold_core_gpui::Root;
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
 
-    use super::fixtures::{saved_token, signed_out};
+    use super::fixtures::{rejected_token, saved_token, signed_out};
     use super::sign_in::Stage;
     use super::*;
     use crate::api::fake::FakeApi;
@@ -703,6 +743,38 @@ mod tests {
             assert!(!harness.shows("github paste token", cx));
             assert!(!harness.shows("github hint", cx));
             assert!(!harness.shows("github actions label", cx));
+        }
+
+        #[gpui::test]
+        fn should_offer_sign_in_and_paste_token_over_sign_out_for_a_rejected_saved_token(
+            cx: &mut TestAppContext,
+        ) {
+            let (harness, cx) = Harness::open(rejected_token(), cx);
+
+            assert!(harness.shows("github actions label", cx));
+            assert!(harness.shows("github sign in", cx));
+            assert!(harness.shows("github paste token", cx));
+            assert!(harness.shows("github sign out", cx));
+            assert!(harness.shows("github hint", cx));
+            assert!(!harness.shows("github source", cx));
+            let sign_in = cx.debug_bounds("github sign in").expect("sign in");
+            let paste = cx.debug_bounds("github paste token").expect("paste token");
+            let sign_out = cx.debug_bounds("github sign out").expect("sign out");
+            assert!(sign_in.top() < paste.top() && paste.top() < sign_out.top());
+            assert_eq!(sign_out.size.width, sign_in.size.width);
+            assert_eq!(paste.size.width, sign_in.size.width);
+        }
+
+        #[gpui::test]
+        fn should_offer_sign_in_again_once_github_rejects_the_saved_token(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(saved_token(), cx);
+            harness.api.set_github(rejected_token());
+
+            harness.github_auth(None, None, cx);
+
+            assert!(harness.shows("github sign in", cx));
+            assert!(harness.shows("github paste token", cx));
+            assert!(harness.shows("github sign out", cx));
         }
 
         #[gpui::test]
@@ -941,6 +1013,20 @@ mod tests {
         }
 
         #[gpui::test]
+        fn should_replace_a_rejected_saved_token(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(rejected_token(), cx);
+            open_and_type(&harness, "ghp_x", cx);
+
+            harness.click("paste token save", cx);
+
+            let auth = harness.view.read_with(cx, |view, _| view.auth().cloned());
+            assert_eq!(auth.map(|auth| auth.rejected), Some(false));
+            assert!(harness.shows("github sign out", cx));
+            assert!(!harness.shows("github paste token", cx));
+            assert!(!harness.shows("github hint", cx));
+        }
+
+        #[gpui::test]
         fn should_show_a_refused_token_under_the_field_and_stay_open(cx: &mut TestAppContext) {
             let (harness, cx) = Harness::open(signed_out(), cx);
             open_and_type(&harness, "ghp_bad", cx);
@@ -1163,6 +1249,50 @@ mod tests {
         fn should_say_not_signed_in_without_a_login() {
             assert_eq!(login_line(&signed_out()), "Not signed in to GitHub");
             assert_eq!(source_line(&signed_out()), None);
+        }
+
+        #[test]
+        fn should_say_github_rejected_a_saved_token_and_what_to_do() {
+            let rejected = rejected_token();
+
+            assert_eq!(login_line(&rejected), "GitHub rejected your saved token");
+            assert_eq!(source_line(&rejected), None);
+            assert_eq!(
+                hint(&rejected).as_deref(),
+                Some("It was revoked or expired. Sign in again or use another token.")
+            );
+            assert_eq!(actions_label(&rejected), Some("Sign in"));
+            assert_eq!(scope_note(&rejected), None);
+        }
+
+        #[test]
+        fn should_still_say_a_rejected_saved_token_overrides_the_variable() {
+            let both = GithubAuthInfo {
+                env_var: Some(TokenEnvVar::GhToken),
+                ..rejected_token()
+            };
+
+            assert_eq!(
+                override_line(&both).as_deref(),
+                Some("Your saved token overrides GH_TOKEN")
+            );
+        }
+
+        #[test]
+        fn should_say_not_signed_in_over_the_source_of_a_rejected_env_token() {
+            let env = GithubAuthInfo {
+                source: TokenSource::Env,
+                env_var: Some(TokenEnvVar::GhToken),
+                ..rejected_token()
+            };
+
+            assert_eq!(login_line(&env), "Not signed in to GitHub");
+            assert_eq!(
+                source_line(&env).as_deref(),
+                Some("With GH_TOKEN from agentdeckd's environment.")
+            );
+            assert_eq!(hint(&env).as_deref(), Some("Unset GH_TOKEN"));
+            assert_eq!(actions_label(&env), Some("Use your own token"));
         }
 
         #[test]

@@ -199,6 +199,9 @@ pub mod types {
         ///The token's GitHub user; absent while there's no token, GitHub rejected it, or it couldn't be asked.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub login: ::std::option::Option<::std::string::String>,
+        ///Whether GitHub rejected the token `source` gives (revoked or expired). A token GitHub couldn't be asked about has no `login` either, but isn't rejected.
+        #[serde(default)]
+        pub rejected: bool,
         ///The token's scopes, from `X-OAuth-Scopes`; absent for a token that sends none (a fine-grained one).
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub scopes: ::std::option::Option<::std::vec::Vec<::std::string::String>>,
@@ -1765,6 +1768,7 @@ pub mod types {
                 ::std::option::Option<::std::string::String>,
                 ::std::string::String,
             >,
+            rejected: ::std::result::Result<bool, ::std::string::String>,
             scopes: ::std::result::Result<
                 ::std::option::Option<::std::vec::Vec<::std::string::String>>,
                 ::std::string::String,
@@ -1777,6 +1781,7 @@ pub mod types {
                     client_id_set: Err("no value supplied for client_id_set".to_string()),
                     env_var: Ok(Default::default()),
                     login: Ok(Default::default()),
+                    rejected: Ok(Default::default()),
                     scopes: Ok(Default::default()),
                     source: Err("no value supplied for source".to_string()),
                 }
@@ -1813,6 +1818,16 @@ pub mod types {
                     .map_err(|e| format!("error converting supplied value for login: {e}"));
                 self
             }
+            pub fn rejected<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<bool>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.rejected = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for rejected: {e}"));
+                self
+            }
             pub fn scopes<T>(mut self, value: T) -> Self
             where
                 T: ::std::convert::TryInto<
@@ -1845,6 +1860,7 @@ pub mod types {
                     client_id_set: value.client_id_set?,
                     env_var: value.env_var?,
                     login: value.login?,
+                    rejected: value.rejected?,
                     scopes: value.scopes?,
                     source: value.source?,
                 })
@@ -1856,6 +1872,7 @@ pub mod types {
                     client_id_set: Ok(value.client_id_set),
                     env_var: Ok(value.env_var),
                     login: Ok(value.login),
+                    rejected: Ok(value.rejected),
                     scopes: Ok(value.scopes),
                     source: Ok(value.source),
                 }

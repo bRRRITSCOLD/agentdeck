@@ -231,6 +231,13 @@ struct State {
     client_id_set: bool,
 }
 
+impl State {
+    /// Whether GitHub rejected the token the source gives.
+    fn rejected(&self) -> bool {
+        self.source != TokenSource::None && self.token.is_none()
+    }
+}
+
 /// The daemon's GitHub credentials; clones share them.
 #[derive(Clone)]
 pub struct GithubAuth {
@@ -298,6 +305,7 @@ impl GithubAuth {
             env_var: self.inner.env.token().map(|(var, _)| var),
             login: state.login.clone(),
             scopes: state.scopes.clone(),
+            rejected: state.rejected(),
             client_id_set: state.client_id_set,
         }
     }
@@ -307,7 +315,8 @@ impl GithubAuth {
         self.inner.changes.subscribe()
     }
 
-    /// Reads the sources again, tells clients when the source or the login changed, and
+    /// Reads the sources again, tells clients when the source, the login or whether GitHub
+    /// rejected the token changed, and
     /// returns the token, unless there's none or GitHub rejected it.
     pub async fn reread(&self) -> Result<String, NoToken> {
         if self.read().await {
@@ -321,15 +330,24 @@ impl GithubAuth {
         }
     }
 
-    /// Forgets the token: GitHub rejected it, though it took it a moment ago.
+    /// Forgets the token: GitHub rejected it, though it took it a moment ago. Tells clients,
+    /// unless it was already forgotten.
     pub fn rejected(&self) {
-        let mut state = self.state();
-        state.token = None;
-        state.login = None;
-        state.scopes = None;
+        let changed = {
+            let mut state = self.state();
+            let changed = state.token.is_some();
+            state.token = None;
+            state.login = None;
+            state.scopes = None;
+            changed
+        };
+        if changed {
+            self.publish(None, None);
+        }
     }
 
-    /// Reads the sources and the client ID; returns whether the source or the login changed.
+    /// Reads the sources and the client ID; returns whether the source, the login or whether
+    /// GitHub rejected the token changed.
     async fn read(&self) -> bool {
         let _reading = self.inner.reading.lock().await;
         let found = find(&self.inner.store, &self.inner.env, gh::gh_auth_token).await;
@@ -360,7 +378,9 @@ impl GithubAuth {
             },
         };
         let mut state = self.state();
-        let changed = state.source != source || state.login != login;
+        let changed = state.source != source
+            || state.login != login
+            || state.rejected() != (source != TokenSource::None && token.is_none());
         *state = State {
             source,
             token,

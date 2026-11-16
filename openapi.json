@@ -329,6 +329,11 @@
             "nullable": true,
             "type": "string"
           },
+          "rejected": {
+            "default": false,
+            "description": "Whether GitHub rejected the token `source` gives (revoked or expired). A token GitHub couldn't be asked about has no `login` either, but isn't rejected.",
+            "type": "boolean"
+          },
           "scopes": {
             "description": "The token's scopes, from `X-OAuth-Scopes`; absent for a token that sends none (a fine-grained one).",
             "items": {
