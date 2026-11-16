@@ -6,7 +6,9 @@
 //! task's agent. Enter is a newline there; Ctrl+Enter or **Comment** sends.
 //!
 //! While no agent works on the task, the status row ends in **Start agent**, which closes the
-//! sheet and asks the window for New agent on the task's workspace with [`StartAgentOn`].
+//! sheet and asks the window for New agent on the task's workspace with [`StartAgentOn`]. The
+//! header's `…` menu (Penpot "Task sheet · send to agent") sends the task to a live agent pane
+//! ([`send_task`]) and copies its id.
 //!
 //! The task is edited in place (spec §11, Editing a task; Penpot "Task sheet · edit title",
 //! "… · title error", "… · edit description", "… · workspace select", "… · PR task"): a click on
@@ -20,6 +22,7 @@
 //! seen, which clears the row's unseen mark. While open, a `changed comment` reads the thread again.
 //! The task itself comes from the sidebar's [`Snapshot`], passed on by the window.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use agentdeck_client::types::{Comment, Task, TaskPatch};
@@ -29,9 +32,9 @@ use agentdeck_core::{
 };
 use brrritscold_core_gpui::{
     ActiveTheme as _, Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, DialogHandle,
-    FieldError, Icon, IconName, Input, InputState, Select, SelectTrigger, Sheet, SheetContent,
-    SheetDescription, SheetFooter, SheetTitle, Textarea, TextareaState, Tooltip, TooltipContent,
-    TooltipContentSide,
+    DropdownMenu, DropdownMenuContent, DropdownMenuItem, FieldError, Icon, IconName, Input,
+    InputState, Select, SelectTrigger, Sheet, SheetContent, SheetDescription, SheetFooter,
+    SheetTitle, Textarea, TextareaState, Tooltip, TooltipContent, TooltipContentSide,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use chrono::{DateTime, Utc};
@@ -52,6 +55,7 @@ use crate::open_pr;
 use crate::overview::{Snapshot, ago};
 use crate::pane_header;
 use crate::rereads::Rereads;
+use crate::send_task::{self, Sending, TaskTarget};
 use crate::task_list::{self, PrCell};
 use crate::task_row;
 use crate::workspace::failed;
@@ -102,6 +106,11 @@ pub struct Summary {
     pub pr: Option<PrCell>,
     /// The Start agent button at the end of the status row.
     pub start_agent: StartAgent,
+    /// The panes the sheet menu's Send to agent offers; `None` for a done task, whose menu
+    /// has no Send to agent.
+    pub send_to: Option<Vec<TaskTarget>>,
+    /// Whether it is in the Inbox, so a send moves it to the pane's workspace first.
+    pub inbox: bool,
 }
 
 /// The sheet's Start agent button (Penpot `TaskSheetBody` → `StartAgent`), shown while no
@@ -160,6 +169,8 @@ pub fn summary(snapshot: &Snapshot, task: TaskId) -> Option<Summary> {
         description: (!held.body.trim().is_empty()).then(|| held.body.clone().into()),
         pr: row.and_then(|r| r.pr),
         start_agent,
+        send_to: send_task::targets(snapshot, task),
+        inbox: held.workspace_id.is_none(),
     })
 }
 
@@ -228,7 +239,7 @@ pub(crate) fn agent_name(agent: Agent) -> &'static str {
 
 /// The agent's name after the glyph it puts in its pane's title, as pane headers show it:
 /// `✳ Claude Code`. Codex puts none.
-fn agent_label(agent: Agent) -> String {
+pub(crate) fn agent_label(agent: Agent) -> String {
     match agent {
         Agent::Claude => format!("✳ {}", agent_name(agent)),
         Agent::Codex | Agent::Other => agent_name(agent).to_owned(),
@@ -853,12 +864,13 @@ impl TaskSheet {
                 .key_context(keymap::TASK_EDITOR)
                 .on_action(cx.listener(|this, _: &Submit, window, cx| this.save_edit(window, cx)))
                 .on_action(cx.listener(|this, _: &CancelEdit, _, cx| this.cancel_edit(cx)))
-                .mr(space::S10)
+                .mr(space::S18)
                 .child(Input::new(input).aria_invalid(self.shows_blank_title(cx)))
                 .into_any_element(),
             _ if summary.title_editable => div()
                 .id("task-sheet-title")
                 .debug_selector(|| "task sheet title".into())
+                .mr(space::S18)
                 .cursor_text()
                 .on_click(cx.listener(|this, _, window, cx| this.edit_title(window, cx)))
                 .child(SheetTitle::new(summary.title.clone()))
@@ -867,6 +879,7 @@ impl TaskSheet {
                 .trigger(
                     div()
                         .debug_selector(|| "task sheet title".into())
+                        .mr(space::S18)
                         .child(SheetTitle::new(summary.title.clone())),
                 )
                 .content(
@@ -881,12 +894,64 @@ impl TaskSheet {
             SheetDescription::new(summary.on_it.clone()).into_any_element()
         };
         div()
+            .debug_selector(|| "task sheet header".into())
+            .relative()
             .flex()
             .flex_col()
             .gap(space::S1_5)
             .p(space::S4)
             .child(title)
             .child(under)
+            .child(self.menu(summary))
+            .into_any_element()
+    }
+
+    /// The sheet's `…` menu (Penpot "Task sheet · send to agent"): a ghost icon-sm `Ellipsis`
+    /// just left of the close button, holding **Send to agent** unless the task is done, then
+    /// **Copy task id**, as a row's menu does.
+    fn menu(&self, summary: &Summary) -> AnyElement {
+        let content = DropdownMenuContent::new();
+        let content = match (self.task, summary.send_to.clone()) {
+            (Some(task), Some(targets)) => {
+                let api = self.api.clone();
+                let sending = Sending {
+                    task,
+                    title: summary.title.clone(),
+                    inbox: summary.inbox,
+                };
+                let (trigger, sub) = send_task::submenu(
+                    targets,
+                    Rc::new(move |target, window, cx| {
+                        send_task::send(api.clone(), sending.clone(), target, window, cx);
+                    }),
+                );
+                content.sub(trigger, sub)
+            }
+            _ => content,
+        };
+        let task = self.task;
+        let content = content.item(DropdownMenuItem::new("Copy task id").on_click(
+            move |_, window, cx| {
+                if let Some(task) = task {
+                    crate::notice::copy(task.to_string(), "Copied task id", window, cx);
+                }
+            },
+        ));
+        div()
+            .debug_selector(|| "task sheet menu".into())
+            .absolute()
+            .top(space::S4)
+            .right(space::S12)
+            .child(
+                DropdownMenu::new("task-sheet-menu")
+                    .trigger(
+                        Button::new("task-sheet-menu-trigger")
+                            .variant(ButtonVariant::Ghost)
+                            .size(ButtonSize::IconSm)
+                            .icon(IconName::Ellipsis),
+                    )
+                    .content(content),
+            )
             .into_any_element()
     }
 
@@ -1680,6 +1745,99 @@ mod tests {
                 .unwrap_or_else(|| panic!("{selector} shows"));
             cx.simulate_click(bounds.center(), Modifiers::default());
             harness.settle(cx);
+        }
+
+        mod sheet_menu {
+            use super::*;
+
+            /// [`snapshot`] with Claude Code idle in `tabs-a11y`'s `agents` tab, on no task.
+            fn with_agent() -> Snapshot {
+                let mut snapshot = snapshot();
+                snapshot.panes.push(PaneState {
+                    agent: Some(Agent::Claude),
+                    tab: "agents".into(),
+                    ..pane(30, id(1), AgentState::Idle)
+                });
+                snapshot
+            }
+
+            /// The sheet open on task 10 of `snapshot`.
+            fn open_with(
+                snapshot: Snapshot,
+                cx: &mut TestAppContext,
+            ) -> (Harness, &mut VisualTestContext) {
+                let (harness, cx) = Harness::new(Vec::new(), cx);
+                cx.update(|window, cx| {
+                    harness
+                        .sheet
+                        .update(cx, |s, cx| s.open(id(10), snapshot, window, cx));
+                });
+                harness.settle(cx);
+                (harness, cx)
+            }
+
+            /// Opens the sheet's `…` menu and types `keys`.
+            fn pick(harness: &Harness, keys: &str, cx: &mut VisualTestContext) {
+                click("task sheet menu", harness, cx);
+                cx.simulate_keystrokes(keys);
+                harness.settle(cx);
+            }
+
+            #[gpui::test]
+            fn should_send_the_task_to_the_agent_picked(cx: &mut TestAppContext) {
+                let (harness, cx) = open_with(with_agent(), cx);
+
+                // Send to agent, its submenu, its first pane.
+                pick(&harness, "down enter", cx);
+                cx.simulate_keystrokes("enter");
+                harness.settle(cx);
+
+                assert_eq!(
+                    *harness.api.linked.lock().unwrap(),
+                    [(id(30), Some(id(10)))]
+                );
+            }
+
+            #[gpui::test]
+            fn should_copy_the_task_id_after_send_to_agent(cx: &mut TestAppContext) {
+                let (harness, cx) = open_with(with_agent(), cx);
+
+                pick(&harness, "down down enter", cx);
+
+                let copied = cx.read_from_clipboard().and_then(|item| item.text());
+                assert_eq!(copied, Some(id::<TaskId>(10).to_string()));
+            }
+
+            #[gpui::test]
+            fn should_offer_only_copy_task_id_on_a_done_task(cx: &mut TestAppContext) {
+                let mut done = with_agent();
+                done.tasks[0].status = TaskStatus::Done;
+                let (harness, cx) = open_with(done, cx);
+
+                pick(&harness, "down enter", cx);
+
+                let copied = cx.read_from_clipboard().and_then(|item| item.text());
+                assert_eq!(copied, Some(id::<TaskId>(10).to_string()));
+                assert_eq!(*harness.api.linked.lock().unwrap(), []);
+            }
+
+            #[gpui::test]
+            fn should_sit_left_of_the_close_button_with_the_title_clear_of_it(
+                cx: &mut TestAppContext,
+            ) {
+                let (_harness, cx) = open_with(with_agent(), cx);
+
+                let menu = cx.debug_bounds("task sheet menu").expect("the menu shows");
+                let title = cx
+                    .debug_bounds("task sheet title")
+                    .expect("the title shows");
+                let sheet = (cx.debug_bounds("task sheet header")).expect("the header shows");
+                assert_eq!(menu.size, gpui::size(px(32.), px(32.)));
+                // `top-4`, `right-12`: just left of the close button's `right-4`.
+                assert_eq!(menu.top() - sheet.top(), px(16.));
+                assert_eq!(sheet.right() - menu.right(), px(48.));
+                assert!(title.right() <= menu.left(), "{title:?} clear of {menu:?}");
+            }
         }
 
         mod edit_title {

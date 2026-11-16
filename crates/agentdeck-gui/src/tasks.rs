@@ -248,7 +248,8 @@ impl TasksView {
                 let edit = move |_: &mut Window, cx: &mut gpui::App| {
                     let _ = view.update(cx, |_, cx| cx.emit(EditTask(task)));
                 };
-                let parts = close_prs::row_parts(&self.close, row, edit, cx);
+                let send = crate::send_task::targets(&self.snapshot, task);
+                let parts = close_prs::row_parts(&self.close, row, send, edit, cx);
                 task_row::spaced(task_row::wide(
                     row,
                     picker,
@@ -560,7 +561,7 @@ mod tests {
 
         harness.click(format!("tasks menu {}", id::<TaskId>(1)).leak(), cx);
         harness.draw(cx);
-        cx.simulate_keystrokes("down down enter");
+        cx.simulate_keystrokes("down down down enter");
         cx.run_until_parked();
 
         let copied = cx.read_from_clipboard().and_then(|item| item.text());
@@ -570,6 +571,57 @@ mod tests {
             shown.last().map(|toast| toast.title.clone()),
             Some("Copied task id".into())
         );
+    }
+
+    /// Opens `task`'s row menu, then its Send to agent submenu, and picks its `n`th pane,
+    /// counting from 1: the submenu opens with its first item picked.
+    fn send_to(harness: &Harness, task: u32, n: usize, cx: &mut VisualTestContext) {
+        harness.click(format!("tasks menu {}", id::<TaskId>(task)).leak(), cx);
+        harness.draw(cx);
+        cx.simulate_keystrokes("down down enter");
+        cx.run_until_parked();
+        harness.draw(cx);
+        cx.simulate_keystrokes(&format!("{}enter", "down ".repeat(n - 1)));
+        cx.run_until_parked();
+    }
+
+    /// [`board`] with Codex idle in workspace 1's `review` tab, on no task.
+    fn with_codex() -> Snapshot {
+        let mut snapshot = board();
+        snapshot.panes.push(PaneState {
+            agent: Some(Agent::Codex),
+            tab: "review".into(),
+            ..pane(11, id(1), AgentState::Idle)
+        });
+        snapshot
+    }
+
+    #[gpui::test]
+    fn should_send_a_task_to_the_agent_picked_from_its_rows_menu(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::open(with_codex(), cx);
+
+        send_to(&harness, 2, 2, cx);
+
+        // Task 2 is in workspace 1: the pane is linked, and the task stays where it is.
+        assert_eq!(*harness.api.linked.lock().unwrap(), [(id(11), Some(id(2)))]);
+        assert_eq!(*harness.api.edited_tasks.lock().unwrap(), []);
+    }
+
+    #[gpui::test]
+    fn should_move_an_inbox_task_to_the_agents_workspace_then_send_it(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::open(with_codex(), cx);
+
+        // Task 3 is in the Inbox; Claude Code (pane 10) works on task 1, so is offered first.
+        send_to(&harness, 3, 2, cx);
+
+        let edited = harness.api.edited_tasks.lock().unwrap().clone();
+        assert_eq!(edited.len(), 1);
+        assert_eq!(edited[0].0, id(3));
+        assert_eq!(
+            edited[0].1.workspace_id,
+            Some(agentdeck_core::TaskPlace::Workspace(id(1)))
+        );
+        assert_eq!(*harness.api.linked.lock().unwrap(), [(id(11), Some(id(3)))]);
     }
 
     #[gpui::test]

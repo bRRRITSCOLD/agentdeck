@@ -401,6 +401,14 @@ impl Shell {
                                 shell.open_new_agent(ask.workspace, Some(ask.task), window, cx);
                             },
                         ),
+                        // New task's Send to: New agent.
+                        cx.subscribe_in(
+                            &new_task,
+                            window,
+                            |shell, _, ask: &StartAgentOn, window, cx| {
+                                shell.open_new_agent(ask.workspace, Some(ask.task), window, cx);
+                            },
+                        ),
                         // The rename also comes back through `changed`; reading now shows it
                         // at once.
                         cx.subscribe(&edit, |shell, _, _: &Renamed, cx| shell.refresh(cx)),
@@ -1471,6 +1479,26 @@ mod tests {
                 let dialog = dialog(&shell, cx);
                 assert!(dialog.read_with(cx, |d, _| d.is_open()));
                 assert_eq!(dialog.read_with(cx, |d, _| d.workspace()), Some(id(1)));
+            }
+
+            #[gpui::test]
+            fn should_open_new_agent_on_the_task_when_the_dialog_asks(cx: &mut TestAppContext) {
+                let connector = Rc::new(FakeConnector::default());
+                let _remote = connector.then_connect_to(workspace_with_a_pane());
+                let shell = open(connector, cx);
+
+                dialog(&shell, cx).update(cx, |_, cx| {
+                    cx.emit(crate::task_sheet::StartAgentOn {
+                        workspace: id(1),
+                        task: id(3),
+                    })
+                });
+                cx.run_until_parked();
+
+                let new_agent = shell.read_with(cx, |shell, _| shell.new_agent.clone().unwrap());
+                assert!(new_agent.read_with(cx, |d, _| d.is_open()));
+                assert_eq!(new_agent.read_with(cx, |d, _| d.workspace()), Some(id(1)));
+                assert_eq!(new_agent.read_with(cx, |d, _| d.task()), Some(id(3)));
             }
         }
 
