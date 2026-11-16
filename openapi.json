@@ -886,6 +886,42 @@
         ],
         "type": "object"
       },
+      "PaneRespawn": {
+        "description": "`POST /v1/panes/{id}/respawn`.",
+        "properties": {
+          "run": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PaneRun"
+              }
+            ],
+            "description": "What to run."
+          }
+        },
+        "required": [
+          "run"
+        ],
+        "type": "object"
+      },
+      "PaneRun": {
+        "description": "What `POST /v1/panes/{id}/respawn` runs in an exited pane.",
+        "oneOf": [
+          {
+            "description": "The pane's agent again: claude and codex resume their session when it is known, else start fresh with a new launch prompt; an `other` agent runs its argv again. Agent panes only.",
+            "enum": [
+              "agent"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "A shell, which turns the pane into a shell pane.",
+            "enum": [
+              "shell"
+            ],
+            "type": "string"
+          }
+        ]
+      },
       "PrClose": {
         "description": "`POST /v1/prs/close`: the PR tasks whose PRs to close on GitHub.",
         "properties": {
@@ -1967,7 +2003,7 @@
     },
     "/v1/panes": {
       "post": {
-        "description": "the tab's layout.\n\n`claude` and `codex` panes start with a launch prompt: the linked task's title and body, then every instruction for the pane's workspace and the task's comments no agent has had yet, which are then marked delivered to the pane. Claude Code starts on a session id agentdeck chooses; a Codex pane's is found once Codex writes its session file, and `session_id` is set then.",
+        "description": "the tab's layout.\n\n`claude` and `codex` panes get agentdeck's MCP server (`agentdeck mcp`) and start with a launch prompt: the linked task's title, its `Task id:` and how to report back on it with the MCP tools, and its body; then every instruction for the pane's workspace and the task's comments no agent has had yet, which are then marked delivered to the pane. Claude Code starts on a session id agentdeck chooses; a Codex pane's is found once Codex writes its session file, and `session_id` is set then.",
         "operationId": "pane_create",
         "requestBody": {
           "content": {
@@ -2062,7 +2098,7 @@
         "summary": "One pane, with its live title and state."
       },
       "patch": {
-        "description": "null). The task's comments no agent has had yet are then typed into the pane once it is idle, as a new comment would be (spec §9).",
+        "description": "null). Linking a live agent pane to another task first tells its agent the task itself (its title, id, how to report back on it, and body), then types in the task's comments no agent has had yet, each once the agent is idle or done, as a new comment would be (spec §9). Whatever was still waiting to be typed for the task it leaves is dropped from the pane, and a comment held for it moves on to that task's next live agent pane.",
         "operationId": "pane_update",
         "parameters": [
           {
@@ -2149,6 +2185,52 @@
           }
         },
         "summary": "Types text into the pane, as is or submitted (`submit`), now or once it is idle (`when`)."
+      }
+    },
+    "/v1/panes/{id}/respawn": {
+      "post": {
+        "description": "`cwd` and its task link (spec §4). `run: \"agent\"`, for an agent pane only (`unsupported_kind`), runs its agent again: claude and codex resume their session when it is known, else start fresh with a new launch prompt; an `other` agent runs its argv again. `run: \"shell\"` turns the pane into a shell pane running `$SHELL`, with hosting on. The state starts over. `running` (409) while its process hasn't exited; `invalid_dir` when its `cwd` is gone; `invalid_argv` when the program can't start, and the pane stays exited.",
+        "operationId": "pane_respawn",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/PaneId"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PaneRespawn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Pane"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Starts an exited pane again in place, keeping its id, its place in the tab's layout, its"
       }
     },
     "/v1/panes/{id}/tail": {

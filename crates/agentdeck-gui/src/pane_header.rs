@@ -8,7 +8,8 @@ use brrritscold_core_gpui::{
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _, Window, div,
+    AnyElement, App, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _,
+    Window, div,
 };
 
 use crate::state_dot;
@@ -86,6 +87,7 @@ pub struct PaneHeader {
     exit_code: Option<i64>,
     in_shell: bool,
     task: Option<SharedString>,
+    actions: Vec<AnyElement>,
     menu: Option<DropdownMenu>,
 }
 
@@ -98,6 +100,7 @@ impl PaneHeader {
             exit_code: None,
             in_shell: false,
             task: None,
+            actions: Vec::new(),
             menu: None,
         }
     }
@@ -120,6 +123,12 @@ impl PaneHeader {
     /// The linked task's title: the `Task` part, absent without one.
     pub fn task(mut self, task: Option<SharedString>) -> Self {
         self.task = task;
+        self
+    }
+
+    /// Buttons before the menu: the `Actions` part, `space.2` apart, absent while empty.
+    pub fn actions(mut self, actions: Vec<AnyElement>) -> Self {
+        self.actions = actions;
         self
     }
 
@@ -204,11 +213,20 @@ impl RenderOnce for PaneHeader {
                         ),
                 )
             })
-            // Penpot `Spacer` then `Menu`.
+            // Penpot `Spacer`, `Actions`, then `Menu`.
+            .child(div().flex_1())
+            .when(!self.actions.is_empty(), |header| {
+                header.child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(space::S2)
+                        .children(self.actions),
+                )
+            })
             .when_some(self.menu, |header, menu| {
-                header
-                    .child(div().flex_1())
-                    .child(div().flex_none().child(menu))
+                header.child(div().flex_none().child(menu))
             })
     }
 }

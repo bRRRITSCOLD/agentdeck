@@ -52,6 +52,17 @@ pub fn workspace_for(conn: &Connection, new: &NewPane) -> Result<WorkspaceId, Db
     Ok(workspace)
 }
 
+/// The workspace pane `id`'s tab is in.
+pub fn workspace_of(conn: &Connection, id: PaneId) -> Result<WorkspaceId, DbError> {
+    conn.query_row(
+        "SELECT t.workspace_id FROM panes p JOIN tabs t ON t.id = p.tab_id WHERE p.id = ?1",
+        [id.to_string()],
+        |row| text(row, "workspace_id"),
+    )
+    .optional()?
+    .ok_or(DbError::NotFound("pane"))
+}
+
 /// Adds a pane to its tab, before its process starts: `argv` is what will be launched and
 /// `session_id` the agent session it starts on. Returns it with the workspace its tab is in.
 pub fn create(
@@ -109,11 +120,13 @@ pub fn resumable(conn: &Connection) -> Result<Vec<(Pane, WorkspaceId)>, DbError>
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// The agent panes linked to `task`, newest first, shell panes hosting an agent included.
+/// The agent panes linked to `task` whose process hasn't exited, newest first, shell panes
+/// hosting an agent included (spec §3).
 pub fn agents_on_task(conn: &Connection, task: TaskId) -> Result<Vec<PaneId>, DbError> {
     let mut stmt = conn.prepare(
         "SELECT id FROM panes
-         WHERE task_id = ?1 AND (kind = 'agent' OR hosted_agent IS NOT NULL)
+         WHERE task_id = ?1 AND state <> 'exited'
+           AND (kind = 'agent' OR hosted_agent IS NOT NULL)
          ORDER BY created_at DESC, id DESC",
     )?;
     let rows = stmt.query_map([task.to_string()], |row| text(row, "id"))?;
@@ -228,6 +241,44 @@ pub fn set_exited(
          WHERE id = ?1",
         params![id.to_string(), code, title],
     )?;
+    Ok(())
+}
+
+/// Turns pane `id` into a shell pane running `argv` (spec §3): no agent, no session.
+pub fn become_shell(conn: &Connection, id: PaneId, argv: &[String]) -> Result<Pane, DbError> {
+    conn.execute(
+        "UPDATE panes SET kind = 'shell', agent = NULL, session_id = NULL, hosted_agent = NULL,
+                          argv = ?2
+         WHERE id = ?1",
+        params![
+            id.to_string(),
+            serde_json::to_string(argv).expect("a string list always serializes")
+        ],
+    )?;
+    get(conn, id)
+}
+
+/// Starts pane `id`'s state over as it is spawned again (spec §4): `unknown`, no exit code,
+/// no hosted agent. A fresh launch passes the `argv` and `session_id` it starts with.
+pub fn respawned(
+    conn: &Connection,
+    id: PaneId,
+    fresh: Option<(&[String], Option<&str>)>,
+) -> Result<(), DbError> {
+    conn.execute(
+        "UPDATE panes SET state = 'unknown', exit_code = NULL, hosted_agent = NULL WHERE id = ?1",
+        [id.to_string()],
+    )?;
+    if let Some((argv, session_id)) = fresh {
+        conn.execute(
+            "UPDATE panes SET argv = ?2, session_id = ?3 WHERE id = ?1",
+            params![
+                id.to_string(),
+                serde_json::to_string(argv).expect("a string list always serializes"),
+                session_id
+            ],
+        )?;
+    }
     Ok(())
 }
 
