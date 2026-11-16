@@ -31,6 +31,7 @@ mod rereads;
 mod right_panel;
 mod runtime;
 mod scrollbar;
+mod send_task;
 mod settings;
 mod shell;
 mod sidebar;

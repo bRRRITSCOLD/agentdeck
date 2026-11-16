@@ -526,7 +526,8 @@ impl Render for RightPanel {
                 let edit = move |_: &mut Window, cx: &mut gpui::App| {
                     let _ = view.update(cx, |_, cx| cx.emit(EditTask(task)));
                 };
-                let parts = close_prs::row_parts(&self.close, row, edit, cx);
+                let send = crate::send_task::targets(&self.snapshot, task);
+                let parts = close_prs::row_parts(&self.close, row, send, edit, cx);
                 list = list.child(task_row::panel(row, picker, parts, open, spin, cx));
             }
         }
@@ -1508,6 +1509,44 @@ mod tests {
         assert_eq!(*asked.borrow(), [EditTask(id(1))]);
     }
 
+    /// Opens task 1's row menu, then its Send to agent submenu, and picks its first item.
+    fn send_task_1(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let menu = format!("panel menu {}", id::<TaskId>(1));
+        let bounds = cx.debug_bounds(menu.leak()).expect("the row's menu shows");
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_keystrokes("down down enter");
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn should_send_a_task_to_the_agent_picked_from_its_rows_menu(cx: &mut TestAppContext) {
+        let (panel, api, cx) = open_with_api(cx);
+        let mut with_agent = snapshot();
+        with_agent.panes.push(PaneState {
+            agent: Some(agentdeck_core::Agent::Claude),
+            ..pane(30, id(1), AgentState::Idle)
+        });
+        panel.update(cx, |panel, cx| panel.show(id(1), with_agent, cx));
+
+        send_task_1(cx);
+
+        assert_eq!(*api.linked.lock().unwrap(), [(id(30), Some(id(1)))]);
+    }
+
+    #[gpui::test]
+    fn should_send_nothing_while_no_agent_runs_in_the_workspace(cx: &mut TestAppContext) {
+        let (_panel, api, cx) = open_with_api(cx);
+
+        send_task_1(cx);
+
+        assert_eq!(*api.linked.lock().unwrap(), []);
+    }
+
     #[gpui::test]
     fn should_copy_a_tasks_id_from_its_rows_menu(cx: &mut TestAppContext) {
         let (_panel, cx) = open(cx);
@@ -1517,7 +1556,7 @@ mod tests {
         let bounds = cx.debug_bounds(menu.leak()).expect("the row's menu shows");
         cx.simulate_click(bounds.center(), Modifiers::default());
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        cx.simulate_keystrokes("down down enter");
+        cx.simulate_keystrokes("down down down enter");
         cx.run_until_parked();
 
         let copied = cx.read_from_clipboard().and_then(|item| item.text());
