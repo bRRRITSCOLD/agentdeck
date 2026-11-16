@@ -7,7 +7,8 @@ use agentdeck_client::types::{
     Comment, DirtyReport, Instruction, Pane, PrCloseResult, PrSyncStage, PrSyncStatus, PullRequest,
     Settings, Task, Workspace,
 };
-use agentdeck_core::{CommentAuthor, TaskId};
+use agentdeck_core::{CommentAuthor, PaneKind, TaskId, WorkspaceId};
+use serde::Serialize;
 use serde_json::Value;
 
 /// Left-aligned columns two spaces apart, under a header row; `empty` when there are no rows.
@@ -130,6 +131,64 @@ pub fn pane(pane: &Pane) -> String {
         out.push_str(&format!("  session: {session}\n"));
     }
     out
+}
+
+/// One pane as `agent ls` lists it: the pane, and the workspace, tab and task it is in. With
+/// `--json` it is the pane's own object plus `workspace_id`, `workspace` (the slug), `tab`
+/// (its title) and `task_title`.
+#[derive(Debug, Serialize)]
+pub struct ListedPane {
+    /// The pane, as the API gives it.
+    #[serde(flatten)]
+    pub pane: Pane,
+    /// The workspace holding its tab.
+    pub workspace_id: WorkspaceId,
+    /// That workspace's slug.
+    pub workspace: String,
+    /// Its tab's title.
+    pub tab: String,
+    /// Its linked task's title, when it has one the daemon still lists.
+    pub task_title: Option<String>,
+}
+
+/// What runs in `pane`: its agent; for a shell pane, `hosting <agent>` while it hosts one,
+/// else `shell`.
+fn pane_agent(pane: &Pane) -> String {
+    match (pane.kind, pane.agent, pane.hosted_agent) {
+        (PaneKind::Agent, Some(agent), _) => agent.to_string(),
+        (PaneKind::Shell, _, Some(agent)) => format!("hosting {agent}"),
+        (PaneKind::Agent, None, _) => "agent".to_owned(),
+        (PaneKind::Shell, _, None) => "shell".to_owned(),
+    }
+}
+
+/// `agentdeck agent ls`: a pane a line, its linked task by title, or by id when the title
+/// isn't known.
+pub fn panes(panes: &[ListedPane]) -> String {
+    let rows: Vec<[String; 6]> = panes
+        .iter()
+        .map(|listed| {
+            let pane = &listed.pane;
+            let task = match (&listed.task_title, pane.task_id) {
+                (Some(title), _) => title.clone(),
+                (None, Some(id)) => id.to_string(),
+                (None, None) => String::new(),
+            };
+            [
+                pane.id.to_string(),
+                listed.workspace.clone(),
+                listed.tab.clone(),
+                pane_agent(pane),
+                pane.state.to_string(),
+                task,
+            ]
+        })
+        .collect();
+    table(
+        ["ID", "WORKSPACE", "TAB", "AGENT", "STATE", "TASK"],
+        &rows,
+        "no panes",
+    )
 }
 
 /// `agentdeck comment ls`: who wrote each, whether one of yours has reached an agent, and
@@ -373,6 +432,74 @@ mod tests {
             let out = workspaces(&[workspace_named("old", "Old", true)]);
 
             assert!(out.contains("Old (archived)"), "{out}");
+        }
+    }
+
+    mod panes {
+        use agentdeck_core::{AgentState, PaneKind};
+
+        use super::*;
+
+        const PANE_1: &str = "0190a1b2-c3d4-7e5f-8a9b-000000000011";
+        const PANE_2: &str = "0190a1b2-c3d4-7e5f-8a9b-000000000012";
+        const PANE_3: &str = "0190a1b2-c3d4-7e5f-8a9b-000000000013";
+        const TASK: &str = "0190a1b2-c3d4-7e5f-8a9b-000000000020";
+
+        fn listed(id: &str, kind: PaneKind, tab: &str) -> ListedPane {
+            ListedPane {
+                pane: Pane {
+                    agent: None,
+                    argv: vec!["sh".into()],
+                    created_at: "2026-01-01T00:00:00Z".into(),
+                    cwd: "/work/web".into(),
+                    exit_code: None,
+                    hosted_agent: None,
+                    id: id.parse().unwrap(),
+                    kind,
+                    session_id: None,
+                    state: AgentState::Idle,
+                    tab_id: "0190a1b2-c3d4-7e5f-8a9b-000000000030".parse().unwrap(),
+                    task_id: None,
+                    title: String::new(),
+                },
+                workspace_id: "0190a1b2-c3d4-7e5f-8a9b-000000000001".parse().unwrap(),
+                workspace: "web".into(),
+                tab: tab.into(),
+                task_title: None,
+            }
+        }
+
+        #[test]
+        fn should_list_id_workspace_tab_agent_state_and_task() {
+            let mut agent = listed(PANE_1, PaneKind::Agent, "agents");
+            agent.pane.agent = Some(Agent::Claude);
+            agent.pane.state = AgentState::Blocked;
+            agent.pane.task_id = Some(TASK.parse().unwrap());
+            agent.task_title = Some("Fix the flaky test".into());
+            let mut hosting = listed(PANE_2, PaneKind::Shell, "shell");
+            hosting.pane.hosted_agent = Some(Agent::Codex);
+            hosting.pane.state = AgentState::Working;
+            let mut exited = listed(PANE_3, PaneKind::Shell, "shell");
+            exited.pane.state = AgentState::Exited;
+            exited.pane.task_id = Some(TASK.parse().unwrap());
+
+            let out = panes(&[agent, hosting, exited]);
+
+            assert_eq!(
+                out,
+                format!(
+                    "ID{pad}  WORKSPACE  TAB     AGENT          STATE    TASK\n\
+                     {PANE_1}  web        agents  claude         blocked  Fix the flaky test\n\
+                     {PANE_2}  web        shell   hosting codex  working\n\
+                     {PANE_3}  web        shell   shell          exited   {TASK}\n",
+                    pad = " ".repeat(PANE_1.len() - 2)
+                )
+            );
+        }
+
+        #[test]
+        fn should_say_so_when_no_pane_runs() {
+            assert_eq!(panes(&[]), "no panes\n");
         }
     }
 

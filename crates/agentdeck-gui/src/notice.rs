@@ -7,7 +7,7 @@ use agentdeck_client::ApiError;
 use brrritscold_core_gpui::{
     Toast, ToastAction, ToastDescription, ToastExt as _, ToastTitle, ToastType,
 };
-use gpui::{App, SharedString, Window};
+use gpui::{App, ClipboardItem, SharedString, Window};
 
 /// A toast: its kind, title, description and action.
 #[derive(Clone)]
@@ -108,6 +108,12 @@ impl Notice {
         }
         window.push_toast(toast, cx);
     }
+}
+
+/// Puts `text` on the clipboard, then toasts `title` ("Copied pane id") to say so.
+pub fn copy(text: String, title: &'static str, window: &mut Window, cx: &mut App) {
+    cx.write_to_clipboard(ClipboardItem::new_string(text));
+    Notice::new(title).show(window, cx);
 }
 
 /// What a failed call says to a person: the daemon's own message, without its code.

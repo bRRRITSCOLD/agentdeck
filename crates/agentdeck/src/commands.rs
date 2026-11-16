@@ -10,7 +10,7 @@ use agentdeck_client::types::{
     PrClose, PullRequest, TaskPatch,
 };
 use agentdeck_client::{Client, panes};
-use agentdeck_core::{PaneId, TaskId, TaskKind, TaskPlace, WorkspaceId};
+use agentdeck_core::{Layout, PaneId, TaskId, TaskKind, TaskPlace, WorkspaceId};
 use anyhow::Context;
 use futures_util::TryStreamExt;
 use serde::Serialize;
@@ -388,8 +388,59 @@ pub fn caller_pane() -> Option<PaneId> {
     std::env::var(PANE_VAR).ok()?.parse().ok()
 }
 
+/// `agent ls`: every pane in the layouts of the tabs of the workspace `ws` names, else of
+/// every workspace, in workspace, tab and layout order; exited panes too, until closed.
+async fn agent_ls(client: &Client, ws: Option<&str>) -> anyhow::Result<Output> {
+    let workspaces = client
+        .workspace_list()
+        .send()
+        .await
+        .map_err(ApiError::from)?
+        .into_inner();
+    let only = ws
+        .map(|reference| resolve::workspace(&workspaces, reference))
+        .transpose()?;
+    let titles: HashMap<TaskId, String> = client
+        .task_list()
+        .send()
+        .await
+        .map_err(ApiError::from)?
+        .into_inner()
+        .into_iter()
+        .map(|task| (task.id, task.title))
+        .collect();
+    let mut listed = Vec::new();
+    for ws in (workspaces.iter()).filter(|ws| only.is_none_or(|id| ws.id == id)) {
+        let tabs = client
+            .tab_list()
+            .id(ws.id)
+            .send()
+            .await
+            .map_err(ApiError::from)?
+            .into_inner();
+        for tab in tabs {
+            let ids = tab.layout.as_ref().map(Layout::panes).unwrap_or_default();
+            for id in ids {
+                // Gone since the tab was read: closed meanwhile.
+                let Some(pane) = panes::pane_if_any(client, id).await? else {
+                    continue;
+                };
+                listed.push(render::ListedPane {
+                    task_title: pane.task_id.and_then(|task| titles.get(&task).cloned()),
+                    workspace_id: ws.id,
+                    workspace: ws.slug.clone(),
+                    tab: tab.title.clone(),
+                    pane,
+                });
+            }
+        }
+    }
+    Output::new(&listed, render::panes(&listed))
+}
+
 async fn agent(client: &Client, command: AgentCommand) -> anyhow::Result<Output> {
     match command {
+        AgentCommand::Ls { ws } => agent_ls(client, ws.as_deref()).await,
         AgentCommand::New {
             ws,
             agent,

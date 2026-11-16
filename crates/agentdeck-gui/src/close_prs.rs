@@ -9,8 +9,8 @@
 //!
 //! The row's menu is on every row: **Edit task** first (spec §11, Editing a task), then on
 //! a PR row, merged and closed ones too, **Open on GitHub** (spec §11, Opening PRs, through
-//! [`open_pr`]), then **Close PR** after a separator when its PR can close
-//! ([`menu_entries`]).
+//! [`open_pr`]), then **Copy task id** on every row, then **Close PR** after a separator when
+//! its PR can close ([`menu_entries`]).
 //!
 //! Penpot "Screens" → "Inbox · select", "Inbox · row menu", "Inbox · row menu · open PR",
 //! "Tasks · row menu · merged PR", "Inbox · close confirm", "Inbox · closing", "Inbox · partial
@@ -253,6 +253,8 @@ pub enum MenuEntry {
     EditTask,
     /// **Open on GitHub**, opening this URL, the PR's.
     OpenOnGitHub(SharedString),
+    /// **Copy task id**, putting this task's id on the clipboard.
+    CopyTaskId(TaskId),
     /// A line between the entries.
     Separator,
     /// **Close PR**, asking to close this PR.
@@ -260,14 +262,14 @@ pub enum MenuEntry {
 }
 
 /// `row`'s `…` menu, top to bottom: **Edit task** on every row; **Open on GitHub** on every
-/// PR row the sync has filled in, whatever its PR's state; then, when its PR can close, a
-/// separator and **Close PR**.
+/// PR row the sync has filled in, whatever its PR's state; **Copy task id** on every row;
+/// then, when its PR can close, a separator and **Close PR**.
 pub fn menu_entries(row: &Row) -> Vec<MenuEntry> {
     let mut entries = vec![MenuEntry::EditTask];
-    let Some(pr) = &row.pr else {
-        return entries;
-    };
-    entries.push(MenuEntry::OpenOnGitHub(pr.url.clone()));
+    if let Some(pr) = &row.pr {
+        entries.push(MenuEntry::OpenOnGitHub(pr.url.clone()));
+    }
+    entries.push(MenuEntry::CopyTaskId(row.id));
     if let Some(target) = Target::of(row) {
         entries.extend([MenuEntry::Separator, MenuEntry::ClosePr(target)]);
     }
@@ -705,8 +707,8 @@ pub fn select_all(close: &Entity<ClosePrs>, key: &str, tasks: Vec<TaskId>, cx: &
 
 /// `row`'s `Select` and `Menu` layers and its close error: a checkbox in Select mode, only when
 /// its PR can close, and on every row a `…` menu of its [`menu_entries`]: **Edit task**,
-/// which calls `on_edit`; on a PR row **Open on GitHub**, then **Close PR** after a separator
-/// when its PR can close. Tests find them as `<id> select <task>` and `<id> menu <task>`.
+/// which calls `on_edit`; on a PR row **Open on GitHub**; **Copy task id**; then **Close PR**
+/// after a separator when its PR can close. Tests find them as `<id> select <task>` and `<id> menu <task>`.
 pub fn row_parts(
     close: &Entity<ClosePrs>,
     row: &Row,
@@ -754,6 +756,11 @@ pub fn row_parts(
                     MenuEntry::OpenOnGitHub(url) => content.item(
                         DropdownMenuItem::new("Open on GitHub")
                             .on_click(move |_, window, cx| open_pr::open(&url, window, cx)),
+                    ),
+                    MenuEntry::CopyTaskId(task) => content.item(
+                        DropdownMenuItem::new("Copy task id").on_click(move |_, window, cx| {
+                            crate::notice::copy(task.to_string(), "Copied task id", window, cx);
+                        }),
                     ),
                     MenuEntry::Separator => content.separator(DropdownMenuSeparator::new()),
                     MenuEntry::ClosePr(target) => {
@@ -935,12 +942,13 @@ mod tests {
         }
 
         #[test]
-        fn should_offer_edit_open_then_close_on_an_open_pr() {
+        fn should_offer_edit_open_copy_then_close_on_an_open_pr() {
             assert_eq!(
                 menu(pr_task(1, "acme/widgets", PrState::Open, None)),
                 [
                     MenuEntry::EditTask,
                     open_on_github(1),
+                    MenuEntry::CopyTaskId(id(1)),
                     MenuEntry::Separator,
                     MenuEntry::ClosePr(Target {
                         id: id(1),
@@ -952,21 +960,35 @@ mod tests {
         }
 
         #[test]
-        fn should_offer_edit_and_open_on_a_merged_or_closed_pr() {
+        fn should_offer_edit_open_and_copy_on_a_merged_or_closed_pr() {
             assert_eq!(
                 menu(pr_task(2, "acme/widgets", PrState::Merged, None)),
-                [MenuEntry::EditTask, open_on_github(2)]
+                [
+                    MenuEntry::EditTask,
+                    open_on_github(2),
+                    MenuEntry::CopyTaskId(id(2))
+                ]
             );
             assert_eq!(
                 menu(pr_task(3, "acme/widgets", PrState::Closed, None)),
-                [MenuEntry::EditTask, open_on_github(3)]
+                [
+                    MenuEntry::EditTask,
+                    open_on_github(3),
+                    MenuEntry::CopyTaskId(id(3))
+                ]
             );
         }
 
         #[test]
-        fn should_offer_only_edit_on_a_plain_task_or_an_unsynced_pr() {
-            assert_eq!(menu(task(4, TaskKind::Plain, None)), [MenuEntry::EditTask]);
-            assert_eq!(menu(task(5, TaskKind::Pr, None)), [MenuEntry::EditTask]);
+        fn should_offer_edit_and_copy_on_a_plain_task_or_an_unsynced_pr() {
+            assert_eq!(
+                menu(task(4, TaskKind::Plain, None)),
+                [MenuEntry::EditTask, MenuEntry::CopyTaskId(id(4))]
+            );
+            assert_eq!(
+                menu(task(5, TaskKind::Pr, None)),
+                [MenuEntry::EditTask, MenuEntry::CopyTaskId(id(5))]
+            );
         }
     }
 

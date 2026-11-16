@@ -2,8 +2,9 @@
 //!
 //! The header's title is the terminal's live one, then the one read over REST, then a name
 //! for what runs there. Its state follows the daemon's `state` and `exit` broadcasts between
-//! reads. Its menu asks the workspace holding it for a split, a close or, for an agent, a
-//! link to a task, as a [`PaneRequest`]: only the workspace knows the tab's layout.
+//! reads. Its menu asks the workspace holding it for a split, a close, its id copied or, for
+//! an agent, a link to a task, as a [`PaneRequest`]: only the workspace knows the tab's
+//! layout.
 //!
 //! A shell pane hosting an agent (spec §3, §7) is an agent pane for all of that, and its
 //! header says "in shell" (Penpot "Screens" → "Pane · hosted agent").
@@ -94,6 +95,8 @@ pub enum PaneRequest {
     RestartAgent,
     /// Turn it into a shell: exited agent panes only.
     OpenShell,
+    /// Copy its id, for `agentdeck agent send <pane>` and the like: every pane.
+    CopyId,
 }
 
 /// The buttons an exited agent pane's header offers, in order: Restart agent, then Open shell
@@ -109,7 +112,7 @@ pub fn header_actions(pane: &Pane) -> Vec<(&'static str, PaneRequest)> {
 }
 
 /// The menu items before the separator and Close pane for `pane`: the splits, then, for an
-/// agent pane or a shell pane hosting an agent, Link to task.
+/// agent pane or a shell pane hosting an agent, Link to task, then Copy pane id.
 pub fn menu_items(pane: &Pane) -> Vec<(&'static str, IconName, PaneRequest)> {
     let mut items = vec![
         (
@@ -126,6 +129,7 @@ pub fn menu_items(pane: &Pane) -> Vec<(&'static str, IconName, PaneRequest)> {
     if running_agent(pane).is_some() {
         items.push(("Link to task", IconName::Link, PaneRequest::LinkTask));
     }
+    items.push(("Copy pane id", IconName::Copy, PaneRequest::CopyId));
     items
 }
 
@@ -376,30 +380,37 @@ mod tests {
         }
 
         #[test]
-        fn should_offer_link_to_task_after_the_splits_for_an_agent() {
+        fn should_offer_link_to_task_then_copy_pane_id_after_the_splits_for_an_agent() {
             let pane = agent_pane(Agent::Claude);
-            assert_eq!(labels(&pane), ["Split right", "Split down", "Link to task"]);
+            assert_eq!(
+                labels(&pane),
+                ["Split right", "Split down", "Link to task", "Copy pane id"]
+            );
             assert_eq!(menu_items(&pane)[2].2, PaneRequest::LinkTask);
+            assert_eq!(menu_items(&pane)[3].2, PaneRequest::CopyId);
         }
 
         #[test]
         fn should_offer_link_to_task_for_a_shell_while_it_hosts_an_agent() {
             assert_eq!(
                 labels(&hosting(Agent::Codex)),
-                ["Split right", "Split down", "Link to task"]
+                ["Split right", "Split down", "Link to task", "Copy pane id"]
             );
         }
 
         #[test]
-        fn should_offer_only_the_splits_for_a_shell() {
-            assert_eq!(labels(&shell_pane(1, id(1))), ["Split right", "Split down"]);
+        fn should_offer_the_splits_and_copy_pane_id_for_a_shell() {
+            assert_eq!(
+                labels(&shell_pane(1, id(1))),
+                ["Split right", "Split down", "Copy pane id"]
+            );
         }
 
         #[test]
-        fn should_offer_only_the_splits_once_the_agent_exited() {
+        fn should_offer_the_splits_and_copy_pane_id_once_the_agent_exited() {
             assert_eq!(
                 labels(&exited(Agent::Claude)),
-                ["Split right", "Split down"]
+                ["Split right", "Split down", "Copy pane id"]
             );
         }
     }

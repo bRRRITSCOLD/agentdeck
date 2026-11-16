@@ -1509,6 +1509,27 @@ mod tests {
     }
 
     #[gpui::test]
+    fn should_copy_a_tasks_id_from_its_rows_menu(cx: &mut TestAppContext) {
+        let (_panel, cx) = open(cx);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let menu = format!("panel menu {}", id::<TaskId>(1));
+        let bounds = cx.debug_bounds(menu.leak()).expect("the row's menu shows");
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_keystrokes("down down enter");
+        cx.run_until_parked();
+
+        let copied = cx.read_from_clipboard().and_then(|item| item.text());
+        assert_eq!(copied, Some(id::<TaskId>(1).to_string()));
+        let shown = cx.update(|_, cx| crate::notice::shown(cx));
+        assert_eq!(
+            shown.last().map(|toast| toast.title.clone()),
+            Some("Copied task id".into())
+        );
+    }
+
+    #[gpui::test]
     fn should_ask_for_the_task_sheet_when_a_title_is_clicked(cx: &mut TestAppContext) {
         let (panel, cx) = open(cx);
         let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));

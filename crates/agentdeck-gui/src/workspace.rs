@@ -257,6 +257,9 @@ impl WorkspaceView {
                 let failure = format!("Couldn't restart {}", agent_name(agent));
                 self.respawn(pane.id, PaneRun::Agent, failure, window, cx);
             }
+            PaneRequest::CopyId => {
+                crate::notice::copy(at.pane.to_string(), "Copied pane id", window, cx);
+            }
             PaneRequest::OpenShell => {
                 let id = pane.id;
                 self.respawn(
@@ -1586,6 +1589,35 @@ mod tests {
             #[gpui::test]
             fn should_ask_nothing_for_a_shell(cx: &mut TestAppContext) {
                 assert!(ask(shell_pane(7, id(1)), cx).is_empty());
+            }
+        }
+
+        mod copy_id {
+            use super::*;
+
+            #[gpui::test]
+            fn should_copy_the_panes_id_and_say_so(cx: &mut TestAppContext) {
+                let (harness, cx) = one_pane(AgentState::Idle, cx);
+
+                harness.request(0, PaneRequest::CopyId, cx);
+
+                let copied = cx.read_from_clipboard().and_then(|item| item.text());
+                assert_eq!(copied, Some(id::<PaneId>(7).to_string()));
+                let shown = cx.update(|_, cx| crate::notice::shown(cx));
+                let toast = shown.last().expect("a toast");
+                assert_eq!(toast.title, "Copied pane id");
+                assert_eq!(toast.description, None);
+            }
+
+            #[gpui::test]
+            fn should_copy_an_exited_panes_id_too(cx: &mut TestAppContext) {
+                let (harness, cx) = one_pane(AgentState::Exited, cx);
+
+                harness.request(0, PaneRequest::CopyId, cx);
+
+                let copied = cx.read_from_clipboard().and_then(|item| item.text());
+                assert_eq!(copied, Some(id::<PaneId>(7).to_string()));
+                assert!(harness.closed().is_empty());
             }
         }
 
