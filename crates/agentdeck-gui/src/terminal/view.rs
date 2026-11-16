@@ -1437,6 +1437,25 @@ mod tests {
         }
 
         #[gpui::test]
+        fn should_send_tab_and_shift_tab_instead_of_moving_focus(cx: &mut TestAppContext) {
+            let (mut harness, cx) = Harness::open(cx);
+            harness.focus(cx);
+            harness.draw(cx);
+            harness.attached(10, 2, b"", cx);
+            harness.sent();
+
+            cx.simulate_keystrokes("tab shift-tab");
+
+            assert_eq!(
+                harness.sent(),
+                [
+                    Outgoing::Input(1, b"\t".to_vec()),
+                    Outgoing::Input(1, b"\x1b[Z".to_vec()),
+                ]
+            );
+        }
+
+        #[gpui::test]
         fn should_send_nothing_before_it_is_attached(cx: &mut TestAppContext) {
             let (mut harness, cx) = Harness::open(cx);
             harness.focus(cx);
