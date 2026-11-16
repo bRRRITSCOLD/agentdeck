@@ -40,7 +40,7 @@ use crate::state_dot;
 use crate::task_row;
 
 /// The sidebar's width. Raw in Penpot too: no sizing token is 260px.
-const WIDTH: gpui::Pixels = px(260.);
+pub const WIDTH: gpui::Pixels = px(260.);
 
 /// How often the footer's "synced N min ago" is redrawn.
 const FOOTER_TICK: Duration = Duration::from_secs(30);
@@ -591,7 +591,10 @@ impl Render for SidebarView {
                         ),
                     ),
             )
-            // Penpot's `Spacer` pushes the footer down; the list takes that room and scrolls.
+            // Penpot `Workspaces` takes the room down to the footer and scrolls. It reaches the
+            // sidebar's right edge, over its padding, and pads its rows back in by the
+            // scrollbar's gutter: the rows stay as wide as Inbox and Tasks, and the scrollbar
+            // sits in the gutter, clear of them.
             .child(
                 div()
                     .debug_selector(|| "workspaces".into())
@@ -599,13 +602,15 @@ impl Render for SidebarView {
                     .flex_col()
                     .flex_1()
                     .min_h_0()
+                    .mr(-space::S3)
                     .child(
                         list(
                             self.list.clone(),
                             cx.processor(move |this, ix, _, cx| this.item(ix, spin, cx)),
                         )
                         .flex_1()
-                        .min_h_0(),
+                        .min_h_0()
+                        .pr(scrollbar::GUTTER),
                     ),
             )
             .child(scrollbar::vertical(&self.list, cx))
@@ -1556,6 +1561,35 @@ mod tests {
 
             let list = open.cx.debug_bounds("workspaces").expect("the list");
             assert_eq!(thumb(list, open.cx), None);
+        }
+
+        #[gpui::test]
+        fn should_keep_the_thumb_clear_of_every_row(cx: &mut TestAppContext) {
+            let crowded = Snapshot {
+                workspaces: (1..=60).map(|n| workspace(n, &format!("w{n}"))).collect(),
+                ..Snapshot::default()
+            };
+            let open = open(crowded, cx);
+            let list = open.cx.debug_bounds("workspaces").expect("the list");
+            let thumb = thumb(list, open.cx).expect("a thumb");
+
+            // The first row is the selected one, so its highlight is among them.
+            let rows: Vec<_> = (1..=60)
+                .filter_map(|n| open.cx.debug_bounds(format!("row w{n}").leak()))
+                .collect();
+            assert!(!rows.is_empty());
+            for row in rows {
+                assert!(row.right() < thumb.left(), "{row:?} reaches {thumb:?}");
+            }
+        }
+
+        #[gpui::test]
+        fn should_keep_the_rows_as_wide_as_inbox_and_tasks(cx: &mut TestAppContext) {
+            let open = open(two_workspaces(), cx);
+
+            let inbox = open.cx.debug_bounds("row inbox").expect("the Inbox row");
+            let row = open.cx.debug_bounds("row a").expect("workspace a's row");
+            assert_eq!(row.right(), inbox.right());
         }
     }
 }
