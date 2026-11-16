@@ -5,19 +5,22 @@
 //! chords (`secondary-shift-`, cmd-shift on macOS), ctrl-tab, ctrl-pageup / ctrl-pagedown and
 //! `alt-<digit>`. Copy and paste are `secondary-shift-c` / `secondary-shift-v` in a terminal,
 //! so `ctrl-c` and `ctrl-v` stay the shell's. Plain `ctrl-<letter>`, `alt-<letter>`, the
-//! arrows and the paging keys stay the shell's.
+//! arrows and the paging keys stay the shell's. Tab and Shift+Tab go to the terminal when it
+//! has focus: the window root binds them to focus navigation, so the terminal context binds them
+//! to `NoAction`, which lets them through.
 //!
 //! `secondary-` resolves per OS only through [`KeyBinding::load`], so every binding loads
 //! that way.
 
 use std::rc::Rc;
 
-use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate, actions};
+use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate, NoAction, actions};
 
 /// The key context the workspace view sets; its shortcuts only apply inside it.
 pub const WORKSPACE: &str = "Workspace";
 
-/// The key context a terminal sets; copy and paste only apply inside it.
+/// The key context a terminal sets; copy and paste only apply inside it, and Tab and Shift+Tab
+/// move focus everywhere but inside it.
 pub const TERMINAL: &str = "Terminal";
 
 /// The key context an instruction being edited sets: Ctrl+Enter in its textarea saves
@@ -138,7 +141,14 @@ fn bindings(cx: &App) -> Vec<KeyBinding> {
             workspace.clone(),
         ),
         ("secondary-shift-c".into(), Box::new(Copy), terminal.clone()),
-        ("secondary-shift-v".into(), Box::new(Paste), terminal),
+        (
+            "secondary-shift-v".into(),
+            Box::new(Paste),
+            terminal.clone(),
+        ),
+        // Unbinds the window root's focus navigation, so the terminal's key handler sends them.
+        ("tab".into(), Box::new(NoAction), terminal.clone()),
+        ("shift-tab".into(), Box::new(NoAction), terminal),
         (
             "secondary-enter".into(),
             Box::new(Submit),

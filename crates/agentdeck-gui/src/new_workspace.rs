@@ -498,6 +498,24 @@ mod tests {
         }
 
         #[gpui::test]
+        fn should_move_between_its_fields_on_tab_and_shift_tab(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(cx);
+            cx.update(|_, cx| crate::keymap::init(cx));
+
+            cx.simulate_keystrokes("tab");
+            cx.simulate_input("~/code");
+            cx.simulate_keystrokes("shift-tab");
+            cx.simulate_input("ts");
+
+            let value = |input: fn(&NewWorkspaceDialog) -> &Entity<InputState>,
+                         cx: &mut VisualTestContext| {
+                cx.update(|_, cx| input(harness.dialog.read(cx)).read(cx).value())
+            };
+            assert_eq!(value(|d| &d.name, cx), "ts");
+            assert_eq!(value(|d| &d.dir, cx), "~/code");
+        }
+
+        #[gpui::test]
         fn should_open_empty_again(cx: &mut TestAppContext) {
             let (harness, cx) = Harness::open(cx);
             cx.simulate_input("ts");
