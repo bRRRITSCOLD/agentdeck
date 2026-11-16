@@ -438,7 +438,7 @@ impl TerminalView {
             return false;
         };
         match link.target {
-            Target::Uri(uri) => cx.open_url(&uri),
+            Target::Uri(uri) => open::open_url(&uri, "Couldn't open the link", window, cx),
             Target::File { path, line, col } => open_file(&path, line, col, window, cx),
             Target::Refused(uri) => {
                 tracing::debug!(uri, "refused to open a link with that scheme");
@@ -1033,6 +1033,16 @@ mod tests {
         /// Every argv the file opener was asked to start.
         fn started(&self) -> Vec<Vec<String>> {
             self.opener.started.lock().unwrap().clone()
+        }
+
+        /// The URL the OS's handler was last started on, through the opener.
+        fn opened_url(&self) -> Option<String> {
+            (self.started().into_iter().rev()).find_map(|argv| {
+                match <[String; 2]>::try_from(argv) {
+                    Ok([program, url]) if program == "xdg-open" && url.contains(':') => Some(url),
+                    _ => None,
+                }
+            })
         }
 
         fn sent(&mut self) -> Vec<Outgoing> {
@@ -2193,7 +2203,7 @@ mod tests {
         ) -> Option<String> {
             let (harness, cx) = Harness::live(snapshot, cx);
             ctrl_click(&harness, line, col, cx);
-            cx.opened_url()
+            harness.opened_url()
         }
 
         #[gpui::test]
@@ -2202,8 +2212,34 @@ mod tests {
 
             ctrl_click(&harness, 0, 2, cx);
 
-            assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
+            assert_eq!(harness.opened_url().as_deref(), Some("https://example.com"));
             assert_eq!(harness.sent(), []);
+        }
+
+        #[gpui::test]
+        fn should_start_the_os_handler_through_the_opener(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::live(OSC_8, cx);
+
+            ctrl_click(&harness, 0, 2, cx);
+
+            assert_eq!(harness.started(), [["xdg-open", "https://example.com"]]);
+            assert_eq!(cx.opened_url(), None, "not through GPUI's open_url");
+        }
+
+        #[gpui::test]
+        fn should_toast_when_the_os_handler_does_not_start(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::live(OSC_8, cx);
+            *harness.opener.failure.lock().unwrap() = Some("No such file".into());
+
+            ctrl_click(&harness, 0, 2, cx);
+
+            let shown = cx.update(|_, cx| crate::notice::shown(cx));
+            let notice = shown.last().expect("a toast");
+            assert_eq!(notice.title, "Couldn't open the link");
+            assert_eq!(
+                notice.description.as_deref(),
+                Some("xdg-open: No such file")
+            );
         }
 
         #[gpui::test]
@@ -2216,7 +2252,7 @@ mod tests {
 
             harness.drag(from, to, 1, Modifiers::default(), cx);
 
-            assert_eq!(cx.opened_url(), None);
+            assert_eq!(harness.opened_url(), None);
             assert_eq!(harness.copied(cx).as_deref(), Some("example"));
         }
 
@@ -2244,7 +2280,7 @@ mod tests {
 
             ctrl_click(&harness, 1, 2, cx);
 
-            assert_eq!(cx.opened_url(), Some(url));
+            assert_eq!(harness.opened_url(), Some(url));
         }
 
         #[gpui::test]
@@ -2262,7 +2298,7 @@ mod tests {
 
             ctrl_click(&harness, 0, 2, cx);
 
-            assert_eq!(cx.opened_url(), None);
+            assert_eq!(harness.opened_url(), None);
             assert_eq!(harness.started(), Vec::<Vec<String>>::new());
             assert_eq!(harness.sent(), []);
         }
@@ -2295,7 +2331,7 @@ mod tests {
                     harness.started(),
                     [["code", "-g", &format!("{}:42:7", file.display())]]
                 );
-                assert_eq!(cx.opened_url(), None);
+                assert_eq!(harness.opened_url(), None);
                 assert_eq!(harness.sent(), []);
             }
 
@@ -2386,7 +2422,7 @@ mod tests {
                     harness.started(),
                     [["xdg-open".to_owned(), file.display().to_string()]]
                 );
-                assert_eq!(cx.opened_url(), None);
+                assert_eq!(harness.opened_url(), None);
             }
 
             #[gpui::test]
@@ -2403,7 +2439,7 @@ mod tests {
                 ctrl_click(&harness, 0, 1, cx);
 
                 assert_eq!(harness.started(), Vec::<Vec<String>>::new());
-                assert_eq!(cx.opened_url(), None);
+                assert_eq!(harness.opened_url(), None);
             }
 
             #[gpui::test]
@@ -2416,8 +2452,7 @@ mod tests {
 
                 ctrl_click(&harness, 0, 2, cx);
 
-                assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
-                assert_eq!(harness.started(), Vec::<Vec<String>>::new());
+                assert_eq!(harness.started(), [["xdg-open", "https://example.com"]]);
             }
 
             #[gpui::test]
@@ -2461,7 +2496,7 @@ mod tests {
 
                 ctrl_click(&harness, 0, 2, cx);
 
-                assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
+                assert_eq!(harness.opened_url().as_deref(), Some("https://example.com"));
                 assert_eq!(harness.sent(), []);
             }
 
@@ -2481,7 +2516,7 @@ mod tests {
                     harness.sent(),
                     expected.map(|bytes| Outgoing::Input(1, bytes.to_vec()))
                 );
-                assert_eq!(cx.opened_url(), None);
+                assert_eq!(harness.opened_url(), None);
             }
         }
 

@@ -110,12 +110,16 @@ pub struct Notify {
     pub timeout: i32,
 }
 
-/// `org.freedesktop.Notifications` on a [`PrivateBus`]: answers each `Notify` with the next id,
-/// from 1, and passes the call on.
+/// `org.freedesktop.Notifications` on a [`PrivateBus`], as the spec has a server behave:
+/// answers each `Notify` with the next id, from 1, or with `replaces_id` when it names one
+/// still open; answers each `CloseNotification` and reports the notification closed (reason 3).
+/// It passes each call on.
 pub struct FakeServer {
     connection: zbus::Connection,
     /// Each `Notify` received, in order.
     calls: mpsc::UnboundedReceiver<Notify>,
+    /// The id of each `CloseNotification` received, in order.
+    closes: mpsc::UnboundedReceiver<u32>,
 }
 
 impl FakeServer {
@@ -130,51 +134,72 @@ impl FakeServer {
             .await
             .expect("owning org.freedesktop.Notifications");
         let (sender, calls) = mpsc::unbounded_channel();
+        let (closed, closes) = mpsc::unbounded_channel();
         let serving = connection.clone();
         tokio::spawn(async move {
             let mut messages = zbus::MessageStream::from(&serving);
             let mut next_id = 0u32;
+            let mut open = std::collections::HashSet::new();
             while let Some(Ok(message)) = messages.next().await {
                 let header = message.header();
-                let notify = header.message_type() == zbus::message::Type::MethodCall
-                    && header
-                        .member()
-                        .is_some_and(|member| member.as_str() == "Notify");
-                if !notify {
+                if header.message_type() != zbus::message::Type::MethodCall {
                     continue;
                 }
-                type Args = (
-                    String,
-                    u32,
-                    String,
-                    String,
-                    String,
-                    Vec<String>,
-                    HashMap<String, OwnedVariant>,
-                    i32,
-                );
-                let (app_name, replaces_id, icon, summary, body, actions, hints, timeout): Args =
-                    message.body().deserialize().expect("Notify's arguments");
-                next_id += 1;
-                serving
-                    .reply(&header, &next_id)
-                    .await
-                    .expect("answering Notify");
-                let _ = sender.send(Notify {
-                    sender: header.sender().expect("a sender").to_string(),
-                    id: next_id,
-                    app_name,
-                    replaces_id,
-                    icon,
-                    summary,
-                    body,
-                    actions,
-                    hints,
-                    timeout,
-                });
+                match header.member().map(|member| member.as_str()) {
+                    Some("Notify") => {
+                        type Args = (
+                            String,
+                            u32,
+                            String,
+                            String,
+                            String,
+                            Vec<String>,
+                            HashMap<String, OwnedVariant>,
+                            i32,
+                        );
+                        let (app_name, replaces_id, icon, summary, body, actions, hints, timeout): Args =
+                            message.body().deserialize().expect("Notify's arguments");
+                        let id = if open.contains(&replaces_id) {
+                            replaces_id
+                        } else {
+                            next_id += 1;
+                            next_id
+                        };
+                        open.insert(id);
+                        serving.reply(&header, &id).await.expect("answering Notify");
+                        let _ = sender.send(Notify {
+                            sender: header.sender().expect("a sender").to_string(),
+                            id,
+                            app_name,
+                            replaces_id,
+                            icon,
+                            summary,
+                            body,
+                            actions,
+                            hints,
+                            timeout,
+                        });
+                    }
+                    Some("CloseNotification") => {
+                        let id: u32 = message.body().deserialize().expect("its id");
+                        serving
+                            .reply(&header, &())
+                            .await
+                            .expect("answering CloseNotification");
+                        if open.remove(&id) {
+                            emit_closed(&serving, id, 3).await;
+                        }
+                        let _ = closed.send(id);
+                    }
+                    _ => {}
+                }
             }
         });
-        FakeServer { connection, calls }
+        FakeServer {
+            connection,
+            calls,
+            closes,
+        }
     }
 
     /// The next `Notify` call; it must arrive within [`TIMEOUT`].
@@ -182,6 +207,14 @@ impl FakeServer {
         tokio::time::timeout(TIMEOUT, self.calls.recv())
             .await
             .expect("Notify reaches the server in time")
+            .expect("the server is still running")
+    }
+
+    /// The id of the next `CloseNotification` call; it must arrive within [`TIMEOUT`].
+    pub async fn next_close(&mut self) -> u32 {
+        tokio::time::timeout(TIMEOUT, self.closes.recv())
+            .await
+            .expect("CloseNotification reaches the server in time")
             .expect("the server is still running")
     }
 
@@ -203,23 +236,29 @@ impl FakeServer {
     /// Reports that notification `id` closed for `reason` (2: dismissed by the user), as a
     /// server does when one expires or is dismissed.
     pub async fn close(&self, id: u32, reason: u32) {
-        self.connection
-            .emit_signal(
-                None::<zbus::names::BusName<'_>>,
-                PATH,
-                INTERFACE,
-                "NotificationClosed",
-                &(id, reason),
-            )
-            .await
-            .expect("emitting NotificationClosed");
+        emit_closed(&self.connection, id, reason).await;
     }
+}
+
+/// Emits `NotificationClosed` for `id` with `reason`.
+async fn emit_closed(connection: &zbus::Connection, id: u32, reason: u32) {
+    connection
+        .emit_signal(
+            None::<zbus::names::BusName<'_>>,
+            PATH,
+            INTERFACE,
+            "NotificationClosed",
+            &(id, reason),
+        )
+        .await
+        .expect("emitting NotificationClosed");
 }
 
 /// How long each side waits for the other.
 pub const TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Set in the app side's environment: the tags it shows, comma-separated.
+/// Set in the app side's environment: what it does, comma-separated and in order. A tag shows a
+/// notification with that tag; `-<tag>` withdraws the one shown with it.
 pub const APP_SIDE: &str = "AGENTDECK_NOTIFY_APP_SIDE";
 
 /// This test binary re-run as a child to run `test`'s app side, with `DBUS_SESSION_BUS_ADDRESS`
@@ -228,11 +267,11 @@ pub const APP_SIDE: &str = "AGENTDECK_NOTIFY_APP_SIDE";
 pub struct AppSide(Child);
 
 impl AppSide {
-    /// Starts `test` (its full path) in a child that shows `tags`.
-    pub fn spawn(test: &str, bus: &PrivateBus, tags: &[&str]) -> AppSide {
+    /// Starts `test` (its full path) in a child that does `steps` (see [`APP_SIDE`]).
+    pub fn spawn(test: &str, bus: &PrivateBus, steps: &[&str]) -> AppSide {
         let child = Command::new(std::env::current_exe().expect("the test binary"))
             .args([test, "--exact", "--nocapture"])
-            .env(APP_SIDE, tags.join(","))
+            .env(APP_SIDE, steps.join(","))
             .env("DBUS_SESSION_BUS_ADDRESS", bus.address())
             .env("XDG_RUNTIME_DIR", bus.dir())
             .env_remove("WAYLAND_DISPLAY")

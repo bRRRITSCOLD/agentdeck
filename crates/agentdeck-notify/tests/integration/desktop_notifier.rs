@@ -8,30 +8,35 @@ use gpui::{App, Global, SharedString};
 
 use crate::support::{APP_SIDE, AppSide, FakeServer, PrivateBus};
 
-/// The app side, when this process is one: shows the tags [`APP_SIDE`] lists, prints each
-/// click, and quits once the last tag is clicked. Answers whether it was one.
+/// The app side, when this process is one: does the steps [`APP_SIDE`] lists, prints each
+/// click, and quits once the last tag shown is clicked. Answers whether it was one.
 fn ran_as_app_side() -> bool {
-    let Some(tags) = std::env::var_os(APP_SIDE) else {
+    let Some(steps) = std::env::var_os(APP_SIDE) else {
         return false;
     };
-    let tags: Vec<SharedString> = (tags.to_str().expect("UTF-8 tags").split(','))
-        .map(|tag| SharedString::from(tag.to_owned()))
+    let steps: Vec<String> = (steps.to_str().expect("UTF-8 steps").split(','))
+        .map(str::to_owned)
         .collect();
     gpui_platform::headless().run(move |cx: &mut App| {
         let notifier = DesktopNotifier::session(cx);
-        let last = tags.last().cloned();
+        let last = (steps.iter().rev())
+            .find(|step| !step.starts_with('-'))
+            .map(|tag| SharedString::from(tag.clone()));
         notifier.on_click(Box::new(move |tag, cx| {
             println!("clicked {tag}");
             if Some(&tag) == last.as_ref() {
                 cx.quit();
             }
         }));
-        for tag in tags {
-            notifier.show(Notification {
-                title: format!("{tag} title").into(),
-                body: format!("{tag} body").into(),
-                tag,
-            });
+        for step in steps {
+            match step.strip_prefix('-') {
+                Some(tag) => notifier.withdraw(tag),
+                None => notifier.show(Notification {
+                    title: format!("{step} title").into(),
+                    body: format!("{step} body").into(),
+                    tag: step.into(),
+                }),
+            }
         }
         cx.set_global(Keep {
             _notifier: notifier,
@@ -67,14 +72,14 @@ mod show {
     use super::*;
 
     #[test]
-    fn should_send_what_gpui_sent() {
+    fn should_name_the_app_and_its_desktop_entry() {
         if ran_as_app_side() {
             return;
         }
         let bus = PrivateBus::start();
         let (runtime, mut server) = serve(&bus);
         let app = AppSide::spawn(
-            &format!("{TEST}should_send_what_gpui_sent"),
+            &format!("{TEST}should_name_the_app_and_its_desktop_entry"),
             &bus,
             &["pane:7"],
         );
@@ -91,9 +96,61 @@ mod show {
             ("pane:7 title", "pane:7 body")
         );
         assert_eq!(call.actions, ["default", "default"]);
-        assert_eq!(call.hints, HashMap::new());
+        let hints: HashMap<String, String> = (call.hints.into_iter())
+            .map(|(key, value)| (key, String::try_from(value).expect("a string hint")))
+            .collect();
+        assert_eq!(
+            hints,
+            HashMap::from([("desktop-entry".to_owned(), "agentdeck".to_owned())])
+        );
         assert_eq!(call.timeout, -1);
         assert_eq!(app.clicks(), ["clicked pane:7"]);
+    }
+
+    #[test]
+    fn should_replace_the_notification_still_shown_with_the_same_tag() {
+        if ran_as_app_side() {
+            return;
+        }
+        let bus = PrivateBus::start();
+        let (runtime, mut server) = serve(&bus);
+        let app = AppSide::spawn(
+            &format!("{TEST}should_replace_the_notification_still_shown_with_the_same_tag"),
+            &bus,
+            &["a", "b", "a"],
+        );
+
+        let a = runtime.block_on(server.next_call());
+        let b = runtime.block_on(server.next_call());
+        let again = runtime.block_on(server.next_call());
+        runtime.block_on(server.invoke(again.id, "default"));
+
+        assert_eq!((a.replaces_id, b.replaces_id), (0, 0));
+        assert_eq!((again.replaces_id, again.id), (a.id, a.id));
+        assert_eq!(app.clicks(), ["clicked a"]);
+    }
+
+    #[test]
+    fn should_show_a_new_notification_for_a_tag_whose_last_one_closed() {
+        if ran_as_app_side() {
+            return;
+        }
+        let bus = PrivateBus::start();
+        let (runtime, mut server) = serve(&bus);
+        let app = AppSide::spawn(
+            &format!("{TEST}should_show_a_new_notification_for_a_tag_whose_last_one_closed"),
+            &bus,
+            &["a", "-a", "a"],
+        );
+
+        let first = runtime.block_on(server.next_call());
+        runtime.block_on(server.next_close());
+        let again = runtime.block_on(server.next_call());
+        runtime.block_on(server.invoke(again.id, "default"));
+
+        assert_eq!(again.replaces_id, 0);
+        assert_ne!(again.id, first.id);
+        assert_eq!(app.clicks(), ["clicked a"]);
     }
 
     #[test]
@@ -190,5 +247,64 @@ mod click {
         });
 
         assert_eq!(app.clicks(), ["clicked b"]);
+    }
+}
+
+mod withdraw {
+    use super::*;
+
+    const TEST: &str = "desktop_notifier::withdraw::";
+
+    #[test]
+    fn should_close_the_notification_shown_with_the_tag() {
+        if ran_as_app_side() {
+            return;
+        }
+        let bus = PrivateBus::start();
+        let (runtime, mut server) = serve(&bus);
+        let app = AppSide::spawn(
+            &format!("{TEST}should_close_the_notification_shown_with_the_tag"),
+            &bus,
+            &["a", "b", "-a", "-never-shown", "c"],
+        );
+
+        let a = runtime.block_on(server.next_call()).id;
+        runtime.block_on(server.next_call());
+        let closed = runtime.block_on(server.next_close());
+        let c = runtime.block_on(server.next_call()).id;
+        runtime.block_on(server.invoke(c, "default"));
+
+        assert_eq!(closed, a);
+        assert_eq!(app.clicks(), ["clicked c"]);
+    }
+
+    #[test]
+    fn should_close_a_notification_once_clicked_and_every_one_left_on_quit() {
+        if ran_as_app_side() {
+            return;
+        }
+        let bus = PrivateBus::start();
+        let (runtime, mut server) = serve(&bus);
+        let app = AppSide::spawn(
+            &format!("{TEST}should_close_a_notification_once_clicked_and_every_one_left_on_quit"),
+            &bus,
+            &["a", "b", "c"],
+        );
+
+        let ids: Vec<u32> = (0..3)
+            .map(|_| runtime.block_on(server.next_call()).id)
+            .collect();
+        runtime.block_on(server.invoke(ids[0], "default"));
+        let clicked = runtime.block_on(server.next_close());
+        // Clicking c quits the app side, which withdraws b, still shown, as it goes.
+        runtime.block_on(server.invoke(ids[2], "default"));
+        let mut closed: Vec<u32> = (0..2)
+            .map(|_| runtime.block_on(server.next_close()))
+            .collect();
+        closed.sort();
+
+        assert_eq!(clicked, ids[0]);
+        assert_eq!(closed, [ids[1], ids[2]]);
+        assert_eq!(app.clicks(), ["clicked a", "clicked c"]);
     }
 }

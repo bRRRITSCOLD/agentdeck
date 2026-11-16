@@ -6,6 +6,11 @@
 //! one task on GPUI's foreground owns the connection: it sends each `Notify` in turn and reads
 //! the server's signals, telling a click on one notification from another by the id the server
 //! gave it. The click handler runs on the foreground too, so it can activate a window.
+//!
+//! The ids also tie each notification to its tag, so a newer one for the same tag replaces it
+//! in place (`replaces_id`), and the app can withdraw it (`CloseNotification`) once the user has
+//! seen what it is about. A click withdraws it, and quitting withdraws every one still shown,
+//! so none outlives the app that could act on it.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -13,11 +18,16 @@ use std::rc::Rc;
 
 use futures_channel::mpsc;
 use futures_util::{StreamExt as _, stream};
-use gpui::{App, AsyncApp, SharedString, Task};
+use gpui::{App, AsyncApp, SharedString, Subscription, Task};
 use zbus::Variant;
 
 /// The name the server shows on each notification.
 const APP_NAME: &str = "agentdeck";
+
+/// The app's desktop file id, `agentdeck.desktop` without its suffix: the `desktop-entry` hint,
+/// by which the desktop groups the notifications with the app's window (its app id, the
+/// file's `StartupWMClass`).
+const DESKTOP_ENTRY: &str = "agentdeck";
 
 /// The notification server's bus name, object path and interface.
 const BUS_NAME: &str = "org.freedesktop.Notifications";
@@ -44,15 +54,21 @@ pub type ClickHandler = Box<dyn FnMut(SharedString, &mut App)>;
 /// Shows desktop notifications and reports a click on one.
 ///
 /// The contract every implementation, and every test double, keeps:
-/// - [`show`](Notifier::show) returns at once and never fails the caller: a notification that
-///   can't be shown is logged and dropped. It has no buttons; a click on its body is its one
-///   action.
+/// - [`show`](Notifier::show) and [`withdraw`](Notifier::withdraw) return at once and never
+///   fail the caller: a notification that can't be shown or closed is logged and dropped. It
+///   has no buttons; a click on its body is its one action.
+/// - One notification per tag: showing a tag whose notification is still open replaces that
+///   one in place.
 /// - The handler [`on_click`](Notifier::on_click) set runs on GPUI's foreground with the
 ///   notification's tag when the user clicks its body: at most once per notification shown,
 ///   and never once the notification has closed. A later `on_click` replaces it.
+/// - A notification clicked is withdrawn, and so is every one still open when the app quits.
 pub trait Notifier {
-    /// Shows `notification`.
+    /// Shows `notification`, in place of the one still open with its tag.
     fn show(&self, notification: Notification);
+
+    /// Closes the notification open with `tag`, if one is.
+    fn withdraw(&self, tag: &str);
 
     /// Sets what a click on a notification's body runs.
     fn on_click(&self, handler: ClickHandler);
@@ -61,10 +77,12 @@ pub trait Notifier {
 /// [`Notifier`] over the desktop's session bus: one connection and one foreground task,
 /// however many notifications are open. Dropping it closes the connection.
 pub struct DesktopNotifier {
-    /// Notifications for the task to show, in order.
-    requests: mpsc::UnboundedSender<Notification>,
+    /// What the task is asked to do, in order.
+    requests: mpsc::UnboundedSender<Request>,
     on_click: Rc<RefCell<Option<ClickHandler>>>,
     _serving: Task<()>,
+    /// Withdraws every notification still open as the app quits.
+    _quitting: Subscription,
 }
 
 impl DesktopNotifier {
@@ -74,11 +92,31 @@ impl DesktopNotifier {
         let (requests, queued) = mpsc::unbounded();
         let on_click = Rc::<RefCell<Option<ClickHandler>>>::default();
         let handler = on_click.clone();
-        let serving = cx.spawn(async move |cx| serve(queued, handler, cx).await);
+        let state = Rc::<RefCell<State>>::default();
+        let serving = cx.spawn({
+            let state = state.clone();
+            async move |cx| serve(queued, handler, state, cx).await
+        });
+        // Run while GPUI blocks on the quit observers, so the calls are awaited right here;
+        // zbus reads their replies on its own thread.
+        let quitting = cx.on_app_quit(move |_| {
+            let (connection, open) = {
+                let mut state = state.borrow_mut();
+                (state.connection.clone(), state.routes.take())
+            };
+            async move {
+                if let Some(connection) = connection {
+                    for id in open {
+                        close(&connection, id).await;
+                    }
+                }
+            }
+        });
         DesktopNotifier {
             requests,
             on_click,
             _serving: serving,
+            _quitting: quitting,
         }
     }
 }
@@ -86,7 +124,12 @@ impl DesktopNotifier {
 impl Notifier for DesktopNotifier {
     fn show(&self, notification: Notification) {
         // Fails only once the task has given up on the bus, which it logged.
-        let _ = self.requests.unbounded_send(notification);
+        let _ = self.requests.unbounded_send(Request::Show(notification));
+    }
+
+    fn withdraw(&self, tag: &str) {
+        let tag = SharedString::from(tag.to_owned());
+        let _ = self.requests.unbounded_send(Request::Withdraw(tag));
     }
 
     fn on_click(&self, handler: ClickHandler) {
@@ -94,19 +137,36 @@ impl Notifier for DesktopNotifier {
     }
 }
 
+/// What the app asks of the serving task.
+enum Request {
+    /// Show a notification.
+    Show(Notification),
+    /// Close the notification open with this tag.
+    Withdraw(SharedString),
+}
+
 /// What the serving task waits on.
 enum Event {
-    /// A notification to show.
-    Show(Notification),
+    /// A request from the app.
+    Request(Request),
     /// A signal from the notification server.
     Signal(zbus::Result<zbus::Message>),
 }
 
-/// The task: connects, then shows what is queued and routes the server's signals, until the
-/// [`DesktopNotifier`] is dropped.
+/// What the serving task shares with the quit observer.
+#[derive(Default)]
+struct State {
+    /// The session bus, once connected.
+    connection: Option<zbus::Connection>,
+    routes: Routes,
+}
+
+/// The task: connects, then carries out what is queued and routes the server's signals, until
+/// the [`DesktopNotifier`] is dropped.
 async fn serve(
-    queued: mpsc::UnboundedReceiver<Notification>,
+    queued: mpsc::UnboundedReceiver<Request>,
     on_click: Rc<RefCell<Option<ClickHandler>>>,
+    state: Rc<RefCell<State>>,
     cx: &mut AsyncApp,
 ) {
     let (connection, signals) = match connect().await {
@@ -116,18 +176,32 @@ async fn serve(
             return;
         }
     };
-    let mut routes = Routes::default();
-    let mut events = stream::select(queued.map(Event::Show), signals.map(Event::Signal));
+    state.borrow_mut().connection = Some(connection.clone());
+    let mut events = stream::select(queued.map(Event::Request), signals.map(Event::Signal));
     while let Some(event) = events.next().await {
         match event {
             // Awaited before the next event, so the id is routed before any signal about it.
-            Event::Show(notification) => match notify(&connection, &notification).await {
-                Ok(id) => routes.shown(id, notification.tag),
-                Err(error) => tracing::warn!("a desktop notification wasn't shown: {error}"),
-            },
+            Event::Request(Request::Show(notification)) => {
+                let replaces = state.borrow().routes.id_of(&notification.tag);
+                match notify(&connection, &notification, replaces).await {
+                    Ok(id) => state.borrow_mut().routes.shown(id, notification.tag),
+                    Err(error) => tracing::warn!("a desktop notification wasn't shown: {error}"),
+                }
+            }
+            Event::Request(Request::Withdraw(tag)) => {
+                let id = state.borrow_mut().routes.withdrawn(&tag);
+                if let Some(id) = id {
+                    close(&connection, id).await;
+                }
+            }
             Event::Signal(Ok(signal)) => {
-                if let Some(tag) = route(&mut routes, &signal) {
-                    click(&on_click, tag, cx);
+                let clicked = route(&mut state.borrow_mut().routes, &signal);
+                if let Some((id, tag)) = clicked {
+                    // Closed first: the click may quit the app.
+                    close(&connection, id).await;
+                    if let Some(tag) = tag {
+                        click(&on_click, tag, cx);
+                    }
                 }
             }
             Event::Signal(Err(_)) => {}
@@ -147,10 +221,15 @@ async fn connect() -> zbus::Result<(zbus::Connection, zbus::MessageStream)> {
     Ok((connection, signals))
 }
 
-/// Shows `notification`, as GPUI did: named [`APP_NAME`], no icon, no hints, the server's own
-/// timeout, and the default action alone. Answers the id the server gave it.
-async fn notify(connection: &zbus::Connection, notification: &Notification) -> zbus::Result<u32> {
-    let hints = HashMap::<&str, Variant<'_>>::new();
+/// Shows `notification` in place of notification `replaces`, when that is still open: named
+/// [`APP_NAME`] with the [`DESKTOP_ENTRY`] hint, no icon, the server's own timeout, and the
+/// default action alone. Answers the id the server gave it.
+async fn notify(
+    connection: &zbus::Connection,
+    notification: &Notification,
+    replaces: Option<u32>,
+) -> zbus::Result<u32> {
+    let hints = HashMap::from([("desktop-entry", Variant::from(DESKTOP_ENTRY))]);
     let actions = [DEFAULT_ACTION, DEFAULT_ACTION];
     let reply = connection
         .call_method(
@@ -160,7 +239,7 @@ async fn notify(connection: &zbus::Connection, notification: &Notification) -> z
             "Notify",
             &(
                 APP_NAME,
-                0u32,
+                replaces.unwrap_or(0),
                 "",
                 notification.title.as_str(),
                 notification.body.as_str(),
@@ -173,13 +252,33 @@ async fn notify(connection: &zbus::Connection, notification: &Notification) -> z
     reply.body().deserialize()
 }
 
-/// Updates `routes` with `signal`: the tag clicked, when it reports a click on one of ours.
-fn route(routes: &mut Routes, signal: &zbus::Message) -> Option<SharedString> {
+/// Closes notification `id`. One already gone (the server closed it, or the user did) is no
+/// failure worth more than a debug line.
+async fn close(connection: &zbus::Connection, id: u32) {
+    let closing = connection
+        .call_method(
+            Some(BUS_NAME),
+            PATH,
+            Some(INTERFACE),
+            "CloseNotification",
+            &id,
+        )
+        .await;
+    if let Err(error) = closing {
+        tracing::debug!(id, "a desktop notification wasn't closed: {error}");
+    }
+}
+
+/// Updates `routes` with `signal`. When it reports an action invoked on one of ours: its id,
+/// and its tag when that action is a click on its body.
+fn route(routes: &mut Routes, signal: &zbus::Message) -> Option<(u32, Option<SharedString>)> {
     let header = signal.header();
     match header.member()?.as_str() {
         "ActionInvoked" => {
             let (id, action): (u32, String) = signal.body().deserialize().ok()?;
-            routes.invoked(id, &action)
+            let ours = routes.is_open(id);
+            let tag = routes.invoked(id, &action);
+            ours.then_some((id, tag))
         }
         "NotificationClosed" => {
             let (id, _reason): (u32, u32) = signal.body().deserialize().ok()?;
@@ -207,9 +306,32 @@ struct Routes {
 }
 
 impl Routes {
-    /// Notification `id` was shown for `tag`.
+    /// Notification `id` was shown for `tag`, replacing any other open with it.
     fn shown(&mut self, id: u32, tag: SharedString) {
+        self.open.retain(|_, open| *open != tag);
         self.open.insert(id, tag);
+    }
+
+    /// The id of the notification open with `tag`.
+    fn id_of(&self, tag: &str) -> Option<u32> {
+        (self.open.iter()).find_map(|(id, open)| (open == tag).then_some(*id))
+    }
+
+    /// The notification open with `tag` is being closed: its id, if one is open.
+    fn withdrawn(&mut self, tag: &str) -> Option<u32> {
+        let id = self.id_of(tag)?;
+        self.open.remove(&id);
+        Some(id)
+    }
+
+    /// Every notification is being closed: their ids.
+    fn take(&mut self) -> Vec<u32> {
+        self.open.drain().map(|(id, _)| id).collect()
+    }
+
+    /// Whether notification `id` is one of ours, still open.
+    fn is_open(&self, id: u32) -> bool {
+        self.open.contains_key(&id)
     }
 
     /// The user invoked `action` on notification `id`: its tag when that is a click on its body.
@@ -282,6 +404,46 @@ mod tests {
             let mut routes = showing(&["a"]);
 
             assert_eq!(routes.invoked(1, "inline-reply"), None);
+        }
+
+        #[test]
+        fn should_keep_one_notification_per_tag() {
+            let mut routes = showing(&["a", "b"]);
+
+            routes.shown(3, "a".into());
+
+            assert_eq!(routes.id_of("a"), Some(3));
+            assert_eq!(routes.invoked(1, "default"), None);
+        }
+
+        #[test]
+        fn should_find_the_id_open_with_a_tag() {
+            let routes = showing(&["a", "b"]);
+
+            assert_eq!(routes.id_of("b"), Some(2));
+            assert_eq!(routes.id_of("c"), None);
+        }
+
+        #[test]
+        fn should_withdraw_a_tag_once() {
+            let mut routes = showing(&["a", "b"]);
+
+            assert_eq!(routes.withdrawn("a"), Some(1));
+            assert_eq!(routes.withdrawn("a"), None);
+            assert_eq!(routes.invoked(1, "default"), None);
+            assert_eq!(routes.invoked(2, "default"), Some("b".into()));
+        }
+
+        #[test]
+        fn should_take_every_id_still_open() {
+            let mut routes = showing(&["a", "b", "c"]);
+            routes.closed(2);
+
+            let mut taken = routes.take();
+            taken.sort();
+
+            assert_eq!(taken, [1, 3]);
+            assert_eq!(routes, Routes::default());
         }
 
         #[test]

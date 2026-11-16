@@ -2,7 +2,8 @@
 //! user should hear about, as [`Alert`]s.
 //!
 //! - **Panes:** an agent pane turning `blocked` or `done`, once per change. Whether its tab is
-//!   in view is the window's call, so [`pane_alert`] doesn't know.
+//!   in view is the window's call, so [`pane_alert`] doesn't know. [`Reattached`] leaves out a
+//!   pane settling back, just after it reattached, into the state it held then.
 //! - **PRs:** a PR task's checks turning `failure`, or a review arriving (`approved`,
 //!   `changes_requested`). [`PrBatch`] holds them while a sync runs, and lets them out as one
 //!   alert per change once it ends, or as one "N PRs changed" when more than 3 PRs changed.
@@ -12,6 +13,9 @@
 //!
 //! The shell shows them through an `agentdeck_notify::Notifier`: the desktop's notification
 //! server over one shared D-Bus connection, or, in the unit tier, `fake::FakeNotifier`.
+
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use agentdeck_client::types::Task;
 use agentdeck_core::{AgentState, ChecksState, PaneId, ReviewState, TaskId, WorkspaceId};
@@ -23,6 +27,10 @@ use crate::task_sheet::agent_name;
 
 /// More PRs than this changing in one sync make one alert.
 const COALESCE_OVER: usize = 3;
+
+/// How long after a pane reattaches its agent settling back into the state it held then is
+/// no news.
+pub const REATTACH_QUIET: Duration = Duration::from_secs(10);
 
 /// What clicking a notification shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +114,41 @@ pub fn pane_alerts(before: &Snapshot, after: &Snapshot) -> Vec<Alert> {
             pane_alert(was.state, pane, after)
         })
         .collect()
+}
+
+/// The panes reattached in the last [`REATTACH_QUIET`], and the state each held then.
+///
+/// Attaching resizes a pane to its view, and an agent redraws on a resize: Claude Code done
+/// reads working, then done again. That is the state the user already heard about, from this
+/// GUI or the one before a restart, so the pane's alert for it is left out.
+#[derive(Debug, Default)]
+pub struct Reattached {
+    panes: HashMap<PaneId, (AgentState, Instant)>,
+}
+
+impl Reattached {
+    /// `pane` attached at `now`, holding `state`.
+    pub fn attached(&mut self, pane: PaneId, state: AgentState, now: Instant) {
+        self.panes.insert(pane, (state, now));
+    }
+
+    /// Leaves out of `alerts` each pane's whose state in `snapshot` is the one it held when it
+    /// reattached, under [`REATTACH_QUIET`] before `now`. Each left out is logged at debug.
+    pub fn retain(&mut self, alerts: &mut Vec<Alert>, snapshot: &Snapshot, now: Instant) {
+        self.panes
+            .retain(|_, (_, at)| now.saturating_duration_since(*at) < REATTACH_QUIET);
+        alerts.retain(|alert| {
+            let Target::Pane { pane, .. } = alert.target else {
+                return true;
+            };
+            let state = (snapshot.panes.iter()).find(|p| p.pane == pane).map(|p| p.state);
+            let echo = state.is_some() && self.panes.get(&pane).map(|(held, _)| *held) == state;
+            if echo {
+                tracing::debug!(tag = %alert.tag, "leaving out a desktop alert: its pane settled back after a reattach");
+            }
+            !echo
+        });
+    }
 }
 
 /// What happened to a PR.
@@ -232,25 +275,34 @@ pub(crate) mod fake {
     use std::cell::RefCell;
 
     use agentdeck_notify::{ClickHandler, Notification, Notifier};
-    use gpui::App;
+    use gpui::{App, SharedString};
 
-    /// Records what it shows; [`click`](FakeNotifier::click) stands in for the user.
+    /// Records what it shows and which are still open, one per tag, as the contract has it;
+    /// [`click`](FakeNotifier::click) stands in for the user.
     #[derive(Default)]
     pub struct FakeNotifier {
         shown: RefCell<Vec<Notification>>,
+        open: RefCell<Vec<SharedString>>,
         on_click: RefCell<Option<ClickHandler>>,
     }
 
     impl FakeNotifier {
-        /// Everything shown, in order.
+        /// Everything shown, in order, replaced ones included.
         pub fn shown(&self) -> Vec<Notification> {
             self.shown.borrow().clone()
         }
 
-        /// Clicks the body of the notification tagged `tag`, which must have been shown.
+        /// The tags of the notifications still open: neither withdrawn nor clicked.
+        pub fn open(&self) -> Vec<SharedString> {
+            self.open.borrow().clone()
+        }
+
+        /// Clicks the body of the notification tagged `tag`, which must be open. A click
+        /// withdraws it.
         pub fn click(&self, tag: &str, cx: &mut App) {
-            let shown = self.shown.borrow().iter().any(|n| n.tag == tag);
-            assert!(shown, "no notification tagged {tag} was shown");
+            let open = self.open.borrow().iter().any(|open| open == tag);
+            assert!(open, "no notification tagged {tag} is open");
+            self.withdraw(tag);
             let mut handler = (self.on_click.borrow_mut().take()).expect("a click handler");
             handler(tag.to_owned().into(), cx);
             self.on_click.borrow_mut().get_or_insert(handler);
@@ -259,7 +311,15 @@ pub(crate) mod fake {
 
     impl Notifier for FakeNotifier {
         fn show(&self, notification: Notification) {
+            let mut open = self.open.borrow_mut();
+            if !open.contains(&notification.tag) {
+                open.push(notification.tag.clone());
+            }
             self.shown.borrow_mut().push(notification);
+        }
+
+        fn withdraw(&self, tag: &str) {
+            self.open.borrow_mut().retain(|open| open != tag);
         }
 
         fn on_click(&self, handler: ClickHandler) {
@@ -393,6 +453,84 @@ mod tests {
                 alert.map(|a| a.title),
                 Some("Claude Code is blocked".into())
             );
+        }
+    }
+
+    mod reattached {
+        use super::*;
+
+        /// pane 10's alert for `state`, and the snapshot it came from.
+        fn alert(state: AgentState) -> (Vec<Alert>, Snapshot) {
+            let after = with_state(web(), state);
+            (pane_alerts(&web(), &after), after)
+        }
+
+        fn after(start: Instant, secs: u64) -> Instant {
+            start + Duration::from_secs(secs)
+        }
+
+        #[test]
+        fn should_leave_out_the_state_a_pane_held_when_it_reattached() {
+            let start = Instant::now();
+            let mut reattached = Reattached::default();
+            reattached.attached(id(10), AgentState::Done, start);
+            let (mut alerts, snapshot) = alert(AgentState::Done);
+
+            reattached.retain(&mut alerts, &snapshot, after(start, 2));
+
+            assert_eq!(alerts, []);
+        }
+
+        #[test]
+        fn should_keep_it_once_the_quiet_has_passed() {
+            let start = Instant::now();
+            let mut reattached = Reattached::default();
+            reattached.attached(id(10), AgentState::Done, start);
+            let (mut alerts, snapshot) = alert(AgentState::Done);
+
+            reattached.retain(&mut alerts, &snapshot, after(start, 10));
+
+            assert_eq!(alerts.len(), 1);
+        }
+
+        #[test]
+        fn should_keep_another_state() {
+            let start = Instant::now();
+            let mut reattached = Reattached::default();
+            reattached.attached(id(10), AgentState::Done, start);
+            let (mut alerts, snapshot) = alert(AgentState::Blocked);
+
+            reattached.retain(&mut alerts, &snapshot, after(start, 2));
+
+            assert_eq!(alerts.len(), 1);
+        }
+
+        #[test]
+        fn should_keep_a_pane_that_did_not_reattach() {
+            let start = Instant::now();
+            let mut reattached = Reattached::default();
+            reattached.attached(id(11), AgentState::Done, start);
+            let (mut alerts, snapshot) = alert(AgentState::Done);
+
+            reattached.retain(&mut alerts, &snapshot, after(start, 2));
+
+            assert_eq!(alerts.len(), 1);
+        }
+
+        #[test]
+        fn should_keep_every_pr_alert() {
+            let mut reattached = Reattached::default();
+            reattached.attached(id(10), AgentState::Done, Instant::now());
+            let mut alerts = vec![Alert {
+                tag: "prs".into(),
+                title: "4 PRs changed".into(),
+                body: "".into(),
+                target: Target::Tasks,
+            }];
+
+            reattached.retain(&mut alerts, &web(), Instant::now());
+
+            assert_eq!(alerts.len(), 1);
         }
     }
 

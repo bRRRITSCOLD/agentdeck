@@ -30,6 +30,7 @@ use gpui::{
 use super::paste_token::signed_in;
 use crate::api::Api;
 use crate::notice;
+use crate::terminal::open;
 
 /// The dialog's description.
 pub const DESCRIPTION: &str = "Enter this code on GitHub to let agentdeck sync and close your PRs.";
@@ -157,11 +158,12 @@ impl SignInDialog {
         .detach();
     }
 
-    /// Copies the code, then opens the page to enter it on.
-    pub fn copy_and_open(&mut self, cx: &mut Context<Self>) {
+    /// Copies the code, then opens the page to enter it on with the OS's handler, as a link in
+    /// a pane opens; a handler that can't start toasts why.
+    pub fn copy_and_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Stage::Waiting { code, uri, .. } = &self.stage {
             cx.write_to_clipboard(ClipboardItem::new_string(code.to_string()));
-            cx.open_url(uri);
+            open::open_url(uri, "Couldn't open GitHub", window, cx);
         }
     }
 
@@ -281,7 +283,9 @@ impl SignInDialog {
                     div().debug_selector(|| "sign in copy".into()).child(wide(
                         Button::new("sign-in-copy")
                             .label("Copy code & open GitHub")
-                            .on_click(cx.listener(|this, _, _, cx| this.copy_and_open(cx))),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.copy_and_open(window, cx)),
+                            ),
                     )),
                 )
                 .child(

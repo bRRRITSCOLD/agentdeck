@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=agentdeck
+Comment=Run and watch coding agents
+Exec=agentdeck-gui
+Terminal=false
+Categories=Development;
+# The GUI's Wayland app id (and X11 WM_CLASS) is `agentdeck`, this file's id, so the desktop ties
+# its window and its notifications' `desktop-entry` hint to this entry.
+StartupWMClass=agentdeck

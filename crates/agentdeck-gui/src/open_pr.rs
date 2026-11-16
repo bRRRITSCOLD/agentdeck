@@ -1,15 +1,14 @@
 //! Opening a PR's GitHub page in the default browser (spec §11, Opening PRs): the task sheet's
 //! PR line and a PR row's **Open on GitHub** both call [`open()`] with the PR's stored `url`.
 //!
-//! It adds no opener of its own: the URL goes to the OS's handler through the pane's
-//! [`Opener`], as the default `terminal.file_opener` (`xdg-open`) with the URL as its one
-//! argument, so a handler that can't start is toasted. Only a GitHub `https` URL opens
+//! It adds no opener of its own: the URL goes to the OS's handler through
+//! [`open::open_url`], as the default `terminal.file_opener` (`xdg-open`) with the URL as its
+//! one argument, so a handler that can't start is toasted. Only a GitHub `https` URL opens
 //! ([`openable`]); anything else is refused with a debug line, as a pane refuses other schemes.
 
 use gpui::{App, Window};
 
-use crate::notice::Notice;
-use crate::terminal::open::{self, Opener};
+use crate::terminal::open;
 
 /// The host a PR's `url` must name.
 const GITHUB: &str = "github.com";
@@ -37,14 +36,7 @@ pub fn open(url: &str, window: &mut Window, cx: &mut App) {
         );
         return;
     }
-    let argv = open::url_argv(url);
-    let Some(Opener(spawn)) = cx.try_global::<Opener>().cloned() else {
-        tracing::warn!(?argv, "no opener is set");
-        return;
-    };
-    if let Err(err) = spawn.spawn(&argv) {
-        Notice::error("Couldn't open the PR", format!("{}: {err}", argv[0])).show(window, cx);
-    }
+    open::open_url(url, "Couldn't open the PR", window, cx);
 }
 
 #[cfg(test)]
