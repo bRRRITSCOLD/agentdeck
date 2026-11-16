@@ -458,6 +458,31 @@ mod put_v1_github_client_id {
         assert_eq!(status, 400);
         assert_eq!(body.error_code.as_deref(), Some("invalid_client_id"));
     }
+
+    #[tokio::test]
+    async fn should_refuse_the_sign_in_code_pasted_in_its_place_and_save_nothing_400() {
+        let github = MockServer::start_async().await;
+        let daemon = daemon(&github).await;
+
+        let (status, body) = error_response(
+            daemon
+                .client
+                .github_client_id_put()
+                .body(GithubClientIdBody {
+                    client_id: format!(" {USER_CODE} "),
+                })
+                .send()
+                .await,
+        );
+
+        assert_eq!(status, 400);
+        assert_eq!(body.error_code.as_deref(), Some("invalid_client_id"));
+        assert_eq!(
+            body.message,
+            "That looks like the sign-in code, not a client ID."
+        );
+        assert!(!auth(&daemon).await.client_id_set);
+    }
 }
 
 mod delete_v1_github_client_id {
@@ -542,6 +567,27 @@ mod post_v1_github_device {
             body.message,
             "Device Flow must be explicitly enabled for this App"
         );
+    }
+
+    #[tokio::test]
+    async fn should_say_github_does_not_know_the_client_id_502() {
+        let github = MockServer::start_async().await;
+        github.mock(|when, then| {
+            when.method(POST).path("/login/device/code");
+            then.status(404).json_body(json!({ "error": "Not Found" }));
+        });
+        let daemon = daemon(&github).await;
+        put_client_id(&daemon, CLIENT_ID).await;
+
+        let (status, body) = error_response(daemon.client.github_device_start().send().await);
+
+        assert_eq!(status, 502);
+        assert_eq!(body.error_code.as_deref(), Some("github_error"));
+        assert_eq!(
+            body.message,
+            "GitHub doesn't know this OAuth client ID. Check it in Settings → GitHub."
+        );
+        assert!(!logged(&daemon).contains(CLIENT_ID));
     }
 
     #[tokio::test]

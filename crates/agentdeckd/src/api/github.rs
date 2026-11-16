@@ -114,7 +114,7 @@ fn http_error(err: AuthError) -> HttpError {
             "invalid_token",
             message,
         ),
-        AuthError::InvalidClientId => client_error(
+        AuthError::InvalidClientId | AuthError::UserCodeForClientId => client_error(
             ClientErrorStatusCode::BAD_REQUEST,
             "invalid_client_id",
             message,

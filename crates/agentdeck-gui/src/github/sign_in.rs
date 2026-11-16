@@ -3,9 +3,9 @@
 //!
 //! It starts a sign-in with `POST /v1/github/device` as it opens and shows the user code.
 //! **Copy code & open GitHub** copies it, then opens the page to enter it on; meanwhile
-//! "Waiting for approval…" counts the code's expiry down. How it ends comes from the GitHub
-//! section's `github_auth` events, through [`SignInDialog::ended`]: signed in closes it and
-//! toasts; expired, denied or failed dims the code, puts **Try again** where the copy button
+//! "Waiting for approval of WDJB-MJHT…" counts the code's expiry down. How it ends comes from
+//! the GitHub section's `github_auth` events, through [`SignInDialog::ended`]: signed in closes
+//! it and toasts; expired, denied or failed dims the code, puts **Try again** where the copy button
 //! was and the message under it. A refused start shows the daemon's message in place of the
 //! code, with Try again. Cancel, Escape or the corner button cancels the sign-in.
 
@@ -297,8 +297,9 @@ impl SignInDialog {
                         )
                         .child(
                             div()
+                                .debug_selector(|| "sign in waiting".into())
                                 .text_color(s.foreground)
-                                .child("Waiting for approval…"),
+                                .child(waiting_for(code)),
                         )
                         .child(div().flex_1())
                         .child(
@@ -316,6 +317,12 @@ impl SignInDialog {
         }
         .into_any_element()
     }
+}
+
+/// The waiting line, naming the code so a GitHub tab showing another (an older sign-in's) is
+/// easy to spot.
+fn waiting_for(code: &str) -> SharedString {
+    format!("Waiting for approval of {code}…").into()
 }
 
 /// The code shown for `sign_in`, until it expires.
@@ -381,6 +388,18 @@ mod tests {
             assert_eq!(
                 ended_message(DeviceOutcome::Failed, Some("The client_id is not valid.")),
                 "The client_id is not valid."
+            );
+        }
+    }
+
+    mod waiting_for {
+        use super::*;
+
+        #[test]
+        fn should_name_the_code_it_waits_on() {
+            assert_eq!(
+                waiting_for("WDJB-MJHT"),
+                "Waiting for approval of WDJB-MJHT…"
             );
         }
     }
