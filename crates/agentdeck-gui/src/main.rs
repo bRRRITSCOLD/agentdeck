@@ -50,7 +50,7 @@ use std::rc::Rc;
 
 use agentdeck_notify::DesktopNotifier;
 use brrritscold_core_gpui::Root;
-use gpui::{App, AppContext as _, TitlebarOptions, WindowDecorations, WindowOptions};
+use gpui::{App, AppContext as _};
 
 use crate::connection::{Connection, DaemonConnector};
 use crate::shell::Shell;
@@ -79,7 +79,7 @@ fn main() {
         let notifier = Rc::new(DesktopNotifier::session(cx));
         let connection = cx.new(|cx| Connection::new(Rc::new(DaemonConnector), cx));
         // 1440×900, the design's size, fitted to the display; or the bounds saved last time
-        // while they still land on a connected display (spec §11).
+        // while they still land on a connected display; never below the minimum (spec §11).
         let state_file = state_dir.map(|dir| dir.join("window.json"));
         let saved = state_file.as_deref().and_then(window_state::load);
         let displays: Vec<_> = cx
@@ -89,30 +89,13 @@ fn main() {
             .collect();
         let primary = cx.primary_display().map(|display| display.visible_bounds());
         let window_bounds = window_state::initial_bounds(saved, &displays, primary);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(window_bounds),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("agentdeck".into()),
-                    ..Default::default()
-                }),
-                // The compositor's frame where it draws one; where it doesn't (GNOME's
-                // Mutter), GPUI falls back to client decorations and the shell draws the
-                // title bar and resize edges.
-                window_decorations: Some(WindowDecorations::Server),
-                // Names the window to the desktop, so Alt+Tab and the dock can find it
-                // again once it is minimized.
-                app_id: Some("agentdeck".into()),
-                ..Default::default()
-            },
-            |window, cx| {
-                if let Some(path) = state_file {
-                    window_state::remember(path, window, cx);
-                }
-                let shell = cx.new(|cx| Shell::new(connection, notifier, window, cx));
-                cx.new(|cx| Root::new(shell, window, cx))
-            },
-        )
+        cx.open_window(window_state::options(window_bounds), |window, cx| {
+            if let Some(path) = state_file {
+                window_state::remember(path, window, cx);
+            }
+            let shell = cx.new(|cx| Shell::new(connection, notifier, window, cx));
+            cx.new(|cx| Root::new(shell, window, cx))
+        })
         .expect("the main window opens");
         cx.on_window_closed(|cx, _| cx.quit()).detach();
         cx.activate(true);

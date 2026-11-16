@@ -2,11 +2,16 @@
 //! panel and the sidebar's workspaces. Penpot draws it as shadcn's `ScrollArea` thumb
 //! (`bg-border rounded-full`): a 10px track at the area's right edge holding an 8px thumb.
 //!
+//! It never sits over a row. Tasks and the Inbox put it just right of the list, in the
+//! content's padding (`task_row::table`). The sidebar's workspace list and the right panel
+//! reach their container's right edge and leave a [`GUTTER`] there, past their rows, for the
+//! track to sit in.
+//!
 //! It is `gpui-base`'s [`Scrollbar`], dressed to match. Neither core-react nor core-gpui has a
 //! `ScrollArea` yet, so it stays here until one is promoted through core-react.
 
 use brrritscold_core_gpui::ActiveTheme as _;
-use brrritscold_core_gpui_tokens::primitive::border_radius;
+use brrritscold_core_gpui_tokens::primitive::{border_radius, space};
 use gpui::{App, Pixels, px};
 use gpui_base::{Scrollbar, ScrollbarHandle, ScrollbarMode};
 
@@ -16,9 +21,14 @@ const TRACK: Pixels = px(10.);
 /// The thumb's width, the track less shadcn's `p-px` on either side.
 const THUMB: Pixels = px(8.);
 
+/// The room a list leaves at its right edge for the scrollbar: the track, flush with the
+/// edge, and `space.0-5` clear of the rows. Penpot pads the right panel and the sidebar's
+/// `Workspaces` with `space.3` on the right for it.
+pub const GUTTER: Pixels = space::S3;
+
 /// A vertical scrollbar over the area `handle` scrolls, shown while the content is taller
 /// than the area. Add it after the area, so it paints on top; it sits over the area's right
-/// edge wherever it is laid out.
+/// edge wherever it is laid out, so the area's content leaves a [`GUTTER`] for it.
 #[track_caller]
 pub fn vertical<H: ScrollbarHandle + Clone>(handle: &H, cx: &App) -> Scrollbar {
     let border = cx.theme().semantic().border;
@@ -124,6 +134,11 @@ mod tests {
         // An 8px thumb, centred in the 10px track at the area's right edge.
         assert_eq!(thumb.size.width, px(8.));
         assert_eq!(thumb.right(), area.right() - px(1.));
+    }
+
+    #[test]
+    fn should_leave_the_track_and_a_gap_in_the_gutter() {
+        assert_eq!(GUTTER, TRACK + px(2.));
     }
 
     #[gpui::test]

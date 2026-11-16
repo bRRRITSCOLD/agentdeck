@@ -366,6 +366,9 @@ impl Render for RightPanel {
         let spin = window.is_window_active();
         // Instructions first: the header with its `+`, each instruction, then Penpot
         // `NewInstruction`.
+        // The list reaches the panel's right edge, over its `space.2` padding, and pads its
+        // content back in by the scrollbar's gutter (Penpot's `space.3` on the right): the
+        // scrollbar sits in it, clear of the rows and their buttons.
         let mut list = div()
             .id("panel-list")
             .debug_selector(|| "panel list".into())
@@ -373,6 +376,8 @@ impl Render for RightPanel {
             .flex_col()
             .flex_1()
             .min_h_0()
+            .mr(-space::S2)
+            .pr(scrollbar::GUTTER)
             .gap(space::S1)
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
@@ -1307,6 +1312,48 @@ mod tests {
 
             let list = cx.debug_bounds("panel list").expect("the list");
             assert_eq!(thumb(list, cx), None);
+        }
+
+        #[gpui::test]
+        fn should_keep_the_thumb_clear_of_the_rows_and_their_buttons(cx: &mut TestAppContext) {
+            let (panel, cx) = open(cx);
+            let ws = workspace(1, "a");
+            let crowded = Snapshot {
+                tasks: (1..=100)
+                    .map(|n| with_status(n, TaskStatus::Doing, ws.id))
+                    .collect(),
+                instructions: vec![crate::overview::fixtures::instruction(200, ws.id)],
+                workspaces: vec![ws],
+                ..Snapshot::default()
+            };
+            panel.update(cx, |view, cx| view.show(id(1), crowded, cx));
+            draw(cx);
+            let list = cx.debug_bounds("panel list").expect("the list");
+            let thumb = thumb(list, cx).expect("a thumb");
+
+            let mut parts: Vec<String> = (1..=100)
+                .map(|n| format!("panel task {}", id::<TaskId>(n)))
+                .collect();
+            parts.extend(
+                [
+                    "add instruction",
+                    "new instruction",
+                    "add task",
+                    "group doing",
+                ]
+                .map(String::from),
+            );
+            parts.push(format!(
+                "instruction {}",
+                id::<agentdeck_core::InstructionId>(200)
+            ));
+            for part in parts {
+                let bounds = cx.debug_bounds(part.clone().leak()).expect(&part);
+                assert!(
+                    bounds.right() < thumb.left(),
+                    "{part} {bounds:?} reaches {thumb:?}"
+                );
+            }
         }
     }
 

@@ -6,8 +6,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    App, AppContext as _, Bounds, Context, Entity, Global, Pixels, Subscription, Task, Window,
-    WindowBounds, point, px, size,
+    App, AppContext as _, Bounds, Context, Entity, Global, Pixels, Size, Subscription, Task,
+    TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowOptions, point, px, size,
 };
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +24,37 @@ pub struct SavedWindow {
     pub maximized: bool,
 }
 
+/// The least size the window shrinks to (spec §11, Window): the narrowest layout that fits
+/// without clipping. 1200 is the sidebar and its separator, the Tasks view's padding and its
+/// narrowest table in Select mode, 1197, rounded up; 600 holds the tallest dialog, Delete
+/// workspace (520), under the title bar.
+pub const MIN_SIZE: (f32, f32) = (1200., 600.);
+
+/// [`MIN_SIZE`] as a size.
+pub fn min_size() -> Size<Pixels> {
+    let (width, height) = MIN_SIZE;
+    size(px(width), px(height))
+}
+
+/// The main window's options: opening at `window_bounds`, never resized below [`MIN_SIZE`].
+pub fn options(window_bounds: WindowBounds) -> WindowOptions {
+    WindowOptions {
+        window_bounds: Some(window_bounds),
+        window_min_size: Some(min_size()),
+        titlebar: Some(TitlebarOptions {
+            title: Some("agentdeck".into()),
+            ..Default::default()
+        }),
+        // The compositor's frame where it draws one; where it doesn't (GNOME's Mutter), GPUI
+        // falls back to client decorations and the shell draws the title bar and resize edges.
+        window_decorations: Some(WindowDecorations::Server),
+        // Names the window to the desktop, so Alt+Tab and the dock can find it again once it
+        // is minimized.
+        app_id: Some("agentdeck".into()),
+        ..Default::default()
+    }
+}
+
 /// The saved window in `text`, or `None` when it isn't one.
 pub fn parse(text: &str) -> Option<SavedWindow> {
     let saved: SavedWindow = serde_json::from_str(text).ok()?;
@@ -34,18 +65,20 @@ pub fn parse(text: &str) -> Option<SavedWindow> {
 }
 
 /// The bounds to open at: `saved` while its centre is on one of `displays` (their visible
-/// bounds), else [`DEFAULT_SIZE`] centred on `primary`, shrunk to fit it.
+/// bounds), else [`DEFAULT_SIZE`] centred on `primary`, shrunk to fit it. Either grows to
+/// [`MIN_SIZE`] where it is smaller: from its origin when saved, about its centre otherwise.
 pub fn initial_bounds(
     saved: Option<SavedWindow>,
     displays: &[Bounds<Pixels>],
     primary: Option<Bounds<Pixels>>,
 ) -> WindowBounds {
     if let Some(saved) = saved {
-        let bounds = saved.bounds();
+        let mut bounds = saved.bounds();
         if displays
             .iter()
             .any(|display| display.contains(&bounds.center()))
         {
+            bounds.size = bounds.size.max(&min_size());
             return if saved.maximized {
                 WindowBounds::Maximized(bounds)
             } else {
@@ -56,7 +89,10 @@ pub fn initial_bounds(
     let (width, height) = DEFAULT_SIZE;
     let default = size(px(width), px(height));
     WindowBounds::Windowed(match primary {
-        Some(display) => Bounds::centered_at(display.center(), default.min(&display.size)),
+        Some(display) => Bounds::centered_at(
+            display.center(),
+            default.min(&display.size).max(&min_size()),
+        ),
         None => Bounds {
             origin: Default::default(),
             size: default,
@@ -231,12 +267,12 @@ mod tests {
             let saved = SavedWindow {
                 x: 100.,
                 y: 50.,
-                width: 1000.,
+                width: 1300.,
                 height: 700.,
                 maximized: false,
             };
             let bounds = windowed(initial_bounds(Some(saved), &[full_hd()], Some(full_hd())));
-            assert_eq!(bounds, display(100., 50., 1000., 700.));
+            assert_eq!(bounds, display(100., 50., 1300., 700.));
         }
 
         #[test]
@@ -244,13 +280,13 @@ mod tests {
             let saved = SavedWindow {
                 x: 100.,
                 y: 50.,
-                width: 1000.,
+                width: 1300.,
                 height: 700.,
                 maximized: true,
             };
             assert_eq!(
                 initial_bounds(Some(saved), &[full_hd()], Some(full_hd())),
-                WindowBounds::Maximized(display(100., 50., 1000., 700.))
+                WindowBounds::Maximized(display(100., 50., 1300., 700.))
             );
         }
 
@@ -273,6 +309,41 @@ mod tests {
         }
 
         #[test]
+        fn should_grow_saved_bounds_smaller_than_the_minimum() {
+            let saved = SavedWindow {
+                x: 100.,
+                y: 50.,
+                width: 800.,
+                height: 400.,
+                maximized: false,
+            };
+            let bounds = windowed(initial_bounds(Some(saved), &[full_hd()], Some(full_hd())));
+            assert_eq!(bounds, display(100., 50., 1200., 600.));
+        }
+
+        #[test]
+        fn should_grow_only_the_side_below_the_minimum() {
+            let saved = SavedWindow {
+                x: 100.,
+                y: 50.,
+                width: 1600.,
+                height: 500.,
+                maximized: true,
+            };
+            assert_eq!(
+                initial_bounds(Some(saved), &[full_hd()], Some(full_hd())),
+                WindowBounds::Maximized(display(100., 50., 1600., 600.))
+            );
+        }
+
+        #[test]
+        fn should_open_no_smaller_than_the_minimum_on_a_small_display() {
+            let small = display(0., 0., 1024., 576.);
+            let bounds = windowed(initial_bounds(None, &[small], Some(small)));
+            assert_eq!(bounds.size, size(px(1200.), px(600.)));
+        }
+
+        #[test]
         fn should_ignore_bounds_off_every_display() {
             // Saved on a second display that has since been unplugged.
             let saved = SavedWindow {
@@ -285,6 +356,42 @@ mod tests {
             let bounds = windowed(initial_bounds(Some(saved), &[full_hd()], Some(full_hd())));
             assert_eq!(bounds.size, size(px(1440.), px(900.)));
             assert_eq!(bounds.center(), full_hd().center());
+        }
+    }
+
+    mod min_size {
+        use brrritscold_core_gpui_tokens::primitive::space;
+
+        use super::*;
+        use crate::task_row::Table;
+
+        #[test]
+        fn should_fit_the_narrowest_tasks_table_beside_the_sidebar() {
+            // The sidebar and its separator, the Tasks view's `space.6` padding either side,
+            // and the table's narrowest layout in Select mode, its widest narrowest.
+            let narrowest = Table::Tasks.fit(px(0.), true).min_width();
+            let needed = crate::sidebar::WIDTH + px(1.) + space::S6 * 2. + narrowest;
+            let min = min_size();
+            assert!(min.width >= needed, "{min:?} < {needed:?}");
+            // Rounded up, not padded.
+            assert!(min.width - needed < px(10.), "{min:?} for {needed:?}");
+        }
+
+        #[test]
+        fn should_fit_a_pane_header_beside_the_sidebar_and_the_right_panel() {
+            // Penpot's PaneHeader is 560 wide, and the panes sit `space.2` in.
+            let centre = min_size().width
+                - crate::sidebar::WIDTH
+                - px(1.)
+                - px(crate::right_panel::WIDTH)
+                - px(1.);
+            assert!(centre >= px(560.) + space::S2 * 2., "{centre:?}");
+        }
+
+        #[test]
+        fn should_be_the_window_options_minimum() {
+            let options = options(initial_bounds(None, &[], None));
+            assert_eq!(options.window_min_size, Some(min_size()));
         }
     }
 
