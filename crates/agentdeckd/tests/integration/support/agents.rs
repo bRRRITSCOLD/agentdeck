@@ -1,22 +1,38 @@
 //! Stub `claude` and `codex` CLIs on the daemon's `PATH`, ahead of any real one, so no test
-//! ever runs a real agent. Each records what it was launched with and what is typed into it
-//! under `<root>/agents/<pane id>/`.
+//! ever runs a real agent. Each records what it was launched with (argv and
+//! `$AGENTDECK_TASK`) and what is typed into it under `<root>/agents/<pane id>/`.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use agentdeck_core::PaneId;
+use agentdeck_core::{Agent, PaneId};
 
 use super::TestDaemon;
 
-/// Records its argv; shows a stand-in for the folder trust dialog when its folder holds a
-/// file named `untrusted`, and waits for a line there; then sets the idle title and reads
-/// what is typed as [`READ_LIKE_A_TUI`] does. It stays in the foreground (no `exec`), so the
-/// pane's foreground process is `claude` and the claude rules apply.
+/// Records its argv and `$AGENTDECK_TASK`; when its folder holds a file named
+/// `report-back`, comments `reported back` on that task through the MCP server its
+/// `--mcp-config` names, as an agent would, and records the server's answers in `mcp`; shows
+/// a stand-in for the folder trust dialog when its folder holds a file named `untrusted`, and
+/// waits for a line there; then sets the idle title and reads what is typed as
+/// [`READ_LIKE_A_TUI`] does. It stays in the foreground (no `exec`), so the pane's foreground
+/// process is `claude` and the claude rules apply.
 const STUB_CLAUDE: &str = r#"#!/bin/sh
 log="$(dirname "$0")/../agents/$AGENTDECK_PANE"
 mkdir -p "$log"
+printf '%s' "${AGENTDECK_TASK-unset}" > "$log/task"
 { for arg in "$@"; do printf '%s\0' "$arg"; done; printf '\036'; } >> "$log/argv"
+if [ -e report-back ]; then
+  config=; previous=
+  for arg in "$@"; do [ "$previous" = --mcp-config ] && config=$arg; previous=$arg; done
+  server=$(printf '%s' "$config" | sed 's/.*"command":"\([^"]*\)".*/\1/')
+  {
+    printf '%s\n' \
+      '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"stub-claude","version":"0"}}}' \
+      '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+      "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"task_comment\",\"arguments\":{\"task\":\"$AGENTDECK_TASK\",\"body\":\"reported back\"}}}"
+    until grep -q '"id":2' "$log/mcp" 2>/dev/null; do sleep 0.1; done
+  } | "$server" mcp > "$log/mcp" 2> "$log/mcp.stderr"
+fi
 if [ -e untrusted ]; then
   printf 'Do you trust the files in this folder?\r\n\r\n> 1. Yes, proceed\r\n  2. No, exit\r\n\r\nEnter to confirm \302\267 Esc to cancel\r\n'
   read -r answer
@@ -27,14 +43,17 @@ stty raw -echo
 printf '\033[?2004h\033]0;\342\234\263 Claude Code\007> '
 "#;
 
-/// Records its argv; unless resuming, writes a session file as Codex does, under
-/// `$CODEX_HOME/sessions` (default `$HOME/.codex/sessions`), and records the id in
-/// `session`; then reads what is typed as [`READ_LIKE_A_TUI`] does.
+/// Records its argv and `$AGENTDECK_TASK`; unless resuming (a `resume` argument), writes a
+/// session file as Codex does, under `$CODEX_HOME/sessions` (default `$HOME/.codex/sessions`),
+/// and records the id in `session`; then reads what is typed as [`READ_LIKE_A_TUI`] does.
 const STUB_CODEX: &str = r#"#!/bin/sh
 log="$(dirname "$0")/../agents/$AGENTDECK_PANE"
 mkdir -p "$log"
+printf '%s' "${AGENTDECK_TASK-unset}" > "$log/task"
 { for arg in "$@"; do printf '%s\0' "$arg"; done; printf '\036'; } >> "$log/argv"
-if [ "$1" != resume ]; then
+resuming=
+for arg in "$@"; do [ "$arg" = resume ] && resuming=1; done
+if [ -z "$resuming" ]; then
   id=$(cat /proc/sys/kernel/random/uuid)
   dir="${CODEX_HOME:-$HOME/.codex}/sessions/2026/11/11"
   mkdir -p "$dir"
@@ -106,6 +125,45 @@ pub fn typed(daemon: &TestDaemon, pane: PaneId) -> String {
 /// The answer typed into the stub claude's trust dialog, if it was answered.
 pub fn trust_answer(daemon: &TestDaemon, pane: PaneId) -> Option<String> {
     std::fs::read_to_string(log(daemon, pane).join("trust")).ok()
+}
+
+/// `$AGENTDECK_TASK` as the pane's stub agent last started with it: `unset` when it wasn't
+/// set; `None` before the stub has started. Each stub writes it before its argv, so it is
+/// there once [`launches`] has the launch.
+pub fn task_var(daemon: &TestDaemon, pane: PaneId) -> Option<String> {
+    std::fs::read_to_string(log(daemon, pane).join("task")).ok()
+}
+
+/// The arguments registering the `agentdeck` beside the daemon under test as an agent's MCP
+/// server, as the agent's stub sees them: right after the program.
+pub fn mcp_flags(agent: Agent) -> Vec<String> {
+    let cli = super::cli_binary();
+    let cli = cli.to_str().expect("a UTF-8 target dir");
+    match agent {
+        Agent::Claude => vec![
+            "--mcp-config".into(),
+            format!(r#"{{"mcpServers":{{"agentdeck":{{"command":"{cli}","args":["mcp"]}}}}}}"#),
+        ],
+        Agent::Codex => [
+            format!(r#"mcp_servers.agentdeck.command="{cli}""#),
+            r#"mcp_servers.agentdeck.args=["mcp"]"#.to_owned(),
+            "mcp_servers.agentdeck.env_vars=[\"XDG_RUNTIME_DIR\", \"XDG_CONFIG_HOME\", \
+             \"XDG_DATA_HOME\", \"XDG_STATE_HOME\", \"AGENTDECK_PANE\", \
+             \"AGENTDECK_WORKSPACE\", \"AGENTDECK_TASK\"]"
+                .to_owned(),
+        ]
+        .into_iter()
+        .flat_map(|value| ["-c".to_owned(), value])
+        .collect(),
+        Agent::Other => Vec::new(),
+    }
+}
+
+/// [`mcp_flags`] for `agent`, then `rest`.
+pub fn with_mcp(agent: Agent, rest: &[&str]) -> Vec<String> {
+    let mut argv = mcp_flags(agent);
+    argv.extend(rest.iter().map(|arg| (*arg).to_owned()));
+    argv
 }
 
 /// The session id the pane's stub codex wrote a session file for.

@@ -12,7 +12,7 @@ use agentdeck_client::types::{
 };
 use agentdeck_core::{Agent, AgentState, CommentId, PaneId, PaneKind, TaskId, WorkspaceId};
 
-use crate::support::agents::{codex_session, launches, trust_answer, typed};
+use crate::support::agents::{codex_session, launches, task_var, trust_answer, typed, with_mcp};
 use crate::support::terminal::{Place, daemon_with_shell_rules, eventually, in_state, printed, sh};
 use crate::support::{TestDaemon, error_response};
 
@@ -55,6 +55,17 @@ async fn comment(client: &Client, task: &Task, body: &str, pane: Option<PaneId>)
         .await
         .expect("add a comment")
         .into_inner()
+}
+
+/// The launch prompt's lines on `task`: its title, its id and how to report back on it.
+fn task_header(task: &Task) -> String {
+    let id = task.id;
+    format!(
+        "Task: {}\nTask id: {id}\n\
+         Report back with the agentdeck MCP tools: task_comment to comment on this task, \
+         task_update to set its status (or run `agentdeck comment add --task {id} <text>`).",
+        task.title
+    )
 }
 
 async fn read_comment(client: &Client, task: TaskId, id: CommentId) -> Comment {
@@ -160,11 +171,11 @@ mod post_v1_panes {
             let session = pane.session_id.clone().expect("a session id");
             assert!(uuid::Uuid::parse_str(&session).is_ok(), "{session}");
             assert_eq!(pane.kind, PaneKind::Agent);
-            assert_eq!(pane.argv, ["claude", "--session-id", session.as_str()]);
-            assert_eq!(
-                launched(&daemon, pane.id, 1).await,
-                [["--session-id", &session]]
-            );
+            let args = with_mcp(Agent::Claude, &["--session-id", &session]);
+            assert_eq!(pane.argv[0], "claude");
+            assert_eq!(pane.argv[1..], args);
+            assert_eq!(launched(&daemon, pane.id, 1).await, [args]);
+            assert_eq!(task_var(&daemon, pane.id).as_deref(), Some("unset"));
             in_state(&daemon.client, pane.id, AgentState::Idle).await;
         }
 
@@ -191,16 +202,47 @@ mod post_v1_panes {
                 .await;
 
             let session = pane.session_id.clone().expect("a session id");
-            let prompt = "Task: Fix the login bug\n\nIt fails on Safari.\n\n\
-                          Instructions for this workspace:\n  - Use the staging DB\n  \
-                          - Push only after 20 green runs\n\
-                          Comments since your last session:\n  - Repro in issue 7";
-            assert_eq!(pane.argv, ["claude", "--session-id", &session, prompt]);
-            assert_eq!(
-                launched(&daemon, pane.id, 1).await,
-                [["--session-id", session.as_str(), prompt]]
+            let prompt = format!(
+                "{}\n\nIt fails on Safari.\n\n\
+                 Instructions for this workspace:\n  - Use the staging DB\n  \
+                 - Push only after 20 green runs\n\
+                 Comments since your last session:\n  - Repro in issue 7",
+                task_header(&task)
             );
+            let args = with_mcp(Agent::Claude, &["--session-id", &session, &prompt]);
+            assert_eq!(pane.argv[1..], args);
+            assert_eq!(launched(&daemon, pane.id, 1).await, [args]);
+            assert_eq!(task_var(&daemon, pane.id), Some(task.id.to_string()));
             delivered_to(&daemon.client, task.id, from_you.id, pane.id).await;
+        }
+
+        #[tokio::test]
+        async fn should_let_the_agent_comment_on_its_task_through_its_mcp_server_201() {
+            let daemon = TestDaemon::start().await;
+            let place = Place::new(&daemon).await;
+            let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
+            let report_back = std::path::Path::new(&place.workspace.dir).join("report-back");
+            std::fs::write(&report_back, "").expect("asking the stub to report back");
+
+            let pane = place
+                .launch(&daemon.client, Agent::Claude, Some(task.id))
+                .await;
+
+            let reported = eventually("the agent's comment on its task", || async {
+                daemon
+                    .client
+                    .comment_list()
+                    .id(task.id)
+                    .send()
+                    .await
+                    .expect("list comments")
+                    .into_inner()
+                    .into_iter()
+                    .find(|comment| comment.body == "reported back")
+            })
+            .await;
+            assert_eq!(reported.author_agent, Some(Agent::Claude));
+            assert_eq!(reported.author_pane, Some(pane.id));
         }
 
         #[tokio::test]
@@ -223,8 +265,11 @@ mod post_v1_panes {
                 .await;
 
             assert_eq!(
-                second.argv[3],
-                "Task: Fix it\n\nInstructions for this workspace:\n  - Use the staging DB"
+                second.argv.last().unwrap(),
+                &format!(
+                    "{}\n\nInstructions for this workspace:\n  - Use the staging DB",
+                    task_header(&task)
+                )
             );
         }
 
@@ -235,7 +280,12 @@ mod post_v1_panes {
 
             let pane = place.launch(&daemon.client, Agent::Claude, None).await;
 
-            assert_eq!(pane.argv.len(), 3, "no launch prompt: {:?}", pane.argv);
+            assert_eq!(
+                pane.argv.last().map(String::as_str),
+                pane.session_id.as_deref(),
+                "no launch prompt: {:?}",
+                pane.argv
+            );
         }
 
         #[tokio::test]
@@ -298,11 +348,12 @@ mod post_v1_panes {
                 .launch(&daemon.client, Agent::Codex, Some(task.id))
                 .await;
 
-            assert_eq!(pane.argv, ["codex", "Task: Port the parser"]);
-            assert_eq!(
-                launched(&daemon, pane.id, 1).await,
-                [["Task: Port the parser"]]
-            );
+            let args = with_mcp(Agent::Codex, &[&task_header(&task)]);
+            assert_eq!(pane.argv[0], "codex");
+            assert_eq!(pane.argv[1..], args);
+            assert_eq!(launched(&daemon, pane.id, 1).await, [args]);
+            let task_id = task.id.to_string();
+            assert_eq!(task_var(&daemon, pane.id), Some(task_id));
             let written = eventually("the stub to write its session", || async {
                 codex_session(&daemon, pane.id)
             })
@@ -581,9 +632,15 @@ mod resume_after_restart {
         let daemon = TestDaemon::start_in(dirs).await;
 
         let claude_launches = launched(&daemon, claude.id, 2).await;
-        assert_eq!(claude_launches[1], ["--resume", claude_session.as_str()]);
+        assert_eq!(
+            claude_launches[1],
+            with_mcp(Agent::Claude, &["--resume", &claude_session])
+        );
         let codex_launches = launched(&daemon, codex.id, 2).await;
-        assert_eq!(codex_launches[1], ["resume", codex_session.as_str()]);
+        assert_eq!(
+            codex_launches[1],
+            with_mcp(Agent::Codex, &["resume", &codex_session])
+        );
         let resumed = in_state(&daemon.client, claude.id, AgentState::Idle).await;
         assert_eq!(resumed.session_id.as_deref(), Some(claude_session.as_str()));
         assert_eq!(resumed.argv, claude.argv, "argv stays as first launched");
@@ -592,6 +649,25 @@ mod resume_after_restart {
             (typed(&daemon, claude.id) == "still here\n").then_some(())
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn should_give_a_resumed_agent_its_task() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
+        let claude = place
+            .launch(&daemon.client, Agent::Claude, Some(task.id))
+            .await;
+        in_state(&daemon.client, claude.id, AgentState::Idle).await;
+        let (_, dirs) = daemon.terminate();
+        let first = dirs.path().join(format!("agents/{}/task", claude.id));
+        std::fs::remove_file(first).expect("forgetting the first launch's task");
+
+        let daemon = TestDaemon::start_in(dirs).await;
+
+        launched(&daemon, claude.id, 2).await;
+        assert_eq!(task_var(&daemon, claude.id), Some(task.id.to_string()));
     }
 
     #[tokio::test]

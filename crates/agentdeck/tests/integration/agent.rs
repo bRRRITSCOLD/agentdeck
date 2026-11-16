@@ -3,7 +3,9 @@
 
 use agentdeck_core::Layout;
 
-use crate::support::{TestEnv, agent_argv, agent_typed, eventually, shell_pane, tabs, text};
+use crate::support::{
+    TestEnv, agent_argv, agent_typed, eventually, shell_pane, tabs, text, without_mcp_flags,
+};
 
 mod agent_send {
     use super::*;
@@ -114,7 +116,17 @@ mod agent_new {
         assert_eq!(pane["cwd"], ws["dir"]);
         let session = text(&pane, "session_id");
         assert_eq!(pane["argv"][0], "claude");
-        assert_eq!(started(&env, text(&pane, "id")), ["--session-id", session]);
+        let argv = started(&env, text(&pane, "id"));
+        assert_eq!(without_mcp_flags(&argv), ["--session-id", session]);
+        let cli = env!("CARGO_BIN_EXE_agentdeck");
+        assert_eq!(
+            argv[..2],
+            [
+                "--mcp-config".to_owned(),
+                format!(r#"{{"mcpServers":{{"agentdeck":{{"command":"{cli}","args":["mcp"]}}}}}}"#)
+            ],
+            "this agentdeck, beside the daemon, as claude's MCP server"
+        );
         let tabs = tabs(&env, &ws);
         assert_eq!(tabs.len(), 1);
         assert_eq!(tabs[0].id.to_string(), text(&pane, "tab_id"));
@@ -146,7 +158,8 @@ mod agent_new {
         assert_eq!(pane["agent"], "codex");
         assert_eq!(pane["argv"][0], "codex");
         assert!(pane.get("session_id").is_none(), "{pane}");
-        assert_eq!(started(&env, text(&pane, "id")), Vec::<String>::new());
+        let argv = started(&env, text(&pane, "id"));
+        assert_eq!(without_mcp_flags(&argv), Vec::<String>::new());
     }
 
     #[test]

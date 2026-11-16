@@ -185,17 +185,22 @@ The message types are `agentdeck_core::ws::{ClientMessage, ServerMessage}`.
 
 ## 6. Launching agents
 
-- **Environment:** built from an allowlist: `PATH HOME USER SHELL LANG LC_* TERM COLORTERM XDG_* SSH_AUTH_SOCK GH_* EDITOR CODEX_HOME`, plus `TERM=xterm-256color` and `COLORTERM=truecolor`. Nothing else from the daemon's own environment is passed on, and that rule is tested.
+- **Environment:** built from an allowlist: `PATH HOME USER SHELL LANG LC_* TERM COLORTERM XDG_* SSH_AUTH_SOCK GH_* EDITOR CODEX_HOME`, plus `TERM=xterm-256color` and `COLORTERM=truecolor`. Nothing else from the daemon's own environment is passed on, and that rule is tested. On top: `AGENTDECK_PANE` and `AGENTDECK_WORKSPACE` in every pane, and `AGENTDECK_TASK` in a pane linked to a task when it is spawned (launched or resumed); linking later doesn't change it.
+- **MCP server:** `claude` and `codex` panes, new and resumed, get agentdeck's MCP server (§10) as `agentdeck`, on top of the user's own servers: the `agentdeck` beside `agentdeckd`'s executable, else `agentdeck` from `PATH` (logged at warn), run as `<agentdeck> mcp`. These `<mcp flags>` come right after the program.
+  - `claude`: `--mcp-config '{"mcpServers":{"agentdeck":{"command":"<agentdeck>","args":["mcp"]}}}'`. It takes every value up to the next flag, so a flag follows it, never the prompt. No `--strict-mcp-config`.
+  - `codex`: `-c mcp_servers.agentdeck.command="<agentdeck>" -c 'mcp_servers.agentdeck.args=["mcp"]' -c 'mcp_servers.agentdeck.env_vars=[…]'`. Codex passes an MCP server only `HOME`, `PATH` and a few more of its own, so `env_vars` names what `agentdeck mcp` reads: `XDG_RUNTIME_DIR XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME AGENTDECK_PANE AGENTDECK_WORKSPACE AGENTDECK_TASK`. Claude Code passes its whole environment.
 - **Argv by agent:** `claude` and `codex` are looked up on the pane's `PATH`, so tests put stubs first.
 - **A program that can't start** is refused with 400 `invalid_argv` and the pane row is dropped. When `argv[0]` is a bare name in none of the pane's `PATH` directories, the message is only what to do: "`codex` isn't on agentdeckd's PATH. Install it, or start agentdeckd from a shell where it's found."; the lookup's whole error, which lists every `PATH` directory, goes to `agentdeckd.log` at warn. Any other spawn error keeps its text. The GUI's toast and `agentdeck agent new` show an `invalid_argv` refusal as that message alone.
-  - `claude`: `claude --session-id <uuid> [<launch prompt>]`, with a UUIDv4 agentdeck chooses.
-  - `codex`: `codex [<launch prompt>]`. Codex has no flag to start on a chosen session id (checked against `openai/codex` on 2026-11-11: `codex resume <id>` and `codex fork <id>` only). It writes each session to `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl` (`CODEX_HOME` from the pane's environment, default `$HOME/.codex`). The daemon lists those files just before launch, then polls every 250 ms for up to 2 min, while the pane runs, for the newest new one whose id no other pane holds, and stores its id as `session_id` (a `changed` pane event follows).
+  - `claude`: `claude <mcp flags> --session-id <uuid> [<launch prompt>]`, with a UUIDv4 agentdeck chooses.
+  - `codex`: `codex <mcp flags> [<launch prompt>]`. Codex has no flag to start on a chosen session id (checked against `openai/codex` on 2026-11-11: `codex resume <id>` and `codex fork <id>` only). It writes each session to `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl` (`CODEX_HOME` from the pane's environment, default `$HOME/.codex`). The daemon lists those files just before launch, then polls every 250 ms for up to 2 min, while the pane runs, for the newest new one whose id no other pane holds, and stores its id as `session_id` (a `changed` pane event follows).
   - `other` and `shell`: argv as given.
   - `panes.argv` holds the argv as first launched, launch prompt included.
-- **Launch prompt** for `claude` and `codex` panes: the linked task's title and body, then every instruction for the pane's workspace, oldest first, then the task's user comments no agent has had yet, oldest first. Those comments are then marked delivered to this pane. Either block is left out when empty; with no task and no instructions, there is no prompt argument. `other` panes get no prompt.
+- **Launch prompt** for `claude` and `codex` panes: the linked task's title, id, how to report back on it and body, then every instruction for the pane's workspace, oldest first, then the task's user comments no agent has had yet, oldest first. Those comments are then marked delivered to this pane. Either block is left out when empty; with no task and no instructions, there is no prompt argument. `other` panes get no prompt.
 
   ```
   Task: <title>
+  Task id: <id>
+  Report back with the agentdeck MCP tools: task_comment to comment on this task, task_update to set its status (or run `agentdeck comment add --task <id> <text>`).
 
   <body>
 
@@ -207,8 +212,8 @@ The message types are `agentdeck_core::ws::{ClientMessage, ServerMessage}`.
   ```
 - **Trust dialog:** never answered automatically. The launch prompt goes in as an argument, and input agentdeck types on its own (comment delivery, §9) waits until the pane is `idle` or `done`, never `blocked`, so it can't answer any dialog. The GUI focuses the new pane so you can answer it.
 - **Resume after a restart:** at start, before it serves, the daemon re-spawns each pane whose state isn't `exited`. Exits aren't recorded while the daemon shuts down, so those are the panes that were alive. Their rows, and so the layout, are unchanged.
-  - `claude` panes as `claude --resume <session_id>`.
-  - `codex` panes as `codex resume <session_id>`; one whose session was never found comes back as a shell.
+  - `claude` panes as `claude <mcp flags> --resume <session_id>`.
+  - `codex` panes as `codex <mcp flags> resume <session_id>`; one whose session was never found comes back as a shell.
   - All other panes as `$SHELL` (else `/bin/sh`) in their `cwd`, with the `shell` rules. A shell pane that hosted an agent comes back as that shell alone: the hosted agent isn't resumed, and `hosted_agent` is NULL until the user starts one again.
   - A pane that can't be re-spawned (its `cwd` is gone, say) is marked exited.
   - A pane that had exited stays exited.
@@ -322,7 +327,7 @@ min_ms = 400                   # a new state must hold this long before it is pu
   - **Moving the task** to another workspace or the inbox (`PATCH /v1/tasks/{id}`) unlinks every pane linked to it in another workspace than its new one, live or exited, since a pane links only to a task in its own workspace (§4). A comment held for such a pane goes to the next agent pane linked to the task, as for any pane no longer linked.
   - A comment reaches one agent at most once. While it waits for a pane's prompt it is held for that pane alone. Linking another agent pane to the task moves it to that pane only if it is the newer of the two (or the holder is no longer linked), so it still goes to the newest agent pane; the pane that lost it never types it. A launch prompt (§6) takes it from a pane holding it. One already typed or prompted is handed to no pane.
   - Yours are seen when written.
-- **Agent comments** are written through the CLI or MCP from inside a pane (`pane` on create, from `$AGENTDECK_PANE`, which a shell pane has too, so an agent hosted in it writes as that agent): progress, "blocked on X", "PR opened", a summary when done. They are never delivered. Each is new to the user (`seen_at` NULL) until `POST /v1/tasks/{id}/comments/seen`, which the GUI calls when the user opens the task; a task's `unseen_agent_comments` counts them.
+- **Agent comments** are written through the CLI or MCP from inside a pane (`pane` on create, from `$AGENTDECK_PANE`, which a shell pane has too, so an agent hosted in it writes as that agent): progress, "blocked on X", "PR opened", a summary when done. A launched agent has the MCP server and its task's id for this (§6). They are never delivered. Each is new to the user (`seen_at` NULL) until `POST /v1/tasks/{id}/comments/seen`, which the GUI calls when the user opens the task; a task's `unseen_agent_comments` counts them.
 
 **Workspace instructions** are standing context for every agent in a workspace ("Push only after 20 green runs").
 - Every launch prompt in the workspace carries all of them (§6). They are never consumed: there is no read or unread, and they stay until deleted. They can be edited.
@@ -363,7 +368,8 @@ agentdeck mcp            # MCP server over stdio
 
 **MCP tools** (rmcp): `tasks_list`, `task_get`, `task_create`, `task_update`, `task_comments { task }`, `task_comment { task, body }`, `instructions_list { workspace? }`, `workspaces_list`, `prs_status`.
 - **No tool closes PRs:** agents don't close your PRs. Only the GUI and `agentdeck pr close` do.
-- `AGENTDECK_PANE` and `AGENTDECK_WORKSPACE` are set in every pane's environment. They are added on top of the allowlist.
+- `AGENTDECK_PANE` and `AGENTDECK_WORKSPACE` are set in every pane's environment, and `AGENTDECK_TASK` in one linked to a task when spawned. They are added on top of the allowlist (§6).
+- `claude` and `codex` panes get this server registered at launch and on resume (§6); `$XDG_RUNTIME_DIR` from the pane's environment leads it to the same daemon.
 - Tools default to the caller's workspace and pane:
   - `tasks_list` lists the caller's workspace unless given a `workspace`; it takes `inbox: true` for the inbox and `all_workspaces: true` for everything. Outside a workspace it lists everything.
   - `task_create` goes to the caller's workspace unless given one.

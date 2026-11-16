@@ -28,7 +28,7 @@ use agentdeck_core::state::{
     Foreground, Observation, OscScanner, RuleSet, StateTracker, hosted_agent, screen,
 };
 use agentdeck_core::ws::{Channel, ServerMessage};
-use agentdeck_core::{Agent, AgentState, PaneId, WorkspaceId};
+use agentdeck_core::{Agent, AgentState, PaneId, TaskId, WorkspaceId};
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::term::test::TermSize;
@@ -43,6 +43,7 @@ use super::env::pane_env;
 use super::fanout::{Fanout, Outbox, Outgoing, ResizeDecision, Size, SubscriberId};
 use super::tail::{TAIL_CAPACITY, Tail};
 use super::{palette, snapshot};
+use crate::agents::TASK_VAR;
 use crate::events::Events;
 
 /// What to run in a new pane.
@@ -63,13 +64,21 @@ pub struct Launch {
 const INITIAL_SIZE: Size = Size { cols: 80, rows: 24 };
 
 impl Launch {
-    /// Pane `id`, in `workspace`, running `argv` in `cwd` at 80×24. Its environment is the
-    /// allowlisted part of the daemon's, plus `AGENTDECK_PANE` and `AGENTDECK_WORKSPACE`.
-    pub fn pane(id: PaneId, workspace: WorkspaceId, argv: Vec<String>, cwd: PathBuf) -> Launch {
-        let extra = [
+    /// Pane `id`, in `workspace`, linked to `task`, running `argv` in `cwd` at 80×24. Its
+    /// environment is the allowlisted part of the daemon's, plus `AGENTDECK_PANE`,
+    /// `AGENTDECK_WORKSPACE` and, with a task, `AGENTDECK_TASK`.
+    pub fn pane(
+        id: PaneId,
+        workspace: WorkspaceId,
+        task: Option<TaskId>,
+        argv: Vec<String>,
+        cwd: PathBuf,
+    ) -> Launch {
+        let mut extra = vec![
             ("AGENTDECK_PANE".to_owned(), id.to_string()),
             ("AGENTDECK_WORKSPACE".to_owned(), workspace.to_string()),
         ];
+        extra.extend(task.map(|task| (TASK_VAR.to_owned(), task.to_string())));
         Launch {
             argv,
             cwd,
@@ -864,7 +873,13 @@ mod integration_tests {
             });
             let id = uuid::Uuid::now_v7().into();
             let argv = ["sh", "-c", "exit 3"].map(String::from).to_vec();
-            let launch = Launch::pane(id, uuid::Uuid::now_v7().into(), argv, std::env::temp_dir());
+            let launch = Launch::pane(
+                id,
+                uuid::Uuid::now_v7().into(),
+                None,
+                argv,
+                std::env::temp_dir(),
+            );
             let rules = Rules::Fixed(crate::terminal::rules::resolve("shell", None));
             let pane = Pane::spawn(id, launch, rules, events, on_exit).expect("spawn sh");
 
