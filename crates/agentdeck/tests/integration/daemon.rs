@@ -13,6 +13,7 @@ use serde_json::json;
 use crate::support::mcp::McpClient;
 use crate::support::{
     Run, TestEnv, agent_argv, alive, eventually, parent_pid, process_state, shell_pane, text,
+    without_mcp_flags,
 };
 
 /// A port nothing listens on: bound, then released.
@@ -391,7 +392,7 @@ mod daemon_restart {
         env.ok(&["daemon", "restart"]);
 
         eventually("the agent to resume", || {
-            agent_argv(&env, id).filter(|argv| argv == &["--resume", session])
+            agent_argv(&env, id).filter(|argv| without_mcp_flags(argv) == ["--resume", session])
         });
     }
 

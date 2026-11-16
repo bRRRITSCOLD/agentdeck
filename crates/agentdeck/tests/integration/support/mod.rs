@@ -378,6 +378,18 @@ pub fn agent_argv(env: &TestEnv, pane: &str) -> Option<Vec<String>> {
     argv_record(&String::from_utf8(bytes).expect("UTF-8 argv"))
 }
 
+/// `argv` less the flags registering agentdeck's MCP server, which the daemon puts first:
+/// Claude Code's `--mcp-config <json>` and Codex's `-c <key=value>` pairs.
+pub fn without_mcp_flags(argv: &[String]) -> Vec<String> {
+    let mut rest = argv;
+    while let [flag, _, after @ ..] = rest
+        && (flag == "--mcp-config" || flag == "-c")
+    {
+        rest = after;
+    }
+    rest.to_vec()
+}
+
 /// The arguments in a stub's argv file, or `None` until the stub has written its terminator:
 /// the file exists from the moment the redirect opens it, empty or half written.
 fn argv_record(text: &str) -> Option<Vec<String>> {

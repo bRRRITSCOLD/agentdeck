@@ -239,6 +239,19 @@ pub fn eventually_within<T>(
     }
 }
 
+/// The `agentdeck` beside the `agentdeckd` under test, which the daemon registers as its
+/// agents' MCP server. `cargo test-integration` builds every workspace binary, so a missing
+/// one is a build problem, not a reason to skip.
+pub fn cli_binary() -> PathBuf {
+    let cli = Path::new(env!("CARGO_BIN_EXE_agentdeckd")).with_file_name("agentdeck");
+    assert!(
+        cli.is_file(),
+        "{} is missing; build the workspace (`cargo build --workspace`) first",
+        cli.display()
+    );
+    cli
+}
+
 fn daemon_json(root: &Path) -> PathBuf {
     root.join("run/agentdeck/daemon.json")
 }

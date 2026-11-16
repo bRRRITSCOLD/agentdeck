@@ -138,7 +138,8 @@ pub(crate) async fn pane_create(
                         None => Vec::new(),
                     };
                     let prompt = agents::launch_prompt(task.as_ref(), &instructions, &comments);
-                    let launch = agents::launch(agent, prompt).expect("claude and codex launch");
+                    let launch = agents::launch(agent, prompt, &agents::cli())
+                        .expect("claude and codex launch");
                     (launch.argv, launch.session_id, comments)
                 }
             };
@@ -147,7 +148,7 @@ pub(crate) async fn pane_create(
         })
         .await?;
 
-    let launch = Launch::pane(pane.id, workspace, pane.argv.clone(), cwd);
+    let launch = Launch::pane(pane.id, workspace, pane.task_id, pane.argv.clone(), cwd);
     let codex_sessions = (pane.agent == Some(Agent::Codex))
         .then(|| codex::sessions_dir(&launch.env))
         .flatten()
