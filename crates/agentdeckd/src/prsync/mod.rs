@@ -4,9 +4,9 @@
 //! lists the open PRs, most recently updated first, down to the age cutoff (`[pr_sync]
 //! max_age_days`, see [`crate::config`]), and fetches the stored ones that left the list; a
 //! stored one older than the cutoff is aged out instead. The rest are incremental: they
-//! search only the PRs updated since the last good sync began, in any state, then refresh
-//! pending checks (a finished check run doesn't update a PR) and match inbox PRs to
-//! workspaces again from what's stored.
+//! search only the PRs updated since the last good sync began, in any state, then refresh the
+//! [`unsettled`] ones (a finished check run, and maybe a review, doesn't update a PR) and match
+//! inbox PRs to workspaces again from what's stored.
 //!
 //! - [`crate::github_auth`]: the token, from the first source that gives one.
 //! - [`github`]: the GraphQL search and the fetch by number.
@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use agentdeck_core::ws::Entity;
-use agentdeck_core::{ChecksState, PrState, TaskId, WorkspaceId};
+use agentdeck_core::{ChecksState, PrState, ReviewState, TaskId, WorkspaceId};
 use chrono::{DateTime, SecondsFormat, Utc};
 use tokio::time::MissedTickBehavior;
 
@@ -433,7 +433,7 @@ impl PrSync {
     ///    stored PR keeps its checks and review for now. The list is most recently updated
     ///    first, so it ends at the first PR older than `cutoff`, which isn't stored.
     /// 2. Every field, fetched by number, for the PRs that need it: new ones, ones GitHub
-    ///    updated since they were stored, and ones whose checks are pending.
+    ///    updated since they were stored, and [`unsettled`] ones.
     ///
     /// Then the PRs stored as open that left the list are fetched by number, so a merge or
     /// close reaches its task; one GitHub no longer shows is closed. One last updated before
@@ -468,9 +468,7 @@ impl PrSync {
                     .find(|old| old.repo == pr.repo && old.number == pr.number)
                 {
                     Some(old) => {
-                        if old.updated_at != pr.updated_at
-                            || old.checks == Some(ChecksState::Pending)
-                        {
+                        if old.updated_at != pr.updated_at || unsettled(old) {
                             stale.push(key.clone());
                         }
                         prs.push(RemotePr {
@@ -535,9 +533,9 @@ impl PrSync {
 
     /// An incremental read: the PRs updated at or after `since`, in any state, keeping a
     /// merged or closed one only if it's stored as open, and none last updated before
-    /// `cutoff`; then the stored open PRs with pending checks the search left out, fetched by
-    /// number, and the inbox PRs it left out, matched to a workspace again as stored. Nothing
-    /// is gone: only a full read says so.
+    /// `cutoff`; then the stored open PRs the search left out that are [`unsettled`] and
+    /// GitHub updated within `cutoff`, fetched by number, and the inbox PRs it left out,
+    /// matched to a workspace again as stored. Nothing is gone: only a full read says so.
     async fn read_since(
         &self,
         token: &str,
@@ -578,17 +576,21 @@ impl PrSync {
             }
         }
 
-        let pending = self
+        let unsettled: Vec<(String, i64)> = self
             .inner
             .db
-            .call(|conn| db::pull_requests::open_pending(conn))
-            .await?;
-        let pending = missing(&pending, &seen);
-        if !pending.is_empty() {
+            .call(|conn| db::pull_requests::open_current(conn))
+            .await?
+            .into_iter()
+            .filter(|pr| unsettled(pr) && !older_than(&pr.updated_at, cutoff))
+            .map(|pr| (pr.repo, pr.number))
+            .collect();
+        let unsettled = missing(&unsettled, &seen);
+        if !unsettled.is_empty() {
             self.details_stage();
         }
         let mut prs: Vec<RemotePr> = github
-            .prs(token, &pending)
+            .prs(token, &unsettled)
             .await?
             .into_iter()
             .flatten()
@@ -688,6 +690,19 @@ struct Read {
     clones: Arc<Clones>,
 }
 
+/// Whether stored open PR `pr` may change in a way GitHub doesn't count as an update, so no
+/// search or list shows it (spec §8): its checks are pending or haven't started (a check run
+/// finishing doesn't update a PR), or a review is still to come, required or asked for again
+/// after changes were requested (GitHub doesn't document that a review updates one). No
+/// review decision means the repo requires none, and an approved PR waits on nobody.
+fn unsettled(pr: &RemotePr) -> bool {
+    matches!(pr.checks, None | Some(ChecksState::Pending))
+        || matches!(
+            pr.review,
+            Some(ReviewState::ReviewRequired | ReviewState::ChangesRequested)
+        )
+}
+
 /// Whether a PR last updated at `updated_at` (RFC 3339) is older than `cutoff`. One whose time
 /// doesn't parse isn't: better synced than dropped.
 fn older_than(updated_at: &str, cutoff: Option<DateTime<Utc>>) -> bool {
@@ -764,6 +779,50 @@ mod tests {
         #[test]
         fn should_not_be_older_when_the_time_does_not_parse() {
             assert!(!older_than("yesterday", cutoff()));
+        }
+    }
+
+    mod unsettled {
+        use super::*;
+
+        fn pr(checks: Option<ChecksState>, review: Option<ReviewState>) -> RemotePr {
+            RemotePr {
+                repo: "acme/widgets".into(),
+                number: 7,
+                title: "Add PR sync".into(),
+                url: "https://github.com/acme/widgets/pull/7".into(),
+                state: PrState::Open,
+                draft: false,
+                head_ref: "feat/sync".into(),
+                checks,
+                review,
+                updated_at: "2026-11-01T10:00:00Z".into(),
+            }
+        }
+
+        #[test]
+        fn should_be_unsettled_while_checks_are_pending_or_not_started() {
+            assert!(unsettled(&pr(None, Some(ReviewState::Approved))));
+            assert!(unsettled(&pr(
+                Some(ChecksState::Pending),
+                Some(ReviewState::Approved)
+            )));
+        }
+
+        #[test]
+        fn should_be_unsettled_while_a_review_is_still_to_come() {
+            for review in [ReviewState::ReviewRequired, ReviewState::ChangesRequested] {
+                assert!(unsettled(&pr(Some(ChecksState::Failure), Some(review))));
+            }
+        }
+
+        #[test]
+        fn should_be_settled_once_checks_finished_and_no_review_is_awaited() {
+            for review in [None, Some(ReviewState::Approved)] {
+                for checks in [ChecksState::Success, ChecksState::Failure] {
+                    assert!(!unsettled(&pr(Some(checks), review)));
+                }
+            }
         }
     }
 

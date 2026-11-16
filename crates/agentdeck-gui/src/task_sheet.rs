@@ -304,10 +304,13 @@ impl TaskSheet {
             }
         });
         let _events = cx.subscribe(connection, |this, _, event, cx| {
-            if let DaemonEvent::Message(ServerMessage::Changed {
-                entity: Changed::Comment,
-                ..
-            }) = event
+            if let DaemonEvent::Message(
+                ServerMessage::Changed {
+                    entity: Changed::Comment,
+                    ..
+                }
+                | ServerMessage::Resync,
+            ) = event
                 && this.is_open()
             {
                 this.reread(cx);

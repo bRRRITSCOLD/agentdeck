@@ -181,17 +181,23 @@ impl GithubSection {
                     InputEvent::Blur | InputEvent::Focus => {}
                 },
             ),
-            cx.subscribe_in(connection, window, |this, _, event, window, cx| {
-                if let DaemonEvent::Message(ServerMessage::GithubAuth { device, message }) = event {
-                    if let Some(outcome) = device {
-                        let message = message.clone();
-                        this.sign_in.update(cx, |dialog, cx| {
-                            dialog.ended(*outcome, message, window, cx);
-                        });
+            cx.subscribe_in(
+                connection,
+                window,
+                |this, _, event, window, cx| match event {
+                    DaemonEvent::Message(ServerMessage::GithubAuth { device, message }) => {
+                        if let Some(outcome) = device {
+                            let message = message.clone();
+                            this.sign_in.update(cx, |dialog, cx| {
+                                dialog.ended(*outcome, message, window, cx);
+                            });
+                        }
+                        this.reread(window, cx);
                     }
-                    this.reread(window, cx);
-                }
-            }),
+                    DaemonEvent::Message(ServerMessage::Resync) => this.reread(window, cx),
+                    _ => {}
+                },
+            ),
             cx.subscribe_in(
                 &paste_token,
                 window,

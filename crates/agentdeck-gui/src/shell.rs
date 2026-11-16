@@ -645,14 +645,17 @@ impl Shell {
         shown && window.is_window_active()
     }
 
-    /// Shows `alerts` as OS notifications, but for a pane the user can see.
+    /// Shows `alerts` as OS notifications, but for a pane the user can see. Each is logged by
+    /// its tag, so a missed one can be told from one the daemon never reported (spec §11).
     fn notify(&mut self, alerts: &[Notification], window: &mut Window, cx: &mut Context<Self>) {
         for alert in alerts {
             if let notifications::Target::Pane { pane, .. } = alert.target
                 && self.in_view(pane, window, cx)
             {
+                tracing::debug!(tag = %alert.tag, "leaving out a desktop alert: its pane is in view");
                 continue;
             }
+            tracing::info!(tag = %alert.tag, title = %alert.title, "showing a desktop alert");
             self.alerts.insert(alert.tag.clone(), alert.target);
             self.notifier.show(alert.notification());
         }
@@ -2468,6 +2471,33 @@ mod tests {
                 open.turn(8, AgentState::Blocked);
 
                 assert_eq!(open.shown().len(), 2);
+            }
+
+            #[gpui::test]
+            fn should_log_each_alert_it_shows_by_tag_and_one_it_leaves_out(
+                cx: &mut TestAppContext,
+            ) {
+                let root = tempfile::tempdir().unwrap();
+                let path = root.path().join("agentdeck-gui.log");
+                let (subscriber, _) = crate::logging::subscriber(Some(&path), Some("debug"));
+                let _logging = tracing::subscriber::set_default(subscriber);
+                let mut open = Open::new(daemon(), cx);
+
+                open.turn(8, AgentState::Blocked);
+                open.turn(7, AgentState::Blocked);
+
+                let log = std::fs::read_to_string(&path).unwrap();
+                let line = |pane: u32| {
+                    let tag = format!("tag=pane:{}", id::<PaneId>(pane));
+                    log.lines()
+                        .find(|line| line.contains(&tag))
+                        .map(str::to_owned)
+                };
+                let shown = line(8).expect("a line for pane 8");
+                assert!(shown.contains("INFO"), "{shown}");
+                assert!(shown.contains("showing a desktop alert"), "{shown}");
+                let left_out = line(7).expect("a line for pane 7");
+                assert!(left_out.contains("in view"), "{left_out}");
             }
 
             #[gpui::test]

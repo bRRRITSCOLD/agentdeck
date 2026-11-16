@@ -135,10 +135,13 @@ impl SettingsView {
             InputEvent::Focus => {}
         });
         let _events = cx.subscribe_in(connection, window, |this, _, event, window, cx| {
-            if let DaemonEvent::Message(ServerMessage::Changed {
-                entity: Changed::Settings,
-                ..
-            }) = event
+            if let DaemonEvent::Message(
+                ServerMessage::Changed {
+                    entity: Changed::Settings,
+                    ..
+                }
+                | ServerMessage::Resync,
+            ) = event
             {
                 this.reread(window, cx);
             }

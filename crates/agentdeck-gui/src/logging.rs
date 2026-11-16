@@ -31,7 +31,7 @@ pub fn init(file: Option<&Path>, rust_log: Option<&str>) {
 /// Events at the levels `rust_log` (`RUST_LOG`'s value) picks, `info` and above without it
 /// or when it doesn't parse, to stderr and appended to `file`, creating its dir. Without a
 /// file, or when it can't be opened, to stderr alone; the error says why.
-fn subscriber(
+pub(crate) fn subscriber(
     file: Option<&Path>,
     rust_log: Option<&str>,
 ) -> (
