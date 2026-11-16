@@ -57,8 +57,9 @@ pub(crate) async fn settings_update(
             UpdateError::Io { .. } => HttpError::for_internal_error(err.to_string()),
         })?;
     context.events.changed(Entity::Settings, SETTINGS_ID);
-    if settings.pr_sync.max_age_days != before {
-        context.prs.status_changed();
+    let after = settings.pr_sync.max_age_days;
+    if after != before {
+        context.prs.cutoff_changed(before, after);
     }
     Ok(HttpResponseOk(settings))
 }

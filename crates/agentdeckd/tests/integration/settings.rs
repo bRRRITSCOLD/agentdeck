@@ -2,6 +2,7 @@
 //! cutoff they set without a restart (spec §8).
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use agentdeck_client::types::{
     AppearancePatch, GuiPatch, PrSyncPatch, Settings, SettingsPatch, TerminalPatch, ThemePreference,
@@ -11,7 +12,9 @@ use httpmock::MockServer;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use crate::support::github::{Pr, days_ago, mock_list, set_gh_token};
+use crate::support::github::{
+    Pr, days_ago, mock_fetch, mock_list, mock_updated_search, set_gh_token,
+};
 use crate::support::ws::{Frame, Ws};
 use crate::support::{TestDaemon, error_response, set_daemon_env};
 
@@ -414,5 +417,91 @@ mod pr_sync_cutoff {
             .filter_map(|task| task.pr.map(|pr| pr.number))
             .collect();
         assert_eq!(numbers, [7]);
+    }
+
+    /// The numbers of the stored PRs, sorted.
+    async fn numbers(daemon: &TestDaemon) -> Vec<i64> {
+        let mut numbers: Vec<i64> = daemon
+            .client
+            .task_list()
+            .send()
+            .await
+            .expect("list tasks")
+            .into_inner()
+            .into_iter()
+            .filter_map(|task| task.pr.map(|pr| pr.number))
+            .collect();
+        numbers.sort_unstable();
+        numbers
+    }
+
+    /// Waits up to 10 s, with no sync asked for, until #7 and #8 are both stored.
+    async fn until_both_synced(daemon: &TestDaemon) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while numbers(daemon).await != [7, 8] {
+            assert!(Instant::now() < deadline, "#8 never synced");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// A signed-in daemon reading `max_age_days` from `config.toml`, with a full sync an hour
+    /// apart, past its first sync. GitHub lists #7 (updated a day ago) and #8 (40 days ago);
+    /// the incremental search shows nothing, so only a full sync can add #8.
+    async fn synced(github: &MockServer, max_age_days: u32) -> TestDaemon {
+        let dirs = dirs_without_env();
+        write_config(
+            dirs.path(),
+            &format!("[pr_sync]\nmax_age_days = {max_age_days}\n"),
+        );
+        set_gh_token(dirs.path(), Some(TOKEN));
+        let daemon = TestDaemon::start_with_github(dirs, &github.url("/graphql")).await;
+        daemon.client.prs_sync().send().await.expect("sync");
+        daemon
+    }
+
+    #[tokio::test]
+    async fn should_start_a_full_sync_at_once_when_the_cutoff_widens_200() {
+        let github = MockServer::start_async().await;
+        let listing = mock_list(&github, TOKEN, &[aged(7, 1), aged(8, 40)]);
+        mock_fetch(&github, &[aged(8, 40)]);
+        mock_updated_search(&github, TOKEN, &[]);
+        let daemon = synced(&github, 30).await;
+        assert_eq!(numbers(&daemon).await, [7]);
+
+        patch(&daemon, max_age(365)).await;
+
+        until_both_synced(&daemon).await;
+        listing.list.assert_calls(2);
+    }
+
+    #[tokio::test]
+    async fn should_start_a_full_sync_at_once_when_the_cutoff_is_lifted_200() {
+        let github = MockServer::start_async().await;
+        let listing = mock_list(&github, TOKEN, &[aged(7, 1), aged(8, 40)]);
+        mock_fetch(&github, &[aged(8, 40)]);
+        mock_updated_search(&github, TOKEN, &[]);
+        let daemon = synced(&github, 30).await;
+
+        patch(&daemon, max_age(0)).await;
+
+        until_both_synced(&daemon).await;
+        listing.list.assert_calls(2);
+    }
+
+    #[tokio::test]
+    async fn should_not_start_a_full_sync_when_the_cutoff_narrows_200() {
+        let github = MockServer::start_async().await;
+        let listing = mock_list(&github, TOKEN, &[aged(7, 1), aged(8, 40)]);
+        let updated = mock_updated_search(&github, TOKEN, &[]);
+        let daemon = synced(&github, 365).await;
+        assert_eq!(numbers(&daemon).await, [7, 8]);
+
+        patch(&daemon, max_age(30)).await;
+        // Queues behind any sync the PATCH started.
+        daemon.client.prs_sync().send().await.expect("sync");
+
+        listing.list.assert_calls(1);
+        assert!(updated.calls() >= 1);
+        assert_eq!(numbers(&daemon).await, [7, 8]);
     }
 }

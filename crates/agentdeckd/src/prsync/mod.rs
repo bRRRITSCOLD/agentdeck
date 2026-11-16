@@ -84,6 +84,8 @@ struct Inner {
     state: Mutex<State>,
     /// Held for the length of a sync, so syncs never overlap.
     running: tokio::sync::Mutex<()>,
+    /// Wakes the timer to sync at once: the age cutoff widened.
+    widened: tokio::sync::Notify,
 }
 
 struct State {
@@ -93,6 +95,9 @@ struct State {
     last_good: Option<DateTime<Utc>>,
     /// When the last good full sync began.
     last_full: Option<DateTime<Utc>>,
+    /// Whether the next sync must be full whenever the last full one was: the age cutoff
+    /// widened, so open PRs it now lets in that no incremental search would find are listed.
+    full_wanted: bool,
 }
 
 /// What a good sync did.
@@ -157,8 +162,10 @@ impl PrSync {
                     },
                     last_good: None,
                     last_full: None,
+                    full_wanted: false,
                 }),
                 running: tokio::sync::Mutex::new(()),
+                widened: tokio::sync::Notify::new(),
             }),
         };
         let timer = sync.clone();
@@ -174,6 +181,7 @@ impl PrSync {
                             return;
                         }
                     }
+                    () = timer.inner.widened.notified() => {}
                 }
                 timer.sync().await;
             }
@@ -194,10 +202,16 @@ impl PrSync {
         }
     }
 
-    /// Tells clients the status changed when something other than a sync changed it: the age
-    /// cutoff.
-    pub fn status_changed(&self) {
+    /// Tells clients the status changed with the age cutoff, `before` days then `after` now
+    /// (`0` for none). When it widened, a full sync starts at once, after any sync running, so
+    /// the older open PRs it now lets in arrive without waiting for the hourly one; a narrower
+    /// one waits for the next sync.
+    pub fn cutoff_changed(&self, before: u32, after: u32) {
         self.inner.events.changed(Entity::PrSync, STATUS_ID);
+        if widens(before, after) {
+            self.state().full_wanted = true;
+            self.inner.widened.notify_one();
+        }
     }
 
     /// Syncs now, after any sync already running, and returns the status it leaves.
@@ -208,7 +222,9 @@ impl PrSync {
             prs: 0,
             stage: PrSyncStage::Listing,
         }));
-        let result = self.sync_once().await;
+        let began = Utc::now();
+        let since = self.since(began);
+        let result = self.sync_once(began, since).await;
         {
             let mut state = self.state();
             state.status.progress = None;
@@ -224,6 +240,8 @@ impl PrSync {
                 Err(err) => {
                     tracing::warn!("PR sync failed: {err}");
                     state.status.last_error = Some(err.to_string());
+                    // A full sync the widened cutoff asked for is still owed.
+                    state.full_wanted |= since.is_none();
                 }
             }
         }
@@ -345,15 +363,22 @@ impl PrSync {
         }));
     }
 
-    /// When this sync's incremental search should reach back to; `None` when it is full.
+    /// When the sync beginning `now` should reach back to; `None` when it is full. A full sync
+    /// the widened cutoff asked for is this one.
     fn since(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        let state = self.state();
+        let mut state = self.state();
+        if std::mem::take(&mut state.full_wanted) {
+            return None;
+        }
         since(state.last_good, state.last_full, now, self.inner.full_every)
     }
 
-    async fn sync_once(&self) -> Result<Synced, SyncError> {
-        let began = Utc::now();
-        let since = self.since(began);
+    /// One sync, which began at `began` and reaches back to `since` (`None` for a full one).
+    async fn sync_once(
+        &self,
+        began: DateTime<Utc>,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<Synced, SyncError> {
         let auth = &self.inner.auth;
         let token = match auth.token() {
             Some(token) => token,
@@ -681,6 +706,12 @@ fn missing(wanted: &[(String, i64)], seen: &[(String, i64)]) -> Vec<(String, i64
         .collect()
 }
 
+/// Whether an age cutoff of `after` days lets in open PRs one of `before` days left out: it is
+/// longer, or `0` (none) where there was one.
+fn widens(before: u32, after: u32) -> bool {
+    before != 0 && (after == 0 || after > before)
+}
+
 /// When an incremental search beginning `now` reaches back to, `OVERLAP` before the last good
 /// sync began; `None` when the sync must be full: none has been yet, or the last full one
 /// began `full_every` or longer ago.
@@ -733,6 +764,32 @@ mod tests {
         #[test]
         fn should_not_be_older_when_the_time_does_not_parse() {
             assert!(!older_than("yesterday", cutoff()));
+        }
+    }
+
+    mod widens {
+        use super::*;
+
+        #[test]
+        fn should_widen_when_the_cutoff_grows() {
+            assert!(widens(30, 365));
+        }
+
+        #[test]
+        fn should_widen_when_the_cutoff_is_lifted() {
+            assert!(widens(30, 0));
+        }
+
+        #[test]
+        fn should_not_widen_when_the_cutoff_shrinks_or_stays() {
+            assert!(!widens(365, 30));
+            assert!(!widens(30, 30));
+        }
+
+        #[test]
+        fn should_not_widen_from_no_cutoff() {
+            assert!(!widens(0, 30));
+            assert!(!widens(0, 0));
         }
     }
 
