@@ -555,6 +555,24 @@ mod tests {
     }
 
     #[gpui::test]
+    fn should_copy_a_plain_tasks_id_from_its_rows_menu(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::open(board(), cx);
+
+        harness.click(format!("tasks menu {}", id::<TaskId>(1)).leak(), cx);
+        harness.draw(cx);
+        cx.simulate_keystrokes("down down enter");
+        cx.run_until_parked();
+
+        let copied = cx.read_from_clipboard().and_then(|item| item.text());
+        assert_eq!(copied, Some(id::<TaskId>(1).to_string()));
+        let shown = cx.update(|_, cx| crate::notice::shown(cx));
+        assert_eq!(
+            shown.last().map(|toast| toast.title.clone()),
+            Some("Copied task id".into())
+        );
+    }
+
+    #[gpui::test]
     fn should_ask_for_the_task_sheet_when_a_title_is_clicked(cx: &mut TestAppContext) {
         let (harness, cx) = Harness::open(board(), cx);
         let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));

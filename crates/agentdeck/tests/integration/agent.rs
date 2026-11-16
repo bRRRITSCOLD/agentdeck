@@ -1,11 +1,127 @@
-//! `agentdeck agent new | send` and `agentdeck tail`, against `sh` panes and the stub
-//! `claude` and `codex`; never a real agent.
+//! `agentdeck agent ls | new | send | link` and `agentdeck tail`, against `sh` panes and the
+//! stub `claude` and `codex`; never a real agent.
 
 use agentdeck_core::Layout;
 
 use crate::support::{
-    TestEnv, agent_argv, agent_typed, eventually, shell_pane, tabs, text, without_mcp_flags,
+    TestEnv, agent_argv, agent_typed, eventually, shell_pane, shell_pane_in, tabs, text,
+    without_mcp_flags,
 };
+
+mod agent_ls {
+    use serde_json::Value;
+
+    use super::*;
+
+    /// The listed pane whose id is `id`.
+    fn listed<'a>(list: &'a Value, id: &str) -> &'a Value {
+        (list.as_array().expect("a list").iter())
+            .find(|pane| pane["id"] == id)
+            .unwrap_or_else(|| panic!("{id} isn't listed: {list}"))
+    }
+
+    #[test]
+    fn should_print_each_panes_id_workspace_tab_agent_state_and_task() {
+        let env = TestEnv::new();
+        env.workspace("web");
+        let task = env.json(&["task", "add", "Fix the flaky test", "--ws", "web"]);
+        let agent = env.json(&["agent", "new", "--ws", "web", "--task", text(&task, "id")]);
+        let api = env.workspace("api");
+        let shell = shell_pane_in(&env, &api, "build", "sleep 60");
+
+        let stdout = env.ok(&["agent", "ls"]);
+
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 3, "{stdout}");
+        let header: Vec<&str> = lines[0].split_whitespace().collect();
+        assert_eq!(
+            header,
+            ["ID", "WORKSPACE", "TAB", "AGENT", "STATE", "TASK"],
+            "{stdout}"
+        );
+        let agent_row = (lines.iter())
+            .find(|line| line.starts_with(text(&agent, "id")))
+            .unwrap_or_else(|| panic!("no row for the agent: {stdout}"));
+        let cells: Vec<&str> = agent_row.split_whitespace().collect();
+        assert_eq!(cells[1..4], ["web", "claude", "claude"], "{stdout}");
+        assert!(agent_row.ends_with("  Fix the flaky test"), "{stdout}");
+        let shell_row = (lines.iter())
+            .find(|line| line.starts_with(&shell))
+            .unwrap_or_else(|| panic!("no row for the shell: {stdout}"));
+        let cells: Vec<&str> = shell_row.split_whitespace().collect();
+        assert_eq!(cells[1..4], ["api", "build", "shell"], "{stdout}");
+    }
+
+    #[test]
+    fn should_print_the_panes_with_where_they_are_as_json() {
+        let env = TestEnv::new();
+        let ws = env.workspace("web");
+        let task = env.json(&["task", "add", "Fix the flaky test", "--ws", "web"]);
+        let agent = env.json(&["agent", "new", "--ws", "web", "--task", text(&task, "id")]);
+
+        let list = env.json(&["agent", "ls"]);
+
+        let pane = listed(&list, text(&agent, "id"));
+        assert_eq!(pane["kind"], "agent");
+        assert_eq!(pane["agent"], "claude");
+        assert_eq!(pane["tab_id"], agent["tab_id"]);
+        assert_eq!(pane["task_id"], task["id"]);
+        assert_eq!(pane["workspace_id"], ws["id"]);
+        assert_eq!(pane["workspace"], "web");
+        assert_eq!(pane["tab"], "claude");
+        assert_eq!(pane["task_title"], "Fix the flaky test");
+    }
+
+    #[test]
+    fn should_list_only_the_workspace_ws_names() {
+        let env = TestEnv::new();
+        let web = env.workspace("web");
+        let api = env.workspace("api");
+        let in_web = shell_pane(&env, &web, "sleep 60");
+        let in_api = shell_pane(&env, &api, "sleep 60");
+
+        let list = env.json(&["agent", "ls", "--ws", "api"]);
+
+        let ids: Vec<&Value> = (list.as_array().unwrap().iter())
+            .map(|pane| &pane["id"])
+            .collect();
+        assert_eq!(ids, [&Value::from(in_api)], "not {in_web}");
+    }
+
+    #[test]
+    fn should_list_a_pane_whose_process_exited_as_exited() {
+        let env = TestEnv::new();
+        let ws = env.workspace("web");
+        let pane = shell_pane(&env, &ws, "exit 3");
+
+        let state = eventually("the pane to exit", || {
+            let list = env.json(&["agent", "ls"]);
+            let state = listed(&list, &pane)["state"].clone();
+            (state == "exited").then_some(state)
+        });
+
+        assert_eq!(state, "exited");
+        let stdout = env.ok(&["agent", "ls"]);
+        assert!(stdout.contains("  shell  exited"), "{stdout}");
+    }
+
+    #[test]
+    fn should_say_so_when_there_are_no_panes() {
+        let env = TestEnv::new();
+        env.workspace("web");
+
+        assert_eq!(env.ok(&["agent", "ls"]), "no panes\n");
+    }
+
+    #[test]
+    fn should_fail_for_an_unknown_workspace() {
+        let env = TestEnv::new();
+
+        let stderr = env.fails(&["agent", "ls", "--ws", "nope"]);
+
+        assert!(stderr.contains("unknown_workspace"), "{stderr}");
+    }
+}
 
 mod agent_send {
     use super::*;

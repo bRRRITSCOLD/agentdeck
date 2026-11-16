@@ -417,11 +417,16 @@ pub fn tabs(env: &TestEnv, workspace: &Value) -> Vec<agentdeck_client::types::Ta
 }
 
 /// Spawns a shell pane running `sh -c <script>` in a new tab of `workspace` (a JSON
-/// workspace), through the daemon's API, since the CLI has no command for shell panes.
-/// Returns the pane's id.
+/// workspace), titled `tab`, and makes it the tab's layout, as the GUI does, through the
+/// daemon's API, since the CLI has no command for shell panes. Returns the pane's id.
 pub fn shell_pane(env: &TestEnv, workspace: &Value, script: &str) -> String {
-    use agentdeck_client::types::{NewPane, NewTab};
-    use agentdeck_core::PaneKind;
+    shell_pane_in(env, workspace, "tab", script)
+}
+
+/// [`shell_pane`] in a tab titled `tab`.
+pub fn shell_pane_in(env: &TestEnv, workspace: &Value, tab: &str, script: &str) -> String {
+    use agentdeck_client::types::{NewPane, NewTab, TabPatch};
+    use agentdeck_core::{Layout, PaneKind};
 
     let info = env.daemon_info().expect("a running daemon");
     let client = agentdeck_client::authenticated(&info.base_url(), &info.token).expect("a client");
@@ -435,7 +440,7 @@ pub fn shell_pane(env: &TestEnv, workspace: &Value, script: &str) -> String {
             .tab_create()
             .id(workspace_id)
             .body(NewTab {
-                title: "tab".into(),
+                title: tab.into(),
                 layout: None,
             })
             .send()
@@ -454,6 +459,16 @@ pub fn shell_pane(env: &TestEnv, workspace: &Value, script: &str) -> String {
             .send()
             .await
             .expect("spawn a pane");
+        client
+            .tab_update()
+            .id(tab.id)
+            .body(TabPatch {
+                layout: Some(Layout::single(pane.id)),
+                ..TabPatch::default()
+            })
+            .send()
+            .await
+            .expect("lay the pane out");
         pane.id.to_string()
     })
 }

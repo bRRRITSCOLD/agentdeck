@@ -225,6 +225,13 @@ pub enum InstructionCommand {
 /// `agentdeck agent …`.
 #[derive(Debug, Subcommand)]
 pub enum AgentCommand {
+    /// List every pane, agent and shell, exited ones too: its id, workspace, tab, agent,
+    /// state and linked task.
+    Ls {
+        /// Only panes in this workspace.
+        #[arg(long, value_name = "WS")]
+        ws: Option<String>,
+    },
     /// Launch an agent in a workspace.
     New {
         /// The workspace.
@@ -474,6 +481,22 @@ mod tests {
 
     mod agent {
         use super::*;
+
+        #[test]
+        fn should_list_every_pane_or_one_workspaces() {
+            let all = parse(&["agent", "ls"]).unwrap();
+            assert!(matches!(
+                all.command,
+                Command::Agent(AgentCommand::Ls { ws: None })
+            ));
+
+            let one = parse(&["agent", "ls", "--ws", "web", "--json"]).unwrap();
+            let Command::Agent(AgentCommand::Ls { ws }) = one.command else {
+                panic!("not agent ls: {:?}", one.command);
+            };
+            assert_eq!(ws.as_deref(), Some("web"));
+            assert!(one.json);
+        }
 
         #[test]
         fn should_launch_claude_by_default() {

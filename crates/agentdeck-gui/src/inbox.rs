@@ -1452,11 +1452,26 @@ mod tests {
             }
 
             #[gpui::test]
+            fn should_copy_the_task_id_from_the_item_after_open_on_github(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open(prs(), cx);
+
+                pick(2, 3, cx);
+
+                let copied = cx.read_from_clipboard().and_then(|item| item.text());
+                assert_eq!(copied, Some(id::<TaskId>(2).to_string()));
+                assert_eq!(
+                    toasts(cx).last().map(String::as_str),
+                    Some("Copied task id")
+                );
+                assert!(!asking(&harness, cx));
+            }
+
+            #[gpui::test]
             fn should_ask_to_close_from_the_item_after_the_separator(cx: &mut TestAppContext) {
                 let (harness, cx) = Harness::open(prs(), cx);
                 let opener = cx.update(|_, cx| crate::terminal::open::fake::install(cx));
 
-                pick(1, 3, cx);
+                pick(1, 4, cx);
 
                 assert!(asking(&harness, cx));
                 assert!(opener.started.lock().unwrap().is_empty());
