@@ -232,6 +232,29 @@ pub mod types {
             Default::default()
         }
     }
+    ///`[gui]` in a [`SettingsPatch`]: its schema only, since `config::validate` reads the JSON itself.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
+    pub struct GuiPatch {
+        ///A new `gui.confirm_quit`.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub confirm_quit: ::std::option::Option<bool>,
+    }
+    impl GuiPatch {
+        pub fn builder() -> builder::GuiPatch {
+            Default::default()
+        }
+    }
+    ///`[gui]`: how the GUI behaves (spec §11).
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct GuiSettings {
+        ///`gui.confirm_quit`: whether closing the window or Quit asks first while an agent runs, since agents keep running after the GUI quits.
+        pub confirm_quit: bool,
+    }
+    impl GuiSettings {
+        pub fn builder() -> builder::GuiSettings {
+            Default::default()
+        }
+    }
     ///`GET /v1/health`.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct Health {
@@ -757,6 +780,8 @@ pub mod types {
     pub struct Settings {
         ///`[appearance]`.
         pub appearance: AppearanceSettings,
+        ///`[gui]`.
+        pub gui: GuiSettings,
         ///The dotted keys (`pr_sync.max_age_days`) whose value comes from an environment variable, not `config.toml`. A PATCH of one is written to the file, but the variable still wins until the daemon runs without it.
         pub overridden_by_env: ::std::vec::Vec<::std::string::String>,
         ///`[pr_sync]`.
@@ -777,6 +802,9 @@ pub mod types {
         ///`[appearance]` keys to change.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub appearance: ::std::option::Option<AppearancePatch>,
+        ///`[gui]` keys to change.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub gui: ::std::option::Option<GuiPatch>,
         ///`[pr_sync]` keys to change.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub pr_sync: ::std::option::Option<PrSyncPatch>,
@@ -1910,6 +1938,86 @@ pub mod types {
             fn from(value: super::GithubTokenBody) -> Self {
                 Self {
                     token: Ok(value.token),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
+        pub struct GuiPatch {
+            confirm_quit: ::std::result::Result<::std::option::Option<bool>, ::std::string::String>,
+        }
+        impl ::std::default::Default for GuiPatch {
+            fn default() -> Self {
+                Self {
+                    confirm_quit: Ok(Default::default()),
+                }
+            }
+        }
+        impl GuiPatch {
+            pub fn confirm_quit<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<bool>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.confirm_quit = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for confirm_quit: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<GuiPatch> for super::GuiPatch {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: GuiPatch,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    confirm_quit: value.confirm_quit?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::GuiPatch> for GuiPatch {
+            fn from(value: super::GuiPatch) -> Self {
+                Self {
+                    confirm_quit: Ok(value.confirm_quit),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
+        pub struct GuiSettings {
+            confirm_quit: ::std::result::Result<bool, ::std::string::String>,
+        }
+        impl ::std::default::Default for GuiSettings {
+            fn default() -> Self {
+                Self {
+                    confirm_quit: Err("no value supplied for confirm_quit".to_string()),
+                }
+            }
+        }
+        impl GuiSettings {
+            pub fn confirm_quit<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<bool>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.confirm_quit = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for confirm_quit: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<GuiSettings> for super::GuiSettings {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: GuiSettings,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    confirm_quit: value.confirm_quit?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::GuiSettings> for GuiSettings {
+            fn from(value: super::GuiSettings) -> Self {
+                Self {
+                    confirm_quit: Ok(value.confirm_quit),
                 }
             }
         }
@@ -3516,6 +3624,7 @@ pub mod types {
         #[derive(Clone, Debug)]
         pub struct Settings {
             appearance: ::std::result::Result<super::AppearanceSettings, ::std::string::String>,
+            gui: ::std::result::Result<super::GuiSettings, ::std::string::String>,
             overridden_by_env: ::std::result::Result<
                 ::std::vec::Vec<::std::string::String>,
                 ::std::string::String,
@@ -3527,6 +3636,7 @@ pub mod types {
             fn default() -> Self {
                 Self {
                     appearance: Err("no value supplied for appearance".to_string()),
+                    gui: Err("no value supplied for gui".to_string()),
                     overridden_by_env: Err("no value supplied for overridden_by_env".to_string()),
                     pr_sync: Err("no value supplied for pr_sync".to_string()),
                     terminal: Err("no value supplied for terminal".to_string()),
@@ -3542,6 +3652,16 @@ pub mod types {
                 self.appearance = value
                     .try_into()
                     .map_err(|e| format!("error converting supplied value for appearance: {e}"));
+                self
+            }
+            pub fn gui<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<super::GuiSettings>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.gui = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for gui: {e}"));
                 self
             }
             pub fn overridden_by_env<T>(mut self, value: T) -> Self
@@ -3582,6 +3702,7 @@ pub mod types {
             ) -> ::std::result::Result<Self, super::error::ConversionError> {
                 Ok(Self {
                     appearance: value.appearance?,
+                    gui: value.gui?,
                     overridden_by_env: value.overridden_by_env?,
                     pr_sync: value.pr_sync?,
                     terminal: value.terminal?,
@@ -3592,6 +3713,7 @@ pub mod types {
             fn from(value: super::Settings) -> Self {
                 Self {
                     appearance: Ok(value.appearance),
+                    gui: Ok(value.gui),
                     overridden_by_env: Ok(value.overridden_by_env),
                     pr_sync: Ok(value.pr_sync),
                     terminal: Ok(value.terminal),
@@ -3602,6 +3724,10 @@ pub mod types {
         pub struct SettingsPatch {
             appearance: ::std::result::Result<
                 ::std::option::Option<super::AppearancePatch>,
+                ::std::string::String,
+            >,
+            gui: ::std::result::Result<
+                ::std::option::Option<super::GuiPatch>,
                 ::std::string::String,
             >,
             pr_sync: ::std::result::Result<
@@ -3617,6 +3743,7 @@ pub mod types {
             fn default() -> Self {
                 Self {
                     appearance: Ok(Default::default()),
+                    gui: Ok(Default::default()),
                     pr_sync: Ok(Default::default()),
                     terminal: Ok(Default::default()),
                 }
@@ -3631,6 +3758,16 @@ pub mod types {
                 self.appearance = value
                     .try_into()
                     .map_err(|e| format!("error converting supplied value for appearance: {e}"));
+                self
+            }
+            pub fn gui<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<super::GuiPatch>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.gui = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for gui: {e}"));
                 self
             }
             pub fn pr_sync<T>(mut self, value: T) -> Self
@@ -3661,6 +3798,7 @@ pub mod types {
             ) -> ::std::result::Result<Self, super::error::ConversionError> {
                 Ok(Self {
                     appearance: value.appearance?,
+                    gui: value.gui?,
                     pr_sync: value.pr_sync?,
                     terminal: value.terminal?,
                 })
@@ -3670,6 +3808,7 @@ pub mod types {
             fn from(value: super::SettingsPatch) -> Self {
                 Self {
                     appearance: Ok(value.appearance),
+                    gui: Ok(value.gui),
                     pr_sync: Ok(value.pr_sync),
                     terminal: Ok(value.terminal),
                 }

@@ -378,6 +378,30 @@
         ],
         "type": "object"
       },
+      "GuiPatch": {
+        "description": "`[gui]` in a [`SettingsPatch`]: its schema only, since `config::validate` reads the JSON itself.",
+        "properties": {
+          "confirm_quit": {
+            "description": "A new `gui.confirm_quit`.",
+            "nullable": true,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "GuiSettings": {
+        "description": "`[gui]`: how the GUI behaves (spec §11).",
+        "properties": {
+          "confirm_quit": {
+            "description": "`gui.confirm_quit`: whether closing the window or Quit asks first while an agent runs, since agents keep running after the GUI quits.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "confirm_quit"
+        ],
+        "type": "object"
+      },
       "Health": {
         "description": "`GET /v1/health`.",
         "properties": {
@@ -1200,6 +1224,14 @@
             ],
             "description": "`[appearance]`."
           },
+          "gui": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/GuiSettings"
+              }
+            ],
+            "description": "`[gui]`."
+          },
           "overridden_by_env": {
             "description": "The dotted keys (`pr_sync.max_age_days`) whose value comes from an environment variable, not `config.toml`. A PATCH of one is written to the file, but the variable still wins until the daemon runs without it.",
             "items": {
@@ -1226,6 +1258,7 @@
         },
         "required": [
           "appearance",
+          "gui",
           "overridden_by_env",
           "pr_sync",
           "terminal"
@@ -1242,6 +1275,15 @@
               }
             ],
             "description": "`[appearance]` keys to change.",
+            "nullable": true
+          },
+          "gui": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/GuiPatch"
+              }
+            ],
+            "description": "`[gui]` keys to change.",
             "nullable": true
           },
           "pr_sync": {

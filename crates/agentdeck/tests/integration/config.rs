@@ -17,7 +17,7 @@ mod config_ls {
 
         assert_eq!(
             stdout,
-            "appearance.theme      system\npr_sync.max_age_days  90\nterminal.file_opener  xdg-open {path}\n"
+            "appearance.theme      system\ngui.confirm_quit      true\npr_sync.max_age_days  90\nterminal.file_opener  xdg-open {path}\n"
         );
     }
 
@@ -81,6 +81,16 @@ mod config_set {
         assert_eq!(stdout, "pr_sync.max_age_days  30\n");
         assert_eq!(config_toml(&env), "[pr_sync]\nmax_age_days = 30\n");
         assert_eq!(env.json(&["pr", "status"])["max_age_days"], 30);
+    }
+
+    #[test]
+    fn should_turn_confirm_quit_off() {
+        let env = TestEnv::new();
+
+        let stdout = env.ok(&["config", "set", "gui.confirm_quit", "false"]);
+
+        assert_eq!(stdout, "gui.confirm_quit  false\n");
+        assert_eq!(config_toml(&env), "[gui]\nconfirm_quit = false\n");
     }
 
     #[test]

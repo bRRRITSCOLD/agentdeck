@@ -8,6 +8,9 @@
 //!   and saves it.
 //! - **Terminal:** "Open file paths with", `terminal.file_opener`, saved the same way. A
 //!   command that isn't an opener ([`FileOpener::parse`]) shows the field's error instead.
+//! - **General:** "Ask before quitting while agents run", `gui.confirm_quit`, a Switch. Flipping
+//!   it shows the new value at once and saves it; a failed save puts the saved one back. The
+//!   quit dialog's Don't ask again turns it off through [`SettingsView::set_confirm_quit`].
 //!
 //! The heading stays put; the sections scroll under it, with the scrollbar the lists show.
 //!
@@ -20,20 +23,20 @@ use std::sync::Arc;
 
 use agentdeck_client::ApiError;
 use agentdeck_client::types::{
-    AppearancePatch, PrSyncPatch, Settings, SettingsPatch, TerminalPatch, ThemePreference,
+    AppearancePatch, GuiPatch, PrSyncPatch, Settings, SettingsPatch, TerminalPatch, ThemePreference,
 };
 use agentdeck_core::opener::{FileOpener, OpenerError};
 use agentdeck_core::ws::{Entity as Changed, ServerMessage};
 use brrritscold_core_gpui::{
-    ActiveTheme as _, Field, FieldDescription, FieldError, Input, InputState, Label, Select,
-    SelectContent, SelectItem, SelectTrigger, Theme,
+    ActiveTheme as _, Field, FieldContent, FieldDescription, FieldError, FieldOrientation, Input,
+    InputState, Label, Select, SelectContent, SelectItem, SelectTrigger, Switch, Theme,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, point, px,
+    Styled as _, Subscription, Task, Window, div, point, px,
 };
 use gpui_base::input::InputEvent;
 
@@ -70,6 +73,9 @@ fn opener_error(command: &str) -> Option<&'static str> {
         Err(OpenerError::NoPath) => Some(NO_PATH),
     }
 }
+
+/// The confirm quit switch's description, as Penpot words it.
+const CONFIRM_QUIT_DESCRIPTION: &str = "Agents keep running in the background after agentdeck quits. Off, Quit and the close button quit at once.";
 
 /// The core-gpui preference for the daemon's `appearance.theme`.
 pub fn preference(theme: ThemePreference) -> brrritscold_core_gpui::ThemePreference {
@@ -220,6 +226,52 @@ impl SettingsView {
         cx.notify();
     }
 
+    /// Whether quitting asks first while agents run, as last read or saved; `true`, the
+    /// default, until the first read lands.
+    pub fn confirm_quit(&self) -> bool {
+        self.settings.as_ref().is_none_or(|s| s.gui.confirm_quit)
+    }
+
+    /// Shows `gui.confirm_quit` as `on` at once and saves it; a failure puts the saved value
+    /// back and toasts why. The task ends once the save has landed, so a quit can wait for it.
+    pub fn set_confirm_quit(
+        &mut self,
+        on: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        let before = self.settings.as_ref().map(|s| s.gui.confirm_quit);
+        if before == Some(on) {
+            return Task::ready(());
+        }
+        if let Some(settings) = &mut self.settings {
+            settings.gui.confirm_quit = on;
+        }
+        cx.notify();
+        let patch = SettingsPatch {
+            gui: Some(GuiPatch {
+                confirm_quit: Some(on),
+            }),
+            ..SettingsPatch::default()
+        };
+        let saving = self.api.update_settings(patch, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let saved = saving.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match saved {
+                    Ok(settings) => this.settings = Some(settings),
+                    Err(err) => {
+                        if let (Some(settings), Some(before)) = (&mut this.settings, before) {
+                            settings.gui.confirm_quit = before;
+                        }
+                        failed("Couldn't save Ask before quitting", &err, window, cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+    }
+
     /// Applies `theme` at once and saves it; a failure puts the saved one back and toasts why.
     pub fn set_theme(
         &mut self,
@@ -240,6 +292,7 @@ impl SettingsView {
             appearance: Some(AppearancePatch { theme: Some(theme) }),
             pr_sync: None,
             terminal: None,
+            gui: None,
         };
         let saving = self.api.update_settings(patch, cx);
         cx.spawn_in(window, async move |this, cx| {
@@ -280,6 +333,7 @@ impl SettingsView {
                 max_age_days: Some(days),
             }),
             terminal: None,
+            gui: None,
         };
         let saving = self.api.update_settings(patch, cx);
         cx.spawn_in(window, async move |this, cx| {
@@ -325,6 +379,7 @@ impl SettingsView {
             terminal: Some(TerminalPatch {
                 file_opener: Some(text.to_string()),
             }),
+            gui: None,
         };
         let saving = self.api.update_settings(patch, cx);
         cx.spawn_in(window, async move |this, cx| {
@@ -452,6 +507,33 @@ impl SettingsView {
             .into_any_element()
     }
 
+    /// Penpot `ConfirmQuit`: a horizontal Field, the Switch beside its label and description.
+    fn confirm_quit_field(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let view = cx.entity().downgrade();
+        Field::new()
+            .orientation(FieldOrientation::Horizontal)
+            .child(
+                div()
+                    .debug_selector(|| "settings confirm quit".into())
+                    .child(
+                        Switch::new("settings-confirm-quit")
+                            .checked(self.confirm_quit())
+                            .accessibility_label("Ask before quitting while agents run")
+                            .on_change(move |on, window, cx| {
+                                let _ = view.update(cx, |view, cx| {
+                                    view.set_confirm_quit(on, window, cx).detach();
+                                });
+                            }),
+                    ),
+            )
+            .content(
+                FieldContent::new()
+                    .child(Label::new().child("Ask before quitting while agents run"))
+                    .child(FieldDescription::new(CONFIRM_QUIT_DESCRIPTION)),
+            )
+            .into_any_element()
+    }
+
     /// The file opener field.
     fn opener_field(&self) -> gpui::AnyElement {
         let error = self.opener_error().cloned();
@@ -503,6 +585,8 @@ impl Render for SettingsView {
         let theme = self.theme_field(cx);
         let appearance = self.section("Appearance", [theme], cx);
         let terminal = self.section("Terminal", [self.opener_field()], cx);
+        let confirm_quit = self.confirm_quit_field(cx);
+        let general = self.section("General", [confirm_quit], cx);
         // Penpot `GitHub`: its heading and account (the GitHub section's), then the cutoff.
         let github = div()
             .debug_selector(|| "settings section GitHub".into())
@@ -558,7 +642,8 @@ impl Render for SettingsView {
                                     .pt(space::S2)
                                     .child(github)
                                     .child(appearance)
-                                    .child(terminal),
+                                    .child(terminal)
+                                    .child(general),
                             ),
                     )
                     .child(scrollbar::vertical(&self.scroll, cx)),
@@ -570,7 +655,9 @@ impl Render for SettingsView {
 mod tests {
     use std::rc::Rc;
 
-    use agentdeck_client::types::{AppearanceSettings, PrSyncSettings, TerminalSettings};
+    use agentdeck_client::types::{
+        AppearanceSettings, GuiSettings, PrSyncSettings, TerminalSettings,
+    };
     use agentdeck_client::ws::{self, Remote};
     use brrritscold_core_gpui::{Mode, Root};
     use gpui::{TestAppContext, VisualTestContext};
@@ -702,6 +789,7 @@ mod tests {
             terminal: Some(TerminalPatch {
                 file_opener: Some(command.into()),
             }),
+            gui: None,
         }
     }
 
@@ -755,6 +843,7 @@ mod tests {
                     }),
                     pr_sync: None,
                     terminal: None,
+                    gui: None,
                 }]
             );
             assert_eq!(
@@ -810,6 +899,7 @@ mod tests {
                         max_age_days: Some(14),
                     }),
                     terminal: None,
+                    gui: None,
                 }]
             );
             assert_eq!(harness.api.settings_now().pr_sync.max_age_days, 14);
@@ -1020,6 +1110,91 @@ mod tests {
         }
     }
 
+    mod confirm_quit {
+        use gpui::Modifiers;
+
+        use super::*;
+
+        fn asking(confirm: bool) -> Settings {
+            Settings {
+                gui: GuiSettings {
+                    confirm_quit: confirm,
+                },
+                ..default_settings()
+            }
+        }
+
+        fn patch(confirm: bool) -> SettingsPatch {
+            SettingsPatch {
+                gui: Some(GuiPatch {
+                    confirm_quit: Some(confirm),
+                }),
+                ..SettingsPatch::default()
+            }
+        }
+
+        fn shown(harness: &Harness, cx: &mut VisualTestContext) -> bool {
+            harness.view.read_with(cx, |view, _| view.confirm_quit())
+        }
+
+        /// Clicks the switch, scrolled into view under the other sections.
+        fn click_switch(harness: &Harness, cx: &mut VisualTestContext) {
+            harness.view.update(cx, |view, cx| {
+                view.scroll.scroll_to_bottom();
+                cx.notify();
+            });
+            harness.settle(cx);
+            let switch = cx
+                .debug_bounds("settings confirm quit")
+                .expect("the switch shows");
+            cx.simulate_click(switch.center(), Modifiers::default());
+            harness.settle(cx);
+        }
+
+        #[gpui::test]
+        fn should_show_the_saved_setting(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(asking(false), cx);
+
+            assert!(!shown(&harness, cx));
+        }
+
+        #[gpui::test]
+        fn should_turn_it_off_from_the_switch(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(asking(true), cx);
+
+            click_switch(&harness, cx);
+
+            assert!(!shown(&harness, cx));
+            assert_eq!(harness.patches(), [patch(false)]);
+        }
+
+        #[gpui::test]
+        fn should_turn_it_back_on_from_the_switch(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(asking(false), cx);
+
+            click_switch(&harness, cx);
+
+            assert!(shown(&harness, cx));
+            assert!(harness.api.settings_now().gui.confirm_quit);
+            assert_eq!(harness.patches(), [patch(true)]);
+        }
+
+        #[gpui::test]
+        fn should_put_the_saved_value_back_when_the_save_fails(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(asking(true), cx);
+            harness.api.fail_next("connection refused");
+
+            click_switch(&harness, cx);
+
+            assert!(shown(&harness, cx));
+            let shown = cx.update(|_, cx| notice::shown(cx));
+            assert_eq!(
+                shown.last().unwrap().title,
+                "Couldn't save Ask before quitting"
+            );
+        }
+    }
+
     mod changed {
         use super::*;
 
@@ -1034,6 +1209,9 @@ mod tests {
                 pr_sync: PrSyncSettings { max_age_days: 7 },
                 terminal: TerminalSettings {
                     file_opener: "code {path}".into(),
+                },
+                gui: GuiSettings {
+                    confirm_quit: false,
                 },
                 overridden_by_env: Vec::new(),
             });
