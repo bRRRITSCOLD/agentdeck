@@ -5,6 +5,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use agentdeck_client::types::Task;
 use agentdeck_core::{Agent, PaneId};
 
 use super::TestDaemon;
@@ -164,6 +165,29 @@ pub fn with_mcp(agent: Agent, rest: &[&str]) -> Vec<String> {
     let mut argv = mcp_flags(agent);
     argv.extend(rest.iter().map(|arg| (*arg).to_owned()));
     argv
+}
+
+/// What opens a launch prompt on `task`: its title, its id and how to report back on it.
+pub fn task_header(task: &Task) -> String {
+    let id = task.id;
+    format!(
+        "Task: {}\nTask id: {id}\n\
+         Report back with the agentdeck MCP tools: task_comment to comment on this task, \
+         task_update to set its status (or run `agentdeck comment add --task {id} <text>`).",
+        task.title
+    )
+}
+
+/// What an agent is told about `task` when its pane is linked to it, or when it starts in a
+/// shell pane linked to it, as the stub records it submitted: [`task_header`], then the body
+/// after a blank line when it has one, then the newline that ends a submitted prompt.
+pub fn task_brief(task: &Task) -> String {
+    let body = task.body.trim();
+    if body.is_empty() {
+        format!("{}\n", task_header(task))
+    } else {
+        format!("{}\n\n{body}\n", task_header(task))
+    }
 }
 
 /// The session id the pane's stub codex wrote a session file for.

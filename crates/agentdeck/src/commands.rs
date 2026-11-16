@@ -266,6 +266,7 @@ async fn task(client: &Client, command: TaskCommand) -> anyhow::Result<Output> {
 async fn comment(client: &Client, command: CommentCommand) -> anyhow::Result<Output> {
     match command {
         CommentCommand::Ls { task } => {
+            let task = task_or_callers(client, task, caller_pane(), "--task").await?;
             let comments = client
                 .comment_list()
                 .id(task)
@@ -275,6 +276,7 @@ async fn comment(client: &Client, command: CommentCommand) -> anyhow::Result<Out
             Output::new(&*comments, render::comments(&comments))
         }
         CommentCommand::Add { body, task } => {
+            let task = task_or_callers(client, task, caller_pane(), "--task").await?;
             let comment = client
                 .comment_create()
                 .id(task)
@@ -354,6 +356,31 @@ pub fn caller_workspace() -> Option<String> {
     std::env::var(WORKSPACE_VAR)
         .ok()
         .filter(|value| !value.is_empty())
+}
+
+/// `task` when given, else the task the caller's `pane` is linked to now, read from the
+/// daemon: not `$AGENTDECK_TASK`, which keeps the task the pane was spawned on (spec §10).
+/// Without either it is an error that asks for `arg`, the CLI flag or MCP argument naming one.
+pub async fn task_or_callers(
+    client: &Client,
+    task: Option<TaskId>,
+    pane: Option<PaneId>,
+    arg: &str,
+) -> anyhow::Result<TaskId> {
+    if let Some(task) = task {
+        return Ok(task);
+    }
+    let Some(pane) = pane else {
+        anyhow::bail!("name a task with {arg}: you aren't in an agentdeck pane (no ${PANE_VAR})");
+    };
+    let pane = client
+        .pane_get()
+        .id(pane)
+        .send()
+        .await
+        .map_err(ApiError::from)?;
+    pane.task_id
+        .ok_or_else(|| anyhow::anyhow!("name a task with {arg}: your pane isn't linked to a task"))
 }
 
 /// `$AGENTDECK_PANE`, when it holds a pane id.

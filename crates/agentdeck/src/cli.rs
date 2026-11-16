@@ -171,22 +171,23 @@ pub enum TaskCommand {
 }
 
 /// `agentdeck comment …`. Run inside a pane (`$AGENTDECK_PANE` set), a comment is that
-/// pane's agent's; otherwise it is yours, and goes to the task's agent.
+/// pane's agent's; otherwise it is yours, and goes to the task's agent. Without `--task`, the
+/// task is the one the pane is linked to now.
 #[derive(Debug, Subcommand)]
 pub enum CommentCommand {
     /// List a task's comments, oldest first.
     Ls {
-        /// The task.
+        /// The task. Defaults to the one your pane is linked to.
         #[arg(long, value_name = "T")]
-        task: TaskId,
+        task: Option<TaskId>,
     },
     /// Add a comment to a task.
     Add {
         /// The text.
         body: String,
-        /// The task.
+        /// The task. Defaults to the one your pane is linked to.
         #[arg(long, value_name = "T")]
-        task: TaskId,
+        task: Option<TaskId>,
     },
 }
 
@@ -239,8 +240,8 @@ pub enum AgentCommand {
         #[arg(long, value_name = "T")]
         task: Option<TaskId>,
     },
-    /// Link a running pane to a task in its workspace, or unlink it. The task's comments no
-    /// agent has had yet are typed in once the agent is idle.
+    /// Link a running pane to a task in its workspace, or unlink it. The pane's agent is
+    /// told the task, then the task's comments no agent has had yet, once it is idle.
     #[command(group(ArgGroup::new("link").required(true).args(["task", "none"])))]
     Link {
         /// The pane's id.
@@ -399,8 +400,14 @@ mod tests {
         use super::*;
 
         #[test]
-        fn should_require_a_task_to_list() {
-            assert!(parse(&["comment", "ls"]).is_err());
+        fn should_leave_the_task_to_the_callers_pane_when_not_given() {
+            let cli = parse(&["comment", "add", "hello"]).unwrap();
+
+            let Command::Comment(CommentCommand::Add { task, .. }) = cli.command else {
+                panic!("not comment add: {:?}", cli.command);
+            };
+            assert_eq!(task, None);
+            assert!(parse(&["comment", "ls"]).is_ok());
         }
 
         #[test]
@@ -411,7 +418,7 @@ mod tests {
                 panic!("not comment add: {:?}", cli.command);
             };
             assert_eq!(body, "hello");
-            assert_eq!(task, TASK.parse().unwrap());
+            assert_eq!(task, Some(TASK.parse().unwrap()));
         }
     }
 
