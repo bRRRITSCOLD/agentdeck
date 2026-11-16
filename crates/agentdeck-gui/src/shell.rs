@@ -350,6 +350,10 @@ impl Shell {
             let snapshot = snapshot.clone();
             sheet.update(cx, |sheet, cx| sheet.set_snapshot(snapshot, cx));
         }
+        if let Some(link_task) = &self.link_task {
+            let snapshot = snapshot.clone();
+            link_task.update(cx, |dialog, cx| dialog.set_snapshot(snapshot, cx));
+        }
         if let Some(tasks) = &self.tasks {
             tasks.update(cx, |tasks, cx| tasks.set_snapshot(snapshot, cx));
         }
@@ -1487,6 +1491,41 @@ mod tests {
                     dialog.read_with(cx, |d, _| d.workspace_name()),
                     Some("agentdeck".into())
                 );
+            }
+
+            #[gpui::test]
+            fn should_follow_the_tasks_the_sidebar_reads_while_open(cx: &mut TestAppContext) {
+                use agentdeck_core::{TaskKind, TaskStatus};
+
+                use crate::overview::fixtures::task;
+
+                let connector = Rc::new(FakeConnector::default());
+                let api = workspace_with_a_pane();
+                let mut snapshot = api.snapshot_now();
+                snapshot.tasks = vec![task(10, TaskKind::Plain, Some(id(1)))];
+                api.set(snapshot.clone());
+                let _remote = connector.then_connect_to(api.clone());
+                let shell = open(connector, cx);
+                let view = shell.read_with(cx, |shell, _| shell.workspace.clone().unwrap());
+                view.update(cx, |_, cx| {
+                    cx.emit(LinkPane {
+                        pane: id(7),
+                        agent: Agent::Claude,
+                        task: None,
+                        tab: "tab 1".into(),
+                    })
+                });
+                cx.run_until_parked();
+
+                snapshot.tasks[0].status = TaskStatus::Done;
+                snapshot.tasks.push(task(13, TaskKind::Plain, Some(id(1))));
+                api.set(snapshot);
+                let sidebar = shell.read_with(cx, |shell, _| shell.sidebar.clone().unwrap());
+                sidebar.update(cx, |sidebar, cx| sidebar.refresh(cx));
+                cx.run_until_parked();
+
+                let dialog = shell.read_with(cx, |shell, _| shell.link_task.clone().unwrap());
+                assert_eq!(dialog.read_with(cx, |d, _| d.offered()), [id(13)]);
             }
         }
 
