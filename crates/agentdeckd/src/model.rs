@@ -371,6 +371,10 @@ pub struct GithubAuthInfo {
     /// fine-grained one).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scopes: Option<Vec<String>>,
+    /// Whether GitHub rejected the token `source` gives (revoked or expired). A token GitHub
+    /// couldn't be asked about has no `login` either, but isn't rejected.
+    #[serde(default)]
+    pub rejected: bool,
     /// Whether the keyring or `AGENTDECK_GITHUB_CLIENT_ID` gives an OAuth client ID, so
     /// Sign in with GitHub can start.
     pub client_id_set: bool,

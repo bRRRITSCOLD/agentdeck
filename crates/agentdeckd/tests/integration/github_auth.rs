@@ -121,6 +121,7 @@ mod get_v1_github_auth {
         assert_eq!(auth.source, TokenSource::None);
         assert_eq!(auth.env_var, None);
         assert_eq!(auth.login, None);
+        assert!(!auth.rejected);
         assert!(!auth.client_id_set);
     }
 
@@ -177,11 +178,79 @@ mod get_v1_github_auth {
 
         assert_eq!(auth.source, TokenSource::Env);
         assert_eq!(auth.login, None);
+        assert!(auth.rejected);
         assert_eq!(status.login, GhLogin::LoggedOut);
         assert_eq!(
             status.last_error.as_deref(),
             Some("GitHub rejected the token")
         );
+    }
+
+    #[tokio::test]
+    async fn should_keep_a_saved_token_github_rejects_and_tell_websocket_clients_200() {
+        let github = MockServer::start_async().await;
+        let viewer = mock_viewer(&github, TOKEN, "octocat", Some("repo"));
+        let daemon = daemon(&github).await;
+        put_token(&daemon, TOKEN).await;
+        let mut ws = Ws::connect(&daemon).await;
+        // The user revokes the token on GitHub.
+        viewer.delete_async().await;
+        mock_unauthorized(&github, TOKEN);
+
+        let status = sync(&daemon).await;
+
+        assert_eq!(status.login, GhLogin::LoggedOut);
+        assert_eq!(github_auth_event(&mut ws).await, (None, None));
+        let auth = auth(&daemon).await;
+        assert_eq!(auth.source, TokenSource::Keyring);
+        assert_eq!(auth.login, None);
+        assert!(auth.rejected);
+    }
+
+    #[tokio::test]
+    async fn should_say_github_rejected_the_saved_token_it_took_a_moment_ago_200() {
+        let github = MockServer::start_async().await;
+        mock_viewer(&github, TOKEN, "octocat", Some("repo"));
+        // GitHub takes the token for `viewer` but refuses it for the sync's reads.
+        github.mock(|when, then| {
+            when.method(POST)
+                .path("/graphql")
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .body_excludes("viewer { login }");
+            then.status(401)
+                .json_body(json!({ "message": "Bad credentials" }));
+        });
+        let daemon = daemon(&github).await;
+        let mut ws = Ws::connect(&daemon).await;
+
+        // Saving it starts a sync, which GitHub refuses after the re-read takes it.
+        put_token(&daemon, TOKEN).await;
+
+        assert_eq!(github_auth_event(&mut ws).await, (None, None));
+        assert_eq!(github_auth_event(&mut ws).await, (None, None));
+        let auth = auth(&daemon).await;
+        assert_eq!(auth.source, TokenSource::Keyring);
+        assert_eq!(auth.login, None);
+        assert!(auth.rejected);
+    }
+
+    #[tokio::test]
+    async fn should_not_call_a_token_github_could_not_be_asked_about_rejected_200() {
+        let github = MockServer::start_async().await;
+        github.mock(|when, then| {
+            when.method(POST)
+                .path("/graphql")
+                .header("authorization", format!("Bearer {TOKEN}"));
+            then.status(403)
+                .json_body(json!({ "message": "API rate limit exceeded" }));
+        });
+        let daemon = daemon_with(&github, &[("GH_TOKEN", TOKEN)]).await;
+
+        let auth = auth(&daemon).await;
+
+        assert_eq!(auth.source, TokenSource::Env);
+        assert_eq!(auth.login, None);
+        assert!(!auth.rejected);
     }
 
     #[tokio::test]
@@ -265,6 +334,25 @@ mod put_v1_github_token {
         assert_eq!(saved.login.as_deref(), Some("hubot"));
         assert_eq!(reread.login, GhLogin::LoggedIn);
         assert_eq!(auth(&daemon).await.login.as_deref(), Some("hubot"));
+    }
+
+    #[tokio::test]
+    async fn should_replace_a_saved_token_github_rejected_200() {
+        let github = MockServer::start_async().await;
+        let viewer = mock_viewer(&github, TOKEN, "octocat", Some("repo"));
+        let daemon = daemon(&github).await;
+        put_token(&daemon, TOKEN).await;
+        viewer.delete_async().await;
+        mock_unauthorized(&github, TOKEN);
+        sync(&daemon).await;
+        mock_viewer(&github, OTHER_TOKEN, "octocat", Some("repo"));
+
+        let saved = put_token(&daemon, OTHER_TOKEN).await;
+
+        assert_eq!(saved.source, TokenSource::Keyring);
+        assert_eq!(saved.login.as_deref(), Some("octocat"));
+        assert!(!saved.rejected);
+        assert_eq!(auth(&daemon).await, saved);
     }
 
     #[tokio::test]

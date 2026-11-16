@@ -687,6 +687,7 @@ pub(crate) mod fake {
             env_var: None,
             login: None,
             scopes: None,
+            rejected: false,
             client_id_set: false,
         }
     }
@@ -1396,6 +1397,7 @@ pub(crate) mod fake {
                 source: agentdeck_client::types::TokenSource::Keyring,
                 login: Some(login),
                 scopes,
+                rejected: false,
                 ..self.github_now()
             };
             self.set_github(auth.clone());
@@ -1411,6 +1413,7 @@ pub(crate) mod fake {
                 source: agentdeck_client::types::TokenSource::None,
                 login: None,
                 scopes: None,
+                rejected: false,
                 ..self.github_now()
             };
             self.set_github(auth.clone());
