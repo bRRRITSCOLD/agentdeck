@@ -38,6 +38,58 @@ use crate::text_enum::text_enum;
 /// With no rule matching, output this recent means `working` (spec §7, "No match").
 pub const RECENT_OUTPUT: Duration = Duration::from_secs(2);
 
+/// Output this soon after a resize is the program redrawing for its new size, not work.
+pub const RESIZE_REDRAW: Duration = Duration::from_millis(300);
+
+/// The last output that counts as recent output (spec §7, "No match"), at times passed in as
+/// a monotonic offset, as [`StateTracker`](super::StateTracker)'s are. Output within
+/// [`RESIZE_REDRAW`] of a resize doesn't count, and neither does what a new shell prints
+/// before anything is typed into it: its prompt, drawn and redrawn.
+#[derive(Debug, Clone, Default)]
+pub struct LastOutput {
+    at: Option<Duration>,
+    resized: Option<Duration>,
+    awaiting_input: bool,
+}
+
+impl LastOutput {
+    /// An agent pane's: its output counts from the start.
+    pub fn agent() -> Self {
+        Self::default()
+    }
+
+    /// A shell pane's: its output counts once something is typed into it.
+    pub fn shell() -> Self {
+        Self {
+            awaiting_input: true,
+            ..Self::default()
+        }
+    }
+
+    /// The pane printed at `now`.
+    pub fn printed(&mut self, now: Duration) {
+        let redraw = (self.resized).is_some_and(|at| now.saturating_sub(at) < RESIZE_REDRAW);
+        if !redraw && !self.awaiting_input {
+            self.at = Some(now);
+        }
+    }
+
+    /// The pane was resized at `now`.
+    pub fn resized(&mut self, now: Duration) {
+        self.resized = Some(now);
+    }
+
+    /// Something was typed into the pane.
+    pub fn typed(&mut self) {
+        self.awaiting_input = false;
+    }
+
+    /// Time from the last output that counts to `now`; `None` if none has.
+    pub fn since(&self, now: Duration) -> Option<Duration> {
+        self.at.map(|at| now.saturating_sub(at))
+    }
+}
+
 /// `[settle] min_ms` when a rule file leaves it out.
 pub const DEFAULT_SETTLE: Duration = Duration::from_millis(400);
 
@@ -613,6 +665,98 @@ min_ms = 400
                     };
                     assert_eq!(spec_rules().evaluate(&observation), AgentState::Unknown);
                 }
+            }
+        }
+    }
+
+    mod last_output {
+        use super::*;
+
+        fn no_rules() -> RuleSet {
+            RuleSet::from_toml("agent = \"shell\"").expect("parse")
+        }
+
+        /// The state `output` makes a pane with no rules read as at `now`.
+        fn state_at(output: &LastOutput, now: Duration) -> AgentState {
+            no_rules().evaluate(&Observation {
+                since_output: output.since(now),
+                ..titled("zsh")
+            })
+        }
+
+        fn ms(millis: u64) -> Duration {
+            Duration::from_millis(millis)
+        }
+
+        #[test]
+        fn should_count_an_agent_panes_output_from_the_start() {
+            let mut output = LastOutput::agent();
+            output.printed(ms(50));
+            assert_eq!(output.since(ms(150)), Some(ms(100)));
+            assert_eq!(state_at(&output, ms(150)), AgentState::Working);
+        }
+
+        #[test]
+        fn should_be_none_before_anything_counts() {
+            assert_eq!(LastOutput::agent().since(ms(10)), None);
+        }
+
+        mod resize {
+            use super::*;
+
+            #[test]
+            fn should_not_count_the_redraw_right_after_a_resize() {
+                let mut output = LastOutput::agent();
+                output.resized(ms(5_000));
+                output.printed(ms(5_050));
+                assert_eq!(state_at(&output, ms(5_100)), AgentState::Unknown);
+            }
+
+            #[test]
+            fn should_count_output_400_ms_after_a_resize() {
+                let mut output = LastOutput::agent();
+                output.resized(ms(5_000));
+                output.printed(ms(5_400));
+                assert_eq!(state_at(&output, ms(5_450)), AgentState::Working);
+            }
+
+            #[test]
+            fn should_keep_output_from_before_the_resize() {
+                let mut output = LastOutput::agent();
+                output.printed(ms(4_900));
+                output.resized(ms(5_000));
+                output.printed(ms(5_050));
+                assert_eq!(output.since(ms(5_100)), Some(ms(200)));
+            }
+        }
+
+        mod shell {
+            use super::*;
+
+            #[test]
+            fn should_not_count_the_prompt_a_new_shell_prints() {
+                let mut output = LastOutput::shell();
+                output.printed(ms(30));
+                output.printed(ms(900));
+                assert_eq!(state_at(&output, ms(1_000)), AgentState::Unknown);
+            }
+
+            #[test]
+            fn should_count_output_once_something_is_typed() {
+                let mut output = LastOutput::shell();
+                output.printed(ms(30));
+                output.typed();
+                output.printed(ms(3_000));
+                assert_eq!(state_at(&output, ms(3_100)), AgentState::Working);
+            }
+
+            #[test]
+            fn should_not_count_a_redraw_after_a_resize_once_typed_into() {
+                let mut output = LastOutput::shell();
+                output.typed();
+                output.resized(ms(5_000));
+                output.printed(ms(5_200));
+                assert_eq!(state_at(&output, ms(5_300)), AgentState::Unknown);
             }
         }
     }

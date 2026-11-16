@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use agentdeck_core::state::{
-    Foreground, Observation, OscScanner, RuleSet, StateTracker, hosted_agent, screen,
+    Foreground, LastOutput, Observation, OscScanner, RuleSet, StateTracker, hosted_agent, screen,
 };
 use agentdeck_core::ws::{Channel, ServerMessage};
 use agentdeck_core::{Agent, AgentState, PaneId, TaskId, WorkspaceId};
@@ -296,6 +296,8 @@ pub struct Pane {
     /// The process's id, which is also its process group's: it runs as a session leader.
     pid: Option<i32>,
     events: Events,
+    /// The origin of the pane's own clock, for [`LastOutput`].
+    started: Instant,
 }
 
 /// Everything one chunk of output changes, behind [`Pane::live`].
@@ -307,7 +309,7 @@ struct Live {
     tail: Tail,
     title: String,
     size: Size,
-    last_output: Option<Instant>,
+    last_output: LastOutput,
     tracker: StateTracker,
     /// A shell pane's hosting; `None` for an agent pane.
     hosting: Option<Hosting>,
@@ -365,15 +367,15 @@ impl Pane {
 
         let (input, typed) = channel::<Typing>();
         let (term_events, term_events_rx) = channel();
-        let (rules, hosting) = match rules {
-            Rules::Fixed(rules) => (rules, None),
+        let (rules, hosting, last_output) = match rules {
+            Rules::Fixed(rules) => (rules, None, LastOutput::agent()),
             Rules::Shell { shell, agents } => {
                 let hosting = Hosting {
                     shell: shell.clone(),
                     agents,
                     hosted: None,
                 };
-                (shell, Some(hosting))
+                (shell, Some(hosting), LastOutput::shell())
             }
         };
         let term = Term::new(
@@ -391,7 +393,7 @@ impl Pane {
                 tail: Tail::new(TAIL_CAPACITY),
                 title: String::new(),
                 size: launch.size,
-                last_output: None,
+                last_output,
                 tracker: StateTracker::new(rules),
                 hosting,
                 queued: Vec::new(),
@@ -403,6 +405,7 @@ impl Pane {
             input,
             pid: child.process_id().and_then(|pid| i32::try_from(pid).ok()),
             events,
+            started: Instant::now(),
         });
 
         let thread = |role: &str| std::thread::Builder::new().name(format!("pane-{role}-{id}"));
@@ -486,7 +489,7 @@ impl Pane {
         live.tail.push(bytes);
         live.osc.feed(bytes);
         live.parser.advance(&mut live.term, bytes);
-        live.last_output = Some(Instant::now());
+        live.last_output.printed(self.started.elapsed());
         live.fanout.output(bytes);
 
         let mut retitled = false;
@@ -561,7 +564,7 @@ impl Pane {
             rows: screen::rows(&live.term),
             progress: live.osc.progress(),
             program_state: live.osc.program_state(),
-            since_output: live.last_output.map(|at| at.elapsed()),
+            since_output: live.last_output.since(self.started.elapsed()),
         };
         let Some(state) = live.tracker.observe(&observation, now) else {
             return observed;
@@ -574,9 +577,8 @@ impl Pane {
             .into_iter()
             .partition(|queued| queued.when.accepts(state));
         live.queued = waiting;
-        let (bracketed, linked) = (bracketed_paste(&live.term), live.task);
         for queued in ready {
-            self.typed(queued, bracketed, linked);
+            self.typed(&mut live, queued);
         }
         observed.state = Some((state, live.title.clone()));
         observed
@@ -672,23 +674,22 @@ impl Pane {
             live.queued.push(queued);
             return Ok(true);
         }
-        let (bracketed, linked) = (bracketed_paste(&live.term), live.task);
-        self.typed(queued, bracketed, linked);
+        self.typed(&mut live, queued);
         Ok(false)
     }
 
-    /// Types `queued`, unless it is about a task other than `linked`, the pane's link now;
-    /// `bracketed` is whether the program has bracketed paste on right now.
-    fn typed(&self, queued: Queued, bracketed: bool, linked: Option<TaskId>) {
-        if queued.task.is_some_and(|about| Some(about) != linked) {
+    /// Types `queued`, unless it is about a task other than the one the pane is linked to now.
+    fn typed(&self, live: &mut Live, queued: Queued) {
+        if queued.task.is_some_and(|about| Some(about) != live.task) {
             return;
         }
         if queued.claim.is_some_and(|claim| !claim()) {
             return;
         }
+        live.last_output.typed();
         if queued.submit {
             if !queued.bytes.is_empty() {
-                self.write(message(&queued.bytes, bracketed));
+                self.write(message(&queued.bytes, bracketed_paste(&live.term)));
             }
             self.send(Typing::Enter);
         } else {
@@ -701,6 +702,7 @@ impl Pane {
 
     /// Bytes a client typed: straight to the PTY.
     pub fn type_bytes(&self, bytes: &[u8]) {
+        self.live().last_output.typed();
         self.write(bytes.to_vec());
     }
 
@@ -771,6 +773,7 @@ impl Pane {
             tracing::warn!("resizing pane {}: {err:#}", self.id);
         }
         live.size = size;
+        live.last_output.resized(self.started.elapsed());
         live.fanout.resized(size, Some(by));
     }
 
