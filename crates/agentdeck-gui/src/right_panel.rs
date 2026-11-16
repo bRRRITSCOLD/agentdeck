@@ -15,6 +15,9 @@
 //!
 //! Like the Tasks view it shows the sidebar's [`Snapshot`], passed on by the window; an
 //! instruction added here comes back through the daemon's `changed`.
+//!
+//! All of it is one GPUI [`list`] of `Item`s, which draws only the items in view: with 70 PRs
+//! and a turning mark, drawing every row made each frame rebuild every row's status picker.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -28,10 +31,9 @@ use brrritscold_core_gpui::{
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, TextLayout, Window,
-    div, px,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable as _,
+    InteractiveElement as _, IntoElement, ListState, ParentElement as _, Render, SharedString,
+    Styled as _, StyledText, Subscription, TextLayout, Window, div, list, px,
 };
 use gpui_base::input::InputEvent;
 
@@ -42,7 +44,7 @@ use crate::keymap::{self, CancelEdit, Submit};
 use crate::new_task::NewTask;
 use crate::overview::Snapshot;
 use crate::scrollbar;
-use crate::task_list::{self, Group, Query, Scope};
+use crate::task_list::{self, Group, Query, Row, Scope};
 use crate::task_row;
 use crate::task_sheet::{EditTask, OpenTask};
 use crate::workspace::failed;
@@ -75,11 +77,18 @@ pub struct RightPanel {
     expanded: HashSet<InstructionId>,
     /// The instructions whose text runs past [`CLAMP`] lines, as last drawn.
     overflowing: HashSet<InstructionId>,
-    /// Where the list is scrolled to, for its scrollbar.
-    scroll: ScrollHandle,
+    /// The list's items, as last rendered.
+    shown: Vec<Item>,
+    /// The items of `shown` that take focus, with their focus, as the list was last told.
+    focusable: Vec<(usize, FocusHandle)>,
+    /// The list: where it is scrolled to, and its items' heights.
+    list: ListState,
     /// Select mode, the selection and the confirm dialog.
     close: Entity<ClosePrs>,
     _close: Subscription,
+    /// How many list items it has rendered, so a test can tell which items a frame drew.
+    #[cfg(test)]
+    items_rendered: std::cell::Cell<usize>,
 }
 
 impl EventEmitter<NewTask> for RightPanel {}
@@ -115,9 +124,15 @@ impl RightPanel {
             _editor: None,
             expanded: HashSet::new(),
             overflowing: HashSet::new(),
-            scroll: ScrollHandle::new(),
+            shown: Vec::new(),
+            focusable: Vec::new(),
+            // Every item measured once, then each one that changes, so the scrollbar's thumb is
+            // right from the first frame; a redraw renders only the items in view.
+            list: task_row::list_state().measure_all(),
             close,
             _close,
+            #[cfg(test)]
+            items_rendered: std::cell::Cell::new(0),
         }
     }
 
@@ -196,9 +211,14 @@ impl RightPanel {
             editor.set_value(body, window, cx);
             editor
         });
-        // Save follows whether the text is blank.
-        self._editor = Some(cx.subscribe(&editor, |_, _, event: &InputEvent, cx| {
+        // Save follows whether the text is blank, and the card grows with the text: the list
+        // measures it again, in view or not.
+        self._editor = Some(cx.subscribe(&editor, |this, _, event: &InputEvent, cx| {
             if let InputEvent::Change = event {
+                let editing = (this.shown.iter()).position(|item| matches!(item, Item::Editor(_)));
+                if let Some(ix) = editing {
+                    this.list.remeasure_items(ix..ix + 1);
+                }
                 cx.notify();
             }
         }));
@@ -406,32 +426,117 @@ impl RightPanel {
     pub fn is_collapsed(&self, status: TaskStatus) -> bool {
         self.collapsed.contains(&status)
     }
-}
 
-impl Render for RightPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The list's items, top to bottom, over `groups`, the groups shown.
+    fn items(&self, groups: &[Group], cx: &App) -> Vec<Item> {
+        let mut items = vec![Item::InstructionsHeader];
+        items.extend(self.instructions().into_iter().map(|row| {
+            if self.editing() == Some(row.id) {
+                Item::Editor(row.id)
+            } else {
+                let clamp = Clamp {
+                    expanded: self.is_expanded(row.id),
+                    overflowing: self.overflowing.contains(&row.id),
+                };
+                Item::Instruction { row, clamp }
+            }
+        }));
+        items.extend([Item::NewInstruction, Item::Separator, Item::TasksHeader]);
+        let close = self.close.read(cx);
+        let selecting = close.active();
+        for group in groups {
+            let collapsed = self.is_collapsed(group.status);
+            items.push(Item::Group {
+                status: group.status,
+                count: group.rows.len(),
+                collapsed,
+                selectable: close_prs::selectable(&group.rows),
+                selecting,
+            });
+            if !collapsed {
+                items.extend(group.rows.iter().map(|row| Item::Task {
+                    row: row.clone(),
+                    selecting,
+                    error: close.error(row.id).cloned(),
+                }));
+            }
+        }
+        let done = self.done();
+        if done > 0 {
+            items.push(Item::ShowDone {
+                done,
+                shown: self.show_done,
+            });
+        }
+        items
+    }
+
+    /// Makes the list hold `items`, keeping its place. Only the items that changed are
+    /// measured again. The instruction field and an open editor go to the list with their
+    /// focus, so it keeps drawing them while focused, scrolled out of view or not.
+    fn relist(&mut self, items: Vec<Item>, cx: &App) {
+        let (old, new) = (self.shown.len(), items.len());
+        if old == 0 {
+            // An empty list keeps its top at item 0, which a splice at 0 would push past the
+            // items it adds.
+            self.list.reset(new);
+        } else {
+            if new > old {
+                self.list.splice(old..old, new - old);
+            } else if new < old {
+                self.list.splice(new..old, 0);
+            }
+            let changed = |ix: &usize| self.shown[*ix] != items[*ix];
+            let first = (0..old.min(new)).find(changed);
+            let last = (0..old.min(new)).rfind(changed);
+            if let (Some(first), Some(last)) = (first, last) {
+                self.list.remeasure_items(first..last + 1);
+            }
+        }
+        let focusable = self.focusable(&items, cx);
+        if focusable != self.focusable {
+            for (ix, _) in &self.focusable {
+                if *ix < new {
+                    self.list.splice_focusable(*ix..*ix + 1, [None]);
+                }
+            }
+            for (ix, handle) in &focusable {
+                self.list
+                    .splice_focusable(*ix..*ix + 1, [Some(handle.clone())]);
+            }
+            self.focusable = focusable;
+        }
+        self.shown = items;
+    }
+
+    /// The items in `items` that take focus, the field and an open editor, with their focus.
+    fn focusable(&self, items: &[Item], cx: &App) -> Vec<(usize, FocusHandle)> {
+        (items.iter().enumerate())
+            .filter_map(|(ix, item)| {
+                let handle = match item {
+                    Item::NewInstruction => self.new_instruction.focus_handle(cx),
+                    Item::Editor(_) => self.editor.as_ref()?.1.focus_handle(cx),
+                    _ => return None,
+                };
+                Some((ix, handle))
+            })
+            .collect()
+    }
+
+    /// The list's `ix`th item, `space.1` from the next: a list has no gap of its own. Its
+    /// marks turn only while `spin`: the window is active.
+    fn item(&mut self, ix: usize, spin: bool, cx: &mut Context<Self>) -> AnyElement {
+        #[cfg(test)]
+        self.items_rendered.set(self.items_rendered.get() + 1);
+        let Some(item) = self.shown.get(ix).cloned() else {
+            return div().into_any_element();
+        };
         let s = cx.theme().semantic();
-        // A turning mark redraws the window, so it holds still while the window is inactive.
-        let spin = window.is_window_active();
-        // Instructions first: the header with its `+`, each instruction, then Penpot
-        // `NewInstruction`.
-        // The list reaches the panel's right edge, over its `space.2` padding, and pads its
-        // content back in by the scrollbar's gutter (Penpot's `space.3` on the right): the
-        // scrollbar sits in it, clear of the rows and their buttons.
-        let mut list = div()
-            .id("panel-list")
-            .debug_selector(|| "panel list".into())
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .mr(-space::S2)
-            .pr(scrollbar::GUTTER)
-            .gap(space::S1)
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .child(
-                section_header("Instructions", s).child(
+        let element = match item {
+            // Instructions first: the header with its `+`, each instruction, then Penpot
+            // `NewInstruction`.
+            Item::InstructionsHeader => section_header("Instructions", s)
+                .child(
                     div().debug_selector(|| "add instruction".into()).child(
                         Button::new("add-instruction")
                             .variant(ButtonVariant::Ghost)
@@ -442,77 +547,56 @@ impl Render for RightPanel {
                                     .update(cx, |input, cx| input.focus(window, cx));
                             })),
                     ),
-                ),
-            )
-            .children(
-                self.instructions()
-                    .iter()
-                    .map(|instruction| match &self.editor {
-                        Some((editing, editor)) if *editing == instruction.id => {
-                            instruction_editor(instruction.id, editor, self.can_save(cx), cx)
-                        }
-                        _ => {
-                            let targets =
-                                instruction_list::send_targets(&self.snapshot, instruction.id);
-                            let clamp = Clamp {
-                                expanded: self.is_expanded(instruction.id),
-                                overflowing: self.overflowing.contains(&instruction.id),
-                            };
-                            instruction_item(instruction, clamp, targets, cx)
-                        }
-                    }),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .debug_selector(|| "new instruction".into())
-                    .child(Input::new(&self.new_instruction)),
-            )
-            // Then Separator, the Tasks & PRs header with its `+`, and the groups.
-            .child(Separator::new().my(space::S1))
-            .child(
-                section_header("Tasks & PRs", s)
-                    .child(close_prs::select_toggle(&self.close, cx))
-                    .child(
-                        div().debug_selector(|| "add task".into()).child(
-                            Button::new("add-task")
-                                .variant(ButtonVariant::Ghost)
-                                .size(ButtonSize::IconXs)
-                                .icon(IconName::Plus)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    cx.emit(NewTask(this.workspace));
-                                })),
-                        ),
-                    ),
-            );
-        let groups = self.groups();
-        let rows: Vec<_> = groups.iter().flat_map(|g| g.rows.clone()).collect();
-        let shown = close_prs::selectable(&rows);
-        self.close.update(cx, |close, cx| close.retain(&shown, cx));
-        let bar =
-            close_prs::selection_bar(&self.close, close_prs::picked(&self.close, &rows, cx), cx);
-        for group in groups {
-            let status = group.status;
-            let collapsed = self.is_collapsed(status);
-            let select = close_prs::select_all(
-                &self.close,
-                status.as_str(),
-                close_prs::selectable(&group.rows),
-                cx,
-            );
-            list = list.child(task_row::group_header(
-                status.to_string(),
-                task_row::status_label(status),
-                group.rows.len(),
-                collapsed,
-                select,
-                cx.listener(move |this, _, _, cx| this.toggle(status, cx)),
-                cx,
-            ));
-            if collapsed {
-                continue;
+                )
+                .into_any_element(),
+            Item::Instruction { row, clamp } => {
+                let targets = instruction_list::send_targets(&self.snapshot, row.id);
+                instruction_item(&row, clamp, targets, cx)
             }
-            for row in &group.rows {
+            Item::Editor(instruction) => match &self.editor {
+                Some((_, editor)) => instruction_editor(instruction, editor, self.can_save(cx), cx),
+                None => div().into_any_element(),
+            },
+            Item::NewInstruction => div()
+                .flex_none()
+                .debug_selector(|| "new instruction".into())
+                .child(Input::new(&self.new_instruction))
+                .into_any_element(),
+            // Then Separator, the Tasks & PRs header with its `+`, and the groups.
+            Item::Separator => Separator::new().my(space::S1).into_any_element(),
+            Item::TasksHeader => section_header("Tasks & PRs", s)
+                .child(close_prs::select_toggle(&self.close, cx))
+                .child(
+                    div().debug_selector(|| "add task".into()).child(
+                        Button::new("add-task")
+                            .variant(ButtonVariant::Ghost)
+                            .size(ButtonSize::IconXs)
+                            .icon(IconName::Plus)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                cx.emit(NewTask(this.workspace));
+                            })),
+                    ),
+                )
+                .into_any_element(),
+            Item::Group {
+                status,
+                count,
+                collapsed,
+                selectable,
+                ..
+            } => {
+                let select = close_prs::select_all(&self.close, status.as_str(), selectable, cx);
+                task_row::group_header(
+                    status.to_string(),
+                    task_row::status_label(status),
+                    count,
+                    collapsed,
+                    select,
+                    cx.listener(move |this, _, _, cx| this.toggle(status, cx)),
+                    cx,
+                )
+            }
+            Item::Task { row, .. } => {
                 let task = row.id;
                 let picker = task_row::status_picker(
                     SharedString::from(format!("panel-status-{task}")),
@@ -527,33 +611,122 @@ impl Render for RightPanel {
                     let _ = view.update(cx, |_, cx| cx.emit(EditTask(task)));
                 };
                 let send = crate::send_task::targets(&self.snapshot, task);
-                let parts = close_prs::row_parts(&self.close, row, send, edit, cx);
-                list = list.child(task_row::panel(row, picker, parts, open, spin, cx));
+                let parts = close_prs::row_parts(&self.close, &row, send, edit, cx);
+                task_row::panel(&row, picker, parts, open, spin, cx)
             }
+            // Penpot `ShowDone`: a link button at xs, at the start of its row, after the
+            // groups.
+            Item::ShowDone { done, shown } => {
+                let label = if shown {
+                    "Hide done".to_owned()
+                } else {
+                    format!("Show {done} done")
+                };
+                div()
+                    .flex()
+                    .flex_none()
+                    .px(space::S2)
+                    .child(
+                        div().debug_selector(|| "show done".into()).child(
+                            Button::new("panel-show-done")
+                                .variant(ButtonVariant::Link)
+                                .size(ButtonSize::Xs)
+                                .label(label)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.set_show_done(!shown, cx);
+                                })),
+                        ),
+                    )
+                    .into_any_element()
+            }
+        };
+        div()
+            .flex()
+            .flex_col()
+            .when(ix + 1 < self.shown.len(), |item| item.pb(space::S1))
+            .child(element)
+            .into_any_element()
+    }
+}
+
+/// One item of the panel's list (Penpot `RightPanel`), holding what its height depends on:
+/// the list measures an item again when it changes.
+#[derive(Debug, Clone, PartialEq)]
+enum Item {
+    /// Penpot "Instructions header", with its `+`.
+    InstructionsHeader,
+    /// An instruction's card.
+    Instruction {
+        row: InstructionRow,
+        clamp: Clamp,
+    },
+    /// The card of the instruction being edited.
+    Editor(InstructionId),
+    /// Penpot `NewInstruction`.
+    NewInstruction,
+    Separator,
+    /// Penpot "Tasks & PRs header", with Select and its `+`.
+    TasksHeader,
+    /// A status group's header.
+    Group {
+        status: TaskStatus,
+        count: usize,
+        collapsed: bool,
+        /// Its rows with an open PR, which its checkbox picks.
+        selectable: Vec<TaskId>,
+        /// Select mode is on.
+        selecting: bool,
+    },
+    /// A task's row.
+    Task {
+        row: Row,
+        /// Select mode is on.
+        selecting: bool,
+        /// Why closing its PR failed, under its title.
+        error: Option<SharedString>,
+    },
+    /// Penpot `ShowDone`: Show N done, or Hide done while `shown`.
+    ShowDone {
+        done: usize,
+        shown: bool,
+    },
+}
+
+impl Render for RightPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let s = cx.theme().semantic();
+        // A turning mark redraws the window, so it holds still while the window is inactive.
+        let spin = window.is_window_active();
+        let groups = self.groups();
+        let rows: Vec<_> = groups.iter().flat_map(|g| g.rows.clone()).collect();
+        let shown = close_prs::selectable(&rows);
+        self.close.update(cx, |close, cx| close.retain(&shown, cx));
+        let bar =
+            close_prs::selection_bar(&self.close, close_prs::picked(&self.close, &rows, cx), cx);
+        let items = self.items(&groups, cx);
+        if items != self.shown {
+            self.relist(items, cx);
         }
-        // Penpot `ShowDone`: a link button at xs, at the start of its row, after the groups.
-        let done = self.done();
-        let show_done = !self.show_done;
-        if done > 0 {
-            let label = if self.show_done {
-                "Hide done".to_owned()
-            } else {
-                format!("Show {done} done")
-            };
-            list = list.child(
-                div().flex().flex_none().px(space::S2).child(
-                    div().debug_selector(|| "show done".into()).child(
-                        Button::new("panel-show-done")
-                            .variant(ButtonVariant::Link)
-                            .size(ButtonSize::Xs)
-                            .label(label)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.set_show_done(show_done, cx);
-                            })),
-                    ),
-                ),
+        // Only the items in view are drawn. The list reaches the panel's right edge, over its
+        // `space.2` padding, and pads its content back in by the scrollbar's gutter (Penpot's
+        // `space.3` on the right): the scrollbar sits in it, clear of the rows and their
+        // buttons.
+        let list = div()
+            .debug_selector(|| "panel list".into())
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .mr(-space::S2)
+            .child(
+                list(
+                    self.list.clone(),
+                    cx.processor(move |this, ix, _, cx| this.item(ix, spin, cx)),
+                )
+                .flex_1()
+                .min_h_0()
+                .pr(scrollbar::GUTTER),
             );
-        }
         // Penpot `RightPanel`: `card`, padded `space.3` down and `space.2` across, rows
         // `space.1` apart; in Select mode the selection bar sits on its bottom edge.
         let selecting = bar.is_some();
@@ -568,7 +741,7 @@ impl Render for RightPanel {
             .px(space::S2)
             .bg(s.card)
             .child(list)
-            .child(scrollbar::vertical(&self.scroll, cx))
+            .child(scrollbar::vertical(&self.list, cx))
             .children(bar)
             // The confirm dialog's host: out of the flow.
             .child(div().absolute().child(self.close.clone()))
@@ -608,7 +781,7 @@ fn card(s: &brrritscold_core_gpui_tokens::Semantic) -> gpui::Div {
 }
 
 /// Where an instruction's card stands on clamping.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Clamp {
     /// Shown whole, from Show more.
     expanded: bool,
@@ -1699,9 +1872,12 @@ mod tests {
             let list = cx.debug_bounds("panel list").expect("the list");
             let thumb = thumb(list, cx).expect("a thumb");
 
+            // The rows in view: the list draws no others.
             let mut parts: Vec<String> = (1..=100)
                 .map(|n| format!("panel task {}", id::<TaskId>(n)))
+                .filter(|row| cx.debug_bounds(row.clone().leak()).is_some())
                 .collect();
+            assert!(parts.len() >= 3, "{} rows in view", parts.len());
             parts.extend(
                 [
                     "add instruction",
@@ -1838,6 +2014,266 @@ mod tests {
             });
             assert_eq!(picked, [id(5)]);
             assert!(!panel.read_with(cx, |panel, _| panel.is_collapsed(TaskStatus::Review)));
+        }
+    }
+
+    mod long_list {
+        use agentdeck_client::types::Instruction;
+        use agentdeck_core::InstructionId;
+        use gpui::{ScrollDelta, ScrollEvent, point};
+
+        use super::*;
+        use crate::overview::fixtures::instruction;
+        use crate::scrollbar::testing::thumb;
+        use crate::state_dot::tests::{activate, redraws_in_one_second};
+
+        /// Workspace 1 with tasks 1 to 100 in Doing, an agent at work on task 1, and
+        /// instruction 200.
+        fn crowded() -> Snapshot {
+            let ws = workspace(1, "a");
+            Snapshot {
+                tasks: (1..=100)
+                    .map(|n| with_status(n, TaskStatus::Doing, ws.id))
+                    .collect(),
+                panes: vec![PaneState {
+                    task: Some(id(1)),
+                    ..pane(300, ws.id, AgentState::Working)
+                }],
+                instructions: vec![instruction(200, ws.id)],
+                workspaces: vec![ws],
+                ..Snapshot::default()
+            }
+        }
+
+        fn open_crowded(cx: &mut TestAppContext) -> (Entity<RightPanel>, &mut VisualTestContext) {
+            let (panel, cx) = open(cx);
+            panel.update(cx, |p, cx| p.show(id(1), crowded(), cx));
+            settle(cx);
+            (panel, cx)
+        }
+
+        fn settle(cx: &mut VisualTestContext) {
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+
+        fn shows(selector: String, cx: &mut VisualTestContext) -> bool {
+            cx.debug_bounds(selector.leak()).is_some()
+        }
+
+        fn task_shows(n: u32, cx: &mut VisualTestContext) -> bool {
+            shows(format!("panel task {}", id::<TaskId>(n)), cx)
+        }
+
+        fn rendered(panel: &Entity<RightPanel>, cx: &mut VisualTestContext) -> usize {
+            panel.read_with(cx, |p, _| p.items_rendered.get())
+        }
+
+        /// The most items the list's height holds, counting what it draws past either end:
+        /// as many as the shortest item, a 32px header, would fill.
+        fn in_view(cx: &mut VisualTestContext) -> usize {
+            let list = cx.debug_bounds("panel list").expect("the list");
+            ((list.size.height + task_row::OVERDRAW * 2.) / space::S8).ceil() as usize + 2
+        }
+
+        /// Wheels the list down by `by`.
+        fn wheel(by: f32, cx: &mut VisualTestContext) {
+            let list = cx.debug_bounds("panel list").expect("the list");
+            cx.simulate_event(ScrollEvent {
+                position: list.center(),
+                delta: ScrollDelta::Pixels(point(px(0.), px(-by))),
+                ..ScrollEvent::default()
+            });
+            settle(cx);
+        }
+
+        fn wheel_to_the_end(cx: &mut VisualTestContext) {
+            wheel(20_000., cx);
+        }
+
+        fn wheel_to_the_top(cx: &mut VisualTestContext) {
+            wheel(-20_000., cx);
+        }
+
+        #[gpui::test]
+        fn should_draw_only_the_rows_in_view(cx: &mut TestAppContext) {
+            let (_, cx) = open_crowded(cx);
+
+            assert!(task_shows(1, cx));
+            assert!(!task_shows(100, cx));
+        }
+
+        #[gpui::test]
+        fn should_render_only_the_items_in_view_on_a_spinner_step(cx: &mut TestAppContext) {
+            let (panel, cx) = open_crowded(cx);
+            activate(cx);
+            let (before, in_view) = (rendered(&panel, cx), in_view(cx));
+            assert!(in_view < 100, "the window holds {in_view} items");
+
+            let redraws = redraws_in_one_second(&panel, cx);
+
+            assert!(redraws > 0, "the mark turns");
+            let per_step = (rendered(&panel, cx) - before) / redraws;
+            assert!(
+                per_step <= in_view,
+                "{per_step} items a step, {in_view} in view"
+            );
+        }
+
+        #[gpui::test]
+        fn should_draw_the_rows_a_scroll_brings_into_view(cx: &mut TestAppContext) {
+            let (_, cx) = open_crowded(cx);
+
+            wheel_to_the_end(cx);
+
+            assert!(task_shows(100, cx));
+            assert!(!task_shows(1, cx));
+            assert!(!shows("add instruction".into(), cx));
+        }
+
+        #[gpui::test]
+        fn should_open_a_row_scrolled_into_view(cx: &mut TestAppContext) {
+            let (panel, cx) = open_crowded(cx);
+            let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let seen = asked.clone();
+            let _asks = cx.update(|_, cx| {
+                cx.subscribe(&panel, move |_, event: &OpenTask, _| {
+                    seen.borrow_mut().push(*event)
+                })
+            });
+            wheel_to_the_end(cx);
+
+            let title = format!("task title {}", id::<TaskId>(100));
+            let bounds = cx.debug_bounds(title.leak()).expect("the title shows");
+            cx.simulate_click(bounds.center(), Modifiers::default());
+            cx.run_until_parked();
+
+            assert_eq!(*asked.borrow(), [OpenTask(id(100))]);
+        }
+
+        #[gpui::test]
+        fn should_keep_its_place_when_the_snapshot_changes(cx: &mut TestAppContext) {
+            let (panel, cx) = open_crowded(cx);
+            wheel_to_the_end(cx);
+
+            let mut changed = crowded();
+            changed.tasks[50].title = "renamed".into();
+            panel.update(cx, |p, cx| p.show(id(1), changed, cx));
+            settle(cx);
+
+            assert!(task_shows(100, cx));
+            assert!(!task_shows(1, cx));
+        }
+
+        #[gpui::test]
+        fn should_reach_the_rows_a_snapshot_adds(cx: &mut TestAppContext) {
+            let (panel, cx) = open_crowded(cx);
+
+            let mut more = crowded();
+            more.tasks.extend(
+                (101..=120).map(|n| with_status(n, TaskStatus::Doing, more.workspaces[0].id)),
+            );
+            panel.update(cx, |p, cx| p.show(id(1), more, cx));
+            settle(cx);
+            wheel_to_the_end(cx);
+
+            assert!(task_shows(120, cx));
+        }
+
+        /// A body of about a dozen lines at the card's width.
+        fn long_body() -> String {
+            "Run cargo ci before you push and fix whatever it reports. ".repeat(8)
+        }
+
+        fn with_long_instruction() -> Snapshot {
+            let mut snapshot = crowded();
+            snapshot.instructions = vec![Instruction {
+                body: long_body(),
+                ..instruction(200, id(1))
+            }];
+            snapshot
+        }
+
+        fn top_of(selector: &'static str, cx: &mut VisualTestContext) -> gpui::Pixels {
+            cx.debug_bounds(selector).expect(selector).top()
+        }
+
+        #[gpui::test]
+        fn should_move_the_items_below_down_when_an_instruction_shows_whole(
+            cx: &mut TestAppContext,
+        ) {
+            let (panel, cx) = open_crowded(cx);
+            panel.update(cx, |p, cx| p.show(id(1), with_long_instruction(), cx));
+            settle(cx);
+            let before = top_of("add task", cx);
+
+            let more = format!("instruction more {}", id::<InstructionId>(200));
+            let button = cx.debug_bounds(more.leak()).expect("Show more");
+            cx.simulate_click(button.center(), Modifiers::default());
+            settle(cx);
+
+            assert!(top_of("add task", cx) > before);
+        }
+
+        #[gpui::test]
+        fn should_measure_an_instruction_again_once_its_text_changes_out_of_view(
+            cx: &mut TestAppContext,
+        ) {
+            let (panel, cx) = open_crowded(cx);
+            let list = cx.debug_bounds("panel list").expect("the list");
+            wheel_to_the_end(cx);
+            let short = thumb(list, cx).expect("a thumb").size.height;
+
+            panel.update(cx, |p, cx| p.show(id(1), with_long_instruction(), cx));
+            settle(cx);
+
+            let longer = thumb(list, cx).expect("a thumb").size.height;
+            assert!(longer < short, "{longer:?} after {short:?}: the list grew");
+        }
+
+        #[gpui::test]
+        fn should_keep_typing_into_the_new_instruction_field_scrolled_out_of_view(
+            cx: &mut TestAppContext,
+        ) {
+            let (panel, cx) = open_crowded(cx);
+            activate(cx);
+            cx.update(|window, cx| {
+                let input = panel.read(cx).new_instruction.clone();
+                input.update(cx, |input, cx| input.focus(window, cx));
+            });
+            settle(cx);
+
+            wheel_to_the_end(cx);
+            cx.simulate_input("still here");
+            settle(cx);
+
+            assert_eq!(typed(&panel, cx), "still here");
+            wheel_to_the_top(cx);
+            assert!(shows("new instruction".into(), cx));
+        }
+
+        #[gpui::test]
+        fn should_keep_typing_into_an_instruction_editor_scrolled_out_of_view(
+            cx: &mut TestAppContext,
+        ) {
+            let (panel, cx) = open_crowded(cx);
+            activate(cx);
+            cx.update(|window, cx| {
+                panel.update(cx, |p, cx| p.edit_instruction(id(200), window, cx));
+            });
+            settle(cx);
+
+            wheel_to_the_end(cx);
+            cx.simulate_input("!");
+            settle(cx);
+
+            let text = panel.read_with(cx, |p, cx| {
+                let (_, editor) = p.editor.as_ref().expect("an editor is open");
+                editor.read(cx).value().to_string()
+            });
+            assert!(text.contains('!'), "{text:?}");
         }
     }
 

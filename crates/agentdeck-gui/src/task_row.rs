@@ -28,7 +28,7 @@ use crate::state_dot;
 use crate::task_list::Row;
 
 /// How far past the viewport a list draws, so a short scroll shows rows at once.
-const OVERDRAW: Pixels = px(200.);
+pub const OVERDRAW: Pixels = px(200.);
 
 /// How far right of the list its scrollbar's track ends: Penpot puts the track in the
 /// content's `space.6` padding, 2px in from the window's edge, clear of the rows' `Menu`.
