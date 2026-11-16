@@ -60,6 +60,9 @@ pub struct LinkTaskDialog {
     handle: DialogHandle,
     target: Option<Target>,
     snapshot: Snapshot,
+    /// The pane's link when it opened.
+    linked: Option<TaskId>,
+    /// The task picked.
     task: Option<TaskId>,
     /// Whether a link is out; another waits for it.
     linking: bool,
@@ -73,13 +76,15 @@ impl LinkTaskDialog {
             handle: DialogHandle::new(false),
             target: None,
             snapshot: Snapshot::default(),
+            linked: None,
             task: None,
             linking: false,
         }
     }
 
     /// Opens it on `target`, offering the workspace's tasks from `snapshot` that aren't done,
-    /// with `task`, the pane's link now, picked.
+    /// with `task`, the pane's link now, picked. A done link is offered, marked "(done)", only
+    /// while it stays picked.
     pub fn open(
         &mut self,
         target: Target,
@@ -89,10 +94,30 @@ impl LinkTaskDialog {
         cx: &mut Context<Self>,
     ) {
         self.target = Some(target);
+        self.linked = task;
         self.task = task;
         self.snapshot = snapshot;
         self.handle.open(window, cx);
         cx.notify();
+    }
+
+    /// Follows the daemon's data as read again, so a task that went done, moved or was
+    /// deleted drops out and a new one shows. A pick that dropped out falls back to the pane's
+    /// link, or to None once that is gone too.
+    pub fn set_snapshot(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
+        self.snapshot = snapshot;
+        if !self.offers(self.task) {
+            self.task = self.linked;
+            if !self.offers(self.task) {
+                self.task = None;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Whether `task` is among the options; None always is.
+    fn offers(&self, task: Option<TaskId>) -> bool {
+        task.is_none_or(|task| self.tasks().iter().any(|(id, _)| *id == task))
     }
 
     /// Whether it is open.
@@ -121,22 +146,39 @@ impl LinkTaskDialog {
         self.task
     }
 
+    /// The tasks offered, None aside.
+    #[cfg(test)]
+    pub fn offered(&self) -> Vec<TaskId> {
+        self.tasks().into_iter().map(|(id, _)| id).collect()
+    }
+
     /// Picks the task, or none.
     pub fn set_task(&mut self, task: Option<TaskId>, cx: &mut Context<Self>) {
         self.task = task;
         cx.notify();
     }
 
-    /// The workspace's tasks that aren't done, and the one picked, in the daemon's order.
+    /// The workspace's tasks that aren't done, in the daemon's order, with their titles. The
+    /// pane's link, if done, is among them as `<title> (done)` while it is still picked.
     fn tasks(&self) -> Vec<(TaskId, SharedString)> {
         let Some(target) = &self.target else {
             return Vec::new();
         };
         (self.snapshot.tasks.iter())
             .filter(|t| t.workspace_id == Some(target.workspace))
-            .filter(|t| t.status != TaskStatus::Done || Some(t.id) == self.task)
-            .map(|t| (t.id, SharedString::from(t.title.clone())))
+            .filter_map(|t| match t.status {
+                TaskStatus::Done if self.kept_done_link(t.id) => {
+                    Some((t.id, format!("{} (done)", t.title).into()))
+                }
+                TaskStatus::Done => None,
+                _ => Some((t.id, t.title.clone().into())),
+            })
             .collect()
+    }
+
+    /// Whether `task` is the pane's link, still picked.
+    fn kept_done_link(&self, task: TaskId) -> bool {
+        self.linked == Some(task) && self.task == Some(task)
     }
 
     /// Links the pane to the task picked, or unlinks it: what "Link" does.
@@ -144,6 +186,18 @@ impl LinkTaskDialog {
         let Some(target) = self.target.clone().filter(|_| !self.linking) else {
             return;
         };
+        // The daemon refuses a done task, and keeping it changes nothing.
+        let done = |task: TaskId| {
+            (self.snapshot.tasks.iter()).any(|t| t.id == task && t.status == TaskStatus::Done)
+        };
+        if self
+            .task
+            .is_some_and(|task| self.kept_done_link(task) && done(task))
+        {
+            self.handle.close(window, cx);
+            cx.notify();
+            return;
+        }
         self.linking = true;
         cx.notify();
         let linking = self.api.link_task(target.pane, self.task, cx);
@@ -250,19 +304,11 @@ mod tests {
         });
         let cx = VisualTestContext::from_window(*window, cx).into_mut();
         let dialog = dialog.unwrap();
-        let ws = workspace(1, "tabs");
-        let snapshot = Snapshot {
-            tasks: vec![
-                task(10, TaskKind::Plain, Some(ws.id)),
-                Task {
-                    status: TaskStatus::Done,
-                    ..task(11, TaskKind::Plain, Some(ws.id))
-                },
-                task(12, TaskKind::Plain, Some(id(2))),
-            ],
-            workspaces: vec![ws],
-            ..Snapshot::default()
-        };
+        let snapshot = with_tasks(vec![
+            task(10, TaskKind::Plain, Some(id(1))),
+            done(task(11, TaskKind::Plain, Some(id(1)))),
+            task(12, TaskKind::Plain, Some(id(2))),
+        ]);
         let target = Target {
             pane: id(7),
             agent: Agent::Claude,
@@ -277,6 +323,31 @@ mod tests {
         (Harness { api, dialog }, cx)
     }
 
+    /// Workspace 1 `tabs`, holding `tasks`.
+    fn with_tasks(tasks: Vec<Task>) -> Snapshot {
+        Snapshot {
+            tasks,
+            workspaces: vec![workspace(1, "tabs")],
+            ..Snapshot::default()
+        }
+    }
+
+    fn done(task: Task) -> Task {
+        Task {
+            status: TaskStatus::Done,
+            ..task
+        }
+    }
+
+    /// The daemon's tasks become `tasks` while the dialog is open.
+    fn read_again(harness: &Harness, tasks: Vec<Task>, cx: &mut VisualTestContext) {
+        let snapshot = with_tasks(tasks);
+        harness
+            .dialog
+            .update(cx, |d, cx| d.set_snapshot(snapshot, cx));
+        cx.run_until_parked();
+    }
+
     fn link(harness: &Harness, cx: &mut VisualTestContext) {
         cx.update(|window, cx| harness.dialog.update(cx, |d, cx| d.link(window, cx)));
         cx.run_until_parked();
@@ -286,6 +357,12 @@ mod tests {
         harness
             .dialog
             .read_with(cx, |d, _| d.tasks().into_iter().map(|(t, _)| t).collect())
+    }
+
+    fn labels(harness: &Harness, cx: &mut VisualTestContext) -> Vec<SharedString> {
+        harness
+            .dialog
+            .read_with(cx, |d, _| d.tasks().into_iter().map(|(_, l)| l).collect())
     }
 
     mod dialog {
@@ -347,6 +424,141 @@ mod tests {
             assert_eq!(toast.title, "Couldn't link Claude Code");
             assert_eq!(toast.description.as_deref(), Some("task is done"));
             cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+    }
+
+    mod live_tasks {
+        use super::*;
+
+        #[gpui::test]
+        fn should_drop_a_task_marked_done_while_open(cx: &mut TestAppContext) {
+            let (harness, cx) = open(None, cx);
+
+            read_again(
+                &harness,
+                vec![done(task(10, TaskKind::Plain, Some(id(1))))],
+                cx,
+            );
+
+            assert_eq!(offered(&harness, cx), [] as [TaskId; 0]);
+        }
+
+        #[gpui::test]
+        fn should_drop_a_task_moved_to_another_workspace_or_deleted_while_open(
+            cx: &mut TestAppContext,
+        ) {
+            let (harness, cx) = open(None, cx);
+            let moved = task(10, TaskKind::Plain, Some(id(2)));
+
+            read_again(&harness, vec![moved], cx);
+
+            assert_eq!(offered(&harness, cx), [] as [TaskId; 0]);
+        }
+
+        #[gpui::test]
+        fn should_offer_a_task_added_while_open(cx: &mut TestAppContext) {
+            let (harness, cx) = open(None, cx);
+            let tasks = vec![
+                task(10, TaskKind::Plain, Some(id(1))),
+                task(13, TaskKind::Plain, Some(id(1))),
+            ];
+
+            read_again(&harness, tasks, cx);
+
+            assert_eq!(offered(&harness, cx), [id(10), id(13)]);
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+
+        #[gpui::test]
+        fn should_fall_back_to_the_panes_link_when_the_task_picked_goes_done(
+            cx: &mut TestAppContext,
+        ) {
+            let (harness, cx) = open(Some(id(10)), cx);
+            let tasks = vec![
+                task(10, TaskKind::Plain, Some(id(1))),
+                task(13, TaskKind::Plain, Some(id(1))),
+            ];
+            read_again(&harness, tasks, cx);
+            harness
+                .dialog
+                .update(cx, |d, cx| d.set_task(Some(id(13)), cx));
+
+            let tasks = vec![
+                task(10, TaskKind::Plain, Some(id(1))),
+                done(task(13, TaskKind::Plain, Some(id(1)))),
+            ];
+            read_again(&harness, tasks, cx);
+
+            assert_eq!(harness.dialog.read_with(cx, |d, _| d.task()), Some(id(10)));
+        }
+
+        #[gpui::test]
+        fn should_fall_back_to_none_when_the_task_picked_is_deleted(cx: &mut TestAppContext) {
+            let (harness, cx) = open(None, cx);
+            harness
+                .dialog
+                .update(cx, |d, cx| d.set_task(Some(id(10)), cx));
+
+            read_again(&harness, Vec::new(), cx);
+
+            assert_eq!(harness.dialog.read_with(cx, |d, _| d.task()), None);
+        }
+    }
+
+    mod done_link {
+        use super::*;
+
+        #[gpui::test]
+        fn should_preset_a_done_link_marked_done(cx: &mut TestAppContext) {
+            let (harness, cx) = open(Some(id(11)), cx);
+
+            assert_eq!(harness.dialog.read_with(cx, |d, _| d.task()), Some(id(11)));
+            assert_eq!(offered(&harness, cx), [id(10), id(11)]);
+            assert_eq!(labels(&harness, cx), ["task 10", "task 11 (done)"]);
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+
+        #[gpui::test]
+        fn should_mark_the_link_done_when_it_goes_done_while_open(cx: &mut TestAppContext) {
+            let (harness, cx) = open(Some(id(10)), cx);
+
+            read_again(
+                &harness,
+                vec![done(task(10, TaskKind::Plain, Some(id(1))))],
+                cx,
+            );
+
+            assert_eq!(harness.dialog.read_with(cx, |d, _| d.task()), Some(id(10)));
+            assert_eq!(labels(&harness, cx), ["task 10 (done)"]);
+        }
+
+        #[gpui::test]
+        fn should_stop_offering_it_once_another_is_picked(cx: &mut TestAppContext) {
+            let (harness, cx) = open(Some(id(11)), cx);
+
+            harness.dialog.update(cx, |d, cx| d.set_task(None, cx));
+
+            assert_eq!(offered(&harness, cx), [id(10)]);
+        }
+
+        #[gpui::test]
+        fn should_close_without_linking_it_again_when_kept(cx: &mut TestAppContext) {
+            let (harness, cx) = open(Some(id(11)), cx);
+
+            link(&harness, cx);
+
+            assert!(harness.api.linked.lock().unwrap().is_empty());
+            assert!(!harness.dialog.read_with(cx, |d, _| d.is_open()));
+        }
+
+        #[gpui::test]
+        fn should_unlink_it_when_none_is_picked(cx: &mut TestAppContext) {
+            let (harness, cx) = open(Some(id(11)), cx);
+            harness.dialog.update(cx, |d, cx| d.set_task(None, cx));
+
+            link(&harness, cx);
+
+            assert_eq!(*harness.api.linked.lock().unwrap(), [(id(7), None)]);
         }
     }
 
