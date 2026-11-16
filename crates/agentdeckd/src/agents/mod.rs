@@ -94,6 +94,24 @@ fn mcp_flags(agent: Agent, cli: &Path) -> Vec<String> {
     }
 }
 
+/// What an agent is told about `task` (spec §6, §9): its title, its id and how to report back
+/// on it, then its body after a blank line when it has one. It opens a launch prompt, and is
+/// typed into an agent whose pane is linked to the task later, or that starts in a shell pane
+/// linked to it.
+pub fn task_brief(task: &Task) -> String {
+    let id = task.id;
+    let header = format!(
+        "Task: {}\nTask id: {id}\n\
+         Report back with the agentdeck MCP tools: task_comment to comment on this task, \
+         task_update to set its status (or run `agentdeck comment add --task {id} <text>`).",
+        task.title
+    );
+    match task.body.trim() {
+        "" => header,
+        body => format!("{header}\n\n{body}"),
+    }
+}
+
 /// The launch prompt for an agent pane (spec §6): the linked task's title, id, how to report
 /// back on it and body, then every instruction for the pane's workspace and the task's
 /// comments no agent has had yet, oldest first. `None` when there is none of them. It never
@@ -104,18 +122,7 @@ pub fn launch_prompt(
     comments: &[Comment],
 ) -> Option<String> {
     let mut parts = Vec::new();
-    if let Some(task) = task {
-        let id = task.id;
-        parts.push(format!(
-            "Task: {}\nTask id: {id}\n\
-             Report back with the agentdeck MCP tools: task_comment to comment on this task, \
-             task_update to set its status (or run `agentdeck comment add --task {id} <text>`).",
-            task.title
-        ));
-        if !task.body.trim().is_empty() {
-            parts.push(task.body.trim().to_owned());
-        }
-    }
+    parts.extend(task.map(task_brief));
     let blocks: Vec<String> = [
         (
             "Instructions for this workspace:",

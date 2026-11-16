@@ -13,7 +13,7 @@ use agentdeck_core::ws::{Entity, ServerMessage};
 use agentdeck_core::{Agent, AgentState, CommentAuthor, PaneId, PaneKind, TaskId};
 
 use crate::support::TestDaemon;
-use crate::support::agents::{launches, typed};
+use crate::support::agents::{launches, task_brief, typed};
 use crate::support::terminal::{Place, eventually, in_state, printed};
 use crate::support::ws::{Frame, Ws};
 
@@ -223,7 +223,7 @@ mod comment_delivery {
     use super::*;
 
     #[tokio::test]
-    async fn should_type_the_tasks_waiting_comments_into_an_agent_once_it_is_hosted() {
+    async fn should_type_the_task_then_its_waiting_comments_into_an_agent_once_it_is_hosted() {
         let daemon = TestDaemon::start().await;
         let place = Place::new(&daemon).await;
         let task = task(&daemon.client, &place, "Fix it").await;
@@ -233,7 +233,12 @@ mod comment_delivery {
 
         run(&daemon.client, pane.id, "claude").await;
 
-        submitted(&daemon, pane.id, "Also check Firefox\n").await;
+        submitted(
+            &daemon,
+            pane.id,
+            &format!("{}Also check Firefox\n", task_brief(&task)),
+        )
+        .await;
         let delivered = read_comment(&daemon.client, task.id, &waiting).await;
         assert_eq!(delivered.delivered_to_pane, Some(pane.id));
         assert_eq!(
@@ -251,11 +256,16 @@ mod comment_delivery {
         let pane = shell(&daemon, &place).await;
         link(&daemon.client, pane.id, task.id).await;
         run(&daemon.client, pane.id, "claude").await;
-        in_state(&daemon.client, pane.id, AgentState::Idle).await;
+        submitted(&daemon, pane.id, &task_brief(&task)).await;
 
         let new = comment(&daemon.client, task.id, "Then open the PR", None).await;
 
-        submitted(&daemon, pane.id, "Then open the PR\n").await;
+        submitted(
+            &daemon,
+            pane.id,
+            &format!("{}Then open the PR\n", task_brief(&task)),
+        )
+        .await;
         let delivered = read_comment(&daemon.client, task.id, &new).await;
         assert_eq!(delivered.delivered_to_pane, Some(pane.id));
     }
@@ -268,7 +278,7 @@ mod comment_delivery {
         let pane = shell(&daemon, &place).await;
         link(&daemon.client, pane.id, task.id).await;
         run(&daemon.client, pane.id, "claude").await;
-        in_state(&daemon.client, pane.id, AgentState::Idle).await;
+        submitted(&daemon, pane.id, &task_brief(&task)).await;
         exit_agent(&daemon.client, pane.id).await;
         hosting(&daemon.client, pane.id, None).await;
 
@@ -288,9 +298,30 @@ mod comment_delivery {
 
         run(&daemon.client, pane.id, "claude").await;
 
-        submitted(&daemon, pane.id, "echo typed-into-the-shell\n").await;
+        // A new agent, so it is told the task again.
+        let brief = task_brief(&task);
+        submitted(
+            &daemon,
+            pane.id,
+            &format!("{brief}{brief}echo typed-into-the-shell\n"),
+        )
+        .await;
         let delivered = read_comment(&daemon.client, task.id, &held).await;
         assert_eq!(delivered.delivered_to_pane, Some(pane.id));
+    }
+
+    #[tokio::test]
+    async fn should_type_the_task_into_the_hosted_agent_when_the_shell_is_linked() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let task = task(&daemon.client, &place, "Fix it").await;
+        let pane = shell(&daemon, &place).await;
+        run(&daemon.client, pane.id, "claude").await;
+        hosting(&daemon.client, pane.id, Some(Agent::Claude)).await;
+
+        link(&daemon.client, pane.id, task.id).await;
+
+        submitted(&daemon, pane.id, &task_brief(&task)).await;
     }
 
     #[tokio::test]

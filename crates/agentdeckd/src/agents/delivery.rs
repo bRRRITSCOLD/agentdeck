@@ -11,6 +11,10 @@
 //! A shell pane counts as an agent pane while it hosts an agent (spec §3, §7): it takes
 //! comments only then, and when an agent starts in it the task's waiting comments are handed
 //! to it as on linking ([`deliver_on_hosting`]).
+//!
+//! An agent pane linked to a task after it started, and an agent starting in a shell pane
+//! linked to one, is first told the task itself ([`agents::task_brief`]), ahead of those
+//! comments ([`deliver_on_link`]).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -19,6 +23,7 @@ use agentdeck_core::ws::Entity;
 use agentdeck_core::{AgentState, CommentAuthor, CommentId, PaneId, PaneKind, TaskId};
 use rusqlite::Connection;
 
+use crate::agents;
 use crate::db::{self, Db, DbError};
 use crate::events::Events;
 use crate::model::Comment;
@@ -168,6 +173,43 @@ pub async fn deliver_to_task_pane(
     }
 }
 
+/// Tells `pane`, just linked to `task` or just starting to host an agent while linked to it,
+/// what the task is, then hands it the task's waiting comments ([`deliver_waiting`]). The task
+/// ([`agents::task_brief`]) is submitted once the agent waits at its prompt, as a comment is,
+/// and ahead of them. Nothing is typed into a pane that runs no agent: a shell hosting none,
+/// or an exited pane.
+pub async fn deliver_on_link(
+    db: &Db,
+    claims: &Claims,
+    terminals: &Terminals,
+    events: &Events,
+    task: TaskId,
+    pane: PaneId,
+) {
+    deliver_task(db, terminals, task, pane).await;
+    deliver_waiting(db, claims, terminals, events, task, pane).await;
+}
+
+/// Queues `task`'s brief for `pane`'s agent, typed once it waits at its prompt. Dropped if
+/// the process exits, or the shell's hosted agent leaves, first.
+async fn deliver_task(db: &Db, terminals: &Terminals, task: TaskId, pane: PaneId) {
+    let Some(live) = terminals
+        .get(pane)
+        .filter(|live| live.status().state != AgentState::Exited)
+    else {
+        return;
+    };
+    let brief = match db.call(move |c| db::tasks::get(c, task)).await {
+        Ok(task) => agents::task_brief(&task),
+        Err(err) => {
+            tracing::warn!("reading task {task} to tell pane {pane}: {err}");
+            return;
+        }
+    };
+    // `None`: a shell pane hosting no agent, which gets nothing typed in.
+    let _ = live.deliver(brief.as_bytes(), Box::new(|| true));
+}
+
 /// Hands `task`'s user comments no agent has had yet, oldest first, to `pane`, which was just
 /// linked to it or started hosting an agent, if it is a live agent pane or hosts one: each is
 /// typed and marked delivered as [`deliver_to_task_pane`] does. A comment another pane holds
@@ -196,8 +238,9 @@ pub async fn deliver_waiting(
     .await;
 }
 
-/// Hands each shell pane that starts hosting an agent its task's waiting comments, as linking
-/// it would (spec §9). Runs until `hosting` closes, with the daemon.
+/// Tells each shell pane that starts hosting an agent its task, then hands it the task's
+/// waiting comments, as linking it would ([`deliver_on_link`], spec §9). Runs until `hosting`
+/// closes, with the daemon.
 pub async fn deliver_on_hosting(
     db: Db,
     claims: Claims,
@@ -222,7 +265,7 @@ pub async fn deliver_on_hosting(
             }
         };
         if let Some(task) = task {
-            deliver_waiting(&db, &claims, &terminals, &events, task, pane).await;
+            deliver_on_link(&db, &claims, &terminals, &events, task, pane).await;
         }
     }
 }

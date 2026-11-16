@@ -216,6 +216,9 @@ pub(crate) async fn pane_get(
 /// Links the pane to a task in its workspace that isn't done, or unlinks it (`task_id`
 /// null). The task's comments no agent has had yet are then typed into the pane once it is
 /// idle, as a new comment would be (spec §9).
+// Linking to another task also tells the pane's agent the task itself, ahead of those
+// comments (spec §9). Not in the doc comment above, which is the endpoint's description in
+// openapi.json: changing it means an API_VERSION bump (#232).
 #[endpoint { method = PATCH, path = "/v1/panes/{id}" }]
 pub(crate) async fn pane_update(
     rqctx: RequestContext<ApiContext>,
@@ -236,7 +239,7 @@ pub(crate) async fn pane_update(
             context.events.changed(Entity::Task, linked);
         }
         if let Some(task) = task {
-            delivery::deliver_waiting(
+            delivery::deliver_on_link(
                 &context.db,
                 &context.claims,
                 &context.terminals,

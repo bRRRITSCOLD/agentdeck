@@ -190,6 +190,87 @@ mod agentdeck_mcp {
         }
     }
 
+    /// `task_get`, `task_update`, `task_comments` and `task_comment` without a task: the one
+    /// the caller's pane is linked to now (spec §10).
+    mod in_a_linked_pane {
+        use super::*;
+
+        /// An MCP server for a claude pane in workspace `web` launched on one task, then
+        /// linked to another; and the task it is linked to now. The server's
+        /// `AGENTDECK_TASK` is the stale first one.
+        fn relinked(env: &TestEnv) -> (McpClient, serde_json::Value) {
+            let ws = env.workspace("web");
+            let launched_on = env.json(&["task", "add", "First", "--ws", "web"]);
+            let linked = env.json(&["task", "add", "Second", "--ws", "web"]);
+            let pane = env.json(&[
+                "agent",
+                "new",
+                "--ws",
+                "web",
+                "--task",
+                text(&launched_on, "id"),
+            ]);
+            env.ok(&[
+                "agent",
+                "link",
+                text(&pane, "id"),
+                "--task",
+                text(&linked, "id"),
+            ]);
+            let mut mcp = McpClient::start(
+                env,
+                &[
+                    ("AGENTDECK_WORKSPACE", text(&ws, "id")),
+                    ("AGENTDECK_PANE", text(&pane, "id")),
+                    ("AGENTDECK_TASK", text(&launched_on, "id")),
+                ],
+            );
+            mcp.initialize();
+            (mcp, linked)
+        }
+
+        #[test]
+        fn should_comment_on_the_panes_task_and_list_its_comments() {
+            let env = TestEnv::new();
+            let (mut mcp, linked) = relinked(&env);
+
+            let comment = mcp.call_ok("task_comment", json!({ "body": "PR opened" }));
+            let thread = mcp.call_ok("task_comments", json!({}));
+
+            assert_eq!(comment["task_id"], linked["id"]);
+            assert_eq!(thread.as_array().unwrap().len(), 1, "{thread}");
+            assert_eq!(text(&thread[0], "body"), "PR opened");
+        }
+
+        #[test]
+        fn should_update_and_get_the_panes_task() {
+            let env = TestEnv::new();
+            let (mut mcp, linked) = relinked(&env);
+
+            let updated = mcp.call_ok("task_update", json!({ "status": "review" }));
+            let got = mcp.call_ok("task_get", json!({}));
+
+            assert_eq!(updated["id"], linked["id"]);
+            assert_eq!(got["id"], linked["id"]);
+            assert_eq!(text(&got, "status"), "review");
+        }
+
+        #[test]
+        fn should_ask_for_a_task_when_the_pane_is_linked_to_none() {
+            let env = TestEnv::new();
+            env.workspace("web");
+            let pane = env.json(&["agent", "new", "--ws", "web"]);
+            let mut mcp = McpClient::start(&env, &[("AGENTDECK_PANE", text(&pane, "id"))]);
+            mcp.initialize();
+
+            let result = mcp.call("task_comment", json!({ "body": "PR opened" }));
+
+            assert_eq!(result["isError"], true, "{result}");
+            let message = result["content"][0]["text"].as_str().unwrap();
+            assert!(message.contains("isn't linked to a task"), "{message}");
+        }
+    }
+
     mod tool_errors {
         use super::*;
 
@@ -212,6 +293,26 @@ mod agentdeck_mcp {
                     .contains("not_found"),
                 "{result}"
             );
+        }
+
+        #[test]
+        fn should_ask_for_a_task_outside_a_pane() {
+            let env = TestEnv::new();
+            let mut mcp = McpClient::start(&env, &[]);
+            mcp.initialize();
+
+            for (tool, arguments) in [
+                ("task_get", json!({})),
+                ("task_update", json!({ "status": "doing" })),
+                ("task_comments", json!({})),
+                ("task_comment", json!({ "body": "PR opened" })),
+            ] {
+                let result = mcp.call(tool, arguments);
+
+                assert_eq!(result["isError"], true, "{tool}: {result}");
+                let message = result["content"][0]["text"].as_str().unwrap();
+                assert!(message.contains("name a task"), "{tool}: {message}");
+            }
         }
 
         #[test]

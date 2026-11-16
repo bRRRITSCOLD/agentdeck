@@ -1,5 +1,6 @@
 //! `agentdeck mcp`: an MCP server over stdio with the spec §10 tools. Each tool defaults to
-//! the caller's workspace (`$AGENTDECK_WORKSPACE`) and pane (`$AGENTDECK_PANE`).
+//! the caller's workspace (`$AGENTDECK_WORKSPACE`) and pane (`$AGENTDECK_PANE`), and a task
+//! tool to the task that pane is linked to now.
 
 use agentdeck_client::Client;
 use agentdeck_client::types::{NewComment, NewTask, TaskPatch};
@@ -94,8 +95,8 @@ struct TasksList {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 struct TaskRef {
-    /// The task's id.
-    id: String,
+    /// The task's id. Defaults to the task your pane is linked to.
+    id: Option<String>,
 }
 
 /// `task_create`'s arguments.
@@ -114,8 +115,8 @@ struct TaskCreate {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 struct TaskUpdate {
-    /// The task's id.
-    id: String,
+    /// The task's id. Defaults to the task your pane is linked to.
+    id: Option<String>,
     /// A new title.
     title: Option<String>,
     /// A new body.
@@ -133,16 +134,16 @@ struct TaskUpdate {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 struct TaskComments {
-    /// The task's id.
-    task: String,
+    /// The task's id. Defaults to the task your pane is linked to.
+    task: Option<String>,
 }
 
 /// `task_comment`'s arguments.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 struct TaskComment {
-    /// The task's id.
-    task: String,
+    /// The task's id. Defaults to the task your pane is linked to.
+    task: Option<String>,
     /// The text: progress, what blocks you, a PR you opened, a summary when done.
     body: String,
 }
@@ -210,6 +211,18 @@ impl Server {
         }
     }
 
+    /// The task `reference` names, else the one the caller's pane is linked to now. `arg` is
+    /// the argument that names it, for the error asking for one.
+    async fn task(
+        &self,
+        client: &Client,
+        reference: Option<&str>,
+        arg: &str,
+    ) -> anyhow::Result<TaskId> {
+        let task = parse_opt("task id", reference)?;
+        commands::task_or_callers(client, task, self.caller.pane, &format!("`{arg}`")).await
+    }
+
     async fn workspace(
         client: &Client,
         reference: Option<&str>,
@@ -251,11 +264,14 @@ impl Server {
         .await
     }
 
-    #[tool(description = "Get one task, with its pull request when it has one.")]
+    #[tool(
+        description = "Get one task, with its pull request when it has one. Defaults to the \
+                          task your pane is linked to."
+    )]
     async fn task_get(&self, Parameters(args): Parameters<TaskRef>) -> ToolResult {
         respond(async {
             let client = daemon::connect().await?.client;
-            let id: TaskId = parse("task id", &args.id)?;
+            let id = self.task(&client, args.id.as_deref(), "id").await?;
             Ok(client
                 .task_get()
                 .id(id)
@@ -296,12 +312,12 @@ impl Server {
     #[tool(
         description = "Change a task's title, body, status (todo, doing, review, done) or \
                           workspace; set `inbox` to move it out of any workspace. A PR task's \
-                          title is its PR's."
+                          title is its PR's. Defaults to the task your pane is linked to."
     )]
     async fn task_update(&self, Parameters(args): Parameters<TaskUpdate>) -> ToolResult {
         respond(async {
             let client = daemon::connect().await?.client;
-            let id: TaskId = parse("task id", &args.id)?;
+            let id = self.task(&client, args.id.as_deref(), "id").await?;
             let workspace_id = match (args.workspace.as_deref(), args.inbox) {
                 (Some(_), true) => anyhow::bail!("give either a workspace or inbox, not both"),
                 (Some(reference), false) => Some(TaskPlace::Workspace(
@@ -328,11 +344,14 @@ impl Server {
         .await
     }
 
-    #[tool(description = "A task's comments, oldest first: the user's and the agents'.")]
+    #[tool(
+        description = "A task's comments, oldest first: the user's and the agents'. Defaults \
+                          to the task your pane is linked to."
+    )]
     async fn task_comments(&self, Parameters(args): Parameters<TaskComments>) -> ToolResult {
         respond(async {
             let client = daemon::connect().await?.client;
-            let task: TaskId = parse("task id", &args.task)?;
+            let task = self.task(&client, args.task.as_deref(), "task").await?;
             Ok(client
                 .comment_list()
                 .id(task)
@@ -347,12 +366,12 @@ impl Server {
     #[tool(
         description = "Comment on a task, as your pane's agent: progress, what blocks you, a PR \
                           you opened, a summary when done. The user reads it; it isn't sent to \
-                          any agent."
+                          any agent. Defaults to the task your pane is linked to."
     )]
     async fn task_comment(&self, Parameters(args): Parameters<TaskComment>) -> ToolResult {
         respond(async {
             let client = daemon::connect().await?.client;
-            let task: TaskId = parse("task id", &args.task)?;
+            let task = self.task(&client, args.task.as_deref(), "task").await?;
             let new = NewComment {
                 body: args.body,
                 pane: self.caller.pane,
@@ -434,7 +453,8 @@ impl ServerHandler for Server {
             .with_server_info(Implementation::new("agentdeck", env!("CARGO_PKG_VERSION")))
             .with_instructions(
                 "agentdeck's tasks, task comments, workspace instructions, workspaces and PR \
-                 status. Tools default to the workspace and pane you run in.",
+                 status. Tools default to the workspace and pane you run in, and to the task \
+                 that pane is linked to.",
             )
     }
 }
