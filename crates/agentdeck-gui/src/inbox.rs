@@ -128,6 +128,8 @@ impl InboxView {
 
     /// Shows `snapshot`.
     pub fn set_snapshot(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
+        self.close
+            .update(cx, |close, cx| close.saw(&snapshot.tasks, cx));
         self.snapshot = snapshot;
         cx.notify();
     }
@@ -1253,6 +1255,140 @@ mod tests {
             cx.run_until_parked();
 
             assert_eq!(picked(&harness, cx), [id(4)]);
+        }
+
+        mod while_closing {
+            use super::*;
+
+            fn closing(harness: &Harness, cx: &mut VisualTestContext) -> Option<(usize, usize)> {
+                harness
+                    .view
+                    .read_with(cx, |view, cx| view.close_prs().read(cx).closing())
+            }
+
+            /// `prs()` with the PRs of `closed` stored closed and their tasks done, as the
+            /// daemon leaves them.
+            fn with_closed(closed: &[u32]) -> Snapshot {
+                let mut snapshot = prs();
+                for task in &mut snapshot.tasks {
+                    if closed.iter().any(|n| task.id == id::<TaskId>(*n)) {
+                        task.status = TaskStatus::Done;
+                        if let Some(pr) = &mut task.pr {
+                            pr.state = PrState::Closed;
+                        }
+                    }
+                }
+                snapshot
+            }
+
+            fn show(harness: &Harness, snapshot: Snapshot, cx: &mut VisualTestContext) {
+                harness
+                    .view
+                    .update(cx, |view, cx| view.set_snapshot(snapshot, cx));
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                cx.run_until_parked();
+            }
+
+            #[gpui::test]
+            fn should_count_up_as_each_closed_prs_change_arrives(cx: &mut TestAppContext) {
+                let (harness, cx) = asked_to_close_both(cx);
+                let release = harness.api.hold_close();
+
+                cx.simulate_keystrokes("enter");
+                cx.run_until_parked();
+                assert_eq!(closing(&harness, cx), Some((0, 2)));
+                assert!(selecting(&harness, cx));
+
+                show(&harness, with_closed(&[1]), cx);
+                assert_eq!(closing(&harness, cx), Some((1, 2)));
+                show(&harness, with_closed(&[1, 4]), cx);
+                assert_eq!(closing(&harness, cx), Some((2, 2)));
+
+                release.send(()).unwrap();
+                cx.run_until_parked();
+                assert_eq!(closing(&harness, cx), None);
+                assert_eq!(toasts(cx).last().map(String::as_str), Some("Closed 2 PRs"));
+                assert!(!selecting(&harness, cx));
+            }
+
+            #[gpui::test]
+            fn should_not_close_them_twice(cx: &mut TestAppContext) {
+                let (harness, cx) = asked_to_close_both(cx);
+                let _release = harness.api.hold_close();
+                cx.simulate_keystrokes("enter");
+                cx.run_until_parked();
+
+                click("inbox close prs".into(), cx);
+
+                assert!(!asking(&harness, cx));
+                assert_eq!(harness.api.closes.lock().unwrap().len(), 1);
+            }
+
+            #[gpui::test]
+            fn should_keep_select_mode_and_the_picks_as_they_are(cx: &mut TestAppContext) {
+                let (harness, cx) = asked_to_close_both(cx);
+                let _release = harness.api.hold_close();
+                cx.simulate_keystrokes("enter");
+                cx.run_until_parked();
+
+                click("inbox cancel select".into(), cx);
+                click("inbox select".into(), cx);
+                click(row_selector("select", 4), cx);
+                click("inbox select all inbox".into(), cx);
+
+                assert!(selecting(&harness, cx));
+                assert_eq!(picked(&harness, cx), [id(1), id(4)]);
+            }
+
+            #[gpui::test]
+            fn should_keep_the_failed_row_picked_once_answered(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open(prs(), cx);
+                harness.api.refuse_close(id(4), "Resource not accessible");
+                click("inbox select".into(), cx);
+                click("inbox select all inbox".into(), cx);
+                click("inbox close prs".into(), cx);
+                let release = harness.api.hold_close();
+                cx.simulate_keystrokes("enter");
+                cx.run_until_parked();
+                show(&harness, with_closed(&[1]), cx);
+                assert_eq!(closing(&harness, cx), Some((1, 2)));
+
+                release.send(()).unwrap();
+                cx.run_until_parked();
+
+                assert_eq!(closing(&harness, cx), None);
+                assert_eq!(toasts(cx).last().map(String::as_str), Some("Closed 1 of 2"));
+                assert_eq!(picked(&harness, cx), [id(4)]);
+                click("inbox close prs".into(), cx);
+                assert!(asking(&harness, cx), "Close PRs works again");
+            }
+
+            #[gpui::test]
+            fn should_end_when_the_request_fails(cx: &mut TestAppContext) {
+                let (harness, cx) = asked_to_close_both(cx);
+                harness.api.fail_next("connection refused");
+
+                cx.simulate_keystrokes("enter");
+                cx.run_until_parked();
+
+                assert_eq!(closing(&harness, cx), None);
+                assert_eq!(picked(&harness, cx), [id(1), id(4)]);
+            }
+
+            #[gpui::test]
+            fn should_draw_the_bar_while_closing_in_both_themes(cx: &mut TestAppContext) {
+                let (harness, cx) = asked_to_close_both(cx);
+                let _release = harness.api.hold_close();
+                cx.simulate_keystrokes("enter");
+                cx.run_until_parked();
+
+                for preference in [ThemePreference::Light, ThemePreference::Dark] {
+                    cx.update(|_, cx| Theme::set_preference(preference, cx));
+                    cx.run_until_parked();
+                    cx.update(|window, cx| window.draw(cx).clear(cx));
+                }
+                assert!(shown_at("inbox selection bar".into(), cx));
+            }
         }
 
         mod from_a_rows_menu {

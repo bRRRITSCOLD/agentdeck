@@ -131,6 +131,8 @@ impl TasksView {
 
     /// Shows `snapshot`.
     pub fn set_snapshot(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
+        self.close
+            .update(cx, |close, cx| close.saw(&snapshot.tasks, cx));
         self.snapshot = snapshot;
         cx.notify();
     }
@@ -932,6 +934,40 @@ mod tests {
             harness.click("tasks select", cx);
 
             assert!(cx.debug_bounds("tasks select all doing").is_none());
+        }
+
+        #[gpui::test]
+        fn should_count_the_picked_prs_closing_from_the_snapshots_it_is_shown(
+            cx: &mut TestAppContext,
+        ) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            harness.click("tasks select", cx);
+            harness.click("tasks select all review", cx);
+            harness.click("tasks close prs", cx);
+            let release = harness.api.hold_close();
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+            let closing = |cx: &mut VisualTestContext| {
+                harness
+                    .view
+                    .read_with(cx, |view, cx| view.close_prs().read(cx).closing())
+            };
+            assert_eq!(closing(cx), Some((0, 2)));
+
+            let mut snapshot = prs();
+            snapshot.tasks[0].status = TaskStatus::Done;
+            if let Some(pr) = &mut snapshot.tasks[0].pr {
+                pr.state = PrState::Closed;
+            }
+            harness
+                .view
+                .update(cx, |view, cx| view.set_snapshot(snapshot, cx));
+            harness.draw(cx);
+            assert_eq!(closing(cx), Some((1, 2)));
+
+            release.send(()).unwrap();
+            cx.run_until_parked();
+            assert_eq!(closing(cx), None);
         }
 
         #[gpui::test]

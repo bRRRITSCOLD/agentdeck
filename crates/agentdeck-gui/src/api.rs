@@ -761,6 +761,8 @@ pub(crate) mod fake {
         pub closes: Mutex<Vec<Vec<TaskId>>>,
         /// The PRs GitHub refuses to close, with its message.
         refusals: Mutex<HashMap<TaskId, String>>,
+        /// Holds the next close's answer until its sender sends or drops.
+        held_close: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
         /// Where the GitHub token comes from; none and no client ID when unset.
         github: Mutex<Option<GithubAuthInfo>>,
         /// The login a pasted token belongs to, and its scopes.
@@ -871,6 +873,14 @@ pub(crate) mod fake {
                 .lock()
                 .unwrap()
                 .insert(task, message.to_owned());
+        }
+
+        /// Holds the next close's answer, as a daemon waiting on GitHub does, until the sender
+        /// it returns sends or drops. What the close changes, it changes at once.
+        pub fn hold_close(&self) -> tokio::sync::oneshot::Sender<()> {
+            let (release, held) = tokio::sync::oneshot::channel();
+            *self.held_close.lock().unwrap() = Some(held);
+            release
         }
 
         /// How many times the settings were read.
@@ -1131,7 +1141,7 @@ pub(crate) mod fake {
         fn close_prs(
             &self,
             tasks: Vec<TaskId>,
-            _cx: &App,
+            cx: &App,
         ) -> Task<anyhow::Result<Vec<PrCloseResult>>> {
             if let Some(err) = self.failure() {
                 return Task::ready(Err(err));
@@ -1162,7 +1172,13 @@ pub(crate) mod fake {
                     }
                 })
                 .collect();
-            Task::ready(Ok(results))
+            match self.held_close.lock().unwrap().take() {
+                Some(held) => cx.background_executor().spawn(async move {
+                    let _ = held.await;
+                    Ok(results)
+                }),
+                None => Task::ready(Ok(results)),
+            }
         }
 
         fn launch_agent(&self, launch: Launch, _cx: &App) -> Task<anyhow::Result<Launched>> {

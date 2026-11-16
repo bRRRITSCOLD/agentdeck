@@ -13,15 +13,15 @@
 //! ([`menu_entries`]).
 //!
 //! Penpot "Screens" → "Inbox · select", "Inbox · row menu", "Inbox · row menu · open PR",
-//! "Tasks · row menu · merged PR", "Inbox · close confirm", "Inbox · partial failure" and
-//! "Right panel · select"; page-local parts `agentdeck/SelectionBar`,
+//! "Tasks · row menu · merged PR", "Inbox · close confirm", "Inbox · closing", "Inbox · partial
+//! failure" and "Right panel · select"; page-local parts `agentdeck/SelectionBar`,
 //! `agentdeck/CheckboxIndeterminate` and `agentdeck/ClosePrsList`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use agentdeck_client::types::PrCloseResult;
-use agentdeck_core::TaskId;
+use agentdeck_client::types::{PrCloseResult, Task};
+use agentdeck_core::{PrState, TaskId};
 use brrritscold_core_gpui::{
     ActiveTheme as _, AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
     AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, Button,
@@ -177,6 +177,51 @@ impl Selection {
     }
 }
 
+/// A close of the picked PRs in flight (spec §11, Closing PRs): the PRs it closes, and those
+/// of them the tasks show closed so far.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Closing {
+    targets: Vec<TaskId>,
+    closed: Vec<TaskId>,
+}
+
+impl Closing {
+    /// Closing `targets`, none closed yet.
+    pub fn new(targets: Vec<TaskId>) -> Self {
+        Closing {
+            targets,
+            closed: Vec::new(),
+        }
+    }
+
+    /// How many have closed, of how many.
+    pub fn progress(&self) -> (usize, usize) {
+        (self.closed.len(), self.targets.len())
+    }
+
+    /// Counts the targets `tasks` show closed, each once: the daemon stores a PR closed as
+    /// GitHub closes it and sends its task's `changed`, which reads the tasks again. A task
+    /// that leaves `tasks` keeps its count. Returns whether the count moved.
+    pub fn saw(&mut self, tasks: &[Task]) -> bool {
+        let before = self.closed.len();
+        for task in tasks {
+            let closed = (task.pr.as_ref()).is_some_and(|pr| pr.state == PrState::Closed);
+            if closed && self.targets.contains(&task.id) && !self.closed.contains(&task.id) {
+                self.closed.push(task.id);
+            }
+        }
+        self.closed.len() != before
+    }
+}
+
+/// The selection bar's words: "N selected", or "Closing N of M…" while closing.
+pub fn bar_label(selected: usize, closing: Option<&Closing>) -> String {
+    match closing.map(Closing::progress) {
+        Some((done, of)) => format!("Closing {done} of {of}…"),
+        None => format!("{selected} selected"),
+    }
+}
+
 /// A PR the confirm dialog asks about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
@@ -269,6 +314,8 @@ pub struct ClosePrs {
     selection: Selection,
     dialog: DialogHandle,
     asking: Option<Asking>,
+    /// The close of the picked PRs in flight, which locks Select mode and the selection.
+    closing: Option<Closing>,
     /// Scrolls the dialog's list of repos.
     scroll: ScrollHandle,
 }
@@ -282,6 +329,7 @@ impl ClosePrs {
             selection: Selection::default(),
             dialog: DialogHandle::new(false),
             asking: None,
+            closing: None,
             scroll: ScrollHandle::new(),
         }
     }
@@ -297,20 +345,45 @@ impl ClosePrs {
         self.selection.active()
     }
 
-    /// Turns Select mode on, or off, clearing the selection: what Select and Cancel do.
+    /// Whether a close of the picked PRs is in flight. Select mode and the selection stay as
+    /// they are until it answers.
+    pub fn is_closing(&self) -> bool {
+        self.closing.is_some()
+    }
+
+    /// Counts the PRs being closed that `tasks`, the snapshot's, show closed.
+    pub fn saw(&mut self, tasks: &[Task], cx: &mut Context<Self>) {
+        if let Some(closing) = &mut self.closing
+            && closing.saw(tasks)
+        {
+            cx.notify();
+        }
+    }
+
+    /// Turns Select mode on, or off, clearing the selection: what Select and Cancel do. Not
+    /// while closing.
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        if self.is_closing() {
+            return;
+        }
         self.selection.set_active(active);
         cx.notify();
     }
 
-    /// Picks `task`, or unpicks it.
+    /// Picks `task`, or unpicks it. Not while closing.
     pub fn set(&mut self, task: TaskId, on: bool, cx: &mut Context<Self>) {
+        if self.is_closing() {
+            return;
+        }
         self.selection.set(task, on);
         cx.notify();
     }
 
-    /// Picks every one of `tasks`, or unpicks them.
+    /// Picks every one of `tasks`, or unpicks them. Not while closing.
     pub fn set_all(&mut self, tasks: &[TaskId], on: bool, cx: &mut Context<Self>) {
+        if self.is_closing() {
+            return;
+        }
         self.selection.set_all(tasks, on);
         cx.notify();
     }
@@ -322,14 +395,15 @@ impl ClosePrs {
         }
     }
 
-    /// Opens the confirm dialog for the picked PRs, `targets`: what Close PRs does.
+    /// Opens the confirm dialog for the picked PRs, `targets`: what Close PRs does. Not while
+    /// they are closing.
     pub fn ask_selected(
         &mut self,
         targets: Vec<Target>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if targets.is_empty() {
+        if targets.is_empty() || self.is_closing() {
             return;
         }
         self.ask(Asking::Selected(targets), window, cx);
@@ -346,6 +420,13 @@ impl ClosePrs {
         cx.notify();
     }
 
+    /// How many of the picked PRs being closed have closed, of how many; `None` while no
+    /// close of them is in flight.
+    #[cfg(test)]
+    pub fn closing(&self) -> Option<(usize, usize)> {
+        self.closing.as_ref().map(Closing::progress)
+    }
+
     /// Whether the confirm dialog is open.
     #[cfg(test)]
     pub fn asking(&self) -> bool {
@@ -353,17 +434,24 @@ impl ClosePrs {
     }
 
     /// Closes the PRs the dialog asks about: what its Close button and Enter do. The dialog
-    /// closes; the closed PRs' tasks go to done through the daemon's `changed`.
+    /// closes; the closed PRs' tasks go to done through the daemon's `changed`. For the
+    /// picked PRs, the selection bar counts them closing until the daemon answers.
     pub fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(asking) = self.asking.take() else {
             return;
         };
         self.dialog.close(window, cx);
         let ids: Vec<TaskId> = asking.targets().iter().map(|t| t.id).collect();
+        if let Asking::Selected(_) = asking {
+            self.closing = Some(Closing::new(ids.clone()));
+        }
         let closing = self.api.close_prs(ids, cx);
         cx.spawn_in(window, async move |this, cx| {
             let closed = closing.await;
             let _ = this.update_in(cx, |this, window, cx| {
+                if let Asking::Selected(_) = asking {
+                    this.closing = None;
+                }
                 this.report(&asking, closed, window, cx);
                 cx.notify();
             });
@@ -523,9 +611,9 @@ impl Render for ClosePrs {
 /// The header's **Select**: a ghost (`default`) sm `Toggle`, pressed in Select mode, which
 /// turns it on or off. Tests find it as `<id> select`.
 pub fn select_toggle(close: &Entity<ClosePrs>, cx: &App) -> AnyElement {
-    let (id, active) = {
+    let (id, active, closing) = {
         let close = close.read(cx);
-        (close.id, close.active())
+        (close.id, close.active(), close.is_closing())
     };
     let close = close.clone();
     div()
@@ -536,6 +624,7 @@ pub fn select_toggle(close: &Entity<ClosePrs>, cx: &App) -> AnyElement {
                 .size(ToggleSize::Sm)
                 .label("Select")
                 .pressed(active)
+                .disabled(closing)
                 .on_change(move |on, _, cx| close.update(cx, |close, cx| close.set_active(on, cx))),
         )
         .into_any_element()
@@ -544,16 +633,17 @@ pub fn select_toggle(close: &Entity<ClosePrs>, cx: &App) -> AnyElement {
 /// Penpot `agentdeck/CheckboxIndeterminate`: a checked box with a `Minus` in place of the
 /// check, for a select-all over a partial selection. core-gpui's `Checkbox` draws no
 /// indeterminate mark (core-react has none), so this is the app's own, styled as its checked
-/// arm. Clicking it runs `on_click`.
+/// arm. Clicking it runs `on_click`, unless `disabled`, which dims it to 50%.
 fn checkbox_indeterminate(
     id: SharedString,
+    disabled: bool,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
     cx: &App,
 ) -> AnyElement {
     let s = cx.theme().semantic();
     // size-4 rounded-sm border shadow-xs, data-checked:border-primary data-checked:bg-primary
-    // data-checked:text-primary-foreground
-    div()
+    // data-checked:text-primary-foreground data-disabled:opacity-50
+    let checkbox = div()
         .id(id)
         .flex()
         .flex_none()
@@ -565,9 +655,13 @@ fn checkbox_indeterminate(
         .border_color(s.primary)
         .bg(s.primary)
         .text_color(s.primary_foreground)
+        .child(Icon::new(IconName::Minus).size(px(14.)));
+    if disabled {
+        return checkbox.opacity(0.5).into_any_element();
+    }
+    checkbox
         .cursor_pointer()
         .on_click(move |_, window, cx| on_click(window, cx))
-        .child(Icon::new(IconName::Minus).size(px(14.)))
         .into_any_element()
 }
 
@@ -584,6 +678,7 @@ pub fn select_all(close: &Entity<ClosePrs>, key: &str, tasks: Vec<TaskId>, cx: &
         return SelectCell::Space;
     }
     let check = state.selection.check(&tasks);
+    let closing = state.is_closing();
     let id = state.id;
     let element_id = SharedString::from(format!("{id}-select-all-{key}"));
     let selector = format!("{id} select all {key}");
@@ -592,9 +687,10 @@ pub fn select_all(close: &Entity<ClosePrs>, key: &str, tasks: Vec<TaskId>, cx: &
         close.update(cx, |close, cx| close.set_all(&tasks, on, cx));
     };
     let checkbox = match check {
-        Check::Some => checkbox_indeterminate(element_id, move |_, cx| set(true, cx), cx),
+        Check::Some => checkbox_indeterminate(element_id, closing, move |_, cx| set(true, cx), cx),
         Check::Off | Check::All => Checkbox::new(element_id)
             .checked(check == Check::All)
+            .disabled(closing)
             .accessibility_label("Select all")
             .on_change(move |on, _, cx| set(on, cx))
             .into_any_element(),
@@ -632,6 +728,7 @@ pub fn row_parts(
                     .child(
                         Checkbox::new(SharedString::from(format!("{id}-select-{task}")))
                             .checked(state.selection.contains(task))
+                            .disabled(state.is_closing())
                             .accessibility_label("Select")
                             .on_change(move |on, _, cx| {
                                 close.update(cx, |close, cx| close.set(task, on, cx));
@@ -696,7 +793,8 @@ pub fn row_parts(
 /// Penpot `agentdeck/SelectionBar`, in Select mode: over a `border` line, "N selected" (sm
 /// medium), an outline sm **Close PRs** in `destructive`, disabled while nothing is picked,
 /// which asks to close `targets` (the picked rows' PRs), and a ghost sm **Cancel**, which
-/// ends Select mode. Tests find it as `<id> selection bar`.
+/// ends Select mode. While the picked PRs close it reads "Closing N of M…" with both buttons
+/// disabled (Penpot "Screens" → "Inbox · closing"). Tests find it as `<id> selection bar`.
 pub fn selection_bar(
     close: &Entity<ClosePrs>,
     targets: Vec<Target>,
@@ -709,6 +807,8 @@ pub fn selection_bar(
     let s = cx.theme().semantic();
     let id = state.id;
     let n = state.selection.ids().len();
+    let closing = state.is_closing();
+    let label = bar_label(n, state.closing.as_ref());
     let ask = close.clone();
     let cancel = close.clone();
     Some(
@@ -730,7 +830,7 @@ pub fn selection_bar(
                             .text_size(font_size::SM)
                             .font_weight(font_weight::MEDIUM)
                             .text_color(s.foreground)
-                            .child(format!("{n} selected")),
+                            .child(label),
                     )
                     .child(
                         div()
@@ -741,7 +841,7 @@ pub fn selection_bar(
                                     .size(ButtonSize::Sm)
                                     .label("Close PRs")
                                     .text_color(s.destructive)
-                                    .disabled(n == 0)
+                                    .disabled(n == 0 || closing)
                                     .on_click(move |_, window, cx| {
                                         let targets = targets.clone();
                                         ask.update(cx, |close, cx| {
@@ -758,6 +858,7 @@ pub fn selection_bar(
                                     .variant(ButtonVariant::Ghost)
                                     .size(ButtonSize::Sm)
                                     .label("Cancel")
+                                    .disabled(closing)
                                     .on_click(move |_, _, cx| {
                                         cancel.update(cx, |close, cx| close.set_active(false, cx));
                                     }),
@@ -950,6 +1051,75 @@ mod tests {
             selection.set(id(1), false);
 
             assert_eq!(selection.error(id(1)), None);
+        }
+    }
+
+    mod closing {
+        use agentdeck_core::PrState;
+
+        use super::*;
+        use crate::overview::fixtures::pr_task;
+
+        fn tasks(closed: &[u32]) -> Vec<agentdeck_client::types::Task> {
+            (1..=3)
+                .map(|n| {
+                    let state = if closed.contains(&n) {
+                        PrState::Closed
+                    } else {
+                        PrState::Open
+                    };
+                    pr_task(n, "acme/widgets", state, None)
+                })
+                .collect()
+        }
+
+        #[test]
+        fn should_count_the_prs_the_tasks_show_closed() {
+            let mut closing = Closing::new(vec![id(1), id(2)]);
+            assert_eq!(closing.progress(), (0, 2));
+
+            assert!(closing.saw(&tasks(&[1])));
+            assert_eq!(closing.progress(), (1, 2));
+            assert!(closing.saw(&tasks(&[1, 2])));
+            assert_eq!(closing.progress(), (2, 2));
+        }
+
+        #[test]
+        fn should_count_each_pr_once() {
+            let mut closing = Closing::new(vec![id(1), id(2)]);
+            closing.saw(&tasks(&[1]));
+
+            assert!(!closing.saw(&tasks(&[1])));
+            assert_eq!(closing.progress(), (1, 2));
+        }
+
+        #[test]
+        fn should_ignore_a_pr_it_does_not_close() {
+            let mut closing = Closing::new(vec![id(1), id(2)]);
+
+            assert!(!closing.saw(&tasks(&[3])));
+            assert_eq!(closing.progress(), (0, 2));
+        }
+
+        #[test]
+        fn should_keep_a_count_once_its_task_leaves() {
+            let mut closing = Closing::new(vec![id(1), id(2)]);
+            closing.saw(&tasks(&[1]));
+
+            closing.saw(&tasks(&[])[1..]);
+
+            assert_eq!(closing.progress(), (1, 2));
+        }
+
+        #[test]
+        fn should_read_closing_n_of_m_in_place_of_the_count() {
+            let mut closing = Closing::new(vec![id(1), id(2)]);
+            assert_eq!(bar_label(2, None), "2 selected");
+            assert_eq!(bar_label(2, Some(&closing)), "Closing 0 of 2…");
+
+            closing.saw(&tasks(&[2]));
+
+            assert_eq!(bar_label(1, Some(&closing)), "Closing 1 of 2…");
         }
     }
 
