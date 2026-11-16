@@ -68,7 +68,7 @@ pub struct Row {
     pub unseen: bool,
     /// Whether its PR can be closed from here: a PR task whose PR is stored open, aged out or
     /// not (spec §11, Closing PRs). Only such a row is selectable, and only its menu holds
-    /// Close PR….
+    /// Close PR.
     pub closable: bool,
 }
 

@@ -180,16 +180,16 @@ fn outline(name: &'static str, label: &'static str, action: impl Action) -> impl
 }
 
 /// Penpot `WorkspaceMenu`: a ghost icon-sm `Ellipsis` button opening the workspace's actions:
-/// Edit workspace…, Mute notifications (Unmute notifications once `muted`), Archive workspace,
-/// a separator and the destructive Delete workspace…; only Edit and Delete once the workspace
+/// Edit workspace, Mute notifications (Unmute notifications once `muted`), Archive workspace,
+/// a separator and the destructive Delete workspace; only Edit and Delete once the workspace
 /// is `archived`.
 fn menu(archived: bool, muted: bool) -> impl IntoElement {
     let item = |label: &'static str, action: Box<dyn Action>| {
         DropdownMenuItem::new(label)
             .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
     };
-    let edit = item("Edit workspace…", Box::new(EditWorkspace));
-    let delete = item("Delete workspace…", Box::new(DeleteWorkspace))
+    let edit = item("Edit workspace", Box::new(EditWorkspace));
+    let delete = item("Delete workspace", Box::new(DeleteWorkspace))
         .variant(DropdownMenuItemVariant::Destructive);
     let mute = match muted {
         false => item("Mute notifications", Box::new(MuteWorkspace)),

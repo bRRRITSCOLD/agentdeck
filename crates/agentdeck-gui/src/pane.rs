@@ -73,7 +73,7 @@ pub enum PaneRequest {
 }
 
 /// The menu items before the separator and Close pane for `pane`: the splits, then, for an
-/// agent pane or a shell pane hosting an agent, Link to task….
+/// agent pane or a shell pane hosting an agent, Link to task.
 pub fn menu_items(pane: &Pane) -> Vec<(&'static str, IconName, PaneRequest)> {
     let mut items = vec![
         (
@@ -88,7 +88,7 @@ pub fn menu_items(pane: &Pane) -> Vec<(&'static str, IconName, PaneRequest)> {
         ),
     ];
     if running_agent(pane).is_some() {
-        items.push(("Link to task…", IconName::Link, PaneRequest::LinkTask));
+        items.push(("Link to task", IconName::Link, PaneRequest::LinkTask));
     }
     items
 }
@@ -322,10 +322,7 @@ mod tests {
         #[test]
         fn should_offer_link_to_task_after_the_splits_for_an_agent() {
             let pane = agent_pane(Agent::Claude);
-            assert_eq!(
-                labels(&pane),
-                ["Split right", "Split down", "Link to task…"]
-            );
+            assert_eq!(labels(&pane), ["Split right", "Split down", "Link to task"]);
             assert_eq!(menu_items(&pane)[2].2, PaneRequest::LinkTask);
         }
 
@@ -333,7 +330,7 @@ mod tests {
         fn should_offer_link_to_task_for_a_shell_while_it_hosts_an_agent() {
             assert_eq!(
                 labels(&hosting(Agent::Codex)),
-                ["Split right", "Split down", "Link to task…"]
+                ["Split right", "Split down", "Link to task"]
             );
         }
 

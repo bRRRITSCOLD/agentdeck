@@ -1376,7 +1376,7 @@ mod tests {
             assert!(
                 cx.debug_bounds(format!("panel menu {plain}").leak())
                     .is_some(),
-                "every row has a menu, for Edit task…"
+                "every row has a menu, for Edit task"
             );
         }
 

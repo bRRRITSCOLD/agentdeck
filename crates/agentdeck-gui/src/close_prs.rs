@@ -7,9 +7,9 @@
 //! ([`select_all`]) and the [`selection_bar`] along its bottom edge. The dialog renders with
 //! the [`ClosePrs`] view itself, which the list places as a child.
 //!
-//! The row's menu is on every row: **Edit task…** first (spec §11, Editing a task), then on
+//! The row's menu is on every row: **Edit task** first (spec §11, Editing a task), then on
 //! a PR row, merged and closed ones too, **Open on GitHub** (spec §11, Opening PRs, through
-//! [`open_pr`]), then **Close PR…** after a separator when its PR can close
+//! [`open_pr`]), then **Close PR** after a separator when its PR can close
 //! ([`menu_entries`]).
 //!
 //! Penpot "Screens" → "Inbox · select", "Inbox · row menu", "Inbox · row menu · open PR",
@@ -204,19 +204,19 @@ impl Target {
 /// PRs).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuEntry {
-    /// **Edit task…**, opening the task sheet to edit the task.
+    /// **Edit task**, opening the task sheet to edit the task.
     EditTask,
     /// **Open on GitHub**, opening this URL, the PR's.
     OpenOnGitHub(SharedString),
     /// A line between the entries.
     Separator,
-    /// **Close PR…**, asking to close this PR.
+    /// **Close PR**, asking to close this PR.
     ClosePr(Target),
 }
 
-/// `row`'s `…` menu, top to bottom: **Edit task…** on every row; **Open on GitHub** on every
+/// `row`'s `…` menu, top to bottom: **Edit task** on every row; **Open on GitHub** on every
 /// PR row the sync has filled in, whatever its PR's state; then, when its PR can close, a
-/// separator and **Close PR…**.
+/// separator and **Close PR**.
 pub fn menu_entries(row: &Row) -> Vec<MenuEntry> {
     let mut entries = vec![MenuEntry::EditTask];
     let Some(pr) = &row.pr else {
@@ -322,7 +322,7 @@ impl ClosePrs {
         }
     }
 
-    /// Opens the confirm dialog for the picked PRs, `targets`: what Close PRs… does.
+    /// Opens the confirm dialog for the picked PRs, `targets`: what Close PRs does.
     pub fn ask_selected(
         &mut self,
         targets: Vec<Target>,
@@ -335,7 +335,7 @@ impl ClosePrs {
         self.ask(Asking::Selected(targets), window, cx);
     }
 
-    /// Opens the confirm dialog for one PR: what a row's Close PR… does.
+    /// Opens the confirm dialog for one PR: what a row's Close PR does.
     pub fn ask_one(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         self.ask(Asking::One(target), window, cx);
     }
@@ -608,8 +608,8 @@ pub fn select_all(close: &Entity<ClosePrs>, key: &str, tasks: Vec<TaskId>, cx: &
 }
 
 /// `row`'s `Select` and `Menu` layers and its close error: a checkbox in Select mode, only when
-/// its PR can close, and on every row a `…` menu of its [`menu_entries`]: **Edit task…**,
-/// which calls `on_edit`; on a PR row **Open on GitHub**, then **Close PR…** after a separator
+/// its PR can close, and on every row a `…` menu of its [`menu_entries`]: **Edit task**,
+/// which calls `on_edit`; on a PR row **Open on GitHub**, then **Close PR** after a separator
 /// when its PR can close. Tests find them as `<id> select <task>` and `<id> menu <task>`.
 pub fn row_parts(
     close: &Entity<ClosePrs>,
@@ -650,7 +650,7 @@ pub fn row_parts(
                     MenuEntry::EditTask => {
                         let on_edit = on_edit.clone();
                         content.item(
-                            DropdownMenuItem::new("Edit task…")
+                            DropdownMenuItem::new("Edit task")
                                 .on_click(move |_, window, cx| on_edit(window, cx)),
                         )
                     }
@@ -662,7 +662,7 @@ pub fn row_parts(
                     MenuEntry::ClosePr(target) => {
                         let close = close.clone();
                         content.item(
-                            DropdownMenuItem::new("Close PR…")
+                            DropdownMenuItem::new("Close PR")
                                 .variant(DropdownMenuItemVariant::Destructive)
                                 .on_click(move |_, window, cx| {
                                     let target = target.clone();
@@ -694,7 +694,7 @@ pub fn row_parts(
 }
 
 /// Penpot `agentdeck/SelectionBar`, in Select mode: over a `border` line, "N selected" (sm
-/// medium), an outline sm **Close PRs…** in `destructive`, disabled while nothing is picked,
+/// medium), an outline sm **Close PRs** in `destructive`, disabled while nothing is picked,
 /// which asks to close `targets` (the picked rows' PRs), and a ghost sm **Cancel**, which
 /// ends Select mode. Tests find it as `<id> selection bar`.
 pub fn selection_bar(
@@ -739,7 +739,7 @@ pub fn selection_bar(
                                 Button::new(SharedString::from(format!("{id}-close-prs-button")))
                                     .variant(ButtonVariant::Outline)
                                     .size(ButtonSize::Sm)
-                                    .label("Close PRs…")
+                                    .label("Close PRs")
                                     .text_color(s.destructive)
                                     .disabled(n == 0)
                                     .on_click(move |_, window, cx| {
