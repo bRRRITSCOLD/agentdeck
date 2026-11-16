@@ -49,6 +49,11 @@ use crate::workspace::failed;
 /// A section's width. Raw in Penpot too: the fields are 480px wide.
 const SECTION_WIDTH: gpui::Pixels = px(480.);
 
+/// The age cutoff field's description. A narrower cutoff ages the PRs past it out at the
+/// next full sync, hourly, which moves their tasks to done (spec §8 → Aged out).
+const DAYS_DESCRIPTION: &str =
+    "0 syncs every open PR. Older PRs already here move to done within the hour.";
+
 /// What the field shows for text that isn't a count of days.
 const NOT_DAYS: &str = "Enter a whole number of days, 0 or more.";
 
@@ -497,9 +502,7 @@ impl SettingsView {
                     .debug_selector(|| "settings days".into())
                     .child(Input::new(&self.days).aria_invalid(error.is_some())),
             )
-            .child(FieldDescription::new(
-                "0 syncs every open PR. Older PRs already here stay until you mark them done.",
-            ))
+            .child(FieldDescription::new(DAYS_DESCRIPTION))
             .when_some(error, |field, why| {
                 field.child(
                     div()
@@ -884,6 +887,14 @@ mod tests {
 
     mod days {
         use super::*;
+
+        #[test]
+        fn should_say_older_prs_move_to_done_as_a_full_sync_ages_them_out() {
+            assert_eq!(
+                DAYS_DESCRIPTION,
+                "0 syncs every open PR. Older PRs already here move to done within the hour."
+            );
+        }
 
         #[gpui::test]
         fn should_show_the_saved_cutoff(cx: &mut TestAppContext) {
