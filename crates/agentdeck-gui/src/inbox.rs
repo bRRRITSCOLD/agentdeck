@@ -1059,7 +1059,7 @@ mod tests {
             format!("inbox {what} {}", id::<TaskId>(task))
         }
 
-        /// Select mode on, PRs 1 and 4 picked from the columns' checkbox, and Close PRs…
+        /// Select mode on, PRs 1 and 4 picked from the columns' checkbox, and Close PRs
         /// pressed.
         fn asked_to_close_both(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
             let (harness, cx) = Harness::open(prs(), cx);

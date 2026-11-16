@@ -8,7 +8,7 @@
 //!
 //! It mutes and unmutes the selected workspace's notifications when the top bar asks, toasting
 //! a failure. It archives and unarchives the selected workspace when the top bar asks, toasting
-//! the outcome; an archive's toast offers Undo. The top bar's Edit workspace… opens the edit
+//! the outcome; an archive's toast offers Undo. The top bar's Edit workspace opens the edit
 //! dialog on the selected workspace, and the sidebar reads again once it renames. Its Delete
 //! workspace… opens the delete dialog; once a workspace is deleted the selection falls back to the first workspace left,
 //! else the Inbox.
@@ -16,9 +16,9 @@
 //! The Tasks view and the right panel ask for the new task dialog with
 //! [`NewTask`], preset to the Inbox or their workspace. They and the Inbox ask for the task
 //! sheet with [`OpenTask`] when a task's title is clicked, and for it editing the task with
-//! [`EditTask`] from a row's **Edit task…**; the sheet's Start agent asks for
+//! [`EditTask`] from a row's **Edit task**; the sheet's Start agent asks for
 //! the new agent dialog on the task's workspace with [`StartAgentOn`]. Once an agent starts,
-//! the window shows its workspace and tab. A pane header's Link to task… reaches it as the
+//! the window shows its workspace and tab. A pane header's Link to task reaches it as the
 //! workspace view's [`LinkPane`] and opens the Link to task dialog on that pane.
 //!
 //! It shows the sidebar's [`Alerts`] as OS notifications (spec §11), leaving out a pane's
@@ -545,7 +545,7 @@ impl Shell {
         sheet.update(cx, |sheet, cx| sheet.open(task, snapshot, window, cx));
     }
 
-    /// Opens the task sheet editing the task a row's Edit task… asks for.
+    /// Opens the task sheet editing the task a row's Edit task asks for.
     fn edit_task(&mut self, ask: EditTask, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(sidebar), Some(sheet)) = (&self.sidebar, &self.task_sheet) else {
             return;
@@ -1730,7 +1730,7 @@ mod tests {
         use super::*;
         use crate::top_bar::MuteWorkspace;
 
-        /// Opens the top bar's menu and clicks its second item, after Edit workspace….
+        /// Opens the top bar's menu and clicks its second item, after Edit workspace.
         fn click_mute_item(harness: &Harness, cx: &mut VisualTestContext) {
             support::click_menu_item(harness, 1, cx);
         }
@@ -1875,7 +1875,7 @@ mod tests {
         fn should_archive_the_selected_workspace_from_the_top_bar_menu(cx: &mut TestAppContext) {
             let (harness, cx) = Harness::open(daemon(), cx);
 
-            // The third item, after Edit workspace… and Mute notifications.
+            // The third item, after Edit workspace and Mute notifications.
             support::click_menu_item(&harness, 2, cx);
 
             assert_eq!(*harness.api.archived.lock().unwrap(), [id(1)]);

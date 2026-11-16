@@ -13,7 +13,7 @@
 //! the title turns it into an input (Enter or leaving it saves, Escape cancels), a click on the
 //! description into a textarea (Ctrl+Enter or Save saves, Escape or Cancel cancels), and the
 //! workspace picker moves the task as soon as one is picked. A PR task's title is its PR's,
-//! so it isn't editable. A row's **Edit task…** opens the sheet editing it ([`EditTask`]).
+//! so it isn't editable. A row's **Edit task** opens the sheet editing it ([`EditTask`]).
 //!
 //! Clicking a task's title in the Tasks view, the Inbox or the right panel asks the window
 //! for it with [`OpenTask`]. Opening it reads the thread and marks the task's agent comments
@@ -60,7 +60,7 @@ use crate::workspace::failed;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenTask(pub TaskId);
 
-/// A row's **Edit task…** asks the window for the task sheet on this task, editing it: the
+/// A row's **Edit task** asks the window for the task sheet on this task, editing it: the
 /// title of a plain task, the description of a PR task, whose title is its PR's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EditTask(pub TaskId);
@@ -447,7 +447,7 @@ impl TaskSheet {
         .detach();
     }
 
-    /// Opens it on `task` editing it, as a row's **Edit task…** asks: its title, or for a PR
+    /// Opens it on `task` editing it, as a row's **Edit task** asks: its title, or for a PR
     /// task, whose title is its PR's, its description.
     pub fn open_editing(
         &mut self,

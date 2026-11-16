@@ -218,7 +218,7 @@ impl SelectCell {
 pub struct RowParts {
     /// The `Select` layer.
     pub select: SelectCell,
-    /// The `Menu` layer: Edit task…, then on a PR row Open on GitHub, and Close PR… when its
+    /// The `Menu` layer: Edit task, then on a PR row Open on GitHub, and Close PR when its
     /// PR can close.
     pub menu: AnyElement,
     /// Why its PR didn't close, while it stays selected.

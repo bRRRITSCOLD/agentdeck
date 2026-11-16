@@ -1,7 +1,7 @@
 //! The Link to task dialog (spec §9, §11), Penpot "Screens" → "Link to task": links the agent
 //! in a running pane to one of its workspace's tasks that aren't done, or unlinks it.
 //!
-//! A pane header's Link to task… asks the window for it, through the workspace view's
+//! A pane header's Link to task asks the window for it, through the workspace view's
 //! [`LinkPane`](crate::workspace::LinkPane). Once linked, the daemon types the task's
 //! comments no agent has had yet into the pane when the agent is idle. A failed link keeps
 //! the dialog open and toasts why.
