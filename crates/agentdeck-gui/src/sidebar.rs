@@ -32,7 +32,7 @@ use gpui::{
 use crate::api::Api;
 use crate::connection::{Connection, DaemonEvent};
 use crate::count::Count;
-use crate::notifications::{self, Alert, PrBatch};
+use crate::notifications::{self, Alert, PrBatch, Reattached};
 use crate::overview::{Counts, Overview, Snapshot};
 use crate::rereads::Rereads;
 use crate::scrollbar;
@@ -89,6 +89,8 @@ pub struct SidebarView {
     rereads: Rereads,
     /// The PR changes of a sync still running.
     prs: PrBatch,
+    /// The panes just reattached, whose agents may settle back into the state they held.
+    reattached: Reattached,
     _events: Subscription,
     _tick: Task<()>,
     /// The workspace list: where it is scrolled to, and its items' heights.
@@ -125,6 +127,7 @@ impl SidebarView {
             read: None,
             rereads: Rereads::default(),
             prs: PrBatch::default(),
+            reattached: Reattached::default(),
             _events: events,
             _tick: tick,
             // Every item measured once, after each change to the items, so the scrollbar's
@@ -234,6 +237,10 @@ impl SidebarView {
             DaemonEvent::Message(ServerMessage::Exit { pane, .. }) => {
                 self.set_state(*pane, AgentState::Exited, cx);
             }
+            DaemonEvent::Message(ServerMessage::Attached { pane, state, .. }) => {
+                let now = cx.background_executor().now();
+                self.reattached.attached(*pane, *state, now);
+            }
             // On `resync` the connection missed events: the read is diffed against what the
             // sidebar held, so a change made meanwhile still alerts.
             DaemonEvent::Message(ServerMessage::Changed { .. } | ServerMessage::Resync) => {
@@ -257,7 +264,12 @@ impl SidebarView {
         if let (Some(before), Some(now)) = (before, now)
             && let Some(alert) = notifications::pane_alert(before, now, &self.snapshot)
         {
-            cx.emit(Alerts(vec![alert]));
+            let mut alerts = vec![alert];
+            let now = cx.background_executor().now();
+            self.reattached.retain(&mut alerts, &self.snapshot, now);
+            if !alerts.is_empty() {
+                cx.emit(Alerts(alerts));
+            }
         }
         cx.notify();
     }
@@ -283,6 +295,8 @@ impl SidebarView {
                         };
                         let before = archived(&this.overview);
                         let mut alerts = notifications::pane_alerts(&this.snapshot, &snapshot);
+                        let now = cx.background_executor().now();
+                        this.reattached.retain(&mut alerts, &snapshot, now);
                         alerts.extend(this.prs.read(&this.snapshot, &snapshot));
                         this.overview = snapshot.overview();
                         this.snapshot = snapshot;
@@ -1192,6 +1206,95 @@ mod tests {
 
             let tags: Vec<_> = heard.borrow().iter().map(|a| a.tag.clone()).collect();
             assert_eq!(tags, [format!("task:{}", id::<agentdeck_core::TaskId>(20))]);
+        }
+
+        mod reattach {
+            use std::time::Duration;
+
+            use super::*;
+
+            /// [`with_an_agent`] with Claude Code done in pane 11, as a GUI starting finds it.
+            fn done() -> Snapshot {
+                let mut snapshot = with_an_agent();
+                snapshot.set_state(id(11), AgentState::Done);
+                snapshot
+            }
+
+            /// Pane 11 attaches, holding `state`, as its terminal opens.
+            fn attach(open: &mut Open, state: AgentState) {
+                open.send(ServerMessage::Attached {
+                    channel: 1,
+                    pane: id(11),
+                    cols: 80,
+                    rows: 24,
+                    title: "✳ Claude Code".into(),
+                    state,
+                });
+            }
+
+            fn turn(open: &mut Open, state: AgentState) {
+                open.send(ServerMessage::State {
+                    pane: id(11),
+                    state,
+                });
+            }
+
+            #[gpui::test]
+            fn should_not_alert_when_the_agent_settles_back_into_the_state_it_held(
+                cx: &mut TestAppContext,
+            ) {
+                let mut open = open(done(), cx);
+                let (heard, _subscription) = heard(&mut open);
+
+                attach(&mut open, AgentState::Done);
+                turn(&mut open, AgentState::Working);
+                open.cx.executor().advance_clock(Duration::from_secs(5));
+                turn(&mut open, AgentState::Done);
+
+                assert_eq!(*heard.borrow(), []);
+            }
+
+            #[gpui::test]
+            fn should_alert_for_the_same_state_10_s_after_the_reattach(cx: &mut TestAppContext) {
+                let mut open = open(done(), cx);
+                let (heard, _subscription) = heard(&mut open);
+
+                attach(&mut open, AgentState::Done);
+                turn(&mut open, AgentState::Working);
+                open.cx.executor().advance_clock(Duration::from_secs(10));
+                turn(&mut open, AgentState::Done);
+
+                assert_eq!(heard.borrow().len(), 1);
+            }
+
+            #[gpui::test]
+            fn should_alert_for_another_state_at_once(cx: &mut TestAppContext) {
+                let mut open = open(done(), cx);
+                let (heard, _subscription) = heard(&mut open);
+
+                attach(&mut open, AgentState::Done);
+                turn(&mut open, AgentState::Working);
+                turn(&mut open, AgentState::Blocked);
+
+                let titles: Vec<_> = heard.borrow().iter().map(|a| a.title.clone()).collect();
+                assert_eq!(titles, ["Claude Code is blocked"]);
+            }
+
+            #[gpui::test]
+            fn should_not_alert_when_a_reread_finds_it_settled_back(cx: &mut TestAppContext) {
+                let mut open = open(done(), cx);
+                let (heard, _subscription) = heard(&mut open);
+                attach(&mut open, AgentState::Done);
+                turn(&mut open, AgentState::Working);
+
+                open.api.set(done());
+                open.send(ServerMessage::Changed {
+                    entity: Changed::Pane,
+                    id: id::<agentdeck_core::PaneId>(11).to_string(),
+                });
+
+                assert_eq!(*heard.borrow(), []);
+            }
         }
 
         #[gpui::test]

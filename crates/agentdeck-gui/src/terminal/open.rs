@@ -1,15 +1,22 @@
-//! Running `terminal.file_opener` (spec §2, §11) for a `secondary`-click on a file path.
+//! Running `terminal.file_opener` (spec §2, §11) for a `secondary`-click on a file path, and
+//! the OS's handler for a URL ([`open_url`]).
 //!
 //! The command is the one the Settings view last read ([`set_file_opener`]); the process is
 //! started by the [`Spawn`] in the [`Opener`] global, which `main` sets to [`Processes`] and
 //! tests to a fake. With no `Opener` set, nothing is run.
+//!
+//! Every URL the GUI opens goes through here, never GPUI's `open_url`: that runs `xdg-open`
+//! with the GUI's stdio, so whatever the handler prints (GTK's `Gtk-Message` lines) lands in
+//! the terminal the GUI runs from.
 
 use std::io;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use agentdeck_core::opener::{self, FileOpener};
-use gpui::{App, Global};
+use gpui::{App, Global, Window};
+
+use crate::notice::Notice;
 
 /// Starts a program.
 pub trait Spawn: Send + Sync {
@@ -83,6 +90,19 @@ pub fn url_argv(url: &str) -> Vec<String> {
     FileOpener::parse(opener::DEFAULT)
         .expect("the default opener is valid")
         .argv(url, None, None)
+}
+
+/// Opens `url` with the OS's handler ([`url_argv`]), started by the [`Opener`] with its output
+/// going nowhere. A handler that can't start toasts `failure` with why (`xdg-open: <error>`).
+pub fn open_url(url: &str, failure: &str, window: &mut Window, cx: &mut App) {
+    let argv = url_argv(url);
+    let Some(Opener(spawn)) = cx.try_global::<Opener>().cloned() else {
+        tracing::warn!(?argv, "no opener is set");
+        return;
+    };
+    if let Err(err) = spawn.spawn(&argv) {
+        Notice::error(failure.to_owned(), format!("{}: {err}", argv[0])).show(window, cx);
+    }
 }
 
 #[cfg(test)]

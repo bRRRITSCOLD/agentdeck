@@ -1109,16 +1109,34 @@ mod tests {
         }
 
         #[gpui::test]
-        fn should_copy_the_code_then_open_github(cx: &mut TestAppContext) {
+        fn should_copy_the_code_then_open_github_through_the_opener(cx: &mut TestAppContext) {
             let (harness, cx) = signing_in(cx);
+            let opener = cx.update(|_, cx| crate::terminal::open::fake::install(cx));
 
             harness.click("sign in copy", cx);
 
             let copied = cx.read_from_clipboard().and_then(|item| item.text());
             assert_eq!(copied.as_deref(), Some("WDJB-MJHT"));
             assert_eq!(
-                cx.opened_url().as_deref(),
-                Some("https://github.com/login/device")
+                *opener.started.lock().unwrap(),
+                [["xdg-open", "https://github.com/login/device"]]
+            );
+            assert_eq!(cx.opened_url(), None, "not through GPUI's open_url");
+        }
+
+        #[gpui::test]
+        fn should_toast_when_github_does_not_open(cx: &mut TestAppContext) {
+            let (harness, cx) = signing_in(cx);
+            let opener = cx.update(|_, cx| crate::terminal::open::fake::install(cx));
+            *opener.failure.lock().unwrap() = Some("No such file or directory".into());
+
+            harness.click("sign in copy", cx);
+
+            let toast = cx.read(notice::shown).pop().expect("a toast");
+            assert_eq!(toast.title, "Couldn't open GitHub");
+            assert_eq!(
+                toast.description.as_deref(),
+                Some("xdg-open: No such file or directory")
             );
         }
 

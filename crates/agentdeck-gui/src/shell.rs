@@ -21,10 +21,11 @@
 //! the window shows its workspace and tab. A pane header's Link to task reaches it as the
 //! workspace view's [`LinkPane`] and opens the Link to task dialog on that pane.
 //!
-//! It shows the sidebar's [`Alerts`] as OS notifications (spec §11), leaving out a pane's
-//! while the user can see it: its tab shown in the focused window. Clicking one focuses the
-//! window and shows what it is about: the pane in its tab, the task sheet on a PR task, or the
-//! Tasks view for several PRs.
+//! It shows the sidebar's [`Alerts`] as OS notifications (spec §11), leaving out one while the
+//! user can see what it is about in the focused window: the pane's tab, the task sheet on the
+//! PR task, the Tasks view. Clicking one focuses the window and shows what it is about. One
+//! still open is withdrawn once the user can see what it is about: the window focused, the
+//! workspace, tab or task sheet shown.
 //!
 //! Closing the window (its own close button or the compositor's) and Quit ask first while an
 //! agent runs, unless `gui.confirm_quit` is off (spec §11): "Quit agentdeck?", Penpot "Screens"
@@ -36,7 +37,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use agentdeck_client::ApiError;
-use agentdeck_core::{PaneId, TaskId, WorkspaceId};
+use agentdeck_core::{TaskId, WorkspaceId};
 use agentdeck_notify::Notifier;
 use brrritscold_core_gpui::{
     ActiveTheme as _, Alert, AlertAction, AlertDescription, AlertDialog, AlertDialogAction,
@@ -110,8 +111,8 @@ pub struct Shell {
     _new_workspace: Vec<Subscription>,
     /// The selected workspace.
     workspace: Option<Entity<WorkspaceView>>,
-    /// Follows the selected workspace's asks to link a pane.
-    _workspace: Option<Subscription>,
+    /// Follows the selected workspace's asks to link a pane, and the tab it shows.
+    _workspace: Vec<Subscription>,
     /// The Tasks view, while connected; shown while the sidebar selects Tasks.
     tasks: Option<Entity<TasksView>>,
     /// The Inbox, while connected; shown while the sidebar selects it.
@@ -130,8 +131,11 @@ pub struct Shell {
     focus: FocusHandle,
     /// Shows the alerts as OS notifications.
     notifier: Rc<dyn Notifier>,
-    /// What each notification shown opens when clicked, by its tag.
+    /// What each notification still open is about, by its tag: what a click opens, and what
+    /// withdraws it once the user can see it.
     alerts: HashMap<SharedString, notifications::Target>,
+    /// Withdraws the notifications about what the window shows once it is focused.
+    _activation: Subscription,
     /// Opens and closes "Quit agentdeck?".
     quit_dialog: DialogHandle,
     /// How many agents ran when the quit dialog opened.
@@ -165,6 +169,9 @@ impl Shell {
                 let _ = this.update(cx, |shell, cx| shell.open_alert(&tag, window, cx));
             });
         }));
+        let activation = cx.observe_window_activation(window, |shell, window, cx| {
+            shell.withdraw_seen(window, cx);
+        });
         let mut shell = Shell {
             connection,
             sidebar: None,
@@ -178,7 +185,7 @@ impl Shell {
             link_task: None,
             _new_workspace: Vec::new(),
             workspace: None,
-            _workspace: None,
+            _workspace: Vec::new(),
             tasks: None,
             inbox: None,
             settings: None,
@@ -188,6 +195,7 @@ impl Shell {
             focus,
             notifier,
             alerts: HashMap::new(),
+            _activation: activation,
             quit_dialog: DialogHandle::new(false),
             quit_running: 0,
             dont_ask_again: false,
@@ -351,6 +359,7 @@ impl Shell {
                     self._selection =
                         Some(cx.observe_in(&sidebar, window, |shell, _, window, cx| {
                             shell.follow_selection(window, cx);
+                            shell.withdraw_seen(window, cx);
                         }));
                     self._new_workspace = vec![
                         cx.subscribe_in(
@@ -382,6 +391,9 @@ impl Shell {
                                 shell.show_launched(*launched, window, cx);
                             },
                         ),
+                        cx.observe_in(&task_sheet, window, |shell, _, window, cx| {
+                            shell.withdraw_seen(window, cx);
+                        }),
                         cx.subscribe_in(
                             &task_sheet,
                             window,
@@ -461,7 +473,7 @@ impl Shell {
                 self.new_workspace = None;
                 self._new_workspace.clear();
                 self.workspace = None;
-                self._workspace = None;
+                self._workspace.clear();
                 self.tasks = None;
                 self.inbox = None;
                 self.settings = None;
@@ -535,11 +547,15 @@ impl Shell {
         let connection = self.connection.clone();
         let view =
             cx.new(|cx| WorkspaceView::new(selected, top_bar, api, connection, sender, window, cx));
-        self._workspace = Some(cx.subscribe_in(
-            &view,
-            window,
-            |shell, _, ask: &LinkPane, window, cx| shell.open_link_task(ask, window, cx),
-        ));
+        self._workspace = vec![
+            cx.subscribe_in(&view, window, |shell, _, ask: &LinkPane, window, cx| {
+                shell.open_link_task(ask, window, cx);
+            }),
+            // Its tabs read, or another tab shown.
+            cx.observe_in(&view, window, |shell, _, window, cx| {
+                shell.withdraw_seen(window, cx);
+            }),
+        ];
         self.workspace = Some(view);
         cx.notify();
     }
@@ -637,27 +653,50 @@ impl Shell {
         (self.workspace.clone()).filter(|view| view.read(cx).workspace() == workspace)
     }
 
-    /// Whether the user can see `pane`: its tab shows in the focused window.
-    fn in_view(&self, pane: PaneId, window: &Window, cx: &App) -> bool {
-        let shown = (self.workspace.as_ref()).is_some_and(|view| {
-            (view.read(cx).shown().iter()).any(|shown| shown.read(cx).id() == pane)
-        });
-        shown && window.is_window_active()
+    /// Whether the user can see what `target` is about in the focused window: the pane in the
+    /// tab shown, the task sheet open on the task, the Tasks view.
+    fn in_view(&self, target: notifications::Target, window: &Window, cx: &App) -> bool {
+        if !window.is_window_active() {
+            return false;
+        }
+        match target {
+            notifications::Target::Pane { pane, .. } => {
+                (self.workspace.as_ref()).is_some_and(|view| {
+                    (view.read(cx).shown().iter()).any(|shown| shown.read(cx).id() == pane)
+                })
+            }
+            notifications::Target::Task(task) => (self.task_sheet.as_ref()).is_some_and(|sheet| {
+                let sheet = sheet.read(cx);
+                sheet.is_open() && sheet.task() == Some(task)
+            }),
+            notifications::Target::Tasks => self.selection == Some(Selection::Tasks),
+        }
     }
 
-    /// Shows `alerts` as OS notifications, but for a pane the user can see. Each is logged by
+    /// Shows `alerts` as OS notifications, but for what the user can see. Each is logged by
     /// its tag, so a missed one can be told from one the daemon never reported (spec §11).
     fn notify(&mut self, alerts: &[Notification], window: &mut Window, cx: &mut Context<Self>) {
         for alert in alerts {
-            if let notifications::Target::Pane { pane, .. } = alert.target
-                && self.in_view(pane, window, cx)
-            {
-                tracing::debug!(tag = %alert.tag, "leaving out a desktop alert: its pane is in view");
+            if self.in_view(alert.target, window, cx) {
+                tracing::debug!(tag = %alert.tag, "leaving out a desktop alert: what it is about is in view");
                 continue;
             }
             tracing::info!(tag = %alert.tag, title = %alert.title, "showing a desktop alert");
             self.alerts.insert(alert.tag.clone(), alert.target);
             self.notifier.show(alert.notification());
+        }
+    }
+
+    /// Withdraws each notification still open whose target the user can now see.
+    fn withdraw_seen(&mut self, window: &Window, cx: &App) {
+        let seen: Vec<SharedString> = (self.alerts.iter())
+            .filter(|(_, target)| self.in_view(**target, window, cx))
+            .map(|(tag, _)| tag.clone())
+            .collect();
+        for tag in seen {
+            tracing::debug!(%tag, "withdrawing a desktop alert: what it is about is in view");
+            self.alerts.remove(&tag);
+            self.notifier.withdraw(&tag);
         }
     }
 
@@ -2290,7 +2329,7 @@ mod tests {
         use agentdeck_client::types::{Pane, PullRequest};
         use agentdeck_client::ws::{Event, Remote};
         use agentdeck_core::ws::{Entity as Changed, ServerMessage};
-        use agentdeck_core::{Agent, AgentState, ChecksState, PaneKind, PrState, TaskKind};
+        use agentdeck_core::{Agent, AgentState, ChecksState, PaneId, PaneKind, PrState, TaskKind};
 
         use super::*;
         use crate::overview::PaneState;
@@ -2514,6 +2553,132 @@ mod tests {
             }
         }
 
+        mod withdraw {
+            use super::*;
+
+            fn tag(pane: u32) -> SharedString {
+                format!("pane:{}", id::<PaneId>(pane)).into()
+            }
+
+            #[gpui::test]
+            fn should_keep_a_panes_notification_while_it_is_out_of_view(cx: &mut TestAppContext) {
+                let mut open = Open::new(daemon(), cx);
+
+                open.turn(8, AgentState::Blocked);
+
+                assert_eq!(open.notifier.open(), [tag(8)]);
+            }
+
+            #[gpui::test]
+            fn should_withdraw_a_panes_notification_once_its_workspace_shows(
+                cx: &mut TestAppContext,
+            ) {
+                let mut open = Open::new(daemon(), cx);
+                open.turn(8, AgentState::Blocked);
+
+                let shell = open.shell.clone();
+                open.cx.update(|window, cx| {
+                    shell.update(cx, |shell, cx| shell.show_workspace(id(2), window, cx));
+                });
+                open.settle();
+
+                assert_eq!(open.notifier.open(), Vec::<SharedString>::new());
+            }
+
+            #[gpui::test]
+            fn should_withdraw_a_panes_notification_once_its_tab_shows(cx: &mut TestAppContext) {
+                let mut open = Open::new(daemon(), cx);
+                open.turn(9, AgentState::Done);
+                assert_eq!(open.notifier.open(), [tag(9)]);
+
+                let view = open
+                    .shell
+                    .read_with(open.cx, |shell, _| shell.workspace.clone());
+                let view = view.expect("web is shown");
+                open.cx.update(|window, cx| {
+                    view.update(cx, |view, cx| view.select(id(3), window, cx));
+                });
+                open.settle();
+
+                assert_eq!(open.notifier.open(), Vec::<SharedString>::new());
+            }
+
+            #[gpui::test]
+            fn should_withdraw_a_panes_notification_once_the_window_is_focused(
+                cx: &mut TestAppContext,
+            ) {
+                let mut open = Open::new(daemon(), cx);
+                open.cx.deactivate_window();
+                open.turn(7, AgentState::Blocked);
+                assert_eq!(open.notifier.open(), [tag(7)]);
+
+                open.cx.update(|window, _| window.activate_window());
+                open.settle();
+
+                assert_eq!(open.notifier.open(), Vec::<SharedString>::new());
+            }
+
+            #[gpui::test]
+            fn should_withdraw_a_prs_notification_once_its_task_sheet_shows(
+                cx: &mut TestAppContext,
+            ) {
+                let mut open = failing_checks(cx);
+                assert_eq!(open.notifier.open().len(), 1);
+
+                let shell = open.shell.clone();
+                open.cx.update(|window, cx| {
+                    shell.update(cx, |shell, cx| {
+                        shell.open_task(OpenTask(id(20)), window, cx)
+                    });
+                });
+                open.settle();
+
+                assert_eq!(open.notifier.open(), Vec::<SharedString>::new());
+            }
+
+            #[gpui::test]
+            fn should_not_notify_for_a_pr_whose_task_sheet_is_in_view(cx: &mut TestAppContext) {
+                let api = daemon();
+                let mut snapshot = api.snapshot_now();
+                snapshot.tasks = vec![click::task_with_checks(20, ChecksState::Pending)];
+                api.set(snapshot.clone());
+                let mut open = Open::new(api, cx);
+                let shell = open.shell.clone();
+                open.cx.update(|window, cx| {
+                    shell.update(cx, |shell, cx| {
+                        shell.open_task(OpenTask(id(20)), window, cx)
+                    });
+                });
+                open.settle();
+
+                snapshot.tasks = vec![click::task_with_checks(20, ChecksState::Failure)];
+                open.api.set(snapshot);
+                open.send(ServerMessage::Changed {
+                    entity: Changed::Task,
+                    id: id::<agentdeck_core::TaskId>(20).to_string(),
+                });
+
+                assert_eq!(open.shown(), []);
+            }
+        }
+
+        /// A shell whose PR task 20's checks just failed, notified.
+        fn failing_checks(cx: &mut TestAppContext) -> Open {
+            let checks = |checks| click::task_with_checks(20, checks);
+            let api = daemon();
+            let mut snapshot = api.snapshot_now();
+            snapshot.tasks = vec![checks(ChecksState::Pending)];
+            api.set(snapshot.clone());
+            let mut open = Open::new(api, cx);
+            snapshot.tasks = vec![checks(ChecksState::Failure)];
+            open.api.set(snapshot);
+            open.send(ServerMessage::Changed {
+                entity: Changed::Task,
+                id: id::<agentdeck_core::TaskId>(20).to_string(),
+            });
+            open
+        }
+
         mod click {
             use super::*;
 
@@ -2543,18 +2708,7 @@ mod tests {
 
             #[gpui::test]
             fn should_open_the_task_sheet_for_a_pr(cx: &mut TestAppContext) {
-                let checks = |checks| task_with_checks(20, checks);
-                let api = daemon();
-                let mut snapshot = api.snapshot_now();
-                snapshot.tasks = vec![checks(ChecksState::Pending)];
-                api.set(snapshot.clone());
-                let mut open = Open::new(api, cx);
-                snapshot.tasks = vec![checks(ChecksState::Failure)];
-                open.api.set(snapshot);
-                open.send(ServerMessage::Changed {
-                    entity: Changed::Task,
-                    id: id::<agentdeck_core::TaskId>(20).to_string(),
-                });
+                let mut open = failing_checks(cx);
 
                 let shown = open.shown();
                 assert_eq!(shown.len(), 1, "{shown:?}");
@@ -2570,7 +2724,10 @@ mod tests {
             }
 
             /// PR task `n` in `web`, `acme/web #n`, with `checks`.
-            fn task_with_checks(n: u32, checks: ChecksState) -> agentdeck_client::types::Task {
+            pub(super) fn task_with_checks(
+                n: u32,
+                checks: ChecksState,
+            ) -> agentdeck_client::types::Task {
                 agentdeck_client::types::Task {
                     pr: Some(PullRequest {
                         checks: Some(checks),
