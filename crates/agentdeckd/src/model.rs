@@ -620,6 +620,8 @@ pub struct Settings {
     pub pr_sync: PrSyncSettings,
     /// `[terminal]`.
     pub terminal: TerminalSettings,
+    /// `[gui]`.
+    pub gui: GuiSettings,
     /// The dotted keys (`pr_sync.max_age_days`) whose value comes from an environment
     /// variable, not `config.toml`. A PATCH of one is written to the file, but the variable
     /// still wins until the daemon runs without it.
@@ -650,6 +652,14 @@ pub struct TerminalSettings {
     pub file_opener: String,
 }
 
+/// `[gui]`: how the GUI behaves (spec §11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct GuiSettings {
+    /// `gui.confirm_quit`: whether closing the window or Quit asks first while an agent runs,
+    /// since agents keep running after the GUI quits.
+    pub confirm_quit: bool,
+}
+
 /// `appearance.theme`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -678,6 +688,9 @@ pub struct SettingsPatch {
     /// `[terminal]` keys to change.
     #[schemars(with = "Option<TerminalPatch>")]
     pub terminal: Option<serde_json::Value>,
+    /// `[gui]` keys to change.
+    #[schemars(with = "Option<GuiPatch>")]
+    pub gui: Option<serde_json::Value>,
     /// Sections no setting is in, so the PATCH can name them in its error.
     #[serde(flatten)]
     #[schemars(skip)]
@@ -709,4 +722,13 @@ pub struct PrSyncPatch {
 pub struct TerminalPatch {
     /// A new `terminal.file_opener`: a command holding `{path}` in an argument.
     pub file_opener: Option<String>,
+}
+
+/// `[gui]` in a [`SettingsPatch`]: its schema only, since `config::validate` reads the JSON
+/// itself.
+#[derive(JsonSchema)]
+#[expect(dead_code, reason = "a schema, never built")]
+pub struct GuiPatch {
+    /// A new `gui.confirm_quit`.
+    pub confirm_quit: Option<bool>,
 }

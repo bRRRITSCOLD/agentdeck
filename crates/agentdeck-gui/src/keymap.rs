@@ -39,7 +39,7 @@ pub const COMMENT_COMPOSER: &str = "CommentComposer";
 actions!(
     agentdeck,
     [
-        /// Quits the app.
+        /// Quits the app, asking first while agents run (spec §11).
         Quit,
         /// Shows the next tab, wrapping to the first.
         NextTab,
@@ -79,7 +79,7 @@ pub struct SelectTab(pub usize);
 pub fn init(cx: &mut App) {
     let bindings = bindings(cx);
     cx.bind_keys(bindings);
-    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &Quit, cx| crate::quit::request(cx));
 }
 
 fn bindings(cx: &App) -> Vec<KeyBinding> {

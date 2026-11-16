@@ -25,6 +25,11 @@
 //! while the user can see it: its tab shown in the focused window. Clicking one focuses the
 //! window and shows what it is about: the pane in its tab, the task sheet on a PR task, or the
 //! Tasks view for several PRs.
+//!
+//! Closing the window (its own close button or the compositor's) and Quit ask first while an
+//! agent runs, unless `gui.confirm_quit` is off (spec §11): "Quit agentdeck?", Penpot "Screens"
+//! → "Quit · agents running". Quit, or Enter, quits, after saving `gui.confirm_quit = false`
+//! when Don't ask again is ticked; Cancel, or Escape, keeps the app.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -34,16 +39,20 @@ use agentdeck_client::ApiError;
 use agentdeck_core::{PaneId, TaskId, WorkspaceId};
 use agentdeck_notify::Notifier;
 use brrritscold_core_gpui::{
-    ActiveTheme as _, Alert, AlertAction, AlertDescription, AlertTitle, AlertVariant, Button,
-    ButtonSize, ButtonVariant, IconName, Separator, SeparatorOrientation,
+    ActiveTheme as _, Alert, AlertAction, AlertDescription, AlertDialog, AlertDialogAction,
+    AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter,
+    AlertDialogHeader, AlertDialogTitle, AlertTitle, AlertVariant, Button, ButtonSize,
+    ButtonVariant, Checkbox, DialogHandle, Field, FieldContent, FieldOrientation, IconName, Label,
+    Separator, SeparatorOrientation,
 };
 use brrritscold_core_gpui_tokens::primitive::space;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Decorations, Entity, FocusHandle,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
-    Subscription, Window, div, px,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
+use gpui_base::actions::Confirm;
 
 use crate::api::Api;
 use crate::connection::{Connection, Status};
@@ -58,6 +67,7 @@ use crate::new_task::{NewTask, NewTaskDialog};
 use crate::new_workspace::{Created, NewWorkspaceDialog};
 use crate::notice::{self, Notice, NoticeAction};
 use crate::notifications::{self, Alert as Notification};
+use crate::quit;
 use crate::right_panel::RightPanel;
 use crate::settings::SettingsView;
 use crate::sidebar::{Alerts, Selection, SidebarEvent, SidebarView};
@@ -122,6 +132,12 @@ pub struct Shell {
     notifier: Rc<dyn Notifier>,
     /// What each notification shown opens when clicked, by its tag.
     alerts: HashMap<SharedString, notifications::Target>,
+    /// Opens and closes "Quit agentdeck?".
+    quit_dialog: DialogHandle,
+    /// How many agents ran when the quit dialog opened.
+    quit_running: usize,
+    /// Whether the quit dialog's Don't ask again is ticked.
+    dont_ask_again: bool,
 }
 
 impl Shell {
@@ -172,9 +188,142 @@ impl Shell {
             focus,
             notifier,
             alerts: HashMap::new(),
+            quit_dialog: DialogHandle::new(false),
+            quit_running: 0,
+            dont_ask_again: false,
         };
+        // The compositor's close button, and Quit, ask first while agents run.
+        let this = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            this.update(cx, |shell, cx| !shell.ask_to_quit(window, cx))
+                .unwrap_or(true)
+        });
+        let this = cx.entity().downgrade();
+        let handle = window.window_handle();
+        quit::ask_first_with(
+            move |cx| {
+                handle
+                    .update(cx, |_, window, cx| {
+                        this.update(cx, |shell, cx| shell.ask_to_quit(window, cx))
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false)
+            },
+            cx,
+        );
         shell.follow_connection(window, cx);
         shell
+    }
+
+    /// Opens "Quit agentdeck?" while an agent runs and `gui.confirm_quit` is on; whether it
+    /// did, so the caller quits only when it didn't. Agent panes whose process runs count, and
+    /// shell panes hosting an agent; plain shells don't.
+    pub fn ask_to_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let running = (self.sidebar.as_ref()).map_or(0, |sidebar| {
+            quit::running_agents(sidebar.read(cx).snapshot())
+        });
+        let confirm = (self.settings.as_ref()).is_none_or(|view| view.read(cx).confirm_quit());
+        if running == 0 || !confirm {
+            return false;
+        }
+        if !self.quit_dialog.is_open() {
+            self.quit_running = running;
+            self.dont_ask_again = false;
+            self.quit_dialog.open(window, cx);
+        }
+        cx.notify();
+        true
+    }
+
+    /// The quit dialog's Quit, and Enter: saves `gui.confirm_quit = false` first when Don't ask
+    /// again is ticked, then quits, whether or not the save went through.
+    fn quit_confirmed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.quit_dialog.close(window, cx);
+        let saving = (self.settings.clone())
+            .filter(|_| self.dont_ask_again)
+            .map(|view| view.update(cx, |view, cx| view.set_confirm_quit(false, window, cx)));
+        cx.spawn(async move |_, cx| {
+            if let Some(saving) = saving {
+                saving.await;
+            }
+            cx.update(quit::now);
+        })
+        .detach();
+    }
+
+    /// "Quit agentdeck?", Penpot "Screens" → "Quit · agents running": the running count over
+    /// Don't ask again, then Cancel and Quit. Enter and the Quit button dispatch the dialog's
+    /// `Confirm`, caught here on its way down to the dialog, which then closes.
+    fn quit_confirmation(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.entity().downgrade();
+        let tick = move |on: bool, cx: &mut App| {
+            let _ = this.update(cx, |shell, cx| {
+                shell.dont_ask_again = on;
+                cx.notify();
+            });
+        };
+        let tick_label = tick.clone();
+        let ticked = self.dont_ask_again;
+        // core-gpui's content has no body part, so Don't ask again leads the footer's column,
+        // `space.6` above the buttons, as Penpot places it between the header and the footer.
+        let dont_ask = Field::new()
+            .orientation(FieldOrientation::Horizontal)
+            .child(
+                div().debug_selector(|| "quit dont ask again".into()).child(
+                    Checkbox::new("quit-dont-ask-again")
+                        .checked(ticked)
+                        .accessibility_label("Don't ask again")
+                        .on_change(move |on, _, cx| tick(on, cx)),
+                ),
+            )
+            .content(
+                FieldContent::new().child(
+                    div()
+                        .id("quit-dont-ask-again-label")
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| tick_label(!ticked, cx))
+                        .child(Label::new().child("Don't ask again")),
+                ),
+            );
+        div()
+            .capture_action(cx.listener(|this, _: &Confirm, window, cx| {
+                this.quit_confirmed(window, cx);
+            }))
+            .child(
+                AlertDialog::new("quit")
+                    .handle(self.quit_dialog.clone())
+                    .content(
+                        AlertDialogContent::new()
+                            .header(
+                                AlertDialogHeader::new()
+                                    .title(AlertDialogTitle::new("Quit agentdeck?"))
+                                    .description(AlertDialogDescription::new(quit::still_running(
+                                        self.quit_running,
+                                    ))),
+                            )
+                            .footer(
+                                AlertDialogFooter::new()
+                                    .flex_col()
+                                    .gap(space::S6)
+                                    .child(dont_ask)
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .justify_end()
+                                            .gap(space::S2)
+                                            .child(AlertDialogCancel::new("quit-cancel", "Cancel"))
+                                            .child(
+                                                div()
+                                                    .debug_selector(|| "quit confirm".into())
+                                                    .child(AlertDialogAction::new(
+                                                        "quit-confirm",
+                                                        "Quit",
+                                                    )),
+                                            ),
+                                    ),
+                            ),
+                    ),
+            )
     }
 
     /// Opens a sidebar on a new session, and drops it and the selected view once the
@@ -841,7 +990,11 @@ impl Render for Shell {
             .track_focus(&self.focus)
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &ToggleMaximize, window, _| window.zoom_window())
-            .on_action(|_: &Close, window, _| window.remove_window())
+            .on_action(cx.listener(|this, _: &Close, window, cx| {
+                if !this.ask_to_quit(window, cx) {
+                    window.remove_window();
+                }
+            }))
             .on_action(cx.listener(|this, _: &NewAgent, window, cx| this.new_agent(window, cx)))
             .on_action(cx.listener(|this, _: &ArchiveWorkspace, window, cx| {
                 this.archive(window, cx);
@@ -877,6 +1030,7 @@ impl Render for Shell {
             .when_some(client_tiling, |shell, tiling| {
                 shell.children(frame::resize_edges(tiling))
             })
+            .child(self.quit_confirmation(cx))
     }
 }
 
@@ -2403,6 +2557,241 @@ mod tests {
                     ..task(n, TaskKind::Pr, Some(id(1)))
                 }
             }
+        }
+    }
+
+    mod quitting {
+        use agentdeck_client::types::{GuiSettings, Settings};
+        use agentdeck_core::{Agent, AgentState};
+        use gpui::Modifiers;
+
+        use super::*;
+        use crate::api::fake::default_settings;
+        use crate::overview::PaneState;
+        use crate::overview::fixtures::{id, pane};
+        use crate::title_bar::Close;
+        use agentdeck_client::ws::Remote;
+
+        /// An agent pane in workspace 1 whose agent runs.
+        fn agent(n: u32) -> PaneState {
+            PaneState {
+                agent: Some(Agent::Claude),
+                ..pane(n, id(1), AgentState::Working)
+            }
+        }
+
+        /// A shell pane in workspace 1 hosting Codex.
+        fn hosting_shell(n: u32) -> PaneState {
+            PaneState {
+                agent: Some(Agent::Codex),
+                ..pane(n, id(1), AgentState::Idle)
+            }
+        }
+
+        /// A shell pane in workspace 1 hosting no agent.
+        fn plain_shell(n: u32) -> PaneState {
+            pane(n, id(1), AgentState::Idle)
+        }
+
+        /// A daemon with workspace 1 holding `panes`, asking before quitting as `confirm`.
+        fn daemon(panes: Vec<PaneState>, confirm: bool) -> Arc<FakeApi> {
+            let api = workspace_with_a_pane();
+            let mut snapshot = api.snapshot_now();
+            snapshot.panes = panes;
+            api.set(snapshot);
+            api.set_settings(Settings {
+                gui: GuiSettings {
+                    confirm_quit: confirm,
+                },
+                ..default_settings()
+            });
+            api
+        }
+
+        struct Harness {
+            shell: Entity<Shell>,
+            api: Arc<FakeApi>,
+            _remote: Remote,
+        }
+
+        impl Harness {
+            /// The main window, its shortcuts bound, over `api`.
+            fn open(
+                api: Arc<FakeApi>,
+                cx: &mut TestAppContext,
+            ) -> (Harness, &mut VisualTestContext) {
+                cx.update(brrritscold_core_gpui::init);
+                cx.update(crate::terminal::init);
+                cx.update(crate::keymap::init);
+                let connector = Rc::new(FakeConnector::default());
+                let remote = connector.then_connect_to(api.clone());
+                let mut shell = None;
+                let window = cx.add_window(|window, cx| {
+                    let connection = cx.new(|cx| Connection::new(connector, cx));
+                    let view = cx.new(|cx| {
+                        Shell::new(connection, Rc::new(FakeNotifier::default()), window, cx)
+                    });
+                    shell = Some(view.clone());
+                    Root::new(view, window, cx)
+                });
+                let cx = VisualTestContext::from_window(*window, cx).into_mut();
+                cx.update(|window, _| window.activate_window());
+                let harness = Harness {
+                    shell: shell.unwrap(),
+                    api,
+                    _remote: remote,
+                };
+                harness.settle(cx);
+                (harness, cx)
+            }
+
+            fn settle(&self, cx: &mut VisualTestContext) {
+                cx.run_until_parked();
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+            }
+
+            /// Presses Quit's shortcut.
+            fn press_quit(&self, cx: &mut VisualTestContext) {
+                cx.simulate_keystrokes("secondary-shift-q");
+                self.settle(cx);
+            }
+
+            fn asking(&self, cx: &mut VisualTestContext) -> bool {
+                self.shell
+                    .read_with(cx, |shell, _| shell.quit_dialog.is_open())
+            }
+
+            fn quits(&self, cx: &mut VisualTestContext) -> usize {
+                cx.update(|_, cx| crate::quit::quits(cx))
+            }
+
+            fn click(&self, selector: &'static str, cx: &mut VisualTestContext) {
+                let bounds = cx.debug_bounds(selector).expect(selector);
+                cx.simulate_click(bounds.center(), Modifiers::default());
+                self.settle(cx);
+            }
+        }
+
+        #[gpui::test]
+        fn should_ask_on_quit_while_an_agent_runs(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(vec![agent(1), agent(2)], true), cx);
+
+            harness.press_quit(cx);
+
+            assert!(harness.asking(cx));
+            assert_eq!(harness.quits(cx), 0);
+            let shown = harness.shell.read_with(cx, |shell, _| shell.quit_running);
+            assert_eq!(shown, 2);
+        }
+
+        #[gpui::test]
+        fn should_ask_when_the_compositor_closes_the_window_while_an_agent_runs(
+            cx: &mut TestAppContext,
+        ) {
+            let (harness, cx) = Harness::open(daemon(vec![agent(1)], true), cx);
+
+            let closed = cx.simulate_close();
+            harness.settle(cx);
+
+            assert!(!closed);
+            assert!(harness.asking(cx));
+        }
+
+        #[gpui::test]
+        fn should_ask_from_the_title_bars_close_button_while_an_agent_runs(
+            cx: &mut TestAppContext,
+        ) {
+            let (harness, cx) = Harness::open(daemon(vec![agent(1)], true), cx);
+            let window = cx.update(|window, _| window.window_handle());
+
+            cx.dispatch_action(Close);
+            harness.settle(cx);
+
+            assert!(harness.asking(cx));
+            assert!(cx.windows().contains(&window));
+        }
+
+        #[gpui::test]
+        fn should_ask_while_a_shell_hosts_an_agent(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(vec![hosting_shell(1)], true), cx);
+
+            harness.press_quit(cx);
+
+            assert!(harness.asking(cx));
+        }
+
+        #[gpui::test]
+        fn should_quit_at_once_with_only_plain_shells(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(vec![plain_shell(1)], true), cx);
+
+            harness.press_quit(cx);
+
+            assert!(!harness.asking(cx));
+            assert_eq!(harness.quits(cx), 1);
+            assert!(cx.simulate_close());
+        }
+
+        #[gpui::test]
+        fn should_quit_at_once_when_the_setting_is_off(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(vec![agent(1)], false), cx);
+
+            harness.press_quit(cx);
+
+            assert!(!harness.asking(cx));
+            assert_eq!(harness.quits(cx), 1);
+            assert!(cx.simulate_close());
+        }
+
+        #[gpui::test]
+        fn should_quit_on_enter(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(vec![agent(1)], true), cx);
+            harness.press_quit(cx);
+            assert_eq!(harness.quits(cx), 0);
+
+            cx.simulate_keystrokes("enter");
+            harness.settle(cx);
+
+            assert_eq!(harness.quits(cx), 1);
+            assert!(harness.api.settings_patches.lock().unwrap().is_empty());
+        }
+
+        #[gpui::test]
+        fn should_quit_once_from_the_quit_button(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(vec![agent(1)], true), cx);
+            harness.press_quit(cx);
+
+            harness.click("quit confirm", cx);
+
+            assert_eq!(harness.quits(cx), 1);
+            assert!(!harness.asking(cx));
+        }
+
+        #[gpui::test]
+        fn should_keep_the_app_on_escape(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(vec![agent(1)], true), cx);
+            harness.press_quit(cx);
+
+            cx.simulate_keystrokes("escape");
+            harness.settle(cx);
+
+            assert!(!harness.asking(cx));
+            assert_eq!(harness.quits(cx), 0);
+        }
+
+        #[gpui::test]
+        fn should_save_dont_ask_again_then_quit_without_asking_next_time(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(vec![agent(1)], true), cx);
+            harness.press_quit(cx);
+
+            harness.click("quit dont ask again", cx);
+            cx.simulate_keystrokes("enter");
+            harness.settle(cx);
+
+            assert_eq!(harness.quits(cx), 1);
+            assert!(!harness.api.settings_now().gui.confirm_quit);
+            harness.press_quit(cx);
+            assert!(!harness.asking(cx));
+            assert_eq!(harness.quits(cx), 2);
         }
     }
 

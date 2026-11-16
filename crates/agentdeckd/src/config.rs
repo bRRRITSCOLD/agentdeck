@@ -20,7 +20,8 @@ use serde_json::Value as Json;
 use toml_edit::{DocumentMut, Item};
 
 use crate::model::{
-    AppearanceSettings, PrSyncSettings, Settings, SettingsPatch, TerminalSettings, ThemePreference,
+    AppearanceSettings, GuiSettings, PrSyncSettings, Settings, SettingsPatch, TerminalSettings,
+    ThemePreference,
 };
 
 /// The environment variable that overrides `[pr_sync] max_age_days` (tests use it). Empty is
@@ -35,6 +36,9 @@ pub const MAX_AGE_KEY: &str = "pr_sync.max_age_days";
 
 /// The dotted key of the command a click on a file path in a pane runs.
 pub const FILE_OPENER_KEY: &str = "terminal.file_opener";
+
+/// The dotted key of whether the GUI asks before quitting while agents run.
+pub const CONFIRM_QUIT_KEY: &str = "gui.confirm_quit";
 
 /// The PR age cutoff when nothing sets one.
 const DEFAULT_MAX_AGE_DAYS: u32 = 90;
@@ -51,6 +55,8 @@ pub struct FileValues {
     pub max_age_days: u32,
     /// `terminal.file_opener`.
     pub file_opener: String,
+    /// `gui.confirm_quit`.
+    pub confirm_quit: bool,
 }
 
 impl Default for FileValues {
@@ -59,6 +65,7 @@ impl Default for FileValues {
             theme: ThemePreference::System,
             max_age_days: DEFAULT_MAX_AGE_DAYS,
             file_opener: opener::DEFAULT.to_owned(),
+            confirm_quit: true,
         }
     }
 }
@@ -107,6 +114,14 @@ impl FileValues {
                 ),
             }
         }
+        if let Some(item) = lookup(&doc, CONFIRM_QUIT_KEY) {
+            match item.as_bool() {
+                Some(confirm) => values.confirm_quit = confirm,
+                None => tracing::warn!(
+                    "config.toml: {CONFIRM_QUIT_KEY} isn't true or false; using true"
+                ),
+            }
+        }
         values
     }
 
@@ -119,6 +134,9 @@ impl FileValues {
         }
         if let Some(file_opener) = &changes.file_opener {
             self.file_opener.clone_from(file_opener);
+        }
+        if let Some(confirm) = changes.confirm_quit {
+            self.confirm_quit = confirm;
         }
     }
 }
@@ -162,6 +180,9 @@ pub fn effective(file: FileValues, env: EnvOverrides) -> Settings {
         terminal: TerminalSettings {
             file_opener: file.file_opener,
         },
+        gui: GuiSettings {
+            confirm_quit: file.confirm_quit,
+        },
         overridden_by_env,
     }
 }
@@ -175,6 +196,8 @@ pub struct Changes {
     pub max_age_days: Option<u32>,
     /// A new `terminal.file_opener`.
     pub file_opener: Option<String>,
+    /// A new `gui.confirm_quit`.
+    pub confirm_quit: Option<bool>,
 }
 
 /// A PATCH named a key that isn't a setting, or gave one a value it can't take.
@@ -263,6 +286,20 @@ pub fn validate(patch: &SettingsPatch) -> Result<Changes, InvalidSetting> {
             _ => return Err(InvalidSetting::new(key, "isn't a setting")),
         }
     }
+    for (key, value) in section_entries("gui", patch.gui.as_ref())? {
+        match key.as_str() {
+            CONFIRM_QUIT_KEY => {
+                let confirm = value.as_bool().ok_or_else(|| {
+                    InvalidSetting::new(
+                        CONFIRM_QUIT_KEY,
+                        format!("must be true or false, not {value}"),
+                    )
+                })?;
+                changes.confirm_quit = Some(confirm);
+            }
+            _ => return Err(InvalidSetting::new(key, "isn't a setting")),
+        }
+    }
     Ok(changes)
 }
 
@@ -296,6 +333,9 @@ pub fn write_changes(text: &str, changes: &Changes) -> Result<String, toml_edit:
     }
     if let Some(file_opener) = &changes.file_opener {
         set(&mut doc, FILE_OPENER_KEY, file_opener.as_str().into());
+    }
+    if let Some(confirm) = changes.confirm_quit {
+        set(&mut doc, CONFIRM_QUIT_KEY, confirm.into());
     }
     Ok(doc.to_string())
 }
@@ -470,13 +510,14 @@ mod tests {
         }
 
         #[test]
-        fn should_default_to_system_90_days_and_xdg_open_without_a_file() {
+        fn should_default_to_system_90_days_xdg_open_and_asking_without_a_file() {
             assert_eq!(
                 read(None),
                 FileValues {
                     theme: ThemePreference::System,
                     max_age_days: 90,
                     file_opener: "xdg-open {path}".into(),
+                    confirm_quit: true,
                 }
             );
         }
@@ -490,12 +531,21 @@ mod tests {
         #[test]
         fn should_read_every_key() {
             let values = read(Some(
-                "[appearance]\ntheme = \"dark\"\n[pr_sync]\nmax_age_days = 30\n[terminal]\nfile_opener = \"code -g {path}:{line}\"\n",
+                "[appearance]\ntheme = \"dark\"\n[pr_sync]\nmax_age_days = 30\n[terminal]\nfile_opener = \"code -g {path}:{line}\"\n[gui]\nconfirm_quit = false\n",
             ));
 
             assert_eq!(values.theme, ThemePreference::Dark);
             assert_eq!(values.max_age_days, 30);
             assert_eq!(values.file_opener, "code -g {path}:{line}");
+            assert!(!values.confirm_quit);
+        }
+
+        #[test]
+        fn should_ask_before_quitting_when_confirm_quit_is_not_a_bool() {
+            for value in ["\"no\"", "0"] {
+                let text = format!("[gui]\nconfirm_quit = {value}\n");
+                assert!(read(Some(&text)).confirm_quit, "{value}");
+            }
         }
 
         #[test]
@@ -589,6 +639,7 @@ mod tests {
 
             assert_eq!(settings.pr_sync.max_age_days, 30);
             assert_eq!(settings.appearance.theme, ThemePreference::System);
+            assert!(settings.gui.confirm_quit);
             assert!(settings.overridden_by_env.is_empty());
         }
 
@@ -619,6 +670,7 @@ mod tests {
                 "appearance": { "theme": "light" },
                 "pr_sync": { "max_age_days": 0 },
                 "terminal": { "file_opener": "code -g {path}:{line}" },
+                "gui": { "confirm_quit": false },
             })))
             .unwrap();
 
@@ -628,8 +680,19 @@ mod tests {
                     theme: Some(ThemePreference::Light),
                     max_age_days: Some(0),
                     file_opener: Some("code -g {path}:{line}".into()),
+                    confirm_quit: Some(false),
                 }
             );
+        }
+
+        #[test]
+        fn should_name_a_confirm_quit_that_is_not_a_bool() {
+            for value in [json!("no"), json!(0), json!("false")] {
+                assert_eq!(
+                    invalid_key(json!({"gui": {"confirm_quit": value}})),
+                    CONFIRM_QUIT_KEY
+                );
+            }
         }
 
         #[test]
@@ -696,6 +759,7 @@ mod tests {
                 "appearance.colour"
             );
             assert_eq!(invalid_key(json!({"terminal": {"x": 1}})), "terminal.x");
+            assert_eq!(invalid_key(json!({"gui": {"x": 1}})), "gui.x");
             assert_eq!(invalid_key(json!({"editor": {"x": 1}})), "editor");
             assert_eq!(invalid_key(json!({"pr_sync": 30})), "pr_sync");
         }
@@ -736,13 +800,14 @@ mod tests {
                     theme: Some(ThemePreference::Dark),
                     max_age_days: Some(30),
                     file_opener: Some("code {path}".into()),
+                    confirm_quit: Some(false),
                 },
             )
             .unwrap();
 
             assert_eq!(
                 text,
-                "[appearance]\ntheme = \"dark\"\n\n[pr_sync]\nmax_age_days = 30\n\n[terminal]\nfile_opener = \"code {path}\"\n"
+                "[appearance]\ntheme = \"dark\"\n\n[pr_sync]\nmax_age_days = 30\n\n[terminal]\nfile_opener = \"code {path}\"\n\n[gui]\nconfirm_quit = false\n"
             );
         }
 

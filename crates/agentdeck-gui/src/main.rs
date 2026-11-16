@@ -26,6 +26,7 @@ mod open_pr;
 mod overview;
 mod pane;
 mod pane_header;
+mod quit;
 mod rereads;
 mod right_panel;
 mod runtime;

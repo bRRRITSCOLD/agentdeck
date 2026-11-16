@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use agentdeck_client::types::{
-    AppearancePatch, PrSyncPatch, Settings, SettingsPatch, TerminalPatch, ThemePreference,
+    AppearancePatch, GuiPatch, PrSyncPatch, Settings, SettingsPatch, TerminalPatch, ThemePreference,
 };
 use agentdeck_core::ws::{Entity, ServerMessage};
 use httpmock::MockServer;
@@ -45,28 +45,34 @@ async fn get(daemon: &TestDaemon) -> Settings {
 fn theme(theme: ThemePreference) -> SettingsPatch {
     SettingsPatch {
         appearance: Some(AppearancePatch { theme: Some(theme) }),
-        pr_sync: None,
-        terminal: None,
+        ..SettingsPatch::default()
     }
 }
 
 fn max_age(days: u32) -> SettingsPatch {
     SettingsPatch {
-        appearance: None,
         pr_sync: Some(PrSyncPatch {
             max_age_days: Some(days),
         }),
-        terminal: None,
+        ..SettingsPatch::default()
     }
 }
 
 fn file_opener(command: &str) -> SettingsPatch {
     SettingsPatch {
-        appearance: None,
-        pr_sync: None,
         terminal: Some(TerminalPatch {
             file_opener: Some(command.into()),
         }),
+        ..SettingsPatch::default()
+    }
+}
+
+fn confirm_quit(confirm: bool) -> SettingsPatch {
+    SettingsPatch {
+        gui: Some(GuiPatch {
+            confirm_quit: Some(confirm),
+        }),
+        ..SettingsPatch::default()
     }
 }
 
@@ -107,6 +113,7 @@ mod get_v1_settings {
         assert_eq!(settings.appearance.theme, ThemePreference::System);
         assert_eq!(settings.pr_sync.max_age_days, 90);
         assert_eq!(settings.terminal.file_opener, "xdg-open {path}");
+        assert!(settings.gui.confirm_quit);
         assert!(settings.overridden_by_env.is_empty());
     }
 
@@ -115,7 +122,7 @@ mod get_v1_settings {
         let dirs = dirs_without_env();
         write_config(
             dirs.path(),
-            "[appearance]\ntheme = \"light\"\n[pr_sync]\nmax_age_days = 14\n[terminal]\nfile_opener = \"code -g {path}:{line}\"\n",
+            "[appearance]\ntheme = \"light\"\n[pr_sync]\nmax_age_days = 14\n[terminal]\nfile_opener = \"code -g {path}:{line}\"\n[gui]\nconfirm_quit = false\n",
         );
         let daemon = TestDaemon::start_in(dirs).await;
 
@@ -124,6 +131,7 @@ mod get_v1_settings {
         assert_eq!(settings.appearance.theme, ThemePreference::Light);
         assert_eq!(settings.pr_sync.max_age_days, 14);
         assert_eq!(settings.terminal.file_opener, "code -g {path}:{line}");
+        assert!(!settings.gui.confirm_quit);
     }
 
     #[tokio::test]
@@ -278,6 +286,33 @@ mod patch_v1_settings {
             text,
             "[terminal]\nfile_opener = \"code -g '{path}:{line}'\"\n"
         );
+    }
+
+    #[tokio::test]
+    async fn should_set_confirm_quit_and_back_200() {
+        let daemon = TestDaemon::start_in(dirs_without_env()).await;
+
+        let off = patch(&daemon, confirm_quit(false)).await;
+        let text = std::fs::read_to_string(config_file(daemon.root())).expect("config.toml");
+        let on = patch(&daemon, confirm_quit(true)).await;
+
+        assert!(!off.gui.confirm_quit);
+        assert_eq!(text, "[gui]\nconfirm_quit = false\n");
+        assert!(on.gui.confirm_quit);
+        assert!(get(&daemon).await.gui.confirm_quit);
+    }
+
+    #[tokio::test]
+    async fn should_reject_a_confirm_quit_that_is_not_a_bool_and_name_it_400() {
+        let daemon = TestDaemon::start_in(dirs_without_env()).await;
+
+        let (status, body) = patch_raw(&daemon, json!({"gui": {"confirm_quit": "no"}})).await;
+
+        assert_eq!(status, 400);
+        assert_eq!(body["error_code"], "invalid_setting");
+        let message = body["message"].as_str().expect("a message");
+        assert!(message.starts_with("gui.confirm_quit "), "{message}");
+        assert!(get(&daemon).await.gui.confirm_quit);
     }
 
     #[tokio::test]

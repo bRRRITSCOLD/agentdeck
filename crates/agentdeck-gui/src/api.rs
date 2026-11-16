@@ -660,11 +660,11 @@ pub(crate) mod fake {
 
     use super::*;
 
-    /// The daemon's defaults: the system theme, a 90-day PR cutoff and `xdg-open`, nothing
-    /// overridden.
+    /// The daemon's defaults: the system theme, a 90-day PR cutoff, `xdg-open` and asking
+    /// before quitting, nothing overridden.
     pub fn default_settings() -> Settings {
         use agentdeck_client::types::{
-            AppearanceSettings, PrSyncSettings, TerminalSettings, ThemePreference,
+            AppearanceSettings, GuiSettings, PrSyncSettings, TerminalSettings, ThemePreference,
         };
 
         Settings {
@@ -675,6 +675,7 @@ pub(crate) mod fake {
             terminal: TerminalSettings {
                 file_opener: agentdeck_core::opener::DEFAULT.into(),
             },
+            gui: GuiSettings { confirm_quit: true },
             overridden_by_env: Vec::new(),
         }
     }
@@ -1373,6 +1374,9 @@ pub(crate) mod fake {
             }
             if let Some(opener) = patch.terminal.as_ref().and_then(|t| t.file_opener.clone()) {
                 settings.terminal.file_opener = opener;
+            }
+            if let Some(confirm) = patch.gui.as_ref().and_then(|g| g.confirm_quit) {
+                settings.gui.confirm_quit = confirm;
             }
             self.set_settings(settings.clone());
             self.settings_patches.lock().unwrap().push(patch);
