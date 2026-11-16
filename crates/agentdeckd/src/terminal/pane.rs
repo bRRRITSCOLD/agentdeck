@@ -1,9 +1,12 @@
 //! One live pane: its PTY and process, the daemon's `Term` for it, and everything the
 //! daemon derives from the output (spec §5–§7).
 //!
-//! Two OS threads serve each pane, since `portable-pty`'s reads and writes block:
-//! - the **reader** feeds every chunk of output through [`Pane::output`], then waits for the
-//!   process, records its exit and only then reports it;
+//! Three OS threads serve each pane, since `portable-pty`'s reads and writes block:
+//! - the **reader** feeds every chunk of output through [`Pane::output`] until the PTY closes;
+//! - the **waiter** waits for the process, not for the PTY, since a child it leaves running
+//!   keeps the PTY open. Once the process has exited it gives the reader [`EXIT_GRACE`] to
+//!   reach the end of the output, records the exit and only then reports it, then hangs up on
+//!   whatever is left in the pane's session ([`hang_up`]);
 //! - the **writer** writes input in order: typed bytes, delivered `input`, and the `Term`'s
 //!   answers to terminal queries. A submitted message's Enter is a write of its own, with a
 //!   pause on either side ([`SUBMIT_PAUSE`]).
@@ -20,7 +23,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -34,7 +37,7 @@ use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config, TermMode};
 use alacritty_terminal::vte::ansi::Processor;
-use nix::sys::signal::{Signal, killpg};
+use nix::sys::signal::{Signal, kill, killpg};
 use nix::unistd::Pid;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::sync::oneshot;
@@ -58,6 +61,8 @@ pub struct Launch {
     pub env: BTreeMap<OsString, OsString>,
     /// The PTY's size until a client resizes it.
     pub size: Size,
+    /// The task the pane is linked to as it starts.
+    pub task: Option<TaskId>,
 }
 
 /// A new pane's size until a client resizes it (spec §4).
@@ -84,6 +89,7 @@ impl Launch {
             cwd,
             env: pane_env(std::env::vars_os(), &extra),
             size: INITIAL_SIZE,
+            task,
         }
     }
 }
@@ -199,6 +205,9 @@ pub type Claim = Box<dyn FnOnce() -> bool + Send>;
 struct Queued {
     when: When,
     bytes: Vec<u8>,
+    /// The task it is about, for the task brief and comments: dropped once the pane is no
+    /// longer linked to it.
+    task: Option<TaskId>,
     /// Typed as a message ([`message`]) followed by Enter, rather than as is.
     submit: bool,
     /// Told once the bytes are typed; dropped untold if the process exits first or `claim`
@@ -304,6 +313,8 @@ struct Live {
     hosting: Option<Hosting>,
     /// `input` waiting for its state, in the order it came.
     queued: Vec<Queued>,
+    /// The task the pane is linked to now.
+    task: Option<TaskId>,
     exit_code: Option<i64>,
     fanout: Fanout,
 }
@@ -384,6 +395,7 @@ impl Pane {
                 tracker: StateTracker::new(rules),
                 hosting,
                 queued: Vec::new(),
+                task: launch.task,
                 exit_code: None,
                 fanout: Fanout::default(),
             }),
@@ -414,6 +426,7 @@ impl Pane {
                 }
             })
             .map_err(|err| SpawnError::Pty(err.into()))?;
+        let (closed, pty_closed) = channel::<()>();
         let reading = Arc::clone(&pane);
         thread("read")
             .spawn(move || {
@@ -424,11 +437,30 @@ impl Pane {
                         Ok(n) => reading.output(&buf[..n]),
                     }
                 }
+                let _ = closed.send(());
+            })
+            .map_err(|err| SpawnError::Pty(err.into()))?;
+        let waiting = Arc::clone(&pane);
+        thread("wait")
+            .spawn(move || {
                 let code = child
                     .wait()
                     .ok()
                     .map(|status| i64::from(status.exit_code()));
-                reading.exit(code, on_exit);
+                // A reader that ended without saying so is done reading too.
+                let held = matches!(
+                    pty_closed.recv_timeout(EXIT_GRACE),
+                    Err(RecvTimeoutError::Timeout)
+                );
+                waiting.exit(code, on_exit);
+                if held && let Some(pid) = waiting.pid {
+                    tracing::info!(
+                        "pane {}'s process exited but its PTY is still open: hanging up on \
+                         its session",
+                        waiting.id
+                    );
+                    hang_up(pid);
+                }
             })
             .map_err(|err| SpawnError::Pty(err.into()))?;
         Ok(pane)
@@ -542,9 +574,9 @@ impl Pane {
             .into_iter()
             .partition(|queued| queued.when.accepts(state));
         live.queued = waiting;
-        let bracketed = bracketed_paste(&live.term);
+        let (bracketed, linked) = (bracketed_paste(&live.term), live.task);
         for queued in ready {
-            self.typed(queued, bracketed);
+            self.typed(queued, bracketed, linked);
         }
         observed.state = Some((state, live.title.clone()));
         observed
@@ -576,32 +608,58 @@ impl Pane {
         self.enqueue(Queued {
             when,
             bytes: bytes.to_vec(),
+            task: None,
             submit,
             typed: None,
             claim: None,
         })
     }
 
-    /// Submits `text` as a message followed by Enter once the agent waits at its prompt
-    /// ([`When::Prompt`]), if `claim`, asked right before, still says yes. The receiver is told
-    /// when it is typed; it errs if the process exits first, the shell pane's hosted agent
-    /// leaves first, or `claim` says no. `None` when there is no agent to take it: the process
-    /// has exited, or a shell pane hosts none.
-    pub fn deliver(&self, text: &[u8], claim: Claim) -> Option<oneshot::Receiver<()>> {
-        let hosts_none = (self.live().hosting.as_ref()).is_some_and(|h| h.hosted.is_none());
-        if hosts_none {
-            return None;
+    /// Submits `text`, about `task`, as a message followed by Enter once the agent waits at
+    /// its prompt ([`When::Prompt`]), if the pane is still linked to `task` then and `claim`,
+    /// asked right before, still says yes. The receiver is told when it is typed; it errs if
+    /// the process exits first, the shell pane's hosted agent leaves first, the pane is linked
+    /// elsewhere first ([`Pane::link`]), or `claim` says no. `None` when the pane can't take
+    /// it: the process has exited, a shell pane hosts no agent, or the pane isn't linked to
+    /// `task`.
+    pub fn deliver(
+        &self,
+        text: &[u8],
+        task: TaskId,
+        claim: Claim,
+    ) -> Option<oneshot::Receiver<()>> {
+        {
+            let live = self.live();
+            let hosts_none = (live.hosting.as_ref()).is_some_and(|h| h.hosted.is_none());
+            if hosts_none || live.task != Some(task) {
+                return None;
+            }
         }
         let (typed, delivered) = oneshot::channel();
         self.enqueue(Queued {
             when: When::Prompt,
             bytes: text.to_vec(),
+            task: Some(task),
             submit: true,
             typed: Some(typed),
             claim: Some(claim),
         })
         .ok()?;
         Some(delivered)
+    }
+
+    /// Records that the pane is linked to `task` now (`None`: unlinked), and drops what was
+    /// queued for any other task, untyped (spec §9).
+    pub fn link(&self, task: Option<TaskId>) {
+        let mut live = self.live();
+        live.task = task;
+        live.queued
+            .retain(|queued| queued.task.is_none_or(|about| Some(about) == task));
+    }
+
+    /// The task the pane is linked to now.
+    pub fn linked(&self) -> Option<TaskId> {
+        self.live().task
     }
 
     fn enqueue(&self, queued: Queued) -> Result<bool, Exited> {
@@ -614,12 +672,17 @@ impl Pane {
             live.queued.push(queued);
             return Ok(true);
         }
-        self.typed(queued, bracketed_paste(&live.term));
+        let (bracketed, linked) = (bracketed_paste(&live.term), live.task);
+        self.typed(queued, bracketed, linked);
         Ok(false)
     }
 
-    /// Types `queued`; `bracketed` is whether the program has bracketed paste on right now.
-    fn typed(&self, queued: Queued, bracketed: bool) {
+    /// Types `queued`, unless it is about a task other than `linked`, the pane's link now;
+    /// `bracketed` is whether the program has bracketed paste on right now.
+    fn typed(&self, queued: Queued, bracketed: bool, linked: Option<TaskId>) {
+        if queued.task.is_some_and(|about| Some(about) != linked) {
+            return;
+        }
         if queued.claim.is_some_and(|claim| !claim()) {
             return;
         }
@@ -761,6 +824,36 @@ impl Pane {
     }
 }
 
+/// How long the waiter gives the reader to reach the end of the output once the process has
+/// exited, before it records the exit and hangs up on what still holds the PTY (spec §7).
+const EXIT_GRACE: Duration = Duration::from_secs(1);
+
+/// Sends SIGHUP to every process left in the session `leader` started, and to its process
+/// group: what an exited pane's process left running (a background job, an MCP server), so
+/// the PTY they hold closes. A process that started a session of its own is out of reach.
+fn hang_up(leader: i32) {
+    let _ = killpg(Pid::from_raw(leader), Signal::SIGHUP);
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return;
+    };
+    for pid in entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<i32>().ok())
+    {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        if session_of(&stat) == Some(leader) {
+            let _ = kill(Pid::from_raw(pid), Signal::SIGHUP);
+        }
+    }
+}
+
+/// The session id in a `/proc/<pid>/stat` line: the fourth field after the command, which is
+/// in parentheses and may hold spaces and parentheses itself.
+fn session_of(stat: &str) -> Option<i32> {
+    let (_, rest) = stat.rsplit_once(')')?;
+    rest.split_whitespace().nth(3)?.parse().ok()
+}
+
 fn pty_size(size: Size) -> PtySize {
     PtySize {
         rows: size.rows,
@@ -811,6 +904,22 @@ mod tests {
         #[test]
         fn should_type_the_text_as_is_when_bracketed_paste_is_off() {
             assert_eq!(message(b"a\x1bb\n", false), b"a\x1bb\n");
+        }
+    }
+
+    mod session_of {
+        use super::*;
+
+        #[test]
+        fn should_read_the_session_after_a_command_holding_parentheses_and_spaces() {
+            let stat = "4242 (a (b) c) S 1 4240 4239 34817 4240 4194560 0 0";
+            assert_eq!(session_of(stat), Some(4239));
+        }
+
+        #[test]
+        fn should_be_none_for_a_line_it_cannot_read() {
+            assert_eq!(session_of(""), None);
+            assert_eq!(session_of("4242 (sh) S 1"), None);
         }
     }
 

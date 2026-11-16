@@ -7,11 +7,15 @@
 //!
 //! A shell pane hosting an agent (spec §3, §7) is an agent pane for all of that, and its
 //! header says "in shell" (Penpot "Screens" → "Pane · hosted agent").
+//!
+//! An agent pane whose agent exited names no agent (Penpot "Screens" → "Pane · agent
+//! exited"): its title is "Agent exited", Link to task leaves its menu, and its header offers
+//! Restart agent and Open shell instead, which the workspace carries out.
 
 use agentdeck_client::types::Pane;
 use agentdeck_client::ws;
 use agentdeck_core::ws::ServerMessage;
-use agentdeck_core::{Agent, PaneId, PaneKind, SplitDirection};
+use agentdeck_core::{Agent, AgentState, PaneId, PaneKind, SplitDirection};
 use brrritscold_core_gpui::{
     ActiveTheme as _, Button, ButtonSize, ButtonVariant, DropdownMenu, DropdownMenuContent,
     DropdownMenuItem, DropdownMenuItemVariant, DropdownMenuSeparator, IconName, Separator,
@@ -19,21 +23,33 @@ use brrritscold_core_gpui::{
 use brrritscold_core_gpui_tokens::primitive::opacity;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
+    Subscription, Window, div,
 };
 
 use crate::connection::{Connection, DaemonEvent};
 use crate::pane_header::PaneHeader;
 use crate::terminal::{self, TerminalEvent, TerminalView};
 
-/// The agent running in `pane`: an agent pane's, or the one a shell pane hosts (spec §3).
+/// The agent running in `pane`: an agent pane's while its process runs, or the one a shell
+/// pane hosts (spec §3).
 pub fn running_agent(pane: &Pane) -> Option<Agent> {
     match pane.kind {
-        PaneKind::Agent => pane.agent,
+        PaneKind::Agent => pane.agent.filter(|_| pane.state != AgentState::Exited),
         PaneKind::Shell => pane.hosted_agent,
     }
 }
+
+/// The agent an agent pane ran, once its process has exited: what Restart agent runs again.
+pub fn exited_agent(pane: &Pane) -> Option<Agent> {
+    (pane.kind == PaneKind::Agent && pane.state == AgentState::Exited)
+        .then_some(pane.agent)
+        .flatten()
+}
+
+/// An exited agent pane's title, whatever the agent last set (spec §11).
+pub const AGENT_EXITED: &str = "Agent exited";
 
 /// Whether the header says "in shell": a shell pane hosting an agent, whose shell comes back
 /// once the agent exits.
@@ -41,9 +57,13 @@ pub fn in_shell(pane: &Pane) -> bool {
     pane.kind == PaneKind::Shell && pane.hosted_agent.is_some()
 }
 
-/// The title a pane's header shows: the first that isn't empty of the terminal's live title
-/// and the one read over REST; else the agent, else the program run.
+/// The title a pane's header shows: "Agent exited" for an agent pane whose agent exited; else
+/// the first that isn't empty of the terminal's live title and the one read over REST; else
+/// the agent, else the program run.
 pub fn shown_title(live: Option<&str>, pane: &Pane) -> SharedString {
+    if exited_agent(pane).is_some() {
+        return AGENT_EXITED.into();
+    }
     if let Some(title) = [live, Some(pane.title.as_str())]
         .into_iter()
         .flatten()
@@ -70,6 +90,22 @@ pub enum PaneRequest {
     Close,
     /// Link the agent in it to a task, or unlink it: agent panes only.
     LinkTask,
+    /// Run its agent again: exited agent panes only.
+    RestartAgent,
+    /// Turn it into a shell: exited agent panes only.
+    OpenShell,
+}
+
+/// The buttons an exited agent pane's header offers, in order: Restart agent, then Open shell
+/// (Penpot PaneHeader `Actions`). None for any other pane.
+pub fn header_actions(pane: &Pane) -> Vec<(&'static str, PaneRequest)> {
+    if exited_agent(pane).is_none() {
+        return Vec::new();
+    }
+    vec![
+        ("Restart agent", PaneRequest::RestartAgent),
+        ("Open shell", PaneRequest::OpenShell),
+    ]
 }
 
 /// The menu items before the separator and Close pane for `pane`: the splits, then, for an
@@ -211,6 +247,25 @@ impl PaneView {
             )
     }
 
+    /// The header's `Actions` part: an outline xs button per [`header_actions`]; tests find
+    /// each by its label.
+    fn actions(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        (header_actions(&self.pane).into_iter())
+            .map(|(label, request)| {
+                div()
+                    .debug_selector(move || label.into())
+                    .child(
+                        Button::new(label)
+                            .variant(ButtonVariant::Outline)
+                            .size(ButtonSize::Xs)
+                            .label(label)
+                            .on_click(cx.listener(move |pane, _, _, cx| pane.request(request, cx))),
+                    )
+                    .into_any_element()
+            })
+            .collect()
+    }
+
     /// The linked task's title.
     #[cfg(test)]
     pub fn task(&self) -> Option<&SharedString> {
@@ -223,7 +278,7 @@ impl PaneView {
                 self.pane.state = *state;
             }
             DaemonEvent::Message(ServerMessage::Exit { pane, code }) if *pane == self.id() => {
-                self.pane.state = agentdeck_core::AgentState::Exited;
+                self.pane.state = AgentState::Exited;
                 self.pane.exit_code = *code;
             }
             _ => return,
@@ -247,6 +302,7 @@ impl Render for PaneView {
             .state(self.pane.state, self.pane.exit_code)
             .in_shell(in_shell(&self.pane))
             .task(self.task.clone())
+            .actions(self.actions(cx))
             .menu(self.menu(cx));
         // Penpot "Pane A": `background`, a `border` stroke inside, `radius-md`, clipped;
         // Header / HeaderRule / Terminal.
@@ -303,7 +359,7 @@ pub(crate) mod fixtures {
 
 #[cfg(test)]
 mod tests {
-    use agentdeck_core::Agent;
+    use agentdeck_core::{Agent, AgentState};
 
     use super::fixtures::shell_pane;
     use super::*;
@@ -338,6 +394,47 @@ mod tests {
         fn should_offer_only_the_splits_for_a_shell() {
             assert_eq!(labels(&shell_pane(1, id(1))), ["Split right", "Split down"]);
         }
+
+        #[test]
+        fn should_offer_only_the_splits_once_the_agent_exited() {
+            assert_eq!(
+                labels(&exited(Agent::Claude)),
+                ["Split right", "Split down"]
+            );
+        }
+    }
+
+    fn exited(agent: Agent) -> Pane {
+        Pane {
+            state: AgentState::Exited,
+            exit_code: Some(0),
+            ..agent_pane(agent)
+        }
+    }
+
+    mod header_actions {
+        use super::*;
+
+        #[test]
+        fn should_offer_restart_agent_then_open_shell_once_the_agent_exited() {
+            assert_eq!(
+                header_actions(&exited(Agent::Codex)),
+                [
+                    ("Restart agent", PaneRequest::RestartAgent),
+                    ("Open shell", PaneRequest::OpenShell)
+                ]
+            );
+        }
+
+        #[test]
+        fn should_offer_none_while_the_agent_runs_or_for_a_shell() {
+            assert!(header_actions(&agent_pane(Agent::Claude)).is_empty());
+            let shell = Pane {
+                state: AgentState::Exited,
+                ..shell_pane(1, id(1))
+            };
+            assert!(header_actions(&shell).is_empty());
+        }
     }
 
     fn agent_pane(agent: Agent) -> Pane {
@@ -371,6 +468,13 @@ mod tests {
         #[test]
         fn should_be_none_for_a_shell_hosting_none() {
             assert_eq!(running_agent(&shell_pane(1, id(1))), None);
+        }
+
+        #[test]
+        fn should_be_none_once_an_agent_panes_process_exited() {
+            assert_eq!(running_agent(&exited(Agent::Claude)), None);
+            assert_eq!(exited_agent(&exited(Agent::Claude)), Some(Agent::Claude));
+            assert_eq!(exited_agent(&agent_pane(Agent::Claude)), None);
         }
     }
 
@@ -418,6 +522,20 @@ mod tests {
             };
 
             assert_eq!(shown_title(None, &pane), "codex");
+        }
+
+        #[test]
+        fn should_say_agent_exited_for_an_exited_agent_whatever_it_last_set() {
+            let pane = Pane {
+                title: "✳ Fix the login bug".into(),
+                ..exited(Agent::Claude)
+            };
+
+            assert_eq!(
+                shown_title(Some("✳ Fix the login bug"), &pane),
+                "Agent exited"
+            );
+            assert_eq!(shown_title(None, &exited(Agent::Codex)), "Agent exited");
         }
 
         #[test]

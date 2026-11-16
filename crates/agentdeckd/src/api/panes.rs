@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use agentdeck_core::ws::Entity;
-use agentdeck_core::{Agent, PaneId, PaneKind};
+use agentdeck_core::{Agent, AgentState, PaneId, PaneKind};
 use dropshot::{
     Body, ClientErrorStatusCode, FreeformBody, HttpError, HttpResponseAccepted,
     HttpResponseCreated, HttpResponseDeleted, HttpResponseOk, Path, Query, RequestContext,
@@ -14,7 +14,10 @@ use dropshot::{
 use super::{ApiContext, Authorized, IdPath, client_error};
 use crate::agents::{self, codex, delivery};
 use crate::db;
-use crate::model::{InputAccepted, InputWhen, NewPane, Pane, PaneInput, PanePatch, TailQuery};
+use crate::model::{
+    Comment, InputAccepted, InputWhen, NewPane, Pane, PaneInput, PanePatch, PaneRespawn, PaneRun,
+    TailQuery,
+};
 use crate::terminal::env::default_shell;
 use crate::terminal::pane::{Launch, SpawnError, When};
 use crate::terminal::tail::TAIL_CAPACITY;
@@ -109,10 +112,12 @@ fn with_live_status(context: &ApiContext, mut pane: Pane) -> Pane {
 /// Spawns a pane in a tab and starts its process (spec §6). The caller places the pane in
 /// the tab's layout.
 ///
-/// `claude` and `codex` panes start with a launch prompt: the linked task's title and body,
-/// then every instruction for the pane's workspace and the task's comments no agent has had
-/// yet, which are then marked delivered to the pane. Claude Code starts on a session id agentdeck chooses; a Codex pane's is
-/// found once Codex writes its session file, and `session_id` is set then.
+/// `claude` and `codex` panes get agentdeck's MCP server (`agentdeck mcp`) and start with a
+/// launch prompt: the linked task's title, its `Task id:` and how to report back on it with
+/// the MCP tools, and its body; then every instruction for the pane's workspace and the task's
+/// comments no agent has had yet, which are then marked delivered to the pane. Claude Code
+/// starts on a session id agentdeck chooses; a Codex pane's is found once Codex writes its
+/// session file, and `session_id` is set then.
 #[endpoint { method = POST, path = "/v1/panes" }]
 pub(crate) async fn pane_create(
     rqctx: RequestContext<ApiContext>,
@@ -149,16 +154,7 @@ pub(crate) async fn pane_create(
         .await?;
 
     let launch = Launch::pane(pane.id, workspace, pane.task_id, pane.argv.clone(), cwd);
-    let codex_sessions = (pane.agent == Some(Agent::Codex))
-        .then(|| codex::sessions_dir(&launch.env))
-        .flatten()
-        .map(|dir| {
-            let before: HashSet<PathBuf> = codex::session_files(&dir)
-                .into_iter()
-                .map(|(path, _)| path)
-                .collect();
-            (dir, before)
-        });
+    let codex_sessions = codex_sessions(pane.agent, &launch);
     let spawned = match pane.agent {
         Some(agent) => context.terminals.spawn(pane.id, launch, agent.as_str()),
         None => context.terminals.spawn_shell(pane.id, launch),
@@ -168,14 +164,7 @@ pub(crate) async fn pane_create(
         tracing::warn!("pane {id} couldn't start: {}", err.detail());
         delivery::launch_failed(&context.claims, &prompted);
         context.db.call(move |c| db::panes::delete(c, id)).await?;
-        return Err(match err {
-            SpawnError::NotOnPath { .. } | SpawnError::Command(_) => client_error(
-                ClientErrorStatusCode::BAD_REQUEST,
-                "invalid_argv",
-                err.to_string(),
-            ),
-            SpawnError::Pty(_) => HttpError::for_internal_error(err.to_string()),
-        });
+        return Err(spawn_error(err));
     }
     context.events.changed(Entity::Pane, pane.id);
     let delivered = prompted.iter().map(|comment| comment.id).collect();
@@ -187,17 +176,49 @@ pub(crate) async fn pane_create(
         pane.id,
     )
     .await;
-    if let Some((dir, before)) = codex_sessions {
+    watch_codex(context, pane.id, codex_sessions);
+    Ok(HttpResponseCreated(with_live_status(context, pane)))
+}
+
+/// For a Codex launch, its sessions dir and the session files already there, to find the one
+/// it writes ([`watch_codex`]).
+fn codex_sessions(agent: Option<Agent>, launch: &Launch) -> Option<(PathBuf, HashSet<PathBuf>)> {
+    (agent == Some(Agent::Codex))
+        .then(|| codex::sessions_dir(&launch.env))
+        .flatten()
+        .map(|dir| {
+            let before = codex::session_files(&dir)
+                .into_iter()
+                .map(|(path, _)| path)
+                .collect();
+            (dir, before)
+        })
+}
+
+/// Finds the session a Codex pane just launched writes, and saves it (spec §6).
+fn watch_codex(context: &ApiContext, pane: PaneId, sessions: Option<(PathBuf, HashSet<PathBuf>)>) {
+    if let Some((dir, before)) = sessions {
         codex::watch(
             context.db.clone(),
             context.terminals.clone(),
             context.events.clone(),
-            pane.id,
+            pane,
             dir,
             before,
         );
     }
-    Ok(HttpResponseCreated(with_live_status(context, pane)))
+}
+
+/// The 400 a pane's program that can't start answers with, or a 500 for a PTY failure.
+fn spawn_error(err: SpawnError) -> HttpError {
+    match err {
+        SpawnError::NotOnPath { .. } | SpawnError::Command(_) => client_error(
+            ClientErrorStatusCode::BAD_REQUEST,
+            "invalid_argv",
+            err.to_string(),
+        ),
+        SpawnError::Pty(_) => HttpError::for_internal_error(err.to_string()),
+    }
 }
 
 /// One pane, with its live title and state.
@@ -214,11 +235,11 @@ pub(crate) async fn pane_get(
 }
 
 /// Links the pane to a task in its workspace that isn't done, or unlinks it (`task_id`
-/// null). The task's comments no agent has had yet are then typed into the pane once it is
-/// idle, as a new comment would be (spec §9).
-// Linking to another task also tells the pane's agent the task itself, ahead of those
-// comments (spec §9). Not in the doc comment above, which is the endpoint's description in
-// openapi.json: changing it means an API_VERSION bump (#232).
+/// null). Linking a live agent pane to another task first tells its agent the task itself
+/// (its title, id, how to report back on it, and body), then types in the task's comments no
+/// agent has had yet, each once the agent is idle or done, as a new comment would be (spec
+/// §9). Whatever was still waiting to be typed for the task it leaves is dropped from the
+/// pane, and a comment held for it moves on to that task's next live agent pane.
 #[endpoint { method = PATCH, path = "/v1/panes/{id}" }]
 pub(crate) async fn pane_update(
     rqctx: RequestContext<ApiContext>,
@@ -233,6 +254,7 @@ pub(crate) async fn pane_update(
         .db
         .call(move |c| db::panes::set_task(c, id, task))
         .await?;
+    context.terminals.link(id, task);
     context.events.changed(Entity::Pane, id);
     if before != task {
         for linked in [before, task].into_iter().flatten() {
@@ -250,6 +272,129 @@ pub(crate) async fn pane_update(
             .await;
         }
     }
+    Ok(HttpResponseOk(with_live_status(context, pane)))
+}
+
+/// What a respawn runs in a pane, decided from its row.
+enum Respawn {
+    /// Its agent's resume command on its session, or an `other` agent's argv: the row's
+    /// `argv` and `session_id` stay.
+    Again(Agent, Vec<String>),
+    /// Claude Code or Codex with no known session: a fresh launch, as a new pane's.
+    Fresh(Agent),
+    /// A shell, which the pane becomes.
+    Shell,
+}
+
+/// Starts an exited pane again in place, keeping its id, its place in the tab's layout, its
+/// `cwd` and its task link (spec §4). `run: "agent"`, for an agent pane only
+/// (`unsupported_kind`), runs its agent again: claude and codex resume their session when it
+/// is known, else start fresh with a new launch prompt; an `other` agent runs its argv again.
+/// `run: "shell"` turns the pane into a shell pane running `$SHELL`, with hosting on. The
+/// state starts over. `running` (409) while its process hasn't exited; `invalid_dir` when its
+/// `cwd` is gone; `invalid_argv` when the program can't start, and the pane stays exited.
+#[endpoint { method = POST, path = "/v1/panes/{id}/respawn" }]
+pub(crate) async fn pane_respawn(
+    rqctx: RequestContext<ApiContext>,
+    _auth: Authorized,
+    path: Path<IdPath<PaneId>>,
+    body: TypedBody<PaneRespawn>,
+) -> Result<HttpResponseOk<Pane>, HttpError> {
+    let context = rqctx.context();
+    let id = path.into_inner().id;
+    let run = body.into_inner().run;
+    let row = context.db.call(move |c| db::panes::get(c, id)).await?;
+    let state = context
+        .terminals
+        .get(id)
+        .map_or(row.state, |live| live.status().state);
+    if state != AgentState::Exited {
+        return Err(client_error(
+            ClientErrorStatusCode::CONFLICT,
+            "running",
+            format!("pane {id}'s process is still running"),
+        ));
+    }
+    let cwd = check_cwd(&row.cwd)?;
+    let respawn = match (run, row.kind, row.agent) {
+        (PaneRun::Shell, ..) => Respawn::Shell,
+        (PaneRun::Agent, PaneKind::Agent, Some(agent)) => {
+            match agents::resume_argv(Some(agent), row.session_id.as_deref(), &agents::cli()) {
+                Some(argv) => Respawn::Again(agent, argv),
+                None if agent == Agent::Other => Respawn::Again(agent, row.argv.clone()),
+                None => Respawn::Fresh(agent),
+            }
+        }
+        (PaneRun::Agent, ..) => {
+            return Err(client_error(
+                ClientErrorStatusCode::BAD_REQUEST,
+                "unsupported_kind",
+                "only an agent pane runs its agent again".into(),
+            ));
+        }
+    };
+    let claims = context.claims.clone();
+    let fresh = matches!(respawn, Respawn::Fresh(_));
+    let (pane, workspace, agent, argv, prompted) = context
+        .db
+        .call(move |c| {
+            let workspace = db::panes::workspace_of(c, id)?;
+            let (agent, argv, prompted): (_, _, Vec<Comment>) = match respawn {
+                Respawn::Shell => {
+                    let shell = vec![default_shell()];
+                    db::panes::become_shell(c, id, &shell)?;
+                    db::panes::respawned(c, id, None)?;
+                    (None, shell, Vec::new())
+                }
+                Respawn::Fresh(agent) => {
+                    let row = db::panes::get(c, id)?;
+                    let task = row
+                        .task_id
+                        .map(|task| db::tasks::get(c, task))
+                        .transpose()?;
+                    let instructions = db::instructions::list(c, workspace)?;
+                    let comments = match row.task_id {
+                        Some(task) => delivery::for_launch_prompt(c, &claims, task)?,
+                        None => Vec::new(),
+                    };
+                    let prompt = agents::launch_prompt(task.as_ref(), &instructions, &comments);
+                    let launch = agents::launch(agent, prompt, &agents::cli())
+                        .expect("claude and codex launch");
+                    let started = (launch.argv.as_slice(), launch.session_id.as_deref());
+                    db::panes::respawned(c, id, Some(started))?;
+                    (Some(agent), launch.argv, comments)
+                }
+                Respawn::Again(agent, argv) => {
+                    db::panes::respawned(c, id, None)?;
+                    (Some(agent), argv, Vec::new())
+                }
+            };
+            Ok((db::panes::get(c, id)?, workspace, agent, argv, prompted))
+        })
+        .await?;
+
+    let launch = Launch::pane(id, workspace, pane.task_id, argv, cwd);
+    let codex_sessions = codex_sessions(agent.filter(|_| fresh), &launch);
+    let spawned = match agent {
+        Some(agent) => context.terminals.spawn(id, launch, agent.as_str()),
+        None => context.terminals.spawn_shell(id, launch),
+    };
+    if let Err(err) = spawned {
+        tracing::warn!("pane {id} couldn't start again: {}", err.detail());
+        delivery::launch_failed(&context.claims, &prompted);
+        let title = pane.title.clone();
+        context
+            .db
+            .call(move |c| db::panes::set_exited(c, id, None, &title))
+            .await?;
+        context.events.changed(Entity::Pane, id);
+        return Err(spawn_error(err));
+    }
+    tracing::info!("respawned pane {id}");
+    context.events.changed(Entity::Pane, id);
+    let delivered = prompted.iter().map(|comment| comment.id).collect();
+    delivery::mark_delivered(&context.db, &context.claims, &context.events, delivered, id).await;
+    watch_codex(context, id, codex_sessions);
     Ok(HttpResponseOk(with_live_status(context, pane)))
 }
 

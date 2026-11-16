@@ -9,7 +9,7 @@ use agentdeck_client::instructions;
 use agentdeck_client::panes::{self, pane_if_any};
 use agentdeck_client::types::{
     Comment, DeviceSignIn, DirtyReport, GithubAuthInfo, GithubClientIdBody, GithubTokenBody,
-    InstructionPatch, NewComment, NewInstruction, NewTask, NewWorkspace, Pane, PrClose,
+    InstructionPatch, NewComment, NewInstruction, NewTask, NewWorkspace, Pane, PaneRun, PrClose,
     PrCloseResult, Settings, SettingsPatch, Tab, TaskPatch,
 };
 use agentdeck_client::{ApiError, Client};
@@ -52,6 +52,10 @@ pub trait Api: Send + Sync {
     /// Links `pane` to `task`, or unlinks it with `None` (spec §4). A refusal is an
     /// [`ApiError`]: `unknown_task`, or `invalid_task` for a task in another workspace or done.
     fn link_task(&self, pane: PaneId, task: Option<TaskId>, cx: &App) -> Task<anyhow::Result<()>>;
+
+    /// Starts exited `pane` again in place, running `run`: its agent again, or a shell it
+    /// becomes (spec §4). A refusal is an [`ApiError`], such as `running`.
+    fn respawn_pane(&self, pane: PaneId, run: PaneRun, cx: &App) -> Task<anyhow::Result<()>>;
 
     /// Makes a workspace as `request` says; its id. A refusal is an [`ApiError`] whose code
     /// names the field: `invalid_name` or `invalid_dir`.
@@ -241,6 +245,14 @@ impl Api for Daemon {
         let client = self.client.clone();
         runtime::spawn(cx, async move {
             panes::link_task(&client, pane, task).await?;
+            Ok(())
+        })
+    }
+
+    fn respawn_pane(&self, pane: PaneId, run: PaneRun, cx: &App) -> Task<anyhow::Result<()>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            panes::respawn(&client, pane, run).await?;
             Ok(())
         })
     }
@@ -644,7 +656,7 @@ pub(crate) mod fake {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    use agentdeck_core::{Layout, PaneId};
+    use agentdeck_core::{AgentState, Layout, PaneId, PaneKind};
 
     use super::*;
 
@@ -723,6 +735,8 @@ pub(crate) mod fake {
         pub closed: Mutex<Vec<PaneId>>,
         /// The links asked for: the pane and its task, or `None` to unlink it, in order.
         pub linked: Mutex<Vec<(PaneId, Option<TaskId>)>>,
+        /// The respawns asked for: the pane and what it runs, in order.
+        pub respawned: Mutex<Vec<(PaneId, PaneRun)>>,
         /// The workspaces archived, in order.
         pub archived: Mutex<Vec<WorkspaceId>>,
         /// The workspaces unarchived, in order.
@@ -1016,6 +1030,24 @@ pub(crate) mod fake {
                 held.task_id = task;
             }
             self.linked.lock().unwrap().push((pane, task));
+            Task::ready(Ok(()))
+        }
+
+        fn respawn_pane(&self, pane: PaneId, run: PaneRun, _cx: &App) -> Task<anyhow::Result<()>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            if let Some(held) = self.panes.lock().unwrap().iter_mut().find(|p| p.id == pane) {
+                held.state = AgentState::Unknown;
+                held.exit_code = None;
+                if run == PaneRun::Shell {
+                    held.kind = PaneKind::Shell;
+                    held.agent = None;
+                    held.session_id = None;
+                    held.argv = vec!["/bin/sh".into()];
+                }
+            }
+            self.respawned.lock().unwrap().push((pane, run));
             Task::ready(Ok(()))
         }
 

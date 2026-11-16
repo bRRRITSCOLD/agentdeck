@@ -277,6 +277,31 @@ mod get_v1_panes_id {
     }
 
     #[tokio::test]
+    async fn should_record_the_exit_though_a_child_left_running_holds_the_pty_200() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        // `set -m` puts the job in a process group of its own, which the hangup the kernel
+        // sends as the shell exits doesn't reach, so it keeps the PTY open.
+        let pane = place
+            .spawn(
+                &daemon.client,
+                &sh("set -m; (trap 'echo hup > hup; exit' HUP; \
+                     while :; do sleep 0.1; done) & echo pid:$!; exit 4"),
+            )
+            .await;
+        let child = pid(&printed(&daemon.client, pane.id, "pid:").await);
+
+        let exited = in_state(&daemon.client, pane.id, AgentState::Exited).await;
+
+        assert_eq!(exited.exit_code, Some(4));
+        let hup = std::path::Path::new(&place.workspace.dir).join("hup");
+        crate::support::terminal::eventually("the child to get SIGHUP", || async {
+            (hup.exists() && !alive(child)).then_some(())
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn should_answer_404_for_an_unknown_pane_404() {
         let daemon = TestDaemon::start().await;
 

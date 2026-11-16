@@ -15,6 +15,11 @@
 //! An agent pane linked to a task after it started, and an agent starting in a shell pane
 //! linked to one, is first told the task itself ([`agents::task_brief`]), ahead of those
 //! comments ([`deliver_on_link`]).
+//!
+//! Everything queued for a pane is about a task, and is typed only while the pane is still
+//! linked to it ([`Pane::link`]). A comment a pane drops untyped (its process exited, its
+//! hosted agent left, it was linked elsewhere) moves on to the task's newest other live agent
+//! pane, or else waits on the task ([`pass_on`]).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -98,12 +103,14 @@ impl Claims {
         true
     }
 
-    /// Lets go of `comment` if `pane` holds it: the pane exited before typing it.
-    fn release(&self, comment: CommentId, pane: PaneId) {
+    /// Lets go of `comment` if `pane` holds it: the pane dropped it untyped. Whether it did.
+    fn release(&self, comment: CommentId, pane: PaneId) -> bool {
         let mut claims = self.lock();
-        if claims.get(&comment) == Some(&Claim::Held(pane)) {
+        let held = claims.get(&comment) == Some(&Claim::Held(pane));
+        if held {
             claims.remove(&comment);
         }
+        held
     }
 
     /// Forgets `comment`: it was marked delivered, or the launch meant to carry it failed.
@@ -164,7 +171,7 @@ pub async fn deliver_to_task_pane(
     });
     if let Some(pane) = live {
         let id = comment.id;
-        hand_off(db, claims, events, &pane, task, move |c| {
+        hand_off(db, claims, terminals, events, &pane, task, move |c| {
             let mut waiting = db::comments::undelivered(c, task)?;
             waiting.retain(|comment| comment.id == id);
             Ok(waiting)
@@ -206,8 +213,9 @@ async fn deliver_task(db: &Db, terminals: &Terminals, task: TaskId, pane: PaneId
             return;
         }
     };
-    // `None`: a shell pane hosting no agent, which gets nothing typed in.
-    let _ = live.deliver(brief.as_bytes(), Box::new(|| true));
+    // `None`: a shell pane hosting no agent, which gets nothing typed in, or a pane linked
+    // elsewhere since.
+    let _ = live.deliver(brief.as_bytes(), task, Box::new(|| true));
 }
 
 /// Hands `task`'s user comments no agent has had yet, oldest first, to `pane`, which was just
@@ -228,7 +236,7 @@ pub async fn deliver_waiting(
     else {
         return;
     };
-    hand_off(db, claims, events, &live, task, move |c| {
+    hand_off(db, claims, terminals, events, &live, task, move |c| {
         let row = db::panes::get(c, pane)?;
         if row.kind != PaneKind::Agent && row.hosted_agent.is_none() {
             return Ok(Vec::new());
@@ -270,11 +278,52 @@ pub async fn deliver_on_hosting(
     }
 }
 
+/// Hands `comment` on `task`, which pane `from` dropped untyped, to the task's newest other
+/// live agent pane, if it has one and the comment is still undelivered (spec §9). With none
+/// it waits on the task, for the next agent linked to it or the next launch prompt.
+async fn pass_on(
+    db: &Db,
+    claims: &Claims,
+    terminals: &Terminals,
+    events: &Events,
+    comment: CommentId,
+    task: TaskId,
+    from: PaneId,
+) {
+    let panes = match db.call(move |c| db::panes::agents_on_task(c, task)).await {
+        Ok(panes) => panes,
+        Err(err) => {
+            tracing::warn!("finding task {task}'s panes to pass comment {comment} on: {err}");
+            return;
+        }
+    };
+    let next = (panes.into_iter()).filter(|id| *id != from).find_map(|id| {
+        terminals
+            .get(id)
+            .filter(|pane| pane.status().state != AgentState::Exited)
+    });
+    let Some(next) = next else {
+        tracing::info!("comment {comment} waits on task {task}: pane {from} dropped it");
+        return;
+    };
+    tracing::info!(
+        "passing comment {comment} from pane {from} on to pane {}",
+        next.id()
+    );
+    hand_off(db, claims, terminals, events, &next, task, move |c| {
+        let mut waiting = db::comments::undelivered(c, task)?;
+        waiting.retain(|waiting| waiting.id == comment);
+        Ok(waiting)
+    })
+    .await;
+}
+
 /// Holds for `pane` each comment `waiting` reads that it wins (see [`Claims::hold`]), in the
 /// same job, then queues them on it.
 async fn hand_off(
     db: &Db,
     claims: &Claims,
+    terminals: &Terminals,
     events: &Events,
     pane: &Pane,
     task: TaskId,
@@ -292,7 +341,7 @@ async fn hand_off(
     match held {
         Ok(held) => {
             for comment in &held {
-                deliver(db, claims, events, pane, comment);
+                deliver(db, claims, terminals, events, pane, comment);
             }
         }
         Err(err) => tracing::warn!("finding task {task}'s comments for pane {id}: {err}"),
@@ -300,21 +349,37 @@ async fn hand_off(
 }
 
 /// Submits `comment` (typed, then Enter) into `pane` once the agent is idle or done, if the
-/// pane still holds it then, and marks it delivered; it stays undelivered if the pane exits
-/// first.
-fn deliver(db: &Db, claims: &Claims, events: &Events, pane: &Pane, comment: &Comment) {
+/// pane still holds it and is still linked to its task then, and marks it delivered. A
+/// comment the pane drops untyped while it holds it moves on ([`pass_on`]).
+fn deliver(
+    db: &Db,
+    claims: &Claims,
+    terminals: &Terminals,
+    events: &Events,
+    pane: &Pane,
+    comment: &Comment,
+) {
     let text = comment.body.trim_end();
-    let (id, pane_id, gives) = (comment.id, pane.id(), claims.clone());
+    let (id, task, pane_id, gives) = (comment.id, comment.task_id, pane.id(), claims.clone());
     let claim = Box::new(move || gives.give(id, pane_id));
-    let Some(typed) = pane.deliver(text.as_bytes(), claim) else {
+    let Some(typed) = pane.deliver(text.as_bytes(), task, claim) else {
         claims.release(id, pane_id);
         return;
     };
-    let (db, claims, events) = (db.clone(), claims.clone(), events.clone());
+    let (db, claims, terminals, events) = (
+        db.clone(),
+        claims.clone(),
+        terminals.clone(),
+        events.clone(),
+    );
     tokio::spawn(async move {
         match typed.await {
             Ok(()) => mark_delivered(&db, &claims, &events, vec![id], pane_id).await,
-            Err(_) => claims.release(id, pane_id),
+            Err(_) => {
+                if claims.release(id, pane_id) {
+                    pass_on(&db, &claims, &terminals, &events, id, task, pane_id).await;
+                }
+            }
         }
     });
 }
@@ -426,7 +491,7 @@ mod tests {
             let (comment, exited, other) = ids();
             assert!(claims.hold(comment, exited, &[exited, other]));
 
-            claims.release(comment, exited);
+            assert!(claims.release(comment, exited));
 
             assert!(claims.hold(comment, other, &[exited, other]));
         }
@@ -438,7 +503,7 @@ mod tests {
             assert!(claims.hold(comment, older, &[newer, older]));
             assert!(claims.hold(comment, newer, &[newer, older]));
 
-            claims.release(comment, older);
+            assert!(!claims.release(comment, older));
 
             assert!(claims.give(comment, newer));
         }

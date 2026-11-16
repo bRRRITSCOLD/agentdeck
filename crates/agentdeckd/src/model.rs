@@ -550,6 +550,25 @@ fn nullable_task_id(generator: &mut schemars::r#gen::SchemaGenerator) -> schemar
     generator.subschema_for::<Option<TaskId>>()
 }
 
+/// What `POST /v1/panes/{id}/respawn` runs in an exited pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneRun {
+    /// The pane's agent again: claude and codex resume their session when it is known, else
+    /// start fresh with a new launch prompt; an `other` agent runs its argv again. Agent panes
+    /// only.
+    Agent,
+    /// A shell, which turns the pane into a shell pane.
+    Shell,
+}
+
+/// `POST /v1/panes/{id}/respawn`.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct PaneRespawn {
+    /// What to run.
+    pub run: PaneRun,
+}
+
 /// When `POST /v1/panes/{id}/input` reaches the terminal.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

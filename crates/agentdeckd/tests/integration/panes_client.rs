@@ -3,7 +3,7 @@
 
 use agentdeck_client::Client;
 use agentdeck_client::panes::{
-    PaneAt, PaneOpError, close_pane, link_task, new_shell_tab, pane_if_any, split_pane,
+    PaneAt, PaneOpError, close_pane, link_task, new_shell_tab, pane_if_any, respawn, split_pane,
 };
 use agentdeck_client::types::{NewWorkspace, Tab, Workspace};
 use agentdeck_core::{Layout, LayoutError, PaneId, PaneKind, Ratio, SplitDirection, TabId};
@@ -299,5 +299,54 @@ mod link_task {
             .expect_err("an unknown task");
 
         assert_eq!(err.code.as_deref(), Some("unknown_task"));
+    }
+}
+
+mod respawn {
+    use agentdeck_client::types::{NewPane, PaneRun};
+    use agentdeck_core::AgentState;
+
+    use super::*;
+    use crate::support::terminal::in_state;
+
+    #[tokio::test]
+    async fn should_start_an_exited_pane_again_as_a_shell() {
+        let daemon = TestDaemon::start().await;
+        let (ws, tab, _) = shell_tab(&daemon.client).await;
+        let done = daemon
+            .client
+            .pane_create()
+            .body(NewPane {
+                tab_id: tab,
+                kind: PaneKind::Shell,
+                agent: None,
+                argv: Some(vec!["true".into()]),
+                cwd: ws.dir.clone(),
+                task_id: None,
+            })
+            .send()
+            .await
+            .expect("spawn a pane")
+            .into_inner();
+        in_state(&daemon.client, done.id, AgentState::Exited).await;
+
+        let again = respawn(&daemon.client, done.id, PaneRun::Shell)
+            .await
+            .expect("respawn");
+
+        assert_eq!((again.id, again.kind), (done.id, PaneKind::Shell));
+        assert_ne!(again.state, AgentState::Exited);
+    }
+
+    #[tokio::test]
+    async fn should_carry_the_daemons_refusal() {
+        let daemon = TestDaemon::start().await;
+        let (_, _, pane) = shell_tab(&daemon.client).await;
+
+        let err = respawn(&daemon.client, pane, PaneRun::Shell)
+            .await
+            .expect_err("a running pane");
+
+        assert_eq!(err.code.as_deref(), Some("running"));
     }
 }

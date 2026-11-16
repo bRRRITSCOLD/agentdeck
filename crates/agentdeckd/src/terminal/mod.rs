@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use agentdeck_core::state::HOSTABLE;
 use agentdeck_core::ws::Entity;
-use agentdeck_core::{Agent, PaneId};
+use agentdeck_core::{Agent, PaneId, TaskId};
 use nix::sys::signal::Signal;
 use tokio::runtime::Handle;
 use tokio::sync::broadcast;
@@ -91,9 +91,9 @@ impl Terminals {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Starts `launch` as pane `id`, whose row the caller has already written, with the
-    /// state rules named `rules` (an agent's name, or `shell` for a resumed agent pane that
-    /// comes back as a shell), for good.
+    /// Starts `launch` as agent pane `id`, whose row the caller has already written, with the
+    /// state rules named `rules` (its agent's name), for good. A live pane `id` that has
+    /// exited is replaced, as respawning it does.
     pub fn spawn(&self, id: PaneId, launch: Launch, rules: &str) -> Result<(), SpawnError> {
         let rules = Rules::Fixed(rules::load(&self.shared.rules_dir, rules));
         self.start(id, launch, rules)
@@ -124,6 +124,22 @@ impl Terminals {
     /// The live pane `id`, exited or not, until it is killed.
     pub fn get(&self, id: PaneId) -> Option<Arc<Pane>> {
         self.panes().get(&id).cloned()
+    }
+
+    /// Tells live pane `id` that it is linked to `task` now (`None`: unlinked), which drops
+    /// what it queued for another task (spec §9).
+    pub fn link(&self, id: PaneId, task: Option<TaskId>) {
+        if let Some(pane) = self.get(id) {
+            pane.link(task);
+        }
+    }
+
+    /// Unlinks every live pane linked to `task`, as deleting it does.
+    pub fn unlink_task(&self, task: TaskId) {
+        let panes: Vec<Arc<Pane>> = self.panes().values().cloned().collect();
+        for pane in panes.iter().filter(|pane| pane.linked() == Some(task)) {
+            pane.link(None);
+        }
     }
 
     /// Kills pane `id` (SIGHUP, then SIGKILL after 3 s) and forgets it. False when no such

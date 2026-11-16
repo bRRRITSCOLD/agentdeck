@@ -95,6 +95,7 @@ pub(crate) async fn task_update(
         .call(move |c| db::tasks::edit(c, id, &patch))
         .await?;
     for pane in edited.unlinked {
+        context.terminals.link(pane, None);
         context.events.changed(Entity::Pane, pane);
     }
     context.events.changed(Entity::Task, edited.task.id);
@@ -109,11 +110,9 @@ pub(crate) async fn task_delete(
     path: Path<IdPath<TaskId>>,
 ) -> Result<HttpResponseDeleted, HttpError> {
     let id = path.into_inner().id;
-    rqctx
-        .context()
-        .db
-        .call(move |c| db::tasks::delete(c, id))
-        .await?;
-    rqctx.context().events.changed(Entity::Task, id);
+    let context = rqctx.context();
+    context.db.call(move |c| db::tasks::delete(c, id)).await?;
+    context.terminals.unlink_task(id);
+    context.events.changed(Entity::Task, id);
     Ok(HttpResponseDeleted())
 }

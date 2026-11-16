@@ -9,7 +9,9 @@
 //! shell from its `NewTab` button or shortcut, and carries out each pane menu's
 //! [`PaneRequest`], or the same request by shortcut on the focused pane. Closing a pane that is
 //! still running asks first. Linking an agent pane to a task goes up to the window as
-//! [`LinkPane`], since the window holds the workspace's tasks. A workspace with no tabs when it opens gets a shell tab.
+//! [`LinkPane`], since the window holds the workspace's tasks. Restart agent and Open shell
+//! start an exited agent pane again in place; its view is made afresh, so it attaches the new
+//! process. A workspace with no tabs when it opens gets a shell tab.
 //!
 //! An archived workspace shows only its top bar over a note saying so: it reads no tabs and
 //! attaches no terminals. The window opens a fresh view when that changes.
@@ -17,7 +19,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use agentdeck_client::types::Tab;
+use agentdeck_client::types::{PaneRun, Tab};
 use agentdeck_client::ws;
 use agentdeck_core::ws::{Entity as Changed, ServerMessage};
 use agentdeck_core::{
@@ -32,9 +34,9 @@ use brrritscold_core_gpui::{
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, Context, Div, Entity, EventEmitter, FocusHandle, Focusable as _,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
-    Subscription, Task, Window, div, relative,
+    AnyElement, App, AppContext as _, Context, Div, Entity, EventEmitter, FocusHandle,
+    Focusable as _, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    Styled as _, Subscription, Task, Window, div, relative,
 };
 
 use crate::api::{Api, PaneAt, Split, WorkspacePanes};
@@ -46,6 +48,7 @@ use crate::keymap::{
 use crate::notice::Notice;
 use crate::pane::{PaneRequest, PaneView};
 use crate::rereads::Rereads;
+use crate::task_sheet::agent_name;
 use crate::top_bar::TopBar;
 
 /// Where the read stands.
@@ -90,6 +93,9 @@ pub struct WorkspaceView {
     requests: HashMap<PaneId, Subscription>,
     /// A pane to focus once a read shows it: the new side of a split.
     focus_next: Option<PaneId>,
+    /// Panes started again whose views the next read makes afresh, so they attach the new
+    /// process.
+    renew: HashSet<PaneId>,
     /// The running pane the close confirmation asks about, while it is open.
     closing: Option<PaneAt>,
     /// Opens and closes the close confirmation.
@@ -142,6 +148,7 @@ impl WorkspaceView {
             panes: HashMap::new(),
             requests: HashMap::new(),
             focus_next: None,
+            renew: HashSet::new(),
             closing: None,
             close_dialog: DialogHandle::new(false),
             closing_now: HashSet::new(),
@@ -240,7 +247,49 @@ impl WorkspaceView {
                     tab,
                 });
             }
+            PaneRequest::RestartAgent => {
+                let Some(agent) = crate::pane::exited_agent(pane) else {
+                    return;
+                };
+                let failure = format!("Couldn't restart {}", agent_name(agent));
+                self.respawn(pane.id, PaneRun::Agent, failure, window, cx);
+            }
+            PaneRequest::OpenShell => {
+                let id = pane.id;
+                self.respawn(
+                    id,
+                    PaneRun::Shell,
+                    "Couldn't open a shell".into(),
+                    window,
+                    cx,
+                );
+            }
         }
+    }
+
+    /// Starts exited `pane` again in place running `run`, then shows it afresh and focuses
+    /// it; a failure toasts `failure` with why.
+    fn respawn(
+        &mut self,
+        pane: PaneId,
+        run: PaneRun,
+        failure: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let respawning = self.api.respawn_pane(pane, run, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let respawned = respawning.await;
+            let _ = this.update_in(cx, |this, window, cx| match respawned {
+                Ok(()) => {
+                    this.renew.insert(pane);
+                    this.focus_next = Some(pane);
+                    this.reread(window, cx);
+                }
+                Err(err) => failed(failure, &err, window, cx),
+            });
+        })
+        .detach();
     }
 
     /// Splits a pane as `split` says, then focuses the new side.
@@ -458,7 +507,13 @@ impl WorkspaceView {
             let task = (pane.task_id)
                 .and_then(|task| self.read.tasks.iter().find(|t| t.id == task))
                 .map(|task| SharedString::from(task.title.clone()));
-            let view = match self.panes.remove(id) {
+            // A pane started again, here or by another client, attaches its new process.
+            let restarted = |view: &Entity<PaneView>, cx: &App| {
+                view.read(cx).pane().state == AgentState::Exited && pane.state != AgentState::Exited
+            };
+            let kept = (self.panes.remove(id))
+                .filter(|view| !self.renew.remove(id) && !restarted(view, cx));
+            let view = match kept {
                 Some(view) => {
                     view.update(cx, |view, cx| view.update(pane, task, cx));
                     view
@@ -477,6 +532,8 @@ impl WorkspaceView {
             panes.insert(*id, view);
         }
         self.panes = panes;
+        // A renewed pane not shown now gets a fresh view whenever it is shown again.
+        self.renew.clear();
         self.requests.retain(|id, _| self.panes.contains_key(id));
         let waiting = self
             .focus_next
@@ -1645,6 +1702,124 @@ mod tests {
                 assert_eq!(harness.closing(cx), None);
                 assert_eq!(harness.shown(cx), [id(7)]);
             }
+        }
+    }
+
+    mod exited_agent {
+        use agentdeck_core::{Agent, PaneKind};
+
+        use super::*;
+
+        fn claude(state: AgentState) -> Pane {
+            Pane {
+                kind: PaneKind::Agent,
+                agent: Some(Agent::Claude),
+                argv: vec!["claude".into()],
+                state,
+                exit_code: (state == AgentState::Exited).then_some(0),
+                ..shell_pane(7, id(1))
+            }
+        }
+
+        fn open(pane: Pane, cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
+            Harness::open(vec![tab(1, id(1), 0, Some(id(7)))], vec![pane], cx)
+        }
+
+        fn offers_both(harness: &Harness, cx: &mut VisualTestContext) -> (bool, bool) {
+            harness.draw(cx);
+            (
+                cx.debug_bounds("Restart agent").is_some(),
+                cx.debug_bounds("Open shell").is_some(),
+            )
+        }
+
+        #[gpui::test]
+        fn should_offer_restart_agent_and_open_shell_once_the_agent_exits(cx: &mut TestAppContext) {
+            let (harness, cx) = open(claude(AgentState::Idle), cx);
+            assert_eq!(offers_both(&harness, cx), (false, false));
+
+            harness.deliver(
+                ServerMessage::Exit {
+                    pane: id(7),
+                    code: Some(0),
+                },
+                cx,
+            );
+
+            assert_eq!(offers_both(&harness, cx), (true, true));
+            let title = harness.pane(0, cx).read_with(cx, |pane, _| pane.title());
+            assert_eq!(title, "Agent exited");
+        }
+
+        #[gpui::test]
+        fn should_restart_the_agent_in_a_fresh_view_and_focus_it(cx: &mut TestAppContext) {
+            let (harness, cx) = open(claude(AgentState::Exited), cx);
+            let before = harness.pane(0, cx).entity_id();
+
+            harness.request(0, PaneRequest::RestartAgent, cx);
+
+            assert_eq!(
+                *harness.api.respawned.lock().unwrap(),
+                [(id(7), PaneRun::Agent)]
+            );
+            assert_ne!(harness.pane(0, cx).entity_id(), before, "attached afresh");
+            assert_eq!(harness.focused(cx), Some(id(7)));
+            assert_eq!(offers_both(&harness, cx), (false, false));
+        }
+
+        #[gpui::test]
+        fn should_turn_the_pane_into_a_shell(cx: &mut TestAppContext) {
+            let (harness, cx) = open(claude(AgentState::Exited), cx);
+
+            harness.request(0, PaneRequest::OpenShell, cx);
+
+            assert_eq!(
+                *harness.api.respawned.lock().unwrap(),
+                [(id(7), PaneRun::Shell)]
+            );
+            let pane = harness
+                .pane(0, cx)
+                .read_with(cx, |pane, _| pane.pane().clone());
+            assert_eq!((pane.kind, pane.agent), (PaneKind::Shell, None));
+            assert_eq!(harness.focused(cx), Some(id(7)));
+        }
+
+        #[gpui::test]
+        fn should_toast_why_a_restart_failed(cx: &mut TestAppContext) {
+            let (harness, cx) = open(claude(AgentState::Exited), cx);
+            let before = harness.pane(0, cx).entity_id();
+            harness
+                .api
+                .fail_next("`claude` isn't on agentdeckd's PATH.");
+
+            harness.request(0, PaneRequest::RestartAgent, cx);
+
+            let shown = cx.update(|_, cx| crate::notice::shown(cx));
+            let toast = shown.last().expect("a toast");
+            assert_eq!(toast.title, "Couldn't restart Claude Code");
+            assert_eq!(harness.pane(0, cx).entity_id(), before);
+        }
+
+        #[gpui::test]
+        fn should_attach_afresh_a_pane_another_client_started_again(cx: &mut TestAppContext) {
+            let (harness, cx) = open(claude(AgentState::Exited), cx);
+            let before = harness.pane(0, cx).entity_id();
+            harness.api.set_panes(vec![claude(AgentState::Unknown)]);
+
+            harness.changed(Changed::Pane, cx);
+
+            assert_ne!(harness.pane(0, cx).entity_id(), before);
+        }
+
+        #[gpui::test]
+        fn should_offer_neither_for_an_exited_shell(cx: &mut TestAppContext) {
+            let shell = Pane {
+                state: AgentState::Exited,
+                ..shell_pane(7, id(1))
+            };
+            let (harness, cx) = open(shell, cx);
+
+            assert_eq!(offers_both(&harness, cx), (false, false));
         }
     }
 

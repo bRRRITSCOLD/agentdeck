@@ -506,6 +506,70 @@ pub mod types {
             Default::default()
         }
     }
+    ///`POST /v1/panes/{id}/respawn`.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct PaneRespawn {
+        ///What to run.
+        pub run: PaneRun,
+    }
+    impl PaneRespawn {
+        pub fn builder() -> builder::PaneRespawn {
+            Default::default()
+        }
+    }
+    ///What `POST /v1/panes/{id}/respawn` runs in an exited pane.
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum PaneRun {
+        ///The pane's agent again: claude and codex resume their session when it is known, else start fresh with a new launch prompt; an `other` agent runs its argv again. Agent panes only.
+        #[serde(rename = "agent")]
+        Agent,
+        ///A shell, which turns the pane into a shell pane.
+        #[serde(rename = "shell")]
+        Shell,
+    }
+    impl ::std::fmt::Display for PaneRun {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Agent => f.write_str("agent"),
+                Self::Shell => f.write_str("shell"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for PaneRun {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "agent" => Ok(Self::Agent),
+                "shell" => Ok(Self::Shell),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for PaneRun {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for PaneRun {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
     ///`POST /v1/prs/close`: the PR tasks whose PRs to close on GitHub.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct PrClose {
@@ -2834,6 +2898,42 @@ pub mod types {
             }
         }
         #[derive(Clone, Debug)]
+        pub struct PaneRespawn {
+            run: ::std::result::Result<super::PaneRun, ::std::string::String>,
+        }
+        impl ::std::default::Default for PaneRespawn {
+            fn default() -> Self {
+                Self {
+                    run: Err("no value supplied for run".to_string()),
+                }
+            }
+        }
+        impl PaneRespawn {
+            pub fn run<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<super::PaneRun>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.run = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for run: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<PaneRespawn> for super::PaneRespawn {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: PaneRespawn,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self { run: value.run? })
+            }
+        }
+        impl ::std::convert::From<super::PaneRespawn> for PaneRespawn {
+            fn from(value: super::PaneRespawn) -> Self {
+                Self { run: Ok(value.run) }
+            }
+        }
+        #[derive(Clone, Debug)]
         pub struct PrClose {
             task_ids: ::std::result::Result<
                 ::std::vec::Vec<agentdeck_core::TaskId>,
@@ -4612,7 +4712,7 @@ impl Client {
     ///
     ///the tab's layout.
     ///
-    ///`claude` and `codex` panes start with a launch prompt: the linked task's title and body, then every instruction for the pane's workspace and the task's comments no agent has had yet, which are then marked delivered to the pane. Claude Code starts on a session id agentdeck chooses; a Codex pane's is found once Codex writes its session file, and `session_id` is set then.
+    ///`claude` and `codex` panes get agentdeck's MCP server (`agentdeck mcp`) and start with a launch prompt: the linked task's title, its `Task id:` and how to report back on it with the MCP tools, and its body; then every instruction for the pane's workspace and the task's comments no agent has had yet, which are then marked delivered to the pane. Claude Code starts on a session id agentdeck chooses; a Codex pane's is found once Codex writes its session file, and `session_id` is set then.
     ///
     ///Sends a `POST` request to `/v1/panes`
     ///
@@ -4659,7 +4759,7 @@ impl Client {
     }
     ///Links the pane to a task in its workspace that isn't done, or unlinks it (`task_id`
     ///
-    ///null). The task's comments no agent has had yet are then typed into the pane once it is idle, as a new comment would be (spec §9).
+    ///null). Linking a live agent pane to another task first tells its agent the task itself (its title, id, how to report back on it, and body), then types in the task's comments no agent has had yet, each once the agent is idle or done, as a new comment would be (spec §9). Whatever was still waiting to be typed for the task it leaves is dropped from the pane, and a comment held for it moves on to that task's next live agent pane.
     ///
     ///Sends a `PATCH` request to `/v1/panes/{id}`
     ///
@@ -4692,6 +4792,25 @@ impl Client {
     ///```
     pub fn pane_input(&self) -> builder::PaneInput<'_> {
         builder::PaneInput::new(self)
+    }
+    ///Starts an exited pane again in place, keeping its id, its place in the tab's layout, its
+    ///
+    ///`cwd` and its task link (spec §4). `run: "agent"`, for an agent pane only (`unsupported_kind`), runs its agent again: claude and codex resume their session when it is known, else start fresh with a new launch prompt; an `other` agent runs its argv again. `run: "shell"` turns the pane into a shell pane running `$SHELL`, with hosting on. The state starts over. `running` (409) while its process hasn't exited; `invalid_dir` when its `cwd` is gone; `invalid_argv` when the program can't start, and the pane stays exited.
+    ///
+    ///Sends a `POST` request to `/v1/panes/{id}/respawn`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///- `body`
+    ///```ignore
+    ///let response = client.pane_respawn()
+    ///    .id(id)
+    ///    .body(body)
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn pane_respawn(&self) -> builder::PaneRespawn<'_> {
+        builder::PaneRespawn::new(self)
     }
     ///The pane's raw output: the last `bytes` bytes of the 256 KiB it keeps. Empty for a pane
     ///
@@ -6211,6 +6330,97 @@ pub mod builder {
             let response = result?;
             match response.status().as_u16() {
                 202u16 => ResponseValue::from_response(response).await,
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::pane_respawn`]
+    ///
+    ///[`Client::pane_respawn`]: super::Client::pane_respawn
+    #[derive(Debug, Clone)]
+    pub struct PaneRespawn<'a> {
+        client: &'a super::Client,
+        id: Result<agentdeck_core::PaneId, String>,
+        body: Result<types::builder::PaneRespawn, String>,
+    }
+    impl<'a> PaneRespawn<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self {
+                client: client,
+                id: Err("id was not initialized".to_string()),
+                body: Ok(::std::default::Default::default()),
+            }
+        }
+        pub fn id<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<agentdeck_core::PaneId>,
+        {
+            self.id = value
+                .try_into()
+                .map_err(|_| "conversion to `agentdeck_core :: PaneId` for id failed".to_string());
+            self
+        }
+        pub fn body<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<types::PaneRespawn>,
+            <V as std::convert::TryInto<types::PaneRespawn>>::Error: std::fmt::Display,
+        {
+            self.body = value
+                .try_into()
+                .map(From::from)
+                .map_err(|s| format!("conversion to `PaneRespawn` for body failed: {}", s));
+            self
+        }
+        pub fn body_map<F>(mut self, f: F) -> Self
+        where
+            F: std::ops::FnOnce(types::builder::PaneRespawn) -> types::builder::PaneRespawn,
+        {
+            self.body = self.body.map(f);
+            self
+        }
+        ///Sends a `POST` request to `/v1/panes/{id}/respawn`
+        pub async fn send(self) -> Result<ResponseValue<types::Pane>, Error<types::Error>> {
+            let Self { client, id, body } = self;
+            let id = id.map_err(Error::InvalidRequest)?;
+            let body = body
+                .and_then(|v| types::PaneRespawn::try_from(v).map_err(|e| e.to_string()))
+                .map_err(Error::InvalidRequest)?;
+            let url = format!(
+                "{}/v1/panes/{}/respawn",
+                client.baseurl,
+                encode_path(&id.to_string()),
+            );
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .post(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .json(&body)
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "pane_respawn",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                200u16 => ResponseValue::from_response(response).await,
                 400u16..=499u16 => Err(Error::ErrorResponse(
                     ResponseValue::from_response(response).await?,
                 )),

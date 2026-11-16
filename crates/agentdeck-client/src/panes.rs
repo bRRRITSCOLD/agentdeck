@@ -6,7 +6,7 @@ use agentdeck_core::{
     Agent, Layout, LayoutError, PaneId, PaneKind, SplitDirection, TabId, TaskId, WorkspaceId,
 };
 
-use crate::types::{NewPane, NewTab, Pane, PanePatch, Tab, TabPatch};
+use crate::types::{NewPane, NewTab, Pane, PanePatch, PaneRespawn, PaneRun, Tab, TabPatch};
 use crate::{ApiError, Client};
 
 /// Why a pane operation failed.
@@ -64,6 +64,19 @@ pub async fn link_task(
         .send()
         .await?;
     Ok(linked.into_inner())
+}
+
+/// Starts exited `pane` again in place, running what `run` says: its agent again, or a shell
+/// it becomes (spec §4). The pane as it is now. A refusal is an [`ApiError`]: `running` while
+/// its process runs, `unsupported_kind` for an agent in a shell pane.
+pub async fn respawn(client: &Client, pane: PaneId, run: PaneRun) -> Result<Pane, ApiError> {
+    let respawned = client
+        .pane_respawn()
+        .id(pane)
+        .body(PaneRespawn { run })
+        .send()
+        .await?;
+    Ok(respawned.into_inner())
 }
 
 /// Adds a tab titled `shell` to `workspace`, running `$SHELL` in `dir` as its one pane; the
