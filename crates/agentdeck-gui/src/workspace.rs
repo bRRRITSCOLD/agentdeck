@@ -34,9 +34,9 @@ use brrritscold_core_gpui::{
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, Context, Div, Entity, EventEmitter, FocusHandle, Focusable as _,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
-    Subscription, Task, Window, div, relative,
+    AnyElement, App, AppContext as _, Context, Div, Entity, EventEmitter, FocusHandle,
+    Focusable as _, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    Styled as _, Subscription, Task, Window, div, relative,
 };
 
 use crate::api::{Api, PaneAt, Split, WorkspacePanes};
@@ -507,7 +507,12 @@ impl WorkspaceView {
             let task = (pane.task_id)
                 .and_then(|task| self.read.tasks.iter().find(|t| t.id == task))
                 .map(|task| SharedString::from(task.title.clone()));
-            let kept = self.panes.remove(id).filter(|_| !self.renew.remove(id));
+            // A pane started again, here or by another client, attaches its new process.
+            let restarted = |view: &Entity<PaneView>, cx: &App| {
+                view.read(cx).pane().state == AgentState::Exited && pane.state != AgentState::Exited
+            };
+            let kept = (self.panes.remove(id))
+                .filter(|view| !self.renew.remove(id) && !restarted(view, cx));
             let view = match kept {
                 Some(view) => {
                     view.update(cx, |view, cx| view.update(pane, task, cx));
@@ -1793,6 +1798,17 @@ mod tests {
             let toast = shown.last().expect("a toast");
             assert_eq!(toast.title, "Couldn't restart Claude Code");
             assert_eq!(harness.pane(0, cx).entity_id(), before);
+        }
+
+        #[gpui::test]
+        fn should_attach_afresh_a_pane_another_client_started_again(cx: &mut TestAppContext) {
+            let (harness, cx) = open(claude(AgentState::Exited), cx);
+            let before = harness.pane(0, cx).entity_id();
+            harness.api.set_panes(vec![claude(AgentState::Unknown)]);
+
+            harness.changed(Changed::Pane, cx);
+
+            assert_ne!(harness.pane(0, cx).entity_id(), before);
         }
 
         #[gpui::test]
