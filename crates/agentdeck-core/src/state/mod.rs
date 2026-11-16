@@ -21,7 +21,7 @@ pub mod tracker;
 
 pub use hosted::{Foreground, HOSTABLE, hosted_agent};
 pub use osc::{OscScanner, ProgramState, Progress};
-pub use rules::{Observation, RuleSet, RuleState, RulesError};
+pub use rules::{LastOutput, Observation, RuleSet, RuleState, RulesError};
 pub use tracker::StateTracker;
 
 text_enum! {

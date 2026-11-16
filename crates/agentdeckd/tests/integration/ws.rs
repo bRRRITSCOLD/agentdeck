@@ -538,6 +538,101 @@ mod get_v1_ws {
         }
     }
 
+    /// A shell pane with no `shell.toml` reads `working` only for output that is work (spec
+    /// §7): not its prompt, and not a redraw for a resize.
+    mod shell_state {
+        use agentdeck_core::PaneId;
+
+        use super::*;
+        use crate::support::ws::Screen;
+
+        /// Output would publish `working` a tick and a settle (500 ms) after it; this is twice
+        /// that.
+        const SETTLED: Duration = Duration::from_secs(1);
+
+        fn is_state(frame: &Frame, pane: PaneId, state: AgentState) -> bool {
+            matches!(
+                frame,
+                Frame::Message(ServerMessage::State { pane: p, state: s }) if *p == pane && *s == state
+            )
+        }
+
+        /// Draws frames for `wait`, failing on a `working` state for `pane`.
+        async fn never_working(ws: &mut Ws, screen: &mut Screen, pane: PaneId, wait: Duration) {
+            let until = tokio::time::Instant::now() + wait;
+            while let Some(left) = until.checked_duration_since(tokio::time::Instant::now()) {
+                let Some(frame) = ws.quiet_for(left).await else {
+                    return;
+                };
+                assert!(
+                    !is_state(&frame, pane, AgentState::Working),
+                    "read as working"
+                );
+                screen.take(&frame);
+            }
+        }
+
+        /// Draws frames until `pane`'s state is `state`.
+        async fn until_state(ws: &mut Ws, screen: &mut Screen, pane: PaneId, state: AgentState) {
+            ws.until(|frame| {
+                screen.take(&frame);
+                is_state(&frame, pane, state).then_some(())
+            })
+            .await;
+        }
+
+        async fn resize(ws: &mut Ws, screen: &mut Screen) {
+            ws.send(ClientMessage::Resize {
+                channel: 1,
+                cols: 100,
+                rows: 30,
+            })
+            .await;
+            screen.until(ws, |screen| screen.shows("redrawn")).await;
+        }
+
+        #[tokio::test]
+        async fn should_not_read_a_new_shell_as_working_for_its_prompt_or_a_resize() {
+            let daemon = TestDaemon::start().await;
+            let place = Place::new(&daemon).await;
+            let pane = place
+                .spawn(
+                    &daemon.client,
+                    &sh("trap 'echo redrawn' WINCH; echo ready; sleep 60 & wait; exec sh"),
+                )
+                .await;
+            let mut ws = Ws::connect(&daemon).await;
+            let mut screen = ws.attach(pane.id, 1).await;
+            screen.until(&mut ws, |screen| screen.shows("ready")).await;
+
+            resize(&mut ws, &mut screen).await;
+
+            never_working(&mut ws, &mut screen, pane.id, SETTLED).await;
+            ws.type_bytes(1, b"echo hi\r").await;
+            until_state(&mut ws, &mut screen, pane.id, AgentState::Working).await;
+        }
+
+        #[tokio::test]
+        async fn should_not_read_a_redraw_for_a_resize_as_working() {
+            let daemon = TestDaemon::start().await;
+            let place = Place::new(&daemon).await;
+            let pane = place.spawn(&daemon.client, &["sh"]).await;
+            let mut ws = Ws::connect(&daemon).await;
+            let mut screen = ws.attach(pane.id, 1).await;
+            // Typing it is output that counts, so wait for that to pass.
+            ws.type_bytes(1, b"trap 'echo redrawn' WINCH; sleep 60 & wait\r")
+                .await;
+            until_state(&mut ws, &mut screen, pane.id, AgentState::Working).await;
+            until_state(&mut ws, &mut screen, pane.id, AgentState::Unknown).await;
+
+            resize(&mut ws, &mut screen).await;
+
+            never_working(&mut ws, &mut screen, pane.id, SETTLED).await;
+            ws.type_bytes(1, b"echo hi\r").await;
+            until_state(&mut ws, &mut screen, pane.id, AgentState::Working).await;
+        }
+    }
+
     mod lagged {
         use super::*;
 
