@@ -510,7 +510,7 @@ impl SettingsView {
     /// Penpot `ConfirmQuit`: a horizontal Field, the Switch beside its label and description.
     fn confirm_quit_field(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let view = cx.entity().downgrade();
-        Field::new()
+        let field = Field::new()
             .orientation(FieldOrientation::Horizontal)
             .child(
                 div()
@@ -526,11 +526,17 @@ impl SettingsView {
                             }),
                     ),
             )
+            // `min_w_0`, so the description wraps in the section's width: a GPUI text's
+            // min-content width is its whole line, where CSS's is its longest word.
             .content(
                 FieldContent::new()
+                    .min_w_0()
                     .child(Label::new().child("Ask before quitting while agents run"))
                     .child(FieldDescription::new(CONFIRM_QUIT_DESCRIPTION)),
-            )
+            );
+        div()
+            .debug_selector(|| "settings confirm quit field".into())
+            .child(field)
             .into_any_element()
     }
 
@@ -1177,6 +1183,19 @@ mod tests {
             assert!(shown(&harness, cx));
             assert!(harness.api.settings_now().gui.confirm_quit);
             assert_eq!(harness.patches(), [patch(true)]);
+        }
+
+        #[gpui::test]
+        fn should_wrap_the_description_in_the_sections_width(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open(asking(true), cx);
+
+            let field = cx
+                .debug_bounds("settings confirm quit field")
+                .expect("the field shows");
+
+            // More than a 20px label line, 4px and one 20px description line: it wraps.
+            assert_eq!(field.size.width, SECTION_WIDTH);
+            assert!(field.size.height > px(20. + 4. + 20.), "{field:?}");
         }
 
         #[gpui::test]
