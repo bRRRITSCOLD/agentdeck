@@ -2,14 +2,15 @@
 //! deleting a workspace loses, a field to type its name into, and Archive instead.
 //!
 //! It reads the workspace's dirty report when it opens and lists each repo holding work on no
-//! remote. Delete workspace stays disabled until the name is typed exactly; then it deletes,
+//! remote, then says what else deleting does: the running panes it stops, the tasks it moves
+//! to the Inbox and the instructions it deletes. Delete workspace stays disabled until the name is typed exactly; then it deletes,
 //! dirty or not, since the user has seen the report. It emits [`DeleteEvent`] for the window.
 
 use std::path::Path;
 use std::sync::Arc;
 
 use agentdeck_client::types::{DirtyRepo, DirtyReport, UnpushedBranch};
-use agentdeck_core::WorkspaceId;
+use agentdeck_core::{AgentState, WorkspaceId};
 use brrritscold_core_gpui::{
     ActiveTheme as _, Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonVariant,
     Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHandle,
@@ -52,6 +53,34 @@ pub struct DeleteTarget {
     pub archived: bool,
 }
 
+/// What deleting a workspace does beyond its folder, counted when the dialog opens.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Consequences {
+    /// Its panes whose process hasn't exited, which deleting stops: what Archive refuses on.
+    pub panes: usize,
+    /// Its tasks, which move to the Inbox.
+    pub tasks: usize,
+    /// Its instructions, which are deleted.
+    pub instructions: usize,
+}
+
+impl Consequences {
+    /// Counts `workspace`'s in `snapshot`.
+    pub fn of(workspace: WorkspaceId, snapshot: &Snapshot) -> Self {
+        Consequences {
+            panes: (snapshot.panes.iter())
+                .filter(|p| p.workspace == workspace && p.state != AgentState::Exited)
+                .count(),
+            tasks: (snapshot.tasks.iter())
+                .filter(|t| t.workspace_id == Some(workspace))
+                .count(),
+            instructions: (snapshot.instructions.iter())
+                .filter(|i| i.workspace_id == workspace)
+                .count(),
+        }
+    }
+}
+
 /// Where the dirty report stands.
 #[derive(Debug, Clone, PartialEq)]
 enum Dirty {
@@ -68,8 +97,8 @@ pub struct DeleteWorkspaceDialog {
     api: Arc<dyn Api>,
     handle: DialogHandle,
     target: Option<DeleteTarget>,
-    /// How many tasks move to the Inbox and how many instructions go.
-    moves: (usize, usize),
+    /// What deleting stops, moves and deletes.
+    consequences: Consequences,
     dirty: Dirty,
     confirm: Entity<InputState>,
     /// Whether a delete is out; another waits for it.
@@ -96,7 +125,7 @@ impl DeleteWorkspaceDialog {
             api,
             handle: DialogHandle::new(false),
             target: None,
-            moves: (0, 0),
+            consequences: Consequences::default(),
             dirty: Dirty::Checking,
             confirm,
             deleting: false,
@@ -106,7 +135,7 @@ impl DeleteWorkspaceDialog {
         }
     }
 
-    /// Opens it on `target`, counting what moves and goes from `snapshot`, and starts reading
+    /// Opens it on `target`, counting what stops, moves and goes from `snapshot`, and starts reading
     /// the dirty report. The name field starts empty and takes the keyboard.
     pub fn open(
         &mut self,
@@ -116,13 +145,7 @@ impl DeleteWorkspaceDialog {
         cx: &mut Context<Self>,
     ) {
         let workspace = target.id;
-        let tasks = (snapshot.tasks.iter())
-            .filter(|t| t.workspace_id == Some(workspace))
-            .count();
-        let instructions = (snapshot.instructions.iter())
-            .filter(|i| i.workspace_id == workspace)
-            .count();
-        self.moves = (tasks, instructions);
+        self.consequences = Consequences::of(workspace, snapshot);
         self.confirm.update(cx, |input, cx| {
             input.set_value("", window, cx);
             input.set_placeholder(target.name.clone(), window, cx);
@@ -305,9 +328,19 @@ pub fn alert_title(repos: usize) -> String {
     }
 }
 
-/// What deleting does to the workspace's `tasks` and `instructions`; nothing when it has
-/// neither.
-pub fn moves_line(tasks: usize, instructions: usize) -> Option<String> {
+/// What deleting does to the workspace's running panes, tasks and instructions, panes first;
+/// nothing when it has none of them (Penpot `Consequence`).
+pub fn consequence_line(consequences: Consequences) -> Option<String> {
+    let Consequences {
+        panes,
+        tasks,
+        instructions,
+    } = consequences;
+    let panes = match panes {
+        0 => None,
+        1 => Some("Its 1 running pane will be stopped.".to_owned()),
+        n => Some(format!("Its {n} running panes will be stopped.")),
+    };
     let tasks = match tasks {
         0 => None,
         1 => Some("Its 1 task moves to the Inbox.".to_owned()),
@@ -318,7 +351,7 @@ pub fn moves_line(tasks: usize, instructions: usize) -> Option<String> {
         1 => Some("Its 1 instruction is deleted.".to_owned()),
         n => Some(format!("Its {n} instructions are deleted.")),
     };
-    let parts: Vec<String> = tasks.into_iter().chain(instructions).collect();
+    let parts: Vec<String> = [panes, tasks, instructions].into_iter().flatten().collect();
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
@@ -397,7 +430,7 @@ impl Render for DeleteWorkspaceDialog {
                             .gap(space::S3)
                             .children(self.dirty_report(cx))
                             .children(
-                                moves_line(self.moves.0, self.moves.1)
+                                consequence_line(self.consequences)
                                     .map(|line| div().text_color(s.muted_foreground).child(line)),
                             )
                             .child(
@@ -769,36 +802,65 @@ mod tests {
         }
     }
 
-    mod moves_line {
+    mod consequence_line {
+        use agentdeck_core::AgentState;
+
         use super::*;
+        use crate::overview::fixtures::pane;
+
+        fn line(panes: usize, tasks: usize, instructions: usize) -> Option<String> {
+            consequence_line(Consequences {
+                panes,
+                tasks,
+                instructions,
+            })
+        }
 
         #[test]
         fn should_say_where_the_tasks_go_and_that_the_instructions_go() {
             assert_eq!(
-                moves_line(4, 2).as_deref(),
+                line(0, 4, 2).as_deref(),
                 Some("Its 4 tasks move to the Inbox. Its 2 instructions are deleted.")
             );
         }
 
         #[test]
-        fn should_speak_of_one_task_or_instruction_in_the_singular() {
+        fn should_say_first_that_its_running_panes_will_be_stopped() {
             assert_eq!(
-                moves_line(1, 1).as_deref(),
-                Some("Its 1 task moves to the Inbox. Its 1 instruction is deleted.")
+                line(3, 4, 2).as_deref(),
+                Some(
+                    "Its 3 running panes will be stopped. Its 4 tasks move to the Inbox. Its 2 \
+                     instructions are deleted."
+                )
+            );
+            assert_eq!(
+                line(2, 0, 0).as_deref(),
+                Some("Its 2 running panes will be stopped.")
+            );
+        }
+
+        #[test]
+        fn should_speak_of_one_pane_task_or_instruction_in_the_singular() {
+            assert_eq!(
+                line(1, 1, 1).as_deref(),
+                Some(
+                    "Its 1 running pane will be stopped. Its 1 task moves to the Inbox. Its 1 \
+                     instruction is deleted."
+                )
             );
         }
 
         #[test]
         fn should_leave_out_what_it_has_none_of() {
             assert_eq!(
-                moves_line(3, 0).as_deref(),
+                line(0, 3, 0).as_deref(),
                 Some("Its 3 tasks move to the Inbox.")
             );
             assert_eq!(
-                moves_line(0, 2).as_deref(),
+                line(0, 0, 2).as_deref(),
                 Some("Its 2 instructions are deleted.")
             );
-            assert_eq!(moves_line(0, 0), None);
+            assert_eq!(line(0, 0, 0), None);
         }
 
         #[gpui::test]
@@ -807,7 +869,32 @@ mod tests {
 
             harness.open(cx);
 
-            assert_eq!(harness.dialog.read_with(cx, |d, _| d.moves), (2, 1));
+            let counted = harness.dialog.read_with(cx, |d, _| d.consequences);
+            assert_eq!((counted.tasks, counted.instructions), (2, 1));
+            assert_eq!(counted.panes, 0);
+        }
+
+        #[gpui::test]
+        fn should_count_the_workspaces_panes_whose_process_has_not_exited(cx: &mut TestAppContext) {
+            let mut running = snapshot();
+            let (ws, other) = (id(1), id(2));
+            running.panes = vec![
+                pane(40, ws, AgentState::Working),
+                pane(41, ws, AgentState::Idle),
+                pane(42, ws, AgentState::Unknown),
+                pane(43, ws, AgentState::Exited),
+                pane(44, other, AgentState::Working),
+            ];
+            let (harness, cx) = Harness::new(Arc::new(FakeApi::with(running.clone())), cx);
+
+            cx.update(|window, cx| {
+                harness
+                    .dialog
+                    .update(cx, |d, cx| d.open(target(), &running, window, cx))
+            });
+            harness.settle(cx);
+
+            assert_eq!(harness.dialog.read_with(cx, |d, _| d.consequences.panes), 3);
         }
     }
 

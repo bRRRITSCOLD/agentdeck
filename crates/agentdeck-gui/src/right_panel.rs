@@ -5,7 +5,8 @@
 //! First come the workspace's instructions, newest first, and a field that adds one for every
 //! agent in the workspace (Enter sends it; the Instructions header's `+` focuses it). Each
 //! instruction's `…` menu sends it to a live agent pane at once (spec §9), edits it in place
-//! (Ctrl+Enter or Save saves, Escape or Cancel drops the edit) or deletes it.
+//! (Ctrl+Enter or Save saves, Escape or Cancel drops the edit) or deletes it. A long
+//! instruction shows [`CLAMP`] lines, and Show more in its meta row shows the rest.
 //!
 //! Below a separator come the workspace's tasks and PRs, grouped by status, each with a status
 //! picker. Done tasks hide behind "Show N done". The Tasks & PRs `+` asks the window for the
@@ -29,7 +30,8 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
+    StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, TextLayout, Window,
+    div, px,
 };
 use gpui_base::input::InputEvent;
 
@@ -47,6 +49,9 @@ use crate::workspace::failed;
 
 /// The panel's width. Raw in Penpot too: no sizing token is 340px.
 pub const WIDTH: f32 = 340.;
+
+/// How many lines of an instruction show until Show more.
+pub const CLAMP: usize = 4;
 
 /// The right panel.
 pub struct RightPanel {
@@ -66,6 +71,10 @@ pub struct RightPanel {
     /// Whether the edit is being saved; Save waits for it.
     saving: bool,
     _editor: Option<Subscription>,
+    /// The instructions shown whole, from Show more.
+    expanded: HashSet<InstructionId>,
+    /// The instructions whose text runs past [`CLAMP`] lines, as last drawn.
+    overflowing: HashSet<InstructionId>,
     /// Where the list is scrolled to, for its scrollbar.
     scroll: ScrollHandle,
     /// Select mode, the selection and the confirm dialog.
@@ -104,6 +113,8 @@ impl RightPanel {
             editor: None,
             saving: false,
             _editor: None,
+            expanded: HashSet::new(),
+            overflowing: HashSet::new(),
             scroll: ScrollHandle::new(),
             close,
             _close,
@@ -282,16 +293,52 @@ impl RightPanel {
     }
 
     /// Lists `workspace`'s tasks and instructions from `snapshot`. An instruction being
-    /// edited that the snapshot no longer holds closes its editor.
+    /// edited that the snapshot no longer holds closes its editor; one that left the list
+    /// forgets whether it was shown whole.
     pub fn show(&mut self, workspace: WorkspaceId, snapshot: Snapshot, cx: &mut Context<Self>) {
         self.workspace = Some(workspace);
         self.snapshot = snapshot;
-        if let Some(editing) = self.editing()
-            && !self.instructions().iter().any(|i| i.id == editing)
+        let listed: HashSet<InstructionId> = self.instructions().iter().map(|i| i.id).collect();
+        if self
+            .editing()
+            .is_some_and(|editing| !listed.contains(&editing))
         {
             self.cancel_edit(cx);
         }
+        self.expanded.retain(|id| listed.contains(id));
+        self.overflowing.retain(|id| listed.contains(id));
         cx.notify();
+    }
+
+    /// Whether `instruction` shows whole, from Show more.
+    pub fn is_expanded(&self, instruction: InstructionId) -> bool {
+        self.expanded.contains(&instruction)
+    }
+
+    /// Shows `instruction` whole, or clamps it again: what Show more and Show less do.
+    pub fn toggle_instruction(&mut self, instruction: InstructionId, cx: &mut Context<Self>) {
+        if !self.expanded.remove(&instruction) {
+            self.expanded.insert(instruction);
+        }
+        cx.notify();
+    }
+
+    /// Records whether `instruction`'s text runs past [`CLAMP`] lines, as its last draw
+    /// measured it; a change redraws, to show or hide its toggle.
+    fn set_overflowing(
+        &mut self,
+        instruction: InstructionId,
+        runs_past: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = if runs_past {
+            self.overflowing.insert(instruction)
+        } else {
+            self.overflowing.remove(&instruction)
+        };
+        if changed {
+            cx.notify();
+        }
     }
 
     /// Folds `status`'s group, or unfolds it.
@@ -405,7 +452,11 @@ impl Render for RightPanel {
                         _ => {
                             let targets =
                                 instruction_list::send_targets(&self.snapshot, instruction.id);
-                            instruction_item(instruction, targets, cx)
+                            let clamp = Clamp {
+                                expanded: self.is_expanded(instruction.id),
+                                overflowing: self.overflowing.contains(&instruction.id),
+                            };
+                            instruction_item(instruction, clamp, targets, cx)
                         }
                     }),
             )
@@ -553,10 +604,21 @@ fn card(s: &brrritscold_core_gpui_tokens::Semantic) -> gpui::Div {
         .rounded(s.radius_md)
 }
 
+/// Where an instruction's card stands on clamping.
+#[derive(Debug, Clone, Copy)]
+struct Clamp {
+    /// Shown whole, from Show more.
+    expanded: bool,
+    /// Its text runs past [`CLAMP`] lines, as last drawn.
+    overflowing: bool,
+}
+
 /// Penpot `agentdeck/InstructionItem`: the text over a meta line (its icon, when it was
-/// added, the instruction's menu).
+/// added, Show more or Show less while the text runs past [`CLAMP`] lines, the
+/// instruction's menu).
 fn instruction_item(
     instruction: &InstructionRow,
+    clamp: Clamp,
     targets: Vec<SendTarget>,
     cx: &Context<RightPanel>,
 ) -> AnyElement {
@@ -564,12 +626,7 @@ fn instruction_item(
     let id = instruction.id;
     card(s)
         .debug_selector(move || format!("instruction {id}"))
-        .child(
-            div()
-                .text_size(font_size::SM)
-                .text_color(s.foreground)
-                .child(instruction.body.clone()),
-        )
+        .child(instruction_text(instruction, clamp, cx))
         .child(
             div()
                 .flex()
@@ -584,7 +641,85 @@ fn instruction_item(
                 )
                 .child(div().min_w_0().truncate().child(instruction.meta.clone()))
                 .child(div().flex_1())
+                .when(clamp.overflowing, |meta| {
+                    meta.child(clamp_toggle(id, clamp, cx))
+                })
                 .child(instruction_menu(id, targets, cx)),
+        )
+        .into_any_element()
+}
+
+/// An instruction's text, sm: [`CLAMP`] lines, the last ending in "…", unless shown whole.
+/// Each draw measures whether the whole text runs past [`CLAMP`] lines at the card's width,
+/// which only layout knows, and tells the panel when that changed.
+fn instruction_text(
+    instruction: &InstructionRow,
+    clamp: Clamp,
+    cx: &Context<RightPanel>,
+) -> AnyElement {
+    let s = cx.theme().semantic();
+    let id = instruction.id;
+    let body = instruction.body.clone();
+    let text = StyledText::new(body.clone());
+    let layout = text.layout().clone();
+    let panel = cx.entity().downgrade();
+    div()
+        .debug_selector(move || format!("instruction text {id}"))
+        .text_size(font_size::SM)
+        .text_color(s.foreground)
+        .when(!clamp.expanded, |text| {
+            text.line_clamp(CLAMP).text_ellipsis()
+        })
+        .child(text)
+        .on_children_prepainted(move |_, window, cx| {
+            let runs_past = runs_past_clamp(&layout, &body, !clamp.expanded);
+            if runs_past != clamp.overflowing {
+                // The panel can't redraw from inside this draw; it does once it's over.
+                let panel = panel.clone();
+                window.defer(cx, move |_, cx| {
+                    let _ = panel.update(cx, |panel, cx| {
+                        panel.set_overflowing(id, runs_past, cx);
+                    });
+                });
+            }
+        })
+        .into_any_element()
+}
+
+/// Whether `body`, laid out in `layout`, runs past [`CLAMP`] lines. A `clamped` layout
+/// holds at most that many, and holds other text than `body` (cut, with "…") only when it
+/// does; a whole one is counted, wrapped lines and line breaks alike.
+fn runs_past_clamp(layout: &TextLayout, body: &str, clamped: bool) -> bool {
+    if clamped {
+        layout.text() != body
+    } else {
+        let lines: usize = (layout.line_layouts().iter())
+            .map(|line| line.wrap_boundaries.len() + 1)
+            .sum();
+        lines > CLAMP
+    }
+}
+
+/// Show more, or Show less once shown whole: a link xs (Penpot `InstructionItem` → `More`).
+fn clamp_toggle(instruction: InstructionId, clamp: Clamp, cx: &Context<RightPanel>) -> AnyElement {
+    let label = if clamp.expanded {
+        "Show less"
+    } else {
+        "Show more"
+    };
+    div()
+        .debug_selector(move || format!("instruction more {instruction}"))
+        .flex_none()
+        .child(
+            Button::new(SharedString::from(format!(
+                "instruction-more-{instruction}"
+            )))
+            .variant(ButtonVariant::Link)
+            .size(ButtonSize::Xs)
+            .label(label)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_instruction(instruction, cx);
+            })),
         )
         .into_any_element()
 }
@@ -894,6 +1029,177 @@ mod tests {
             cx: &mut VisualTestContext,
         ) -> Option<InstructionId> {
             panel.read_with(cx, |p, _| p.editing())
+        }
+
+        mod long {
+            use agentdeck_client::types::Instruction;
+
+            use super::*;
+
+            /// About a dozen lines at the card's width.
+            const LONG: &str = "Before you push, run cargo ci and fix whatever it reports, not \
+                only the tests you touched. Keep each commit to one change and write its message \
+                in the imperative. When a test fails twice in a row for the same reason, stop and \
+                comment on the task with what you tried. Work in your own worktree, never in the \
+                main checkout, and delete it once the PR merges.";
+
+            /// The one-line instruction every case lists too, to measure a line by.
+            const RULER: u32 = 99;
+
+            fn with_body(n: u32, body: &str) -> Instruction {
+                Instruction {
+                    body: body.into(),
+                    ..instruction(n, id(1))
+                }
+            }
+
+            /// Shows workspace 1 with `instructions` and the ruler, then draws until the
+            /// measures settle.
+            fn show(
+                panel: &Entity<RightPanel>,
+                mut instructions: Vec<Instruction>,
+                cx: &mut VisualTestContext,
+            ) {
+                instructions.push(with_body(RULER, "short"));
+                panel.update(cx, |p, cx| {
+                    let mut snapshot = snapshot();
+                    snapshot.instructions = instructions;
+                    p.show(id(1), snapshot, cx);
+                });
+                settle(cx);
+            }
+
+            fn text_height(n: u32, cx: &mut VisualTestContext) -> gpui::Pixels {
+                let selector = format!("instruction text {}", id::<InstructionId>(n));
+                cx.debug_bounds(selector.leak())
+                    .expect("its text")
+                    .size
+                    .height
+            }
+
+            /// One line's height: the ruler's text.
+            fn line(cx: &mut VisualTestContext) -> gpui::Pixels {
+                text_height(RULER, cx)
+            }
+
+            fn toggle(n: u32, cx: &mut VisualTestContext) -> Option<gpui::Bounds<gpui::Pixels>> {
+                let selector = format!("instruction more {}", id::<InstructionId>(n));
+                cx.debug_bounds(selector.leak())
+            }
+
+            fn click_toggle(n: u32, cx: &mut VisualTestContext) {
+                let button = toggle(n, cx).expect("Show more or Show less");
+                cx.simulate_click(button.center(), Modifiers::default());
+                settle(cx);
+            }
+
+            fn expanded(panel: &Entity<RightPanel>, n: u32, cx: &mut VisualTestContext) -> bool {
+                panel.read_with(cx, |p, _| p.is_expanded(id(n)))
+            }
+
+            #[gpui::test]
+            fn should_clamp_a_long_instruction_to_four_lines_with_show_more(
+                cx: &mut TestAppContext,
+            ) {
+                let (panel, _, cx) = open_with_api(cx);
+
+                show(&panel, vec![with_body(30, LONG)], cx);
+
+                assert_eq!(text_height(30, cx), line(cx) * 4.);
+                assert!(toggle(30, cx).is_some());
+                assert!(!expanded(&panel, 30, cx));
+                assert!(toggle(RULER, cx).is_none());
+            }
+
+            #[gpui::test]
+            fn should_offer_no_toggle_for_text_that_fits(cx: &mut TestAppContext) {
+                let (panel, _, cx) = open_with_api(cx);
+
+                show(
+                    &panel,
+                    vec![with_body(30, "Push only after the play test passes.")],
+                    cx,
+                );
+
+                assert!(text_height(30, cx) <= line(cx) * 2.);
+                assert!(toggle(30, cx).is_none());
+            }
+
+            #[gpui::test]
+            fn should_count_line_breaks_as_lines(cx: &mut TestAppContext) {
+                let (panel, _, cx) = open_with_api(cx);
+
+                show(
+                    &panel,
+                    vec![
+                        with_body(30, "one\ntwo\nthree\nfour"),
+                        with_body(31, "1\n2\n3\n4\n5"),
+                    ],
+                    cx,
+                );
+
+                assert_eq!(text_height(30, cx), line(cx) * 4.);
+                assert!(toggle(30, cx).is_none());
+                assert_eq!(text_height(31, cx), line(cx) * 4.);
+                assert!(toggle(31, cx).is_some());
+            }
+
+            #[gpui::test]
+            fn should_show_the_whole_text_from_show_more_and_clamp_it_from_show_less(
+                cx: &mut TestAppContext,
+            ) {
+                let (panel, _, cx) = open_with_api(cx);
+                show(&panel, vec![with_body(30, LONG)], cx);
+
+                click_toggle(30, cx);
+
+                assert!(expanded(&panel, 30, cx));
+                assert!(text_height(30, cx) > line(cx) * 4.);
+                assert!(toggle(30, cx).is_some(), "Show less");
+
+                click_toggle(30, cx);
+
+                assert!(!expanded(&panel, 30, cx));
+                assert_eq!(text_height(30, cx), line(cx) * 4.);
+            }
+
+            #[gpui::test]
+            fn should_keep_each_instructions_choice_across_rereads(cx: &mut TestAppContext) {
+                let (panel, _, cx) = open_with_api(cx);
+                show(&panel, vec![with_body(30, LONG), with_body(31, LONG)], cx);
+                click_toggle(30, cx);
+
+                show(&panel, vec![with_body(30, LONG), with_body(31, LONG)], cx);
+
+                assert!(expanded(&panel, 30, cx));
+                assert!(text_height(30, cx) > line(cx) * 4.);
+                assert!(!expanded(&panel, 31, cx));
+                assert!(toggle(31, cx).is_some());
+            }
+
+            #[gpui::test]
+            fn should_forget_the_choice_once_the_instruction_leaves(cx: &mut TestAppContext) {
+                let (panel, _, cx) = open_with_api(cx);
+                show(&panel, vec![with_body(30, LONG)], cx);
+                click_toggle(30, cx);
+
+                show(&panel, vec![], cx);
+                show(&panel, vec![with_body(30, LONG)], cx);
+
+                assert!(!expanded(&panel, 30, cx));
+                assert_eq!(text_height(30, cx), line(cx) * 4.);
+            }
+
+            #[gpui::test]
+            fn should_drop_the_toggle_once_an_edit_makes_the_text_fit(cx: &mut TestAppContext) {
+                let (panel, _, cx) = open_with_api(cx);
+                show(&panel, vec![with_body(30, LONG)], cx);
+                click_toggle(30, cx);
+
+                show(&panel, vec![with_body(30, "Now it's short.")], cx);
+
+                assert!(toggle(30, cx).is_none());
+            }
         }
 
         mod edit {
