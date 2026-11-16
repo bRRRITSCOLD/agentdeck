@@ -1,7 +1,7 @@
 //! `pull_requests` queries: storing what PR sync saw, and the PR tasks it moves (spec §8).
 
 use agentdeck_core::{
-    ChecksState, PrState, TaskId, TaskKind, TaskPlace, TaskStatus, WorkspaceId, pr_task_status,
+    PrState, TaskId, TaskKind, TaskPlace, TaskStatus, WorkspaceId, pr_task_status,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -19,19 +19,9 @@ pub fn open(conn: &Connection) -> Result<Vec<(String, i64)>, DbError> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// `(repo, number)` of every PR stored as open whose checks are pending, but for those aged
-/// out.
-pub fn open_pending(conn: &Connection) -> Result<Vec<(String, i64)>, DbError> {
-    let mut stmt = conn.prepare(
-        "SELECT repo, number FROM pull_requests
-         WHERE state = ?1 AND checks = ?2 AND aged_out_at IS NULL
-         ORDER BY repo, number",
-    )?;
-    let rows = stmt.query_map(
-        [PrState::Open.as_str(), ChecksState::Pending.as_str()],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+/// Every PR stored as open, as last synced, but for those aged out.
+pub fn open_current(conn: &Connection) -> Result<Vec<RemotePr>, DbError> {
+    stored_where(conn, "p.state = ?1 AND p.aged_out_at IS NULL")
 }
 
 /// Every PR stored as open, as last synced.

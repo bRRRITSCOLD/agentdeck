@@ -601,6 +601,85 @@ mod incremental {
     }
 
     #[tokio::test]
+    async fn should_refetch_a_pr_stored_before_its_checks_started_and_say_it_changed_200() {
+        let github = MockServer::start_async().await;
+        let (daemon, _updated) = synced(&github, &[Pr::open(7)]).await;
+        let mut ws = Ws::connect(&daemon).await;
+        let fetch = mock_fetch(
+            &github,
+            &[Pr {
+                checks: Some("FAILURE"),
+                ..Pr::open(7)
+            }],
+        );
+
+        sync(&daemon.client).await;
+
+        let task = pr_tasks(&daemon.client).await.remove(0);
+        assert_eq!(
+            task.pr.expect("the task's PR").checks,
+            Some(ChecksState::Failure)
+        );
+        assert!(fetch.calls() >= 1);
+        let changed = ws
+            .until(|frame| match frame {
+                Frame::Message(ServerMessage::Changed {
+                    entity: Entity::Task,
+                    id,
+                }) => Some(id),
+                _ => None,
+            })
+            .await;
+        assert_eq!(changed, task.id.to_string());
+    }
+
+    #[tokio::test]
+    async fn should_refetch_a_pr_awaiting_a_review_200() {
+        let github = MockServer::start_async().await;
+        let awaiting = Pr {
+            checks: Some("SUCCESS"),
+            review: Some("REVIEW_REQUIRED"),
+            ..Pr::open(7)
+        };
+        let (daemon, _updated) = synced(&github, std::slice::from_ref(&awaiting)).await;
+        mock_fetch(
+            &github,
+            &[Pr {
+                review: Some("APPROVED"),
+                ..awaiting
+            }],
+        );
+
+        sync(&daemon.client).await;
+
+        let pr = pr_tasks(&daemon.client)
+            .await
+            .remove(0)
+            .pr
+            .expect("the task's PR");
+        assert_eq!(pr.review, Some(ReviewState::Approved));
+    }
+
+    #[tokio::test]
+    async fn should_not_refetch_a_pr_whose_checks_finished_and_review_was_approved_200() {
+        let github = MockServer::start_async().await;
+        let settled = Pr {
+            checks: Some("SUCCESS"),
+            review: Some("APPROVED"),
+            ..Pr::open(7)
+        };
+        let (daemon, _updated) = synced(&github, &[settled]).await;
+        let fetch = github.mock(|when, then| {
+            when.body_includes("pullRequest(");
+            then.status(500);
+        });
+
+        sync(&daemon.client).await;
+
+        fetch.assert_calls(0);
+    }
+
+    #[tokio::test]
     async fn should_not_add_a_pr_older_than_the_cutoff_200() {
         let github = MockServer::start_async().await;
         let mut first = mock_list(&github, TOKEN, &[]);
@@ -623,6 +702,8 @@ mod incremental {
     async fn should_move_an_inbox_pr_into_a_workspace_once_a_clone_appears_200() {
         let github = MockServer::start_async().await;
         let (daemon, _updated) = synced(&github, &[Pr::open(7)]).await;
+        // It has no checks, so it is fetched again in case they started.
+        mock_fetch(&github, &[Pr::open(7)]);
         let dir = daemon.new_dir("ws");
         let workspace = attach(&daemon.client, &dir).await;
 
@@ -776,9 +857,13 @@ mod full {
     use super::*;
 
     #[tokio::test]
-    async fn should_fetch_details_only_for_new_or_changed_prs_200() {
+    async fn should_fetch_details_only_for_new_changed_or_unsettled_prs_200() {
         let github = MockServer::start_async().await;
-        let mut first = mock_list(&github, TOKEN, &[Pr::open(7), Pr::open(8)]);
+        let settled = Pr {
+            checks: Some("SUCCESS"),
+            ..Pr::open(7)
+        };
+        let mut first = mock_list(&github, TOKEN, &[settled.clone(), Pr::open(8)]);
         let daemon = full_daemon(&github, Some(TOKEN)).await;
         sync(&daemon.client).await;
         first.delete();
@@ -791,13 +876,13 @@ mod full {
         let list = mock_list_page(
             &github,
             TOKEN,
-            &[Pr::open(7), changed.clone()],
+            &[settled.clone(), changed.clone()],
             None,
             None,
             2,
             Duration::ZERO,
         );
-        let unchanged = mock_fetch(&github, &[Pr::open(7)]);
+        let unchanged = mock_fetch(&github, &[settled]);
         let details = mock_fetch(&github, &[changed]);
         sync(&daemon.client).await;
 
@@ -997,6 +1082,8 @@ mod max_age {
         let github = MockServer::start_async().await;
         let daemon = restarted_with_cutoff(&github, &[aged(7, 1), aged(8, 400)]).await;
         mock_open(&github, &[aged(7, 1), aged(8, 400)]);
+        // 7 has no checks, so it is fetched again in case they started.
+        mock_fetch(&github, &[aged(7, 1)]);
         let old = task_of(&daemon.client, 8).await;
         let mut ws = Ws::connect(&daemon).await;
 

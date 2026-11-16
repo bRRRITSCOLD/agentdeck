@@ -1,5 +1,6 @@
 //! The WebSocket at `/v1/ws` (spec §5): one per client, carrying terminal I/O for every pane
-//! it attaches, plus the daemon-wide `state`, `exit` and `changed` events.
+//! it attaches, plus the daemon-wide `state`, `exit` and `changed` events, and `resync` when it
+//! missed some.
 //!
 //! Each connection runs two tasks. The reader (this one) handles client messages and
 //! forwards daemon events; the writer drains the connection's outbox into the socket. Panes
@@ -105,11 +106,9 @@ impl Session {
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                     Some(Ok(_)) => {}
                 },
-                event = events.recv() => match event {
-                    Ok(event) => send(&outbox, event),
-                    // A missed event is refetchable over REST; keep going.
-                    Err(broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(broadcast::error::RecvError::Closed) => break,
+                event = next_event(&mut events) => match event {
+                    Some(event) => send(&outbox, event),
+                    None => break,
                 },
                 _ = &mut writer => break,
             }
@@ -198,6 +197,24 @@ impl Session {
     }
 }
 
+/// The next daemon-wide event to send: the event itself, or [`ServerMessage::Resync`] when
+/// the connection fell more than the bus holds behind and missed some, so the client reads
+/// everything again over REST rather than missing a change (spec §5). `None` once the bus
+/// closes. Cancel-safe, as `recv` is.
+async fn next_event(events: &mut broadcast::Receiver<ServerMessage>) -> Option<ServerMessage> {
+    match events.recv().await {
+        Ok(event) => Some(event),
+        Err(broadcast::error::RecvError::Lagged(missed)) => {
+            tracing::info!(
+                missed,
+                "a WebSocket client fell behind on events; sending resync"
+            );
+            Some(ServerMessage::Resync)
+        }
+        Err(broadcast::error::RecvError::Closed) => None,
+    }
+}
+
 fn send(outbox: &Outbox, message: ServerMessage) {
     // The writer has stopped only when the socket has; the reader loop ends right after.
     let _ = outbox.send(Outgoing::Message(message));
@@ -221,4 +238,49 @@ fn not_attached(channel: Channel) -> ServerMessage {
         "not_attached",
         format!("nothing is attached on channel {channel}"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use agentdeck_core::ws::Entity;
+
+    use super::*;
+
+    fn changed(id: &str) -> ServerMessage {
+        ServerMessage::Changed {
+            entity: Entity::Task,
+            id: id.into(),
+        }
+    }
+
+    mod next_event {
+        use super::*;
+
+        #[tokio::test]
+        async fn should_pass_an_event_on_as_it_is() {
+            let (bus, mut events) = broadcast::channel(4);
+            bus.send(changed("a")).unwrap();
+
+            assert_eq!(next_event(&mut events).await, Some(changed("a")));
+        }
+
+        #[tokio::test]
+        async fn should_say_resync_once_the_connection_missed_events_then_go_on() {
+            let (bus, mut events) = broadcast::channel(2);
+            for id in ["a", "b", "c", "d"] {
+                bus.send(changed(id)).unwrap();
+            }
+
+            assert_eq!(next_event(&mut events).await, Some(ServerMessage::Resync));
+            assert_eq!(next_event(&mut events).await, Some(changed("c")));
+        }
+
+        #[tokio::test]
+        async fn should_end_when_the_bus_closes() {
+            let (bus, mut events) = broadcast::channel::<ServerMessage>(2);
+            drop(bus);
+
+            assert_eq!(next_event(&mut events).await, None);
+        }
+    }
 }

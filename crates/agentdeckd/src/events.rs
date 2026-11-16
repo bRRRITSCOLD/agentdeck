@@ -6,8 +6,8 @@ use std::fmt::Display;
 use agentdeck_core::ws::{Entity, ServerMessage};
 use tokio::sync::broadcast;
 
-/// How many events a slow connection may fall behind before it misses some. A missed
-/// `changed` is harmless (clients refetch), and state is also readable over REST.
+/// How many events a slow connection may fall behind before it misses some. One that does
+/// gets `resync` and reads everything again over REST (spec §5).
 const CAPACITY: usize = 1024;
 
 /// A handle to the event bus; clones share it.

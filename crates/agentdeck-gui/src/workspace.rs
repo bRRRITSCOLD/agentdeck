@@ -128,10 +128,13 @@ impl WorkspaceView {
             if this.top_bar.is_archived() {
                 return;
             }
-            if let DaemonEvent::Message(ServerMessage::Changed {
-                entity: Changed::Tab | Changed::Pane | Changed::Task,
-                ..
-            }) = event
+            if let DaemonEvent::Message(
+                ServerMessage::Changed {
+                    entity: Changed::Tab | Changed::Pane | Changed::Task,
+                    ..
+                }
+                | ServerMessage::Resync,
+            ) = event
             {
                 this.reread(window, cx);
             }

@@ -234,7 +234,11 @@ impl SidebarView {
             DaemonEvent::Message(ServerMessage::Exit { pane, .. }) => {
                 self.set_state(*pane, AgentState::Exited, cx);
             }
-            DaemonEvent::Message(ServerMessage::Changed { .. }) => self.reread(cx),
+            // On `resync` the connection missed events: the read is diffed against what the
+            // sidebar held, so a change made meanwhile still alerts.
+            DaemonEvent::Message(ServerMessage::Changed { .. } | ServerMessage::Resync) => {
+                self.reread(cx);
+            }
             _ => {}
         }
     }
@@ -1165,6 +1169,29 @@ mod tests {
             });
 
             assert_eq!(heard.borrow().len(), 1);
+        }
+
+        #[gpui::test]
+        fn should_alert_on_resync_for_a_pr_whose_checks_failed_while_events_were_missed(
+            cx: &mut TestAppContext,
+        ) {
+            use agentdeck_core::{ChecksState, PrState};
+
+            let mut before = two_workspaces();
+            before.tasks = vec![
+                pr_task(20, "acme/widgets", PrState::Open, Some(id(1))),
+                pr_task(21, "acme/widgets", PrState::Open, Some(id(1))),
+            ];
+            let mut open = open(before.clone(), cx);
+            let (heard, _subscription) = heard(&mut open);
+            let mut after = before;
+            after.tasks[0].pr.as_mut().unwrap().checks = Some(ChecksState::Failure);
+            open.api.set(after);
+
+            open.send(ServerMessage::Resync);
+
+            let tags: Vec<_> = heard.borrow().iter().map(|a| a.tag.clone()).collect();
+            assert_eq!(tags, [format!("task:{}", id::<agentdeck_core::TaskId>(20))]);
         }
 
         #[gpui::test]

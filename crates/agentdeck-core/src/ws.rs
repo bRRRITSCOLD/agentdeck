@@ -143,6 +143,9 @@ pub enum ServerMessage {
         /// The attachment.
         channel: Channel,
     },
+    /// The connection fell behind on the daemon-wide events and missed some: read every
+    /// entity it shows again over REST. Sent to that client only.
+    Resync,
     /// A client message couldn't be acted on.
     Error {
         /// The attachment it was about, if any.
@@ -376,6 +379,7 @@ mod tests {
                     ServerMessage::Lagged { channel: 3 },
                     json!({"t": "lagged", "channel": 3}),
                 ),
+                (ServerMessage::Resync, json!({"t": "resync"})),
                 (
                     ServerMessage::Error {
                         channel: Some(3),
