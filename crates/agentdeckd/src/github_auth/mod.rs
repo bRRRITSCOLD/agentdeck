@@ -192,6 +192,9 @@ pub enum AuthError {
     /// A blank client ID.
     #[error("The OAuth client ID is blank.")]
     InvalidClientId,
+    /// A client ID shaped like a device flow's user code: the code pasted in by mistake.
+    #[error("That looks like the sign-in code, not a client ID.")]
+    UserCodeForClientId,
     /// No keyring to save in.
     #[error("{NO_KEYRING}")]
     NoKeyring,
@@ -439,6 +442,9 @@ impl GithubAuth {
         if client_id.is_empty() {
             return Err(AuthError::InvalidClientId);
         }
+        if looks_like_user_code(&client_id) {
+            return Err(AuthError::UserCodeForClientId);
+        }
         self.inner
             .store
             .call(move |keyring| keyring.set(CLIENT_ID_ENTRY, &client_id))
@@ -492,6 +498,11 @@ impl GithubAuth {
             .device_code(&client_id)
             .await
             .map_err(|err| AuthError::Github(err.0))?;
+        tracing::info!(
+            "Sign in with GitHub started: the code expires in {} s, polled every {} s",
+            code.expires_in,
+            code.interval
+        );
         let expires_in = Duration::from_secs(code.expires_in);
         let deadline = tokio::time::Instant::now() + expires_in;
         let expires_at = Utc::now()
@@ -527,6 +538,8 @@ impl GithubAuth {
         deadline: tokio::time::Instant,
     ) {
         let mut slow_downs = 0;
+        // Logs each poll, and how the sign-in ended or that it was cancelled (dropped).
+        let mut log = PollLog::default();
         let (outcome, message) = loop {
             let wake = tokio::time::Instant::now() + device::poll_wait(code.interval, slow_downs);
             if wake >= deadline {
@@ -534,8 +547,10 @@ impl GithubAuth {
                 break (DeviceOutcome::Expired, None);
             }
             tokio::time::sleep_until(wake).await;
-            match self.inner.oauth.poll(&client_id, &code.device_code).await {
-                Poll::Pending | Poll::Unreachable => {}
+            let poll = self.inner.oauth.poll(&client_id, &code.device_code).await;
+            log.record(&poll);
+            match poll {
+                Poll::Pending | Poll::Unreachable(_) => {}
                 Poll::SlowDown => slow_downs += 1,
                 Poll::Token(token) => match self.save_token_quietly(&token).await {
                     Ok(()) => break (DeviceOutcome::SignedIn, None),
@@ -546,7 +561,7 @@ impl GithubAuth {
                 Poll::Failed(message) => break (DeviceOutcome::Failed, Some(message)),
             }
         };
-        tracing::info!("Sign in with GitHub ended: {outcome:?}");
+        log.ended(outcome);
         if outcome == DeviceOutcome::SignedIn {
             self.changed_token(Some(outcome), None);
         } else {
@@ -581,6 +596,73 @@ impl GithubAuth {
             .sign_in
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// Whether `client_id` has the shape of a device flow's user code (`WDJB-MJHT`: 4 capitals or
+/// digits, a hyphen, 4 more), which no OAuth client ID has.
+fn looks_like_user_code(client_id: &str) -> bool {
+    let bytes = client_id.as_bytes();
+    let code_char = |byte: &u8| byte.is_ascii_uppercase() || byte.is_ascii_digit();
+    bytes.len() == 9
+        && bytes[4] == b'-'
+        && bytes[..4].iter().all(code_char)
+        && bytes[5..].iter().all(code_char)
+}
+
+/// A sign-in's polls, for the log: a poll that failed in transit at warn, each pending answer
+/// at debug, then how it ended at info, or, dropped before that (cancelled, or replaced by a
+/// new sign-in), that it was cancelled. Never logs a token.
+#[derive(Default)]
+struct PollLog {
+    polls: u32,
+    pending: u32,
+    unreachable: u32,
+    ended: bool,
+}
+
+impl PollLog {
+    fn record(&mut self, poll: &Poll) {
+        self.polls += 1;
+        match poll {
+            Poll::Pending => {
+                self.pending += 1;
+                tracing::debug!(
+                    "Sign in with GitHub: not approved yet ({} pending answers)",
+                    self.pending
+                );
+            }
+            Poll::Unreachable(err) => {
+                self.unreachable += 1;
+                tracing::warn!("Sign in with GitHub: couldn't poll GitHub, trying again: {err}");
+            }
+            Poll::SlowDown => tracing::debug!("Sign in with GitHub: GitHub asked to poll slower"),
+            Poll::Token(_) | Poll::Expired | Poll::Denied | Poll::Failed(_) => {}
+        }
+    }
+
+    fn ended(&mut self, outcome: DeviceOutcome) {
+        self.ended = true;
+        tracing::info!("Sign in with GitHub ended: {outcome:?} after {self}");
+    }
+}
+
+impl std::fmt::Display for PollLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = if self.polls == 1 { "" } else { "s" };
+        write!(
+            f,
+            "{} poll{s} ({} pending, {} unreachable)",
+            self.polls, self.pending, self.unreachable
+        )
+    }
+}
+
+impl Drop for PollLog {
+    fn drop(&mut self) {
+        if !self.ended {
+            tracing::info!("Sign in with GitHub cancelled after {self}");
+        }
     }
 }
 
@@ -716,6 +798,144 @@ mod tests {
 
             assert_eq!(env.token(), None);
             assert_eq!(env.client_id, None);
+        }
+    }
+
+    mod looks_like_user_code {
+        use super::*;
+
+        #[test]
+        fn should_spot_a_sign_in_code() {
+            assert!(looks_like_user_code("WDJB-MJHT"));
+            assert!(looks_like_user_code("ABCD-1234"));
+        }
+
+        #[test]
+        fn should_pass_a_client_id() {
+            for client_id in [
+                "Ov23liAbCdEf12345678",
+                "Iv1.0123456789abcdef",
+                "wdjb-mjht",
+                "ABCD1234",
+            ] {
+                assert!(!looks_like_user_code(client_id), "{client_id}");
+            }
+        }
+    }
+
+    mod poll_log {
+        use std::io;
+
+        use super::*;
+
+        /// What a test's subscriber wrote.
+        #[derive(Clone, Default)]
+        struct Written(Arc<Mutex<Vec<u8>>>);
+
+        impl io::Write for Written {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        /// Everything `run` logs, debug and up.
+        fn logged(run: impl FnOnce()) -> String {
+            let written = Written::default();
+            let writer = written.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(move || writer.clone())
+                .finish();
+            tracing::subscriber::with_default(subscriber, run);
+            let bytes = written.0.lock().unwrap().clone();
+            String::from_utf8(bytes).unwrap()
+        }
+
+        #[test]
+        fn should_warn_with_the_error_when_a_poll_fails_in_transit() {
+            let logged = logged(|| {
+                let mut log = PollLog::default();
+                log.record(&Poll::Unreachable(
+                    "error sending request: connection refused".into(),
+                ));
+                log.ended(DeviceOutcome::Expired);
+            });
+
+            let warning = logged
+                .lines()
+                .find(|line| line.contains("WARN"))
+                .expect("a warning");
+            assert!(
+                warning.contains("error sending request: connection refused"),
+                "{logged}"
+            );
+        }
+
+        #[test]
+        fn should_count_pending_answers_at_debug() {
+            let logged = logged(|| {
+                let mut log = PollLog::default();
+                log.record(&Poll::Pending);
+                log.record(&Poll::Pending);
+                log.ended(DeviceOutcome::Expired);
+            });
+
+            let pending: Vec<&str> = logged
+                .lines()
+                .filter(|line| line.contains("DEBUG") && line.contains("pending"))
+                .collect();
+            assert_eq!(pending.len(), 2, "{logged}");
+            assert!(pending[1].contains('2'), "{logged}");
+        }
+
+        #[test]
+        fn should_sum_the_polls_up_when_it_ends() {
+            let logged = logged(|| {
+                let mut log = PollLog::default();
+                log.record(&Poll::Pending);
+                log.record(&Poll::Unreachable("timed out".into()));
+                log.record(&Poll::Token("gho_secret".into()));
+                log.ended(DeviceOutcome::SignedIn);
+            });
+
+            let end = logged
+                .lines()
+                .find(|line| line.contains("ended"))
+                .expect("the end");
+            assert!(end.contains("INFO"), "{logged}");
+            assert!(
+                end.contains("SignedIn after 3 polls (1 pending, 1 unreachable)"),
+                "{logged}"
+            );
+            assert!(!logged.contains("gho_secret"), "{logged}");
+        }
+
+        #[test]
+        fn should_say_it_was_cancelled_when_dropped_before_it_ended() {
+            let logged = logged(|| {
+                let mut log = PollLog::default();
+                log.record(&Poll::Pending);
+                drop(log);
+            });
+
+            assert!(
+                logged.contains(
+                    "Sign in with GitHub cancelled after 1 poll (1 pending, 0 unreachable)"
+                ),
+                "{logged}"
+            );
+        }
+
+        #[test]
+        fn should_not_say_cancelled_once_it_ended() {
+            let logged = logged(|| PollLog::default().ended(DeviceOutcome::Denied));
+
+            assert!(!logged.contains("cancelled"), "{logged}");
         }
     }
 

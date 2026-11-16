@@ -876,6 +876,27 @@ mod tests {
         }
 
         #[gpui::test]
+        fn should_show_a_sign_in_code_refused_as_the_fields_error(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(signed_out(), cx);
+            harness.type_client_id("WDJB-MJHT", cx);
+            harness.api.refuse_next(
+                "invalid_client_id",
+                "That looks like the sign-in code, not a client ID.",
+            );
+
+            harness.click("github client id save", cx);
+
+            assert_eq!(
+                harness
+                    .view
+                    .read_with(cx, |view, _| view.client_id_error().cloned()),
+                Some("That looks like the sign-in code, not a client ID.".into())
+            );
+            assert!(harness.shows("github client id error", cx));
+            assert!(cx.read(notice::shown).is_empty());
+        }
+
+        #[gpui::test]
         fn should_clear_it(cx: &mut TestAppContext) {
             let (harness, cx) = Harness::open(saved_token(), cx);
 
@@ -979,7 +1000,20 @@ mod tests {
                 matches!(harness.stage(cx), Stage::Waiting { code, .. } if code == "WDJB-MJHT")
             );
             assert!(harness.shows("sign in copy", cx));
+            assert!(harness.shows("sign in waiting", cx));
             assert!(harness.shows("sign in expires", cx));
+        }
+
+        #[gpui::test]
+        fn should_fit_the_waiting_line_and_the_expiry_on_one_line(cx: &mut TestAppContext) {
+            let (_harness, cx) = signing_in(cx);
+
+            let waiting = cx
+                .debug_bounds("sign in waiting")
+                .expect("the waiting line");
+            let expires = cx.debug_bounds("sign in expires").expect("the expiry");
+            assert!(waiting.right() <= expires.left(), "{waiting:?} {expires:?}");
+            assert_eq!(waiting.size.height, expires.size.height);
         }
 
         #[gpui::test]
