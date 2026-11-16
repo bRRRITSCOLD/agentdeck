@@ -354,6 +354,11 @@ impl ClosePrs {
         self.selection.active()
     }
 
+    /// Why `task`'s PR didn't close, while it stays picked.
+    pub fn error(&self, task: TaskId) -> Option<&SharedString> {
+        self.selection.error(task)
+    }
+
     /// Whether a close of the picked PRs is in flight. Select mode and the selection stay as
     /// they are until it answers.
     pub fn is_closing(&self) -> bool {
