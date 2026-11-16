@@ -297,6 +297,8 @@ impl RightPanel {
     /// forgets whether it was shown whole.
     pub fn show(&mut self, workspace: WorkspaceId, snapshot: Snapshot, cx: &mut Context<Self>) {
         self.workspace = Some(workspace);
+        self.close
+            .update(cx, |close, cx| close.saw(&snapshot.tasks, cx));
         self.snapshot = snapshot;
         let listed: HashSet<InstructionId> = self.instructions().iter().map(|i| i.id).collect();
         if self
@@ -1688,6 +1690,36 @@ mod tests {
             let bounds = cx.debug_bounds(selector).expect(selector);
             cx.simulate_click(bounds.center(), Modifiers::default());
             cx.run_until_parked();
+        }
+
+        #[gpui::test]
+        fn should_count_the_picked_prs_closing_from_the_snapshots_it_is_shown(
+            cx: &mut TestAppContext,
+        ) {
+            let (panel, api, cx) = open_with_api(cx);
+            with_prs(&panel, cx);
+            click("panel select", cx);
+            click("panel select all review", cx);
+            click("panel close prs", cx);
+            let release = api.hold_close();
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+            let closing = |cx: &mut VisualTestContext| {
+                panel.read_with(cx, |panel, cx| panel.close_prs().read(cx).closing())
+            };
+            assert_eq!(closing(cx), Some((0, 1)));
+
+            let mut snapshot = snapshot();
+            let mut pr = pr_task(5, "acme/widgets", PrState::Closed, Some(id(1)));
+            pr.status = TaskStatus::Done;
+            snapshot.tasks.push(pr);
+            panel.update(cx, |panel, cx| panel.show(id(1), snapshot, cx));
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            assert_eq!(closing(cx), Some((1, 1)));
+
+            release.send(()).unwrap();
+            cx.run_until_parked();
+            assert_eq!(closing(cx), None);
         }
 
         #[gpui::test]
