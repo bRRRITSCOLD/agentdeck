@@ -57,6 +57,10 @@ pub trait Api: Send + Sync {
     /// becomes (spec §4). A refusal is an [`ApiError`], such as `running`.
     fn respawn_pane(&self, pane: PaneId, run: PaneRun, cx: &App) -> Task<anyhow::Result<()>>;
 
+    /// Stops `pane`'s agent and keeps the pane (spec §4): an agent pane's process, which then
+    /// reads as exited, or the agent a shell pane hosts, leaving the shell running.
+    fn stop_pane(&self, pane: PaneId, cx: &App) -> Task<anyhow::Result<()>>;
+
     /// Makes a workspace as `request` says; its id. A refusal is an [`ApiError`] whose code
     /// names the field: `invalid_name` or `invalid_dir`.
     fn new_workspace(&self, request: Request, cx: &App) -> Task<anyhow::Result<WorkspaceId>>;
@@ -255,6 +259,11 @@ impl Api for Daemon {
             panes::respawn(&client, pane, run).await?;
             Ok(())
         })
+    }
+
+    fn stop_pane(&self, pane: PaneId, cx: &App) -> Task<anyhow::Result<()>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move { Ok(panes::stop(&client, pane).await?) })
     }
 
     fn new_workspace(&self, request: Request, cx: &App) -> Task<anyhow::Result<WorkspaceId>> {
@@ -739,6 +748,10 @@ pub(crate) mod fake {
         pub linked: Mutex<Vec<(PaneId, Option<TaskId>)>>,
         /// The respawns asked for: the pane and what it runs, in order.
         pub respawned: Mutex<Vec<(PaneId, PaneRun)>>,
+        /// The panes whose agents were stopped, in order.
+        pub stopped: Mutex<Vec<PaneId>>,
+        /// Holds the next stop's answer until its sender sends or drops.
+        held_stop: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
         /// The workspaces archived, in order.
         pub archived: Mutex<Vec<WorkspaceId>>,
         /// The workspaces unarchived, in order.
@@ -880,6 +893,14 @@ pub(crate) mod fake {
         pub fn hold_close(&self) -> tokio::sync::oneshot::Sender<()> {
             let (release, held) = tokio::sync::oneshot::channel();
             *self.held_close.lock().unwrap() = Some(held);
+            release
+        }
+
+        /// Holds the next stop's answer, as a daemon slow to answer does, until the sender it
+        /// returns sends or drops. The stop is recorded at once.
+        pub fn hold_stop(&self) -> tokio::sync::oneshot::Sender<()> {
+            let (release, held) = tokio::sync::oneshot::channel();
+            *self.held_stop.lock().unwrap() = Some(held);
             release
         }
 
@@ -1061,6 +1082,20 @@ pub(crate) mod fake {
             }
             self.respawned.lock().unwrap().push((pane, run));
             Task::ready(Ok(()))
+        }
+
+        fn stop_pane(&self, pane: PaneId, cx: &App) -> Task<anyhow::Result<()>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            self.stopped.lock().unwrap().push(pane);
+            match self.held_stop.lock().unwrap().take() {
+                Some(held) => cx.background_executor().spawn(async move {
+                    let _ = held.await;
+                    Ok(())
+                }),
+                None => Task::ready(Ok(())),
+            }
         }
 
         fn new_workspace(&self, request: Request, _cx: &App) -> Task<anyhow::Result<WorkspaceId>> {

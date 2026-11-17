@@ -7,8 +7,8 @@ use agentdeck_core::ws::Entity;
 use agentdeck_core::{Agent, AgentState, PaneId, PaneKind};
 use dropshot::{
     Body, ClientErrorStatusCode, FreeformBody, HttpError, HttpResponseAccepted,
-    HttpResponseCreated, HttpResponseDeleted, HttpResponseOk, Path, Query, RequestContext,
-    TypedBody, endpoint,
+    HttpResponseCreated, HttpResponseDeleted, HttpResponseOk, HttpResponseUpdatedNoContent, Path,
+    Query, RequestContext, TypedBody, endpoint,
 };
 
 use super::{ApiContext, Authorized, IdPath, client_error};
@@ -19,7 +19,7 @@ use crate::model::{
     InputAccepted, InputWhen, NewPane, Pane, PaneInput, PanePatch, PaneRespawn, PaneRun, TailQuery,
 };
 use crate::terminal::env::default_shell;
-use crate::terminal::pane::{Launch, SpawnError, When};
+use crate::terminal::pane::{Launch, NothingToStop, SpawnError, When};
 use crate::terminal::tail::TAIL_CAPACITY;
 
 /// What a new pane runs, from its request (spec §4, §6).
@@ -338,6 +338,39 @@ pub(crate) async fn pane_delete(
     context.terminals.kill(id);
     context.events.changed(Entity::Pane, id);
     Ok(HttpResponseDeleted())
+}
+
+/// Stops the pane's agent and keeps the pane, with its place in the layout, its session and
+/// its task link: SIGHUP, then SIGKILL after 3 s, as `DELETE` does. An agent pane's process
+/// is stopped, and the pane reads as exited once it has, so `POST /v1/panes/{id}/respawn`
+/// (Restart agent) resumes the session later and a restarted daemon doesn't resume it. A
+/// shell pane's hosted agent is stopped, its process group alone, and the shell keeps
+/// running. Answers once the signal is sent: the `state` and `exit` events, or `changed` for
+/// a hosted agent, follow. `exited` (409) when the process has already exited; `no_agent`
+/// (409) for a shell pane hosting no agent.
+#[endpoint { method = POST, path = "/v1/panes/{id}/stop" }]
+pub(crate) async fn pane_stop(
+    rqctx: RequestContext<ApiContext>,
+    _auth: Authorized,
+    path: Path<IdPath<PaneId>>,
+) -> Result<HttpResponseUpdatedNoContent, HttpError> {
+    let context = rqctx.context();
+    let id = path.into_inner().id;
+    match context.terminals.stop(id) {
+        Ok(()) => {
+            tracing::info!("stopping pane {id}'s agent");
+            Ok(HttpResponseUpdatedNoContent())
+        }
+        Err(NothingToStop::Exited) => {
+            context.db.call(move |c| db::panes::get(c, id)).await?;
+            Err(exited(id))
+        }
+        Err(NothingToStop::NoAgent) => Err(client_error(
+            ClientErrorStatusCode::CONFLICT,
+            "no_agent",
+            format!("pane {id} is a shell hosting no agent: there is no agent to stop"),
+        )),
+    }
 }
 
 /// Types text into the pane, as is or submitted (`submit`), now or once it is idle (`when`).

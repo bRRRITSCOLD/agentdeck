@@ -1,34 +1,45 @@
 //! Quitting (spec §11). Agents keep running after the GUI quits, so while one runs, closing the
-//! window and Quit ask first, unless `gui.confirm_quit` is off. The main window's shell asks;
-//! this module counts the agents, words the question and routes the app-wide Quit to the shell.
+//! window and Quit ask first, unless `gui.confirm_quit` is off; the dialog can stop them
+//! instead. The main window's shell asks; this module finds the running agents, words the
+//! question and routes the app-wide Quit to the shell.
 
 use std::rc::Rc;
+use std::time::Duration;
 
+use agentdeck_core::{AgentState, PaneId};
 use gpui::{App, Global};
 
 use crate::overview::Snapshot;
 
-/// How many agents run: agent panes whose process hasn't exited, and shell panes hosting an
-/// agent. Plain shells don't count.
-pub fn running_agents(snapshot: &Snapshot) -> usize {
-    snapshot
-        .panes
-        .iter()
-        .filter(|pane| pane.agent.is_some())
-        .count()
+/// How long quitting with Stop the agents ticked waits for the stops to land: the daemon's
+/// grace between SIGHUP and SIGKILL (spec §4). It quits then whether or not they all did.
+pub const STOP_GRACE: Duration = Duration::from_secs(3);
+
+/// The panes whose agents run: agent panes whose process hasn't exited, and shell panes
+/// hosting an agent. Plain shells don't count.
+pub fn running_agents(snapshot: &Snapshot) -> Vec<PaneId> {
+    (snapshot.panes.iter())
+        .filter(|pane| pane.agent.is_some() && pane.state != AgentState::Exited)
+        .map(|pane| pane.pane)
+        .collect()
 }
 
-/// The dialog's description for `n` running agents.
-pub fn still_running(n: usize) -> String {
+/// The dialog's description for `n` running agents, as it reads while Stop the agents is
+/// ticked (`stop`) or not.
+pub fn still_running(n: usize, stop: bool) -> String {
     let count = if n == 1 {
         "1 agent is".to_owned()
     } else {
         format!("{n} agents are")
     };
-    format!(
-        "{count} still running. They keep running in the background, and reopening agentdeck \
-         reconnects to them."
-    )
+    let then = match (stop, n == 1) {
+        (false, _) => {
+            "They keep running in the background, and reopening agentdeck reconnects to them."
+        }
+        (true, true) => "It'll be stopped; Restart agent on its pane starts it again.",
+        (true, false) => "They'll be stopped; Restart agent on each pane starts them again.",
+    };
+    format!("{count} still running. {then}")
 }
 
 /// What Quit asks first: the main window's shell, which knows the agents and the setting.
@@ -106,14 +117,24 @@ mod tests {
                 pane(3, id(1), AgentState::Idle),
             ];
 
-            assert_eq!(running_agents(&snapshot(panes)), 2);
+            assert_eq!(running_agents(&snapshot(panes)), [id(1), id(2)]);
         }
 
         #[test]
         fn should_count_none_for_plain_shells() {
             let panes = vec![pane(1, id(1), AgentState::Idle)];
 
-            assert_eq!(running_agents(&snapshot(panes)), 0);
+            assert_eq!(running_agents(&snapshot(panes)), []);
+        }
+
+        #[test]
+        fn should_leave_out_an_agent_that_exited_since_the_read() {
+            let panes = vec![crate::overview::PaneState {
+                agent: Some(Agent::Codex),
+                ..pane(1, id(1), AgentState::Exited)
+            }];
+
+            assert_eq!(running_agents(&snapshot(panes)), []);
         }
     }
 
@@ -122,15 +143,33 @@ mod tests {
 
         #[test]
         fn should_say_one_agent_is() {
-            assert!(still_running(1).starts_with("1 agent is still running. "));
+            assert!(still_running(1, false).starts_with("1 agent is still running. "));
         }
 
         #[test]
         fn should_say_n_agents_are() {
             assert_eq!(
-                still_running(2),
+                still_running(2, false),
                 "2 agents are still running. They keep running in the background, and \
                  reopening agentdeck reconnects to them."
+            );
+        }
+
+        #[test]
+        fn should_say_they_will_be_stopped_while_stop_the_agents_is_ticked() {
+            assert_eq!(
+                still_running(2, true),
+                "2 agents are still running. They'll be stopped; Restart agent on each pane \
+                 starts them again."
+            );
+        }
+
+        #[test]
+        fn should_say_it_will_be_stopped_for_one_agent() {
+            assert_eq!(
+                still_running(1, true),
+                "1 agent is still running. It'll be stopped; Restart agent on its pane starts \
+                 it again."
             );
         }
     }

@@ -79,6 +79,14 @@ pub async fn respawn(client: &Client, pane: PaneId, run: PaneRun) -> Result<Pane
     Ok(respawned.into_inner())
 }
 
+/// Stops `pane`'s agent and keeps the pane (spec §4): an agent pane's process, which then
+/// reads as exited, or the agent a shell pane hosts, leaving the shell running. A refusal is
+/// an [`ApiError`]: `exited` once its process has exited, `no_agent` for a shell hosting none.
+pub async fn stop(client: &Client, pane: PaneId) -> Result<(), ApiError> {
+    client.pane_stop().id(pane).send().await?;
+    Ok(())
+}
+
 /// Adds a tab titled `shell` to `workspace`, running `$SHELL` in `dir` as its one pane; the
 /// new tab. A tab whose shell can't start or be placed is deleted again.
 pub async fn new_shell_tab(

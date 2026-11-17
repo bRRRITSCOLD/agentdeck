@@ -262,6 +262,12 @@ pub enum AgentCommand {
         #[arg(long)]
         none: bool,
     },
+    /// Stop a pane's agent and keep the pane: Restart agent in the app resumes it. In a shell
+    /// pane, only the agent it hosts stops; the shell keeps running.
+    Stop {
+        /// The pane: its id or a short id.
+        pane: String,
+    },
     /// Type a message into a pane and press Enter, once the pane is idle.
     Send {
         /// The pane: its id or a short id.
@@ -541,6 +547,21 @@ mod tests {
                     ..
                 })
             ));
+        }
+
+        #[test]
+        fn should_stop_a_pane() {
+            let cli = parse(&["agent", "stop", TASK]).unwrap();
+
+            let Command::Agent(AgentCommand::Stop { pane }) = cli.command else {
+                panic!("not agent stop: {:?}", cli.command);
+            };
+            assert_eq!(pane, TASK);
+        }
+
+        #[test]
+        fn should_need_a_pane_to_stop() {
+            assert!(parse(&["agent", "stop"]).is_err());
         }
 
         #[test]

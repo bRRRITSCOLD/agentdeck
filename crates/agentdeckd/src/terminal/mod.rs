@@ -33,7 +33,7 @@ use tokio::runtime::Handle;
 use tokio::sync::broadcast;
 
 use self::fanout::SubscriberId;
-use self::pane::{Launch, Observed, Pane, Rules, SpawnError};
+use self::pane::{Launch, NothingToStop, Observed, Pane, Rules, SpawnError};
 use crate::db::{self, Db};
 use crate::events::Events;
 
@@ -154,6 +154,19 @@ impl Terminals {
             pane.signal(Signal::SIGKILL);
         });
         true
+    }
+
+    /// Stops pane `id`'s agent and keeps the pane (spec §4): SIGHUP to the agent pane's process,
+    /// or to the agent a shell pane hosts, then SIGKILL after 3 s to whatever of it is left. The
+    /// pane's exit is recorded as any other; a shell pane's shell keeps running.
+    pub fn stop(&self, id: PaneId) -> Result<(), NothingToStop> {
+        let pane = self.get(id).ok_or(NothingToStop::Exited)?;
+        pane.stop(Signal::SIGHUP)?;
+        self.shared.runtime.spawn(async move {
+            tokio::time::sleep(KILL_GRACE).await;
+            let _ = pane.stop(Signal::SIGKILL);
+        });
+        Ok(())
     }
 
     /// Kills every live pane whose row is gone, as after deleting its tab or workspace.
