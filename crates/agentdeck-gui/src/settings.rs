@@ -463,7 +463,7 @@ impl SettingsView {
     fn theme_field(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.settings.as_ref().map(|s| s.appearance.theme);
         let select = Select::new("settings-theme")
-            .trigger(SelectTrigger::new().w_full())
+            .trigger(SelectTrigger::new())
             .content(
                 SelectContent::new()
                     .item(SelectItem::new(
@@ -482,8 +482,10 @@ impl SettingsView {
         Field::new()
             .child(Label::new().child("Theme"))
             .child(
+                // Penpot fits the trigger to its value, so the field doesn't stretch it.
                 div()
                     .debug_selector(|| "settings theme".into())
+                    .self_start()
                     .child(select),
             )
             .child(FieldDescription::new(
@@ -862,6 +864,18 @@ mod tests {
                 harness.api.settings_now().appearance.theme,
                 ThemePreference::Light
             );
+        }
+
+        /// Penpot "Screens · Settings" → "Settings": the trigger fits "System" and its chevron
+        /// (about 96px), not the section's 480px.
+        #[gpui::test]
+        fn should_fit_the_select_to_its_value(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open(with_theme(ThemePreference::System), cx);
+
+            let select = cx.debug_bounds("settings theme").expect("the select");
+
+            assert!(select.size.width < px(120.), "{:?}", select.size);
+            assert!(select.size.width > px(60.), "{:?}", select.size);
         }
 
         #[gpui::test]

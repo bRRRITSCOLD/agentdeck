@@ -552,6 +552,23 @@ mod tests {
         assert_eq!(*asked.borrow(), [EditTask(id(2))]);
     }
 
+    /// Penpot "Screens · Main" → "Tasks · row menu · edit task": its right edge on the
+    /// trigger's.
+    #[gpui::test]
+    fn should_open_a_rows_menu_end_aligned_4px_below_its_trigger(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::open(board(), cx);
+        let selector = format!("tasks menu {}", id::<TaskId>(2)).leak();
+        harness.draw(cx);
+        let trigger = cx.debug_bounds(selector).expect(selector);
+
+        harness.click(selector, cx);
+        harness.draw(cx);
+
+        let menu = cx.debug_bounds("dropdown-menu-content").expect("it opens");
+        assert_eq!(menu.right(), trigger.right());
+        assert_eq!(menu.top(), trigger.bottom() + px(4.));
+    }
+
     #[gpui::test]
     fn should_copy_a_plain_tasks_id_from_its_rows_menu(cx: &mut TestAppContext) {
         let (harness, cx) = Harness::open(board(), cx);

@@ -26,8 +26,9 @@ use agentdeck_core::{PrState, TaskId};
 use brrritscold_core_gpui::{
     ActiveTheme as _, AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
     AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, Button,
-    ButtonSize, ButtonVariant, Checkbox, DropdownMenu, DropdownMenuContent, DropdownMenuItem,
-    DropdownMenuItemVariant, DropdownMenuSeparator, Icon, IconName, Separator, Toggle, ToggleSize,
+    ButtonSize, ButtonVariant, Checkbox, DropdownMenu, DropdownMenuAlign, DropdownMenuContent,
+    DropdownMenuItem, DropdownMenuItemVariant, DropdownMenuSeparator, Icon, IconName, Separator,
+    Toggle, ToggleSize,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
@@ -806,7 +807,9 @@ pub fn row_parts(
         div()
             .debug_selector(move || format!("{id} menu {task}"))
             .child(
+                // Penpot's "… · row menu" boards end it on the trigger's right edge.
                 DropdownMenu::new(SharedString::from(format!("{id}-menu-{task}")))
+                    .align(DropdownMenuAlign::End)
                     .trigger(
                         Button::new(SharedString::from(format!("{id}-menu-trigger-{task}")))
                             .variant(ButtonVariant::Ghost)

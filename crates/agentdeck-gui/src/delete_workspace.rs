@@ -26,7 +26,6 @@ use gpui::{
 use gpui_base::input::InputEvent;
 
 use crate::api::Api;
-use crate::form_enter::form_enter;
 use crate::notice;
 use crate::overview::Snapshot;
 use crate::workspace::failed;
@@ -436,7 +435,7 @@ impl Render for DeleteWorkspaceDialog {
                             .child(
                                 Field::new()
                                     .child(Label::new().child(format!("Type {name} to confirm")))
-                                    .child(form_enter(Input::new(&self.confirm))),
+                                    .child(Input::new(&self.confirm)),
                             ),
                     )
                     // Penpot `agentdeck/DeleteFooterActions`.

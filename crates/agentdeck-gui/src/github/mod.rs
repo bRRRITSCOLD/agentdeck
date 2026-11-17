@@ -1019,6 +1019,52 @@ mod tests {
         }
 
         #[gpui::test]
+        fn should_save_and_close_on_enter(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(signed_out(), cx);
+            harness.click("github paste token", cx);
+            cx.simulate_input("ghp_x");
+            harness.settle(cx);
+
+            cx.simulate_keystrokes("enter");
+            harness.settle(cx);
+
+            let dialog = harness.paste_token(cx);
+            assert!(!dialog.read_with(cx, |dialog, _| dialog.is_open()));
+            assert_eq!(*harness.api.saved_tokens.lock().unwrap(), ["ghp_x"]);
+        }
+
+        #[gpui::test]
+        fn should_stay_open_on_enter_with_no_token(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(signed_out(), cx);
+            open_and_type(&harness, "  ", cx);
+
+            cx.simulate_keystrokes("enter");
+            harness.settle(cx);
+
+            let dialog = harness.paste_token(cx);
+            assert!(dialog.read_with(cx, |dialog, _| dialog.is_open()));
+            assert!(harness.api.saved_tokens.lock().unwrap().is_empty());
+        }
+
+        #[gpui::test]
+        fn should_stay_open_with_the_refusal_on_enter(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(signed_out(), cx);
+            open_and_type(&harness, "ghp_bad", cx);
+            harness
+                .api
+                .refuse_next("invalid_token", "GitHub didn't accept this token.");
+
+            cx.simulate_keystrokes("enter");
+            harness.settle(cx);
+
+            let dialog = harness.paste_token(cx);
+            let (open, error) =
+                dialog.read_with(cx, |dialog, _| (dialog.is_open(), dialog.error().cloned()));
+            assert!(open);
+            assert_eq!(error, Some("GitHub didn't accept this token.".into()));
+        }
+
+        #[gpui::test]
         fn should_replace_a_rejected_saved_token(cx: &mut TestAppContext) {
             let (harness, cx) = Harness::open(rejected_token(), cx);
             open_and_type(&harness, "ghp_x", cx);
