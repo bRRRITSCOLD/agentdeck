@@ -217,6 +217,29 @@ mod post_v1_prs_sync {
     }
 
     #[tokio::test]
+    async fn should_put_a_pr_whose_branch_no_clone_has_in_the_oldest_workspace_with_its_repo_200() {
+        let github = MockServer::start_async().await;
+        mock_search(&github, TOKEN, &[Pr::open(7)]);
+        let daemon = daemon(&github, Some(TOKEN)).await;
+        let gadgets = daemon.new_dir("gadgets");
+        clone_of(&gadgets.join("gadgets"), "acme/gadgets", "feat/sync");
+        let oldest = daemon.new_dir("oldest");
+        clone_of(&oldest.join("widgets"), "acme/widgets", "main-only");
+        let newer = daemon.new_dir("newer");
+        clone_of(&newer.join("widgets"), "acme/widgets", "other-only");
+        attach(&daemon.client, &gadgets).await;
+        let oldest = attach(&daemon.client, &oldest).await;
+        attach(&daemon.client, &newer).await;
+
+        sync(&daemon.client).await;
+
+        assert_eq!(
+            pr_tasks(&daemon.client).await[0].workspace_id,
+            Some(oldest.id)
+        );
+    }
+
+    #[tokio::test]
     async fn should_leave_a_pr_in_the_inbox_when_no_clone_is_of_its_repo_200() {
         let github = MockServer::start_async().await;
         mock_search(&github, TOKEN, &[Pr::open(7)]);
