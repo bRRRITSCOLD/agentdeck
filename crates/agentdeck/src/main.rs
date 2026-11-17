@@ -30,8 +30,7 @@ const OLDER_DAEMON: &str = "warning: agentdeck's background service (agentdeckd)
 
 /// The one-line warning for a daemon older than this CLI, if `info`'s is.
 fn older_daemon_warning(info: &DaemonInfo) -> Option<String> {
-    info.predates_client()
-        .then(|| format!("agentdeck: {OLDER_DAEMON}"))
+    daemon::is_older(info).then(|| format!("agentdeck: {OLDER_DAEMON}"))
 }
 
 fn main() -> ExitCode {
@@ -103,7 +102,8 @@ mod tests {
             DaemonInfo {
                 port: 1,
                 token: String::new(),
-                pid: 1,
+                // No such process, so only the API version decides.
+                pid: u32::MAX,
                 version: String::new(),
                 api_version,
             }

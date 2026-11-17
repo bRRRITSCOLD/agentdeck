@@ -26,6 +26,8 @@ pub struct Link {
     pub socket: Socket,
     /// What `daemon.json` held: which daemon this is, and its API version.
     pub daemon: DaemonInfo,
+    /// Whether the daemon still runs from a binary since rebuilt or reinstalled (spec §2).
+    pub binary_replaced: bool,
 }
 
 /// Reaches the daemon and opens its socket.
@@ -45,10 +47,12 @@ impl DaemonConnector {
     async fn link(daemon: daemon::Daemon) -> anyhow::Result<Link> {
         let socket = ws::open(&daemon.info).await?;
         let info = daemon.info.clone();
+        let binary_replaced = daemon::binary_replaced(info.pid);
         Ok(Link {
             api: Arc::new(daemon),
             socket,
             daemon: info,
+            binary_replaced,
         })
     }
 }
@@ -103,6 +107,8 @@ pub struct Connection {
     status: Status,
     /// The daemon reached, while connected.
     daemon: Option<DaemonInfo>,
+    /// Whether that daemon runs from a binary since rebuilt or reinstalled.
+    binary_replaced: bool,
     /// Connects, then reads the socket; replaced on each [`Connection::connect`] and
     /// [`Connection::restart`].
     task: Option<Task<()>>,
@@ -119,6 +125,7 @@ impl Connection {
             connector,
             status: Status::Connecting,
             daemon: None,
+            binary_replaced: false,
             task: None,
             last_channel: 0,
         };
@@ -132,11 +139,12 @@ impl Connection {
     }
 
     /// Whether the daemon reached is older than the app, so it may lack what the app asks of
-    /// it (spec §2): its API version is lower than the app's.
+    /// it (spec §2): its API version is lower than the app's, or it still runs from a binary
+    /// that has since been rebuilt or reinstalled.
     pub fn daemon_predates_app(&self) -> bool {
         self.daemon
             .as_ref()
-            .is_some_and(DaemonInfo::predates_client)
+            .is_some_and(|daemon| self.binary_replaced || daemon.predates_client())
     }
 
     /// A channel number no attachment on this socket has used yet.
@@ -188,6 +196,7 @@ impl Connection {
                 api,
                 socket,
                 daemon,
+                binary_replaced,
             } = match connecting.await {
                 Ok(link) => link,
                 Err(err) => {
@@ -203,6 +212,7 @@ impl Connection {
             if this
                 .update(cx, |this, cx| {
                     this.daemon = Some(daemon);
+                    this.binary_replaced = binary_replaced;
                     this.set_status(connected, cx);
                 })
                 .is_err()
@@ -308,12 +318,28 @@ pub(crate) mod fake {
             self.push(api, daemon(0))
         }
 
+        /// Scripts a success to a daemon at the app's API version whose binary has since been
+        /// rebuilt.
+        pub fn then_connect_rebuilt(&self) -> Remote {
+            self.push_link(Arc::new(FakeApi::default()), daemon(API_VERSION), true)
+        }
+
         fn push(&self, api: Arc<FakeApi>, daemon: DaemonInfo) -> Remote {
+            self.push_link(api, daemon, false)
+        }
+
+        fn push_link(
+            &self,
+            api: Arc<FakeApi>,
+            daemon: DaemonInfo,
+            binary_replaced: bool,
+        ) -> Remote {
             let (socket, remote) = loopback();
             self.outcomes.borrow_mut().push_back(Ok(Link {
                 api,
                 socket,
                 daemon,
+                binary_replaced,
             }));
             remote
         }
@@ -417,6 +443,17 @@ mod tests {
         fn should_say_a_daemon_older_than_the_app_is(cx: &mut TestAppContext) {
             let connector = Rc::new(FakeConnector::default());
             let _remote = connector.then_connect_older();
+
+            let connection = connection(&connector, cx);
+
+            assert!(is_connected(&connection, cx));
+            assert!(predates_app(&connection, cx));
+        }
+
+        #[gpui::test]
+        fn should_say_a_daemon_running_from_a_since_rebuilt_binary_is(cx: &mut TestAppContext) {
+            let connector = Rc::new(FakeConnector::default());
+            let _remote = connector.then_connect_rebuilt();
 
             let connection = connection(&connector, cx);
 
