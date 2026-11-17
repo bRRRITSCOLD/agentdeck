@@ -464,3 +464,30 @@ mod daemon_started_by_a_long_lived_client {
         assert!(alive(new.pid), "the fresh daemon isn't running");
     }
 }
+
+mod test_env {
+    use super::*;
+
+    #[test]
+    fn should_end_what_its_panes_left_running_once_dropped() {
+        let env = TestEnv::new();
+        let workspace = env.workspace("web");
+        let pid_file = env.root().join("sleeper.pid");
+        // With job control on, as in an interactive shell, the job gets a process group of
+        // its own. No SIGHUP reaches it as the daemon stops, so it would outlive the test
+        // (issue #274).
+        shell_pane(
+            &env,
+            &workspace,
+            &format!("set -m; sleep 60 & echo $! > {}; wait", pid_file.display()),
+        );
+        let sleeper: u32 = eventually("the pane to write the job's pid", || {
+            std::fs::read_to_string(&pid_file).ok()?.trim().parse().ok()
+        });
+        assert!(alive(sleeper));
+
+        drop(env);
+
+        eventually("the pane's job to die", || (!alive(sleeper)).then_some(()));
+    }
+}

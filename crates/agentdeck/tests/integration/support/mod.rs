@@ -9,6 +9,7 @@ pub mod mcp;
 pub mod pty;
 
 use std::ffi::OsString;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -342,24 +343,47 @@ pub fn alive(pid: u32) -> bool {
 
 impl Drop for TestEnv {
     /// SIGTERM, then waits for the daemon to go; SIGKILL only if it outlives the timeout.
+    /// Then SIGKILL to whatever its panes left running.
     fn drop(&mut self) {
-        let Some(info) = self.daemon_info() else {
-            return;
-        };
-        let pid = info.pid.to_string();
-        let signal = |name: &str| {
-            let _ = Command::new("kill")
-                .args([name, &pid])
-                .stderr(Stdio::null())
-                .status();
-        };
-        signal("-TERM");
-        let deadline = Instant::now() + TIMEOUT;
-        while alive(info.pid) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
+        if let Some(info) = self.daemon_info() {
+            signal("-TERM", info.pid);
+            let deadline = Instant::now() + TIMEOUT;
+            while alive(info.pid) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if alive(info.pid) {
+                signal("-KILL", info.pid);
+            }
         }
-        if alive(info.pid) {
-            signal("-KILL");
+        kill_left_running(self.root());
+    }
+}
+
+fn signal(name: &str, pid: u32) {
+    let _ = Command::new("kill")
+        .args([name, &pid.to_string()])
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// SIGKILLs every process started under `root`: those whose `$XDG_RUNTIME_DIR` is
+/// `<root>/run`, which a pane's environment passes on (spec §6). The PTY's hang-up as the
+/// daemon dies ends a pane's shell, but not a job of its own process group, which the
+/// stopping daemon doesn't end either (spec §2 Stop); it would run on (issue #274). This
+/// also ends what a daemon a test killed left behind. The temp root is unique, so nothing
+/// else matches, even a process that reused a pid. Its twin is in
+/// `agentdeckd/tests/integration/support`.
+fn kill_left_running(root: &Path) {
+    let mut marker = b"XDG_RUNTIME_DIR=".to_vec();
+    marker.extend_from_slice(root.join("run").as_os_str().as_bytes());
+    let pids = std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok());
+    for pid in pids {
+        let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
+        if environ.split(|byte| *byte == 0).any(|var| var == marker) {
+            signal("-KILL", pid);
         }
     }
 }

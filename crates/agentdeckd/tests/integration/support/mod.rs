@@ -10,11 +10,14 @@ pub mod ws;
 
 use std::fmt::Debug;
 use std::fs::File;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use agentdeck_client::{Client, Error, ResponseValue};
+use nix::sys::signal::{Signal, kill};
+use nix::unistd::Pid;
 use serde::Deserialize;
 use tempfile::TempDir;
 
@@ -32,8 +35,8 @@ pub struct DaemonInfo {
     pub api_version: u32,
 }
 
-/// A running daemon on its own temp dirs. Dropping it kills the daemon, then removes the
-/// dirs, even when the test failed.
+/// A running daemon on its own temp dirs. Dropping it kills the daemon and whatever its panes
+/// left running, then removes the dirs, even when the test failed.
 pub struct TestDaemon {
     child: Child,
     pub info: DaemonInfo,
@@ -166,6 +169,28 @@ impl Drop for TestDaemon {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        kill_left_running(self.root());
+    }
+}
+
+/// SIGKILLs every process started under `root`: those whose `$XDG_RUNTIME_DIR` is
+/// `<root>/run`, which a pane's environment passes on (spec §6). The PTY's hang-up as the
+/// daemon dies ends a pane's shell, but not a job of its own process group, which the
+/// stopping daemon doesn't end either (spec §2 Stop); it would run on (issue #274). The
+/// temp root is unique, so nothing else matches, even a process that reused a pid. Its twin
+/// is in `agentdeck/tests/integration/support`.
+fn kill_left_running(root: &Path) {
+    let mut marker = b"XDG_RUNTIME_DIR=".to_vec();
+    marker.extend_from_slice(root.join("run").as_os_str().as_bytes());
+    let pids = std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<i32>().ok());
+    for pid in pids {
+        let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
+        if environ.split(|byte| *byte == 0).any(|var| var == marker) {
+            let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
+        }
     }
 }
 
