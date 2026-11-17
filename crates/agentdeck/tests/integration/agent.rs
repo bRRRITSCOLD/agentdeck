@@ -4,7 +4,7 @@
 use agentdeck_core::Layout;
 
 use crate::support::{
-    TestEnv, agent_argv, agent_typed, eventually, shell_pane, shell_pane_in, tabs, text,
+    TestEnv, agent_argv, agent_typed, eventually, shell_pane, shell_pane_in, short, tabs, text,
     without_mcp_flags,
 };
 
@@ -139,6 +139,35 @@ mod agent_send {
             env.ok(&["tail", &pane]).contains("got:hello").then_some(())
         });
     }
+
+    #[test]
+    fn should_send_to_a_pane_named_by_its_short_id() {
+        let env = TestEnv::new();
+        let ws = env.workspace("web");
+        shell_pane_in(&env, &ws, "other", "sleep 60");
+        let pane = shell_pane(&env, &ws, "read line; echo \"got:$line\"; sleep 60");
+
+        let stdout = env.ok(&["agent", "send", short(&pane), "hello", "--now"]);
+
+        assert_eq!(stdout, format!("sent to {pane}\n"));
+        eventually("the pane to echo the line", || {
+            env.ok(&["tail", &pane]).contains("got:hello").then_some(())
+        });
+    }
+
+    #[test]
+    fn should_list_every_pane_whose_id_holds_the_digits() {
+        let env = TestEnv::new();
+        let ws = env.workspace("web");
+        let first = shell_pane_in(&env, &ws, "one", "sleep 60");
+        let second = shell_pane_in(&env, &ws, "two", "sleep 60");
+
+        let stderr = env.fails(&["agent", "send", &first[..6], "hello"]);
+
+        assert!(stderr.contains("(ambiguous_id)"), "{stderr}");
+        assert!(stderr.contains(&format!("{first}  web · one")), "{stderr}");
+        assert!(stderr.contains(&format!("{second}  web · two")), "{stderr}");
+    }
 }
 
 mod agent_link {
@@ -167,6 +196,24 @@ mod agent_link {
             unlinked.get("task_id").is_none_or(|id| id.is_null()),
             "{unlinked}"
         );
+    }
+
+    #[test]
+    fn should_link_a_pane_and_task_named_by_their_short_ids() {
+        let env = TestEnv::new();
+        let ws = env.workspace("web");
+        let pane = shell_pane(&env, &ws, "sleep 60");
+        let task = env.json(&["task", "add", "Fix it", "--ws", "web"]);
+
+        let stdout = env.ok(&[
+            "agent",
+            "link",
+            short(&pane),
+            "--task",
+            short(text(&task, "id")),
+        ]);
+
+        assert_eq!(stdout, format!("linked {pane} to {}\n", text(&task, "id")));
     }
 
     #[test]
@@ -200,6 +247,31 @@ mod tail {
         let stdout = env.ok(&["tail", &pane, "--bytes", "4"]);
 
         assert_eq!(stdout, "done");
+    }
+
+    #[test]
+    fn should_print_a_pane_named_by_its_short_id() {
+        let env = TestEnv::new();
+        let ws = env.workspace("web");
+        let pane = shell_pane(&env, &ws, "printf 'short-done'; sleep 60");
+
+        eventually("the pane's output", || {
+            env.ok(&["tail", short(&pane)])
+                .contains("short-done")
+                .then_some(())
+        });
+    }
+
+    #[test]
+    fn should_fail_for_digits_no_pane_holds() {
+        let env = TestEnv::new();
+        let ws = env.workspace("web");
+        shell_pane(&env, &ws, "sleep 60");
+
+        // Every UUIDv7 has its version digit, 7, among any 30 of its 32 digits.
+        let stderr = env.fails(&["tail", &"0".repeat(30)]);
+
+        assert!(stderr.contains("(not_found)"), "{stderr}");
     }
 
     #[test]
@@ -302,6 +374,24 @@ mod agent_new {
         assert!(prompt.contains("it fails on CI only"), "{prompt}");
         let comments = env.json(&["comment", "ls", "--task", task_id]);
         assert_eq!(comments[0]["delivered_to_pane"], pane["id"]);
+    }
+
+    #[test]
+    fn should_link_a_task_named_by_its_short_id() {
+        let env = TestEnv::new();
+        env.workspace("web");
+        let task = env.json(&["task", "add", "Fix it", "--ws", "web"]);
+
+        let pane = env.json(&[
+            "agent",
+            "new",
+            "--ws",
+            "web",
+            "--task",
+            short(text(&task, "id")),
+        ]);
+
+        assert_eq!(pane["task_id"], task["id"]);
     }
 
     #[test]

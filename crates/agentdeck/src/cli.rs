@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use agentdeck_core::{Agent, InstructionId, PaneId, TaskId, TaskStatus};
+use agentdeck_core::{Agent, InstructionId, TaskStatus};
 use clap::{ArgGroup, Parser, Subcommand};
 
 /// `agentdeck`: drive agentdeck's workspaces, tasks, comments, instructions and agents from a
@@ -47,8 +47,8 @@ pub enum Command {
     Daemon(DaemonCommand),
     /// Print a pane's recent raw output.
     Tail {
-        /// The pane's id.
-        pane: PaneId,
+        /// The pane: its id or a short id.
+        pane: String,
         /// Only the last N bytes.
         #[arg(long, value_name = "N")]
         bytes: Option<u64>,
@@ -109,7 +109,8 @@ pub enum WsCommand {
     },
 }
 
-/// `agentdeck task …`.
+/// `agentdeck task …`. A task's id may be a short id: 6 or more of its hex digits in a row,
+/// such as its last 8.
 #[derive(Debug, Subcommand)]
 pub enum TaskCommand {
     /// List tasks.
@@ -137,8 +138,8 @@ pub enum TaskCommand {
     },
     /// Change a task's status.
     Set {
-        /// The task's id.
-        id: TaskId,
+        /// The task: its id or a short id.
+        id: String,
         /// The new status: todo, doing, review or done.
         #[arg(long, value_name = "S")]
         status: TaskStatus,
@@ -148,8 +149,8 @@ pub enum TaskCommand {
         ArgGroup::new("change").required(true).multiple(true).args(["title", "body", "ws", "inbox"])
     ))]
     Edit {
-        /// The task's id.
-        id: TaskId,
+        /// The task: its id or a short id.
+        id: String,
         /// A new title.
         #[arg(long, value_name = "T")]
         title: Option<String>,
@@ -165,8 +166,8 @@ pub enum TaskCommand {
     },
     /// Show one task.
     Show {
-        /// The task's id.
-        id: TaskId,
+        /// The task: its id or a short id.
+        id: String,
     },
 }
 
@@ -177,17 +178,17 @@ pub enum TaskCommand {
 pub enum CommentCommand {
     /// List a task's comments, oldest first.
     Ls {
-        /// The task. Defaults to the one your pane is linked to.
+        /// The task: its id or a short id. Defaults to the one your pane is linked to.
         #[arg(long, value_name = "T")]
-        task: Option<TaskId>,
+        task: Option<String>,
     },
     /// Add a comment to a task.
     Add {
         /// The text.
         body: String,
-        /// The task. Defaults to the one your pane is linked to.
+        /// The task: its id or a short id. Defaults to the one your pane is linked to.
         #[arg(long, value_name = "T")]
-        task: Option<TaskId>,
+        task: Option<String>,
     },
 }
 
@@ -222,7 +223,8 @@ pub enum InstructionCommand {
     },
 }
 
-/// `agentdeck agent …`.
+/// `agentdeck agent …`. A pane or task id may be a short id: 6 or more of its hex digits in a
+/// row, such as its last 8.
 #[derive(Debug, Subcommand)]
 pub enum AgentCommand {
     /// List every pane, agent and shell, exited ones too: its id, workspace, tab, agent,
@@ -245,25 +247,25 @@ pub enum AgentCommand {
         cwd: Option<PathBuf>,
         /// A task to link; its title, body and new comments go into the launch prompt.
         #[arg(long, value_name = "T")]
-        task: Option<TaskId>,
+        task: Option<String>,
     },
     /// Link a running pane to a task in its workspace, or unlink it. The pane's agent is
     /// told the task, then the task's comments no agent has had yet, once it is idle.
     #[command(group(ArgGroup::new("link").required(true).args(["task", "none"])))]
     Link {
-        /// The pane's id.
-        pane: PaneId,
+        /// The pane: its id or a short id.
+        pane: String,
         /// The task to link it to.
         #[arg(long, value_name = "T")]
-        task: Option<TaskId>,
+        task: Option<String>,
         /// Unlink it from its task.
         #[arg(long)]
         none: bool,
     },
     /// Type a message into a pane and press Enter, once the pane is idle.
     Send {
-        /// The pane's id.
-        pane: PaneId,
+        /// The pane: its id or a short id.
+        pane: String,
         /// The message.
         text: String,
         /// Type it at once instead of waiting for the pane to be idle.
@@ -282,9 +284,9 @@ pub enum PrCommand {
     /// Close the PRs of PR tasks on GitHub, after asking. Closes only: no comment, no branch
     /// delete.
     Close {
-        /// The PR tasks' ids.
+        /// The PR tasks: their ids or short ids.
         #[arg(required = true, value_name = "ID")]
-        ids: Vec<TaskId>,
+        ids: Vec<String>,
         /// Close them without asking.
         #[arg(long)]
         yes: bool,
@@ -425,7 +427,7 @@ mod tests {
                 panic!("not comment add: {:?}", cli.command);
             };
             assert_eq!(body, "hello");
-            assert_eq!(task, Some(TASK.parse().unwrap()));
+            assert_eq!(task.as_deref(), Some(TASK));
         }
     }
 
@@ -523,7 +525,7 @@ mod tests {
             let Command::Agent(AgentCommand::Link { task, none, .. }) = cli.command else {
                 panic!("not agent link: {:?}", cli.command);
             };
-            assert_eq!(task, Some(TASK.parse().unwrap()));
+            assert_eq!(task.as_deref(), Some(TASK));
             assert!(!none);
         }
 

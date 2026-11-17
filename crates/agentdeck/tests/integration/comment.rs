@@ -64,6 +64,17 @@ mod comment_add {
     }
 
     #[test]
+    fn should_add_to_a_task_named_by_its_short_id() {
+        let env = TestEnv::new();
+        let task = env.json(&["task", "add", "Fix the build"]);
+        let id = text(&task, "id");
+
+        let comment = env.json(&["comment", "add", "hi", "--task", crate::support::short(id)]);
+
+        assert_eq!(comment["task_id"], task["id"]);
+    }
+
+    #[test]
     fn should_author_it_by_the_callers_pane() {
         let env = TestEnv::new();
         env.workspace("web");

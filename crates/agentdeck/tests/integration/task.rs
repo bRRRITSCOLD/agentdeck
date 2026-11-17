@@ -1,6 +1,6 @@
 //! `agentdeck task ls | add | set | edit | show`.
 
-use crate::support::{TestEnv, text};
+use crate::support::{TestEnv, short, text};
 
 mod task_add {
     use super::*;
@@ -90,6 +90,17 @@ mod task_set {
 
         assert_eq!(text(&set, "status"), "done");
         assert!(set["done_at"].is_string());
+    }
+
+    #[test]
+    fn should_change_the_status_of_a_task_named_by_its_short_id() {
+        let env = TestEnv::new();
+        let task = env.json(&["task", "add", "Fix the build"]);
+
+        let set = env.json(&["task", "set", short(text(&task, "id")), "--status", "doing"]);
+
+        assert_eq!(set["id"], task["id"]);
+        assert_eq!(text(&set, "status"), "doing");
     }
 }
 
@@ -190,5 +201,62 @@ mod task_show {
         let stderr = env.fails(&["task", "show", "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"]);
 
         assert!(stderr.contains("(not_found)"), "{stderr}");
+    }
+
+    mod by_short_id {
+        use super::*;
+
+        #[test]
+        fn should_show_the_task_its_last_digits_name() {
+            let env = TestEnv::new();
+            env.ok(&["task", "add", "Other"]);
+            let task = env.json(&["task", "add", "Fix the build"]);
+
+            let shown = env.json(&["task", "show", short(text(&task, "id"))]);
+
+            assert_eq!(shown["id"], task["id"]);
+        }
+
+        #[test]
+        fn should_list_every_task_whose_id_holds_the_digits() {
+            let env = TestEnv::new();
+            let first = env.json(&["task", "add", "First"]);
+            let second = env.json(&["task", "add", "Second"]);
+            // Made milliseconds apart, so their leading (time) digits match.
+            let leading = &text(&first, "id")[..6];
+
+            let stderr = env.fails(&["task", "show", leading]);
+
+            assert!(stderr.contains("(ambiguous_id)"), "{stderr}");
+            assert!(
+                stderr.contains(&format!("{}  First", text(&first, "id"))),
+                "{stderr}"
+            );
+            assert!(
+                stderr.contains(&format!("{}  Second", text(&second, "id"))),
+                "{stderr}"
+            );
+        }
+
+        #[test]
+        fn should_fail_for_digits_no_task_holds() {
+            let env = TestEnv::new();
+            env.ok(&["task", "add", "Fix the build"]);
+
+            // Every UUIDv7 has its version digit, 7, among any 30 of its 32 digits.
+            let stderr = env.fails(&["task", "show", &"0".repeat(30)]);
+
+            assert!(stderr.contains("(not_found)"), "{stderr}");
+        }
+
+        #[test]
+        fn should_refuse_fewer_than_six_digits() {
+            let env = TestEnv::new();
+            let task = env.json(&["task", "add", "Fix the build"]);
+
+            let stderr = env.fails(&["task", "show", &text(&task, "id")[32..]]);
+
+            assert!(stderr.contains("(invalid_id)"), "{stderr}");
+        }
     }
 }

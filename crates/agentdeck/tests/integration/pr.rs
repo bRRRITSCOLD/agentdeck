@@ -96,6 +96,20 @@ mod pr_close {
     }
 
     #[test]
+    fn should_close_the_prs_of_tasks_named_by_their_short_ids() {
+        let github = MockServer::start();
+        let env = synced(&github, &[SEVEN, EIGHT]);
+        mock_node_ids(&github, &[SEVEN]);
+        let close = mock_close(&github, SEVEN, None);
+        let id = task_id(&env, SEVEN);
+
+        let stdout = env.ok(&["pr", "close", crate::support::short(&id), "--yes"]);
+
+        assert_eq!(stdout, "closed acme/widgets #7\n");
+        close.assert_calls(1);
+    }
+
+    #[test]
     fn should_say_how_many_closed_and_exit_1_when_any_failed() {
         let github = MockServer::start();
         let env = synced(&github, &[SEVEN, EIGHT]);

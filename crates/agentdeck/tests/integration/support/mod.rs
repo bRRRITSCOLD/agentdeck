@@ -364,6 +364,11 @@ impl Drop for TestEnv {
     }
 }
 
+/// The short id of `id`, a pane's or task's: its last 8 hex digits (spec §10).
+pub fn short(id: &str) -> &str {
+    &id[id.len() - 8..]
+}
+
 /// A string field of a JSON object.
 pub fn text<'a>(value: &'a Value, field: &str) -> &'a str {
     value[field]
