@@ -31,8 +31,12 @@ pub const MAX_LIST_PAGES: u32 = 10;
 const BATCH_SIZE: usize = 25;
 const BATCHES_IN_FLIGHT: usize = 4;
 
-/// The waits before each retry of a request that failed for a reason that may pass: a 5xx, a
-/// failed connection, a body cut short. One try, then one more per wait.
+/// How long one request may take before the client gives up on it.
+const TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The waits before each retry of a query that failed for a reason that may pass: a 5xx, a
+/// failed connection, a timeout, a body cut short. One try, then one more per wait. A
+/// mutation is retried only when its connection failed, so it never reached GitHub.
 const RETRY_WAITS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(2)];
 
 const PR_FIELDS: &str = "fragment pr on PullRequest {
@@ -56,6 +60,9 @@ const NODE_ID_FIELDS: &str = "fragment nodeId on PullRequest { id }";
 const CLOSE_MUTATION: &str = "mutation($id: ID!) {
   closePullRequest(input: { pullRequestId: $id }) { pullRequest { id state } }
 }";
+
+/// One PR's state by node id: whether a close GitHub didn't answer took effect.
+const STATE_QUERY: &str = "query($id: ID!) { node(id: $id) { ... on PullRequest { state } } }";
 
 /// A pull request as GitHub reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +105,10 @@ pub enum GithubError {
     /// GitHub refused the token (401).
     #[error("GitHub rejected the token")]
     Unauthorized,
+    /// A close failed in a way that may have reached GitHub, and reading the PR's state after
+    /// failed too, so whether it closed is unknown.
+    #[error("GitHub didn't answer; check the PR")]
+    NoAnswer,
     /// Any other non-success HTTP status.
     #[error("GitHub answered {status}{}", message.as_deref().map(|m| format!(": {m}")).unwrap_or_default())]
     Status {
@@ -127,9 +138,14 @@ pub struct Github {
 impl Github {
     /// A client for the GraphQL API at `endpoint`.
     pub fn new(endpoint: String) -> anyhow::Result<Github> {
+        Github::with_timeout(endpoint, TIMEOUT)
+    }
+
+    /// A client for the GraphQL API at `endpoint` whose requests give up after `timeout`.
+    fn with_timeout(endpoint: String, timeout: Duration) -> anyhow::Result<Github> {
         let http = reqwest::Client::builder()
             .user_agent(concat!("agentdeck/", env!("CARGO_PKG_VERSION")))
-            .timeout(Duration::from_secs(30))
+            .timeout(timeout)
             .build()?;
         Ok(Github { http, endpoint })
     }
@@ -268,10 +284,20 @@ impl Github {
     }
 
     /// Closes the PR with node id `id`. A refusal (no write access, say) is GitHub's message.
+    /// The mutation is sent again only after a failed connection: after a timeout or a 5xx it
+    /// may have taken effect, so the PR's state is read once instead (spec §8).
     pub async fn close(&self, token: &str, id: &str) -> Result<(), GithubError> {
-        let (body, _) = self
-            .query_body(token, CLOSE_MUTATION, json!({ "id": id }))
-            .await?;
+        let variables = json!({ "id": id });
+        let body = match self
+            .post_retrying(token, CLOSE_MUTATION, &variables, GithubError::not_sent)
+            .await
+        {
+            Ok((body, _)) => body,
+            Err(err) if err.may_pass() && !err.not_sent() => {
+                return self.closed_after(token, &variables, err).await;
+            }
+            Err(err) => return Err(err),
+        };
         let closed = body
             .pointer("/data/closePullRequest/pullRequest")
             .is_some_and(|pr| !pr.is_null());
@@ -282,6 +308,26 @@ impl Github {
                 error_messages(&body, |_| true)
                     .unwrap_or_else(|| "GitHub didn't close the PR".into()),
             ))
+        }
+    }
+
+    /// After a close that failed with `err` but may have reached GitHub: `Ok` when the PR
+    /// reads closed, `err` when it doesn't, [`GithubError::NoAnswer`] when the read fails. One
+    /// read, not retried, so a GitHub that stopped answering costs one more timeout at most.
+    async fn closed_after(
+        &self,
+        token: &str,
+        variables: &Value,
+        err: GithubError,
+    ) -> Result<(), GithubError> {
+        tracing::info!("GitHub close failed, reading the PR's state: {err}");
+        match self.query_once(token, STATE_QUERY, variables).await {
+            Ok((body, _)) if body.pointer("/data/node/state") == Some(&json!("CLOSED")) => Ok(()),
+            Ok(_) => Err(err),
+            Err(read) => {
+                tracing::warn!("reading the PR's state after a failed close: {read}");
+                Err(GithubError::NoAnswer)
+            }
         }
     }
 
@@ -315,10 +361,23 @@ impl Github {
         query: &str,
         variables: Value,
     ) -> Result<(Value, Option<String>), GithubError> {
+        self.post_retrying(token, query, &variables, GithubError::may_pass)
+            .await
+    }
+
+    /// Posts `query`, trying again after each of `RETRY_WAITS` while it fails with an error
+    /// `retry` accepts.
+    async fn post_retrying(
+        &self,
+        token: &str,
+        query: &str,
+        variables: &Value,
+        retry: fn(&GithubError) -> bool,
+    ) -> Result<(Value, Option<String>), GithubError> {
         let mut waits = RETRY_WAITS.iter();
         loop {
-            match self.query_once(token, query, variables.clone()).await {
-                Err(err) if err.may_pass() => match waits.next() {
+            match self.query_once(token, query, variables).await {
+                Err(err) if retry(&err) => match waits.next() {
                     Some(wait) => {
                         tracing::info!("GitHub call failed, trying again in {wait:?}: {err}");
                         tokio::time::sleep(*wait).await;
@@ -336,7 +395,7 @@ impl Github {
         &self,
         token: &str,
         query: &str,
-        variables: Value,
+        variables: &Value,
     ) -> Result<(Value, Option<String>), GithubError> {
         let response = self
             .http
@@ -380,8 +439,17 @@ impl GithubError {
         match self {
             GithubError::Status { status, .. } => *status >= 500,
             GithubError::Http(_) => true,
-            GithubError::Unauthorized | GithubError::GraphQl(_) | GithubError::Shape(_) => false,
+            GithubError::Unauthorized
+            | GithubError::NoAnswer
+            | GithubError::GraphQl(_)
+            | GithubError::Shape(_) => false,
         }
+    }
+
+    /// Whether the request surely never reached GitHub: its connection failed (refused, or
+    /// the host not found), so sending it again can't act twice.
+    fn not_sent(&self) -> bool {
+        matches!(self, GithubError::Http(err) if err.is_connect())
     }
 }
 
@@ -1035,6 +1103,171 @@ mod tests {
             .unwrap();
 
             assert_eq!(data, json!({ "repository": null }));
+        }
+    }
+}
+
+/// [`Github`] against httpmock as GitHub, over real HTTP.
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use httpmock::prelude::*;
+    use httpmock::{Mock, MockServer};
+    use std::time::Instant;
+
+    const TOKEN: &str = "gho_test";
+    const ID: &str = "PR_kwDOtest7";
+    /// Short, so a request that outlasts it fails fast.
+    const SHORT: Duration = Duration::from_millis(500);
+    /// Longer than [`SHORT`]: how long a slow GitHub holds a request.
+    const SLOW: Duration = Duration::from_secs(3);
+
+    fn github(server: &MockServer) -> Github {
+        Github::with_timeout(server.url("/graphql"), SHORT).expect("a client")
+    }
+
+    /// The close mutation, answered `then` after `delay`.
+    fn mock_close<'a>(server: &'a MockServer, delay: Duration, status: u16) -> Mock<'a> {
+        server.mock(|when, then| {
+            when.method(POST)
+                .path("/graphql")
+                .body_includes("closePullRequest(");
+            then.status(status).delay(delay).json_body(json!({
+                "data": { "closePullRequest": { "pullRequest": { "id": ID, "state": "CLOSED" } } }
+            }));
+        })
+    }
+
+    /// The PR's state by node id, answered with `state`.
+    fn mock_state<'a>(server: &'a MockServer, state: &str) -> Mock<'a> {
+        server.mock(|when, then| {
+            when.method(POST)
+                .path("/graphql")
+                .body_includes("... on PullRequest { state }")
+                .json_body_includes(json!({ "variables": { "id": ID } }).to_string());
+            then.status(200)
+                .json_body(json!({ "data": { "node": { "state": state } } }));
+        })
+    }
+
+    mod close {
+        use super::*;
+
+        #[tokio::test]
+        async fn should_send_a_close_that_outlasts_the_timeout_only_once() {
+            let server = MockServer::start_async().await;
+            let close = mock_close(&server, SLOW, 200);
+            mock_state(&server, "OPEN");
+
+            let result = github(&server).close(TOKEN, ID).await;
+
+            assert!(result.is_err(), "{result:?}");
+            close.assert_calls(1);
+        }
+
+        #[tokio::test]
+        async fn should_succeed_when_the_pr_reads_closed_after_a_timed_out_close() {
+            let server = MockServer::start_async().await;
+            mock_close(&server, SLOW, 200);
+            let state = mock_state(&server, "CLOSED");
+
+            let result = github(&server).close(TOKEN, ID).await;
+
+            assert!(result.is_ok(), "{result:?}");
+            state.assert_calls(1);
+        }
+
+        #[tokio::test]
+        async fn should_fail_with_why_when_the_pr_still_reads_open_after_a_timed_out_close() {
+            let server = MockServer::start_async().await;
+            mock_close(&server, SLOW, 200);
+            mock_state(&server, "OPEN");
+
+            let err = github(&server).close(TOKEN, ID).await.unwrap_err();
+
+            assert!(
+                matches!(&err, GithubError::Http(err) if err.is_timeout()),
+                "{err:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn should_say_github_did_not_answer_when_the_state_read_fails_too() {
+            let server = MockServer::start_async().await;
+            mock_close(&server, SLOW, 200);
+            let state = server.mock(|when, then| {
+                when.method(POST)
+                    .path("/graphql")
+                    .body_includes("... on PullRequest { state }");
+                then.status(502);
+            });
+
+            let err = github(&server).close(TOKEN, ID).await.unwrap_err();
+
+            assert_eq!(err.to_string(), "GitHub didn't answer; check the PR");
+            state.assert_calls(1);
+        }
+
+        #[tokio::test]
+        async fn should_not_send_a_close_github_answers_502_again() {
+            let server = MockServer::start_async().await;
+            let close = mock_close(&server, Duration::ZERO, 502);
+            mock_state(&server, "CLOSED");
+
+            let result = github(&server).close(TOKEN, ID).await;
+
+            assert!(result.is_ok(), "{result:?}");
+            close.assert_calls(1);
+        }
+
+        #[tokio::test]
+        async fn should_try_a_close_whose_connection_is_refused_three_times() {
+            // A port nothing listens on: the connection is refused before anything is sent.
+            let port = std::net::TcpListener::bind("127.0.0.1:0")
+                .and_then(|listener| listener.local_addr())
+                .expect("a free port")
+                .port();
+            let github = Github::with_timeout(format!("http://127.0.0.1:{port}/graphql"), SHORT)
+                .expect("a client");
+            let started = Instant::now();
+
+            let err = github.close(TOKEN, ID).await.unwrap_err();
+
+            assert!(
+                matches!(&err, GithubError::Http(err) if err.is_connect()),
+                "{err:?}"
+            );
+            // Each refusal is at once, so the time taken is the waits between the tries.
+            assert!(
+                started.elapsed() >= RETRY_WAITS.iter().sum::<Duration>(),
+                "{:?}",
+                started.elapsed()
+            );
+        }
+    }
+
+    mod queries {
+        use super::*;
+
+        #[tokio::test]
+        async fn should_try_a_query_that_outlasts_the_timeout_three_times() {
+            let server = MockServer::start_async().await;
+            let viewer = server.mock(|when, then| {
+                when.method(POST)
+                    .path("/graphql")
+                    .body_includes("viewer { login }");
+                then.status(200)
+                    .delay(SLOW)
+                    .json_body(json!({ "data": { "viewer": { "login": "octocat" } } }));
+            });
+
+            let result = github(&server).viewer(TOKEN).await;
+
+            assert!(
+                matches!(&result, Err(GithubError::Http(err)) if err.is_timeout()),
+                "{result:?}"
+            );
+            viewer.assert_calls(3);
         }
     }
 }

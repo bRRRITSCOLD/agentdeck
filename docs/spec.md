@@ -322,6 +322,7 @@ min_ms = 400                   # a new state must hold this long before it is pu
 - **Closing PRs** (`POST /v1/prs/close`) closes them only: no comment, no branch delete.
   - Each `task_id` must be a PR task whose PR is stored `open`, aged-out ones included; any other fails with "Not an open PR" and never reaches GitHub. With no token, every one fails with "Not signed in to GitHub".
   - The daemon reads the PRs' node ids by repo and number, 25 to a request as fetches by number go. Then it closes each PR on its own, one at a time, with its own GraphQL `closePullRequest` mutation, since GitHub has no batch close.
+  - A close is sent again only when its connection failed (refused, host not found), so it never reached GitHub. After a timeout or a 5xx it may have taken effect, so the daemon reads the PR's state once instead, without retries: `CLOSED` counts as closed; any other state fails with the close's error; a failed read fails with "GitHub didn't answer; check the PR".
   - A PR GitHub closes is stored as `closed`, and its task goes to `done` at once (a `changed` event), with no fetch by number on the next sync.
   - A failure is that PR's alone: its result is `ok: false` with `error`, GitHub's message (a token without write access fails this way, per PR) or why the request failed, and the rest still close. It answers once every PR is tried.
 
