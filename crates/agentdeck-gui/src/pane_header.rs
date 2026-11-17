@@ -3,7 +3,7 @@
 
 use agentdeck_core::AgentState;
 use brrritscold_core_gpui::{
-    ActiveTheme as _, Badge, BadgeVariant, DropdownMenu, Icon, IconName, StateDot, StateDotState,
+    ActiveTheme as _, Badge, BadgeVariant, DropdownMenu, Icon, IconName, StateDotState,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
@@ -140,12 +140,10 @@ impl PaneHeader {
 }
 
 impl RenderOnce for PaneHeader {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let s = cx.theme().semantic();
         let (variant, label) = state_badge(self.state, self.exit_code);
-        // A turning mark redraws the window, so it holds still while the window is inactive.
-        let dot = StateDot::new(state_dot::of(self.state, self.exit_code))
-            .spin(window.is_window_active());
+        let dot = state_dot::mark(state_dot::of(self.state, self.exit_code));
         let title = symbol_runs(&self.title);
         // Penpot: `card`, 36px high (raw in Penpot too), px `space.3`, `space.2` apart. The
         // pane's corners clip it there; GPUI doesn't clip to a radius, so it rounds its own top.
@@ -317,7 +315,7 @@ mod tests {
         use gpui::{AnyElement, TestAppContext};
 
         use super::*;
-        use crate::state_dot::tests::{deactivate, host, redraws_in_one_second};
+        use crate::state_dot::tests::{host, redraws_in_one_second};
 
         fn working(_: &Window) -> AnyElement {
             PaneHeader::new("claude")
@@ -326,15 +324,10 @@ mod tests {
         }
 
         #[gpui::test]
-        fn should_spin_a_working_agents_mark_while_the_window_is_active(cx: &mut TestAppContext) {
+        fn should_hold_a_working_agents_mark_still_while_the_window_is_active(
+            cx: &mut TestAppContext,
+        ) {
             let (header, cx) = host(working, cx);
-            assert!(redraws_in_one_second(&header, cx) > 0);
-        }
-
-        #[gpui::test]
-        fn should_hold_it_still_while_the_window_is_inactive(cx: &mut TestAppContext) {
-            let (header, cx) = host(working, cx);
-            deactivate(cx);
             assert_eq!(redraws_in_one_second(&header, cx), 0);
         }
     }

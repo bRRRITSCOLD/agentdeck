@@ -51,7 +51,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Decorations, Entity, FocusHandle,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, Window, div, px,
 };
 use gpui_base::actions::Confirm;
 
@@ -69,7 +69,7 @@ use crate::new_workspace::{Created, NewWorkspaceDialog};
 use crate::notice::{self, Notice, NoticeAction};
 use crate::notifications::{self, Alert as Notification};
 use crate::quit;
-use crate::right_panel::RightPanel;
+use crate::right_panel::{self, RightPanel};
 use crate::settings::SettingsView;
 use crate::sidebar::{Alerts, Selection, SidebarEvent, SidebarView};
 use crate::task_sheet::{EditTask, OpenTask, StartAgentOn, TaskSheet};
@@ -92,7 +92,8 @@ pub struct Shell {
     connection: Entity<Connection>,
     /// The sidebar, while connected; a new connection gets a new one.
     sidebar: Option<Entity<SidebarView>>,
-    /// Follows the sidebar's selection.
+    /// Follows the sidebar's selection and snapshot, and opens the new workspace dialog
+    /// from its `+`.
     _selection: Option<Subscription>,
     /// The new workspace dialog, while connected, and what joins it to the sidebar.
     new_workspace: Option<Entity<NewWorkspaceDialog>>,
@@ -356,11 +357,21 @@ impl Shell {
                     let task_sheet =
                         cx.new(|cx| TaskSheet::new(api.clone(), &connection, window, cx));
                     let sidebar = cx.new(|cx| SidebarView::new(api, &connection, cx));
-                    self._selection =
-                        Some(cx.observe_in(&sidebar, window, |shell, _, window, cx| {
-                            shell.follow_selection(window, cx);
-                            shell.withdraw_seen(window, cx);
-                        }));
+                    self._selection = Some(cx.subscribe_in(
+                        &sidebar,
+                        window,
+                        |shell, _, event: &SidebarEvent, window, cx| match event {
+                            SidebarEvent::Changed => {
+                                shell.follow_selection(window, cx);
+                                shell.withdraw_seen(window, cx);
+                            }
+                            SidebarEvent::NewWorkspace => {
+                                if let Some(dialog) = &shell.new_workspace {
+                                    dialog.update(cx, |dialog, cx| dialog.open(window, cx));
+                                }
+                            }
+                        },
+                    ));
                     self._new_workspace = vec![
                         cx.subscribe_in(
                             &sidebar,
@@ -369,12 +380,6 @@ impl Shell {
                                 shell.notify(&alerts.0, window, cx);
                             },
                         ),
-                        cx.subscribe_in(&sidebar, window, |shell, _, event, window, cx| {
-                            let SidebarEvent::NewWorkspace = event;
-                            if let Some(dialog) = &shell.new_workspace {
-                                dialog.update(cx, |dialog, cx| dialog.open(window, cx));
-                            }
-                        }),
                         // A sync that changes no task broadcasts nothing, yet moves when PRs
                         // last synced.
                         cx.subscribe(&inbox, |shell, _, _: &Synced, cx| {
@@ -1004,8 +1009,13 @@ impl Shell {
                     body.children(self.workspace.clone()).when_some(
                         self.panel.clone().filter(|_| self.panel_open),
                         |body, panel| {
+                            // Cached: a frame drawn for a mark turning elsewhere reuses it.
+                            let style = StyleRefinement::default()
+                                .flex_none()
+                                .w(px(right_panel::WIDTH))
+                                .h_full();
                             body.child(Separator::new().orientation(SeparatorOrientation::Vertical))
-                                .child(panel)
+                                .child(panel.cached(style))
                         },
                     )
                 }
@@ -2770,6 +2780,96 @@ mod tests {
                         url: format!("https://github.com/acme/web/pull/{n}"),
                     }),
                     ..task(n, TaskKind::Pr, Some(id(1)))
+                }
+            }
+        }
+
+        /// Frames drawn while only the sidebar redraws, as its footer's tick makes it.
+        mod sidebar_redraws {
+            use super::*;
+            use crate::state_dot::tests::{play_frame, redraws_in_one_second};
+
+            impl Open {
+                /// Redraws the sidebar, and nothing else, on each of a second's 60 frames.
+                fn redraw_the_sidebar(&mut self) {
+                    let sidebar = self.shell.read_with(self.cx, |s, _| s.sidebar.clone());
+                    let sidebar = sidebar.expect("connected");
+                    for _ in 0..60 {
+                        sidebar.update(self.cx, |_, cx| cx.notify());
+                        play_frame(self.cx);
+                    }
+                }
+            }
+
+            /// Counts each redraw `view` asks for in `redraws`.
+            fn count<V: 'static>(
+                view: &Entity<V>,
+                redraws: &Rc<std::cell::Cell<usize>>,
+                cx: &mut App,
+            ) -> Subscription {
+                let redraws = redraws.clone();
+                cx.observe(view, move |_, _| redraws.set(redraws.get() + 1))
+            }
+
+            /// The views that follow the sidebar's selection and snapshot hear of neither
+            /// changing.
+            #[gpui::test]
+            fn should_leave_the_views_that_follow_it_alone(cx: &mut TestAppContext) {
+                let mut open = Open::new(daemon(), cx);
+                let (panel, inbox, tasks, sheet) = open.shell.read_with(open.cx, |s, _| {
+                    let views = (s.panel.clone(), s.inbox.clone(), s.tasks.clone());
+                    (views.0, views.1, views.2, s.task_sheet.clone())
+                });
+                let (panel, inbox) = (panel.expect("connected"), inbox.expect("connected"));
+                let (tasks, sheet) = (tasks.expect("connected"), sheet.expect("connected"));
+                let redraws = Rc::new(std::cell::Cell::new(0));
+                let _observing = open.cx.update(|_, cx| {
+                    [
+                        count(&panel, &redraws, cx),
+                        count(&inbox, &redraws, cx),
+                        count(&tasks, &redraws, cx),
+                        count(&sheet, &redraws, cx),
+                    ]
+                });
+                open.redraw_the_sidebar();
+                assert_eq!(
+                    redraws.get(),
+                    0,
+                    "panel, inbox, tasks and task sheet redraws"
+                );
+            }
+
+            /// The right panel is drawn from its cache.
+            #[gpui::test]
+            fn should_not_render_the_right_panel_again(cx: &mut TestAppContext) {
+                let mut open = Open::new(daemon(), cx);
+                let panel = open.shell.read_with(open.cx, |s, _| s.panel.clone());
+                let panel = panel.expect("connected");
+                let rendered =
+                    |open: &Open| panel.read_with(open.cx, |panel, _| panel.items_rendered.get());
+                let before = rendered(&open);
+                open.redraw_the_sidebar();
+                assert!(before > 0);
+                assert_eq!(rendered(&open), before);
+            }
+
+            /// No mark turns: a working agent's, in the sidebar or a pane header, is drawn
+            /// still (spec §11).
+            #[gpui::test]
+            fn should_hold_the_working_agents_marks_still(cx: &mut TestAppContext) {
+                let mut open = Open::new(daemon(), cx);
+                open.turn(7, AgentState::Working);
+                let sidebar = open.shell.read_with(open.cx, |s, _| s.sidebar.clone());
+                let panes = open.shell.read_with(open.cx, |s, cx| {
+                    (s.workspace.as_ref()).map_or_else(Vec::new, |v| v.read(cx).shown())
+                });
+                assert!(!panes.is_empty());
+                assert_eq!(
+                    redraws_in_one_second(&sidebar.expect("connected"), open.cx),
+                    0
+                );
+                for pane in panes {
+                    assert_eq!(redraws_in_one_second(&pane, open.cx), 0);
                 }
             }
         }

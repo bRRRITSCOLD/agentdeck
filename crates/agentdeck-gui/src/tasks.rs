@@ -212,8 +212,8 @@ impl TasksView {
     }
 
     /// The list's `ix`th item: a group header that folds its group, or a row with its status
-    /// picker. Its marks turn only while `spin`: the window is active.
-    fn item(&mut self, ix: usize, spin: bool, cx: &mut Context<Self>) -> AnyElement {
+    /// picker.
+    fn item(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         match self.shown.get(ix) {
             Some(Item::Header {
                 status,
@@ -256,7 +256,6 @@ impl TasksView {
                     self.layout(cx),
                     parts,
                     open,
-                    spin,
                     cx,
                 ))
             }
@@ -354,9 +353,7 @@ impl Render for TasksView {
             .child(
                 list(
                     self.list.clone(),
-                    cx.processor(|this, ix, window, cx| {
-                        this.item(ix, window.is_window_active(), cx)
-                    }),
+                    cx.processor(|this, ix, _, cx| this.item(ix, cx)),
                 )
                 .flex_1()
                 .min_h_0(),
@@ -1067,20 +1064,12 @@ mod tests {
 
     mod spin {
         use super::*;
-        use crate::state_dot::tests::{activate, deactivate, redraws_in_one_second};
+        use crate::state_dot::tests::{activate, redraws_in_one_second};
 
         #[gpui::test]
-        fn should_spin_running_checks_while_the_window_is_active(cx: &mut TestAppContext) {
+        fn should_hold_running_checks_still_while_the_window_is_active(cx: &mut TestAppContext) {
             let (harness, cx) = Harness::open(board(), cx);
             activate(cx);
-            assert!(redraws_in_one_second(&harness.view, cx) > 0);
-        }
-
-        #[gpui::test]
-        fn should_hold_them_still_while_the_window_is_inactive(cx: &mut TestAppContext) {
-            let (harness, cx) = Harness::open(board(), cx);
-            activate(cx);
-            deactivate(cx);
             assert_eq!(redraws_in_one_second(&harness.view, cx), 0);
         }
     }

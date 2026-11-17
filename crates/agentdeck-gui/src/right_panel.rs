@@ -16,8 +16,9 @@
 //! Like the Tasks view it shows the sidebar's [`Snapshot`], passed on by the window; an
 //! instruction added here comes back through the daemon's `changed`.
 //!
-//! All of it is one GPUI [`list`] of `Item`s, which draws only the items in view: with 70 PRs
-//! and a turning mark, drawing every row made each frame rebuild every row's status picker.
+//! All of it is one GPUI [`list`] of `Item`s, which draws only the items in view: with 70 PRs,
+//! drawing every row made each frame rebuild every row's status picker. The window draws it as
+//! a cached view, so a frame drawn for a change elsewhere reuses it.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -88,7 +89,7 @@ pub struct RightPanel {
     _close: Subscription,
     /// How many list items it has rendered, so a test can tell which items a frame drew.
     #[cfg(test)]
-    items_rendered: std::cell::Cell<usize>,
+    pub(crate) items_rendered: std::cell::Cell<usize>,
 }
 
 impl EventEmitter<NewTask> for RightPanel {}
@@ -523,9 +524,8 @@ impl RightPanel {
             .collect()
     }
 
-    /// The list's `ix`th item, `space.1` from the next: a list has no gap of its own. Its
-    /// marks turn only while `spin`: the window is active.
-    fn item(&mut self, ix: usize, spin: bool, cx: &mut Context<Self>) -> AnyElement {
+    /// The list's `ix`th item, `space.1` from the next: a list has no gap of its own.
+    fn item(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         #[cfg(test)]
         self.items_rendered.set(self.items_rendered.get() + 1);
         let Some(item) = self.shown.get(ix).cloned() else {
@@ -612,7 +612,7 @@ impl RightPanel {
                 };
                 let send = crate::send_task::targets(&self.snapshot, task);
                 let parts = close_prs::row_parts(&self.close, &row, send, edit, cx);
-                task_row::panel(&row, picker, parts, open, spin, cx)
+                task_row::panel(&row, picker, parts, open, cx)
             }
             // Penpot `ShowDone`: a link button at xs, at the start of its row, after the
             // groups.
@@ -695,10 +695,8 @@ enum Item {
 }
 
 impl Render for RightPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
-        // A turning mark redraws the window, so it holds still while the window is inactive.
-        let spin = window.is_window_active();
         let groups = self.groups();
         let rows: Vec<_> = groups.iter().flat_map(|g| g.rows.clone()).collect();
         let shown = close_prs::selectable(&rows);
@@ -723,7 +721,7 @@ impl Render for RightPanel {
             .child(
                 list(
                     self.list.clone(),
-                    cx.processor(move |this, ix, _, cx| this.item(ix, spin, cx)),
+                    cx.processor(|this, ix, _, cx| this.item(ix, cx)),
                 )
                 .flex_1()
                 .min_h_0()
@@ -2027,7 +2025,7 @@ mod tests {
         use super::*;
         use crate::overview::fixtures::instruction;
         use crate::scrollbar::testing::thumb;
-        use crate::state_dot::tests::{activate, redraws_in_one_second};
+        use crate::state_dot::tests::{activate, redraw};
 
         /// Workspace 1 with tasks 1 to 100 in Doing, an agent at work on task 1, and
         /// instruction 200.
@@ -2108,19 +2106,17 @@ mod tests {
         }
 
         #[gpui::test]
-        fn should_render_only_the_items_in_view_on_a_spinner_step(cx: &mut TestAppContext) {
+        fn should_render_only_the_items_in_view_on_a_redraw(cx: &mut TestAppContext) {
             let (panel, cx) = open_crowded(cx);
-            activate(cx);
             let (before, in_view) = (rendered(&panel, cx), in_view(cx));
             assert!(in_view < 100, "the window holds {in_view} items");
 
-            let redraws = redraws_in_one_second(&panel, cx);
+            redraw(&panel, 10, cx);
 
-            assert!(redraws > 0, "the mark turns");
-            let per_step = (rendered(&panel, cx) - before) / redraws;
+            let per_redraw = (rendered(&panel, cx) - before) / 10;
             assert!(
-                per_step <= in_view,
-                "{per_step} items a step, {in_view} in view"
+                per_redraw <= in_view,
+                "{per_redraw} items a redraw, {in_view} in view"
             );
         }
 
@@ -2302,7 +2298,7 @@ mod tests {
 
     mod spin {
         use super::*;
-        use crate::state_dot::tests::{activate, deactivate, redraws_in_one_second};
+        use crate::state_dot::tests::{activate, redraws_in_one_second};
 
         /// Opens the panel on workspace 1, whose doing task an agent is working on.
         fn working(cx: &mut TestAppContext) -> (Entity<RightPanel>, &mut VisualTestContext) {
@@ -2320,15 +2316,10 @@ mod tests {
         }
 
         #[gpui::test]
-        fn should_spin_a_working_agents_mark_while_the_window_is_active(cx: &mut TestAppContext) {
+        fn should_hold_a_working_agents_mark_still_while_the_window_is_active(
+            cx: &mut TestAppContext,
+        ) {
             let (panel, cx) = working(cx);
-            assert!(redraws_in_one_second(&panel, cx) > 0);
-        }
-
-        #[gpui::test]
-        fn should_hold_it_still_while_the_window_is_inactive(cx: &mut TestAppContext) {
-            let (panel, cx) = working(cx);
-            deactivate(cx);
             assert_eq!(redraws_in_one_second(&panel, cx), 0);
         }
     }
