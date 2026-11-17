@@ -2,7 +2,7 @@
 //! [`Snapshot`]: a pure function of it, which the views render.
 //!
 //! A row carries what its cells show: the task's status, kind and title, the state of the
-//! agent panes that link it, its PR (repository, number, draft, checks, review) and its
+//! agent panes that link it, its PR (repository, number, state, draft, checks, review) and its
 //! workspace.
 
 use agentdeck_client::types::Task;
@@ -37,6 +37,8 @@ pub struct PrCell {
     pub repo: SharedString,
     /// The repository's name without its owner, then the number: `ts-packages #142`.
     pub reference: SharedString,
+    /// Open, merged or closed: with `draft`, the row's icon.
+    pub state: PrState,
     /// Whether it is a draft.
     pub draft: bool,
     /// Its checks, once known.
@@ -164,6 +166,7 @@ fn row(snapshot: &Snapshot, task: &Task) -> Row {
         PrCell {
             repo: repo.to_owned().into(),
             reference: format!("{repo} #{}", pr.number).into(),
+            state: pr.state,
             draft: pr.draft,
             checks: pr.checks,
             review: pr.review,
@@ -392,11 +395,42 @@ mod tests {
                 Some(PrCell {
                     repo: "rust-packages".into(),
                     reference: "rust-packages #61".into(),
+                    state: PrState::Open,
                     draft: true,
                     checks: Some(ChecksState::Failure),
                     review: Some(ReviewState::ChangesRequested),
                     url: "https://github.com/bRRRITSCOLD/rust-packages/pull/61".into(),
                 })
+            );
+        }
+
+        #[test]
+        fn should_keep_the_prs_state() {
+            let snapshot = Snapshot {
+                tasks: [PrState::Open, PrState::Merged, PrState::Closed]
+                    .into_iter()
+                    .zip(1..)
+                    .map(|(state, n)| Task {
+                        pr: Some(PullRequest {
+                            state,
+                            ..pr("acme/widgets", i64::from(n))
+                        }),
+                        ..task(n, TaskKind::Pr, None)
+                    })
+                    .collect(),
+                ..Snapshot::default()
+            };
+
+            let states: Vec<_> = (rows(&snapshot, &all()).iter())
+                .map(|r| r.pr.as_ref().map(|pr| pr.state))
+                .collect();
+            assert_eq!(
+                states,
+                [
+                    Some(PrState::Open),
+                    Some(PrState::Merged),
+                    Some(PrState::Closed)
+                ]
             );
         }
 
