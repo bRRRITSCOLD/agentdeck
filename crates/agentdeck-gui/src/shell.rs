@@ -51,7 +51,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Decorations, Entity, FocusHandle,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, Window, div, px,
 };
 use gpui_base::actions::Confirm;
 
@@ -70,7 +70,7 @@ use crate::new_workspace::{Created, NewWorkspaceDialog};
 use crate::notice::{self, Notice, NoticeAction};
 use crate::notifications::{self, Alert as Notification};
 use crate::quit;
-use crate::right_panel::RightPanel;
+use crate::right_panel::{self, RightPanel};
 use crate::settings::SettingsView;
 use crate::sidebar::{Alerts, Selection, SidebarEvent, SidebarView};
 use crate::task_sheet::{EditTask, OpenTask, StartAgentOn, TaskSheet};
@@ -1013,8 +1013,13 @@ impl Shell {
                     body.children(self.workspace.clone()).when_some(
                         self.panel.clone().filter(|_| self.panel_open),
                         |body, panel| {
+                            // Cached: a frame drawn for a mark turning elsewhere reuses it.
+                            let style = StyleRefinement::default()
+                                .flex_none()
+                                .w(px(right_panel::WIDTH))
+                                .h_full();
                             body.child(Separator::new().orientation(SeparatorOrientation::Vertical))
-                                .child(panel)
+                                .child(panel.cached(style))
                         },
                     )
                 }
@@ -2858,6 +2863,24 @@ mod tests {
                     redraws_in_one_second(&sheet.expect("connected"), open.cx),
                 ];
                 assert_eq!(redraws, [0; 4], "panel, inbox, tasks, task sheet");
+            }
+
+            /// The right panel, holding no turning mark here, is drawn from its cache.
+            #[gpui::test]
+            fn should_not_render_the_right_panel_again_while_the_marks_turn(
+                cx: &mut TestAppContext,
+            ) {
+                let open = working(cx);
+                let panel = open.shell.read_with(open.cx, |s, _| s.panel.clone());
+                let panel = panel.expect("connected");
+                let rendered =
+                    |open: &Open| panel.read_with(open.cx, |panel, _| panel.items_rendered.get());
+                let before = rendered(&open);
+                for _ in 0..60 {
+                    play_frame(open.cx);
+                }
+                assert!(before > 0);
+                assert_eq!(rendered(&open), before);
             }
 
             #[gpui::test]

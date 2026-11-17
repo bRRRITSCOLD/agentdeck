@@ -89,7 +89,7 @@ pub struct RightPanel {
     _close: Subscription,
     /// How many list items it has rendered, so a test can tell which items a frame drew.
     #[cfg(test)]
-    items_rendered: std::cell::Cell<usize>,
+    pub(crate) items_rendered: std::cell::Cell<usize>,
 }
 
 impl EventEmitter<NewTask> for RightPanel {}
