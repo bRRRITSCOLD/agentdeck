@@ -12,6 +12,7 @@ use gpui::{
     Window, div,
 };
 
+use crate::activity;
 use crate::state_dot;
 use crate::terminal::SYMBOL_FAMILIES;
 
@@ -143,9 +144,9 @@ impl RenderOnce for PaneHeader {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let s = cx.theme().semantic();
         let (variant, label) = state_badge(self.state, self.exit_code);
-        // A turning mark redraws the window, so it holds still while the window is inactive.
+        // A turning mark redraws the window, so it holds still while the user is away.
         let dot = StateDot::new(state_dot::of(self.state, self.exit_code))
-            .spin(window.is_window_active());
+            .spin(activity::spins(window, cx));
         let title = symbol_runs(&self.title);
         // Penpot: `card`, 36px high (raw in Penpot too), px `space.3`, `space.2` apart. The
         // pane's corners clip it there; GPUI doesn't clip to a radius, so it rounds its own top.

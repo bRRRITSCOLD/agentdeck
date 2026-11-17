@@ -26,6 +26,7 @@ use gpui::{
 };
 use gpui_base::input::InputEvent;
 
+use crate::activity;
 use crate::api::Api;
 use crate::close_prs::{self, ClosePrs};
 use crate::new_task::NewTask;
@@ -212,7 +213,7 @@ impl TasksView {
     }
 
     /// The list's `ix`th item: a group header that folds its group, or a row with its status
-    /// picker. Its marks turn only while `spin`: the window is active.
+    /// picker. Its marks turn only while `spin`: [`activity::spins`].
     fn item(&mut self, ix: usize, spin: bool, cx: &mut Context<Self>) -> AnyElement {
         match self.shown.get(ix) {
             Some(Item::Header {
@@ -355,7 +356,7 @@ impl Render for TasksView {
                 list(
                     self.list.clone(),
                     cx.processor(|this, ix, window, cx| {
-                        this.item(ix, window.is_window_active(), cx)
+                        this.item(ix, activity::spins(window, cx), cx)
                     }),
                 )
                 .flex_1()

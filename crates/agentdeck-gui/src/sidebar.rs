@@ -29,6 +29,7 @@ use gpui::{
     div, list, px,
 };
 
+use crate::activity;
 use crate::api::Api;
 use crate::connection::{Connection, DaemonEvent};
 use crate::count::Count;
@@ -505,7 +506,7 @@ impl Render for SidebarView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
         // A turning mark redraws the window, so it holds still while the window is inactive.
-        let spin = window.is_window_active();
+        let spin = activity::spins(window, cx);
         // Penpot's `Section` and `Footer`: xs muted text, inset 8px across and 4px down.
         let small = || {
             div()

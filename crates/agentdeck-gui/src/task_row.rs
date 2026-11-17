@@ -470,7 +470,7 @@ fn checks_mark(state: ChecksState) -> (UiChecksState, &'static str) {
 }
 
 /// Penpot `Checks`: the icon and its word, as the Tasks view, the Inbox and the task sheet
-/// show a PR's checks. Running checks turn only while `spin`: the window is active.
+/// show a PR's checks. Running checks turn only while `spin`: [`crate::activity::spins`].
 pub fn checks(state: ChecksState, spin: bool) -> Checks {
     let (mark, word) = checks_mark(state);
     Checks::new(mark).label(word).spin(spin)
@@ -580,7 +580,7 @@ fn unseen_mark(row: &Row, cx: &App) -> Option<Div> {
 /// `space.2`; `layout`'s columns only. `picker` is the row's status picker; clicking the
 /// title runs `on_open`. The title cell ends with the [`unseen_mark`] while the task's agent
 /// comments are unseen. A working agent's mark and running checks turn only while `spin`,
-/// which the caller sets while its window is active. Tests find a cell as `<column> <id>`.
+/// which the caller sets from [`crate::activity::spins`]. Tests find a cell as `<column> <id>`.
 pub fn wide(
     row: &Row,
     picker: Select,

@@ -87,7 +87,7 @@ pub mod tests {
 
     /// Moves the clock on by one 60 Hz frame, delivers the frame and lets whatever it woke
     /// run.
-    fn play_frame(cx: &mut VisualTestContext) {
+    pub fn play_frame(cx: &mut VisualTestContext) {
         cx.executor()
             .advance_clock(Duration::from_secs_f64(1. / 60.));
         cx.update(|window, cx| window.simulate_next_frame(cx));

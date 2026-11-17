@@ -30,6 +30,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, list,
 };
 
+use crate::activity;
 use crate::api::Api;
 use crate::close_prs::{self, ClosePrs};
 use crate::overview::{PrSync, Snapshot};
@@ -185,8 +186,8 @@ impl InboxView {
         .detach();
     }
 
-    /// The list's `ix`th row, with its status picker. Its marks turn only while `spin`: the
-    /// window is active.
+    /// The list's `ix`th row, with its status picker. Its marks turn only while `spin`:
+    /// [`activity::spins`].
     fn item(&mut self, ix: usize, spin: bool, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.shown.get(ix) else {
             return div().into_any_element();
@@ -375,7 +376,7 @@ impl Render for InboxView {
                 list(
                     self.list.clone(),
                     cx.processor(|this, ix, window, cx| {
-                        this.item(ix, window.is_window_active(), cx)
+                        this.item(ix, activity::spins(window, cx), cx)
                     }),
                 )
                 .flex_1()

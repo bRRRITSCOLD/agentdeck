@@ -46,6 +46,7 @@ use gpui::{
 };
 use gpui_base::input::InputEvent;
 
+use crate::activity;
 use crate::api::Api;
 use crate::connection::{Connection, DaemonEvent};
 use crate::keymap::{self, CancelEdit, Submit};
@@ -1104,7 +1105,7 @@ fn comment(row: CommentRow, cx: &App) -> AnyElement {
 impl Render for TaskSheet {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // A turning mark redraws the window, so it holds still while the window is inactive.
-        let spin = window.is_window_active();
+        let spin = activity::spins(window, cx);
         let summary = self.task.and_then(|task| summary(&self.snapshot, task));
         let mut content = SheetContent::new();
         if let Some(summary) = &summary {

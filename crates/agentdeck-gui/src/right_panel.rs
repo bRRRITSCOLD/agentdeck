@@ -37,6 +37,7 @@ use gpui::{
 };
 use gpui_base::input::InputEvent;
 
+use crate::activity;
 use crate::api::Api;
 use crate::close_prs::{self, ClosePrs};
 use crate::instruction_list::{self, InstructionRow, SendTarget};
@@ -524,7 +525,7 @@ impl RightPanel {
     }
 
     /// The list's `ix`th item, `space.1` from the next: a list has no gap of its own. Its
-    /// marks turn only while `spin`: the window is active.
+    /// marks turn only while `spin`: [`activity::spins`].
     fn item(&mut self, ix: usize, spin: bool, cx: &mut Context<Self>) -> AnyElement {
         #[cfg(test)]
         self.items_rendered.set(self.items_rendered.get() + 1);
@@ -698,7 +699,7 @@ impl Render for RightPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
         // A turning mark redraws the window, so it holds still while the window is inactive.
-        let spin = window.is_window_active();
+        let spin = activity::spins(window, cx);
         let groups = self.groups();
         let rows: Vec<_> = groups.iter().flat_map(|g| g.rows.clone()).collect();
         let shown = close_prs::selectable(&rows);

@@ -55,6 +55,7 @@ use gpui::{
 };
 use gpui_base::actions::Confirm;
 
+use crate::activity;
 use crate::api::Api;
 use crate::connection::{Connection, Status};
 use crate::delete_workspace::{DeleteEvent, DeleteTarget, DeleteWorkspaceDialog};
@@ -136,6 +137,8 @@ pub struct Shell {
     alerts: HashMap<SharedString, notifications::Target>,
     /// Withdraws the notifications about what the window shows once it is focused.
     _activation: Subscription,
+    /// Times the window's input, so its turning marks hold still while the user is away.
+    _activity: [Subscription; 2],
     /// Opens and closes "Quit agentdeck?".
     quit_dialog: DialogHandle,
     /// How many agents ran when the quit dialog opened.
@@ -196,6 +199,7 @@ impl Shell {
             notifier,
             alerts: HashMap::new(),
             _activation: activation,
+            _activity: activity::watch(window, cx),
             quit_dialog: DialogHandle::new(false),
             quit_running: 0,
             dont_ask_again: false,
@@ -1081,6 +1085,7 @@ impl Render for Shell {
                 shell.children(frame::resize_edges(tiling))
             })
             .child(self.quit_confirmation(cx))
+            .child(activity::listener())
     }
 }
 
@@ -2771,6 +2776,73 @@ mod tests {
                     }),
                     ..task(n, TaskKind::Pr, Some(id(1)))
                 }
+            }
+        }
+
+        /// The working agents' marks, in the sidebar and the panes shown (spec §11).
+        mod spin {
+            use gpui::{Modifiers, point, px};
+
+            use super::*;
+            use crate::activity::IDLE_AFTER;
+            use crate::state_dot::tests::{play_frame, redraws_in_one_second};
+
+            /// The shell over [`daemon`], with the pane shown, 7, working too.
+            fn working(cx: &mut TestAppContext) -> Open {
+                let mut open = Open::new(daemon(), cx);
+                open.turn(7, AgentState::Working);
+                open
+            }
+
+            impl Open {
+                /// How often the sidebar and each pane shown asked to redraw in a second.
+                fn redraws(&mut self) -> Vec<usize> {
+                    let sidebar = self.shell.read_with(self.cx, |s, _| s.sidebar.clone());
+                    let panes = self.shell.read_with(self.cx, |s, cx| {
+                        (s.workspace.as_ref()).map_or_else(Vec::new, |v| v.read(cx).shown())
+                    });
+                    let mut redraws = vec![redraws_in_one_second(&sidebar.unwrap(), self.cx)];
+                    for pane in panes {
+                        redraws.push(redraws_in_one_second(&pane, self.cx));
+                    }
+                    redraws
+                }
+
+                /// Lets 30 s pass with no input.
+                fn idle(&mut self) {
+                    self.cx.executor().advance_clock(IDLE_AFTER);
+                    for _ in 0..12 {
+                        play_frame(self.cx);
+                    }
+                }
+            }
+
+            #[gpui::test]
+            fn should_turn_while_the_user_is_at_the_window(cx: &mut TestAppContext) {
+                let mut open = working(cx);
+                let redraws = open.redraws();
+                assert!(
+                    redraws.len() > 1 && redraws.iter().all(|n| *n > 0),
+                    "{redraws:?}"
+                );
+            }
+
+            #[gpui::test]
+            fn should_hold_still_after_30_s_without_input(cx: &mut TestAppContext) {
+                let mut open = working(cx);
+                open.idle();
+                let redraws = open.redraws();
+                assert!(redraws.iter().all(|n| *n == 0), "{redraws:?}");
+            }
+
+            #[gpui::test]
+            fn should_turn_again_when_the_pointer_moves(cx: &mut TestAppContext) {
+                let mut open = working(cx);
+                open.idle();
+                (open.cx).simulate_mouse_move(point(px(10.), px(10.)), None, Modifiers::default());
+                play_frame(open.cx);
+                let redraws = open.redraws();
+                assert!(redraws.iter().all(|n| *n > 0), "{redraws:?}");
             }
         }
     }
