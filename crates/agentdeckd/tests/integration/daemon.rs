@@ -286,3 +286,33 @@ mod agentdeckd {
         }
     }
 }
+
+mod test_daemon {
+    use super::*;
+    use crate::support::terminal::{Place, alive, printed, sh};
+
+    #[tokio::test]
+    async fn should_end_what_its_panes_left_running_once_dropped() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        // With job control on, as in an interactive shell, the job gets a process group of
+        // its own. The PTY's hang-up ends the shell, which leads the session, but no SIGHUP
+        // reaches a background group, so the job would outlive the daemon (issue #274).
+        let pane = place
+            .spawn(&daemon.client, &sh("set -m; sleep 60 & echo pid:$!; wait"))
+            .await;
+        let text = printed(&daemon.client, pane.id, "pid:").await;
+        let digits = text[text.find("pid:").unwrap() + 4..]
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .unwrap();
+        let sleeper: u32 = digits.parse().expect("a pid");
+        assert!(alive(sleeper));
+
+        drop(daemon);
+
+        eventually_within("the pane's child to die", Duration::from_secs(5), || {
+            (!alive(sleeper)).then_some(())
+        });
+    }
+}
