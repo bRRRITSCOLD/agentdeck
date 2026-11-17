@@ -1,5 +1,5 @@
 //! Which workspace a PR belongs to (spec §8): the one whose dir holds a clone of the PR's repo
-//! with the PR's branch checked out or present locally.
+//! with the PR's branch present locally, else the one holding any clone of the repo.
 //!
 //! Shells out to the `git` CLI, like the dirty report, so it sees what the user's git sees.
 
@@ -50,14 +50,22 @@ impl Clones {
     }
 
     /// The first workspace holding a clone of `repo` (`owner/name`) that has the local branch
-    /// `head_ref`.
+    /// `head_ref`; failing that, the first holding any clone of `repo`. A branch that lives only
+    /// on GitHub (a workflow's or the web editor's PR) still finds the repo's workspace.
     pub fn workspace_for(&self, repo: &str, head_ref: &str) -> Option<WorkspaceId> {
         let repo = repo.to_lowercase();
-        self.workspaces.iter().find_map(|(id, clones)| {
+        let of_repo = |clone: &&RepoClone| clone.repos.contains(&repo);
+        let with_branch = self.workspaces.iter().find_map(|(id, clones)| {
             clones
                 .iter()
-                .any(|clone| clone.repos.contains(&repo) && has_branch(&clone.path, head_ref))
+                .filter(of_repo)
+                .any(|clone| has_branch(&clone.path, head_ref))
                 .then_some(*id)
+        });
+        with_branch.or_else(|| {
+            self.workspaces
+                .iter()
+                .find_map(|(id, clones)| clones.iter().any(|c| of_repo(&c)).then_some(*id))
         })
     }
 }
