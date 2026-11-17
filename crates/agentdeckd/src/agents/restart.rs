@@ -23,8 +23,9 @@ use crate::terminal::pane::{Launch, SpawnError};
 
 /// How soon after starting a resumed agent may exit non-zero for the daemon to start it
 /// afresh instead. Claude Code prints `No conversation found with session ID: <id>` for a
-/// session it can't find and exits 1 at once; Codex's message is `No saved session found with
-/// ID <id>`. The exit counts, not the message, which either CLI may reword.
+/// session it can't find and exits 1 at once; Codex (codex-cli 0.169.0, #262) draws its TUI's
+/// first frame, prints `ERROR: No saved session found with ID <id>. …` and exits 1 within a
+/// second too. The exit counts, not the message, which either CLI may reword.
 pub const FAILED_RESUME_WITHIN: Duration = Duration::from_secs(10);
 
 /// What a respawn runs in a pane, decided from its row.

@@ -7,9 +7,9 @@ use agentdeck_client::types::{InputWhen, PaneInput};
 use agentdeck_core::{Agent, AgentState, PaneKind};
 
 use crate::support::terminal::{
-    Place, alive, daemon_with_shell_rules, in_state, printed, sh, tail,
+    Place, alive, daemon_with_shell_rules, in_state, printed, reader_threads, sh, tail,
 };
-use crate::support::{TestDaemon, error_response, set_daemon_env};
+use crate::support::{TestDaemon, error_response, eventually_within, set_daemon_env};
 
 /// Types `text` into the pane, as is.
 async fn input(
@@ -42,6 +42,33 @@ fn pid(text: &str) -> u32 {
         .next()
         .and_then(|digits| digits.parse().ok())
         .expect("a pid")
+}
+
+/// How long after a pane reads as exited, or is deleted, a child that started a session of its
+/// own and holds the pane's PTY may live on: SIGHUP as the pane exits, then SIGKILL 1 s later
+/// for one that ignores it, with room to spare.
+const SESSION_CHILD_BOUND: Duration = Duration::from_secs(5);
+
+/// A script that starts a child in a session of its own (`setsid`), holding the PTY on its
+/// inherited stdin, stdout and stderr, which prints `pid:<its pid>`; `trap` runs in it first;
+/// then `rest`.
+fn session_child(trap: &str, rest: &str) -> String {
+    format!("setsid sh -c '{trap} echo pid:$$; exec sleep 60' & {rest}")
+}
+
+/// Fails unless `child` has died and the daemon reads no pane's PTY within
+/// [`SESSION_CHILD_BOUND`]: nothing holds the PTY any more, so its reader thread ended.
+fn released(daemon: &TestDaemon, child: u32) {
+    eventually_within(
+        "the child in a session of its own to die",
+        SESSION_CHILD_BOUND,
+        || (!alive(child)).then_some(()),
+    );
+    eventually_within(
+        "the pane's reader thread to end",
+        SESSION_CHILD_BOUND,
+        || (reader_threads(daemon) == 0).then_some(()),
+    );
 }
 
 mod post_v1_panes {
@@ -299,6 +326,37 @@ mod get_v1_panes_id {
             (hup.exists() && !alive(child)).then_some(())
         })
         .await;
+    }
+
+    mod a_child_in_a_session_of_its_own {
+        use super::*;
+
+        #[tokio::test]
+        async fn should_be_hung_up_on_so_the_pty_closes_once_the_pane_exits_200() {
+            let daemon = TestDaemon::start().await;
+            let place = Place::new(&daemon).await;
+            let script = session_child("", "sleep 0.5; exit 4");
+            let pane = place.spawn(&daemon.client, &sh(&script)).await;
+            let child = pid(&printed(&daemon.client, pane.id, "pid:").await);
+
+            let exited = in_state(&daemon.client, pane.id, AgentState::Exited).await;
+
+            assert_eq!(exited.exit_code, Some(4));
+            released(&daemon, child);
+        }
+
+        #[tokio::test]
+        async fn should_be_killed_when_it_ignores_sighup_200() {
+            let daemon = TestDaemon::start().await;
+            let place = Place::new(&daemon).await;
+            let script = session_child("trap \"\" HUP;", "sleep 0.5; exit 4");
+            let pane = place.spawn(&daemon.client, &sh(&script)).await;
+            let child = pid(&printed(&daemon.client, pane.id, "pid:").await);
+
+            in_state(&daemon.client, pane.id, AgentState::Exited).await;
+
+            released(&daemon, child);
+        }
     }
 
     #[tokio::test]
@@ -564,6 +622,25 @@ mod delete_v1_panes_id {
         assert!(alive(pid), "SIGHUP alone shouldn't stop it");
         crate::support::terminal::eventually("SIGKILL", || async { (!alive(pid)).then_some(()) })
             .await;
+    }
+
+    #[tokio::test]
+    async fn should_end_a_child_in_a_session_of_its_own_holding_the_pty_204() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let script = session_child("", "exec sleep 600");
+        let pane = place.spawn(&daemon.client, &sh(&script)).await;
+        let child = pid(&printed(&daemon.client, pane.id, "pid:").await);
+
+        daemon
+            .client
+            .pane_delete()
+            .id(pane.id)
+            .send()
+            .await
+            .expect("delete");
+
+        released(&daemon, child);
     }
 
     #[tokio::test]

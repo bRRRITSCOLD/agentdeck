@@ -181,6 +181,20 @@ pub fn alive(pid: u32) -> bool {
     })
 }
 
+/// How many reader threads `daemon` runs, one per pane whose PTY is still open: its threads
+/// named `pane-read-<id>`, which the kernel cuts to 15 bytes.
+pub fn reader_threads(daemon: &TestDaemon) -> usize {
+    let tasks = format!("/proc/{}/task", daemon.info.pid);
+    std::fs::read_dir(tasks)
+        .expect("the daemon's threads")
+        .flatten()
+        .filter(|task| {
+            std::fs::read_to_string(task.path().join("comm"))
+                .is_ok_and(|name| name.starts_with("pane-read"))
+        })
+        .count()
+}
+
 /// Shell panes whose title is exactly `idle` are idle, after 100 ms; every daemon started on
 /// `root` afterwards reads it.
 pub fn shell_rules(root: &Path) {

@@ -6,7 +6,8 @@
 //! - the **waiter** waits for the process, not for the PTY, since a child it leaves running
 //!   keeps the PTY open. Once the process has exited it gives the reader [`EXIT_GRACE`] to
 //!   reach the end of the output, records the exit and only then reports it, then hangs up on
-//!   whatever is left in the pane's session ([`hang_up`]);
+//!   whatever is left in the pane's session or still holds its PTY ([`hang_up`]), and kills
+//!   what holds the PTY [`EXIT_GRACE`] after that, so the reader always ends;
 //! - the **writer** writes input in order: typed bytes, delivered `input`, and the `Term`'s
 //!   answers to terminal queries. A submitted message's Enter is a write of its own, with a
 //!   pause on either side ([`SUBMIT_PAUSE`]).
@@ -459,10 +460,22 @@ impl Pane {
                 if held && let Some(pid) = waiting.pid {
                     tracing::info!(
                         "pane {}'s process exited but its PTY is still open: hanging up on \
-                         its session",
+                         its session and what holds the PTY",
                         waiting.id
                     );
-                    hang_up(pid);
+                    let tty = waiting.master().tty_name();
+                    hang_up(pid, tty.as_deref());
+                    let still_held = matches!(
+                        pty_closed.recv_timeout(EXIT_GRACE),
+                        Err(RecvTimeoutError::Timeout)
+                    );
+                    if still_held && let Some(tty) = tty {
+                        tracing::info!(
+                            "pane {}'s PTY is still open after SIGHUP: killing what holds it",
+                            waiting.id
+                        );
+                        kill_holders(&tty);
+                    }
                 }
             })
             .map_err(|err| SpawnError::Pty(err.into()))?;
@@ -828,26 +841,50 @@ impl Pane {
 }
 
 /// How long the waiter gives the reader to reach the end of the output once the process has
-/// exited, before it records the exit and hangs up on what still holds the PTY (spec §7).
+/// exited, before it records the exit and hangs up on what still holds the PTY; and how long
+/// it then gives that SIGHUP before it kills what still holds the PTY (spec §7).
 const EXIT_GRACE: Duration = Duration::from_secs(1);
 
 /// Sends SIGHUP to every process left in the session `leader` started, and to its process
 /// group: what an exited pane's process left running (a background job, an MCP server), so
-/// the PTY they hold closes. A process that started a session of its own is out of reach.
-fn hang_up(leader: i32) {
+/// the PTY they hold closes. A process that started a session of its own (`setsid`) is in no
+/// session the pane knows, so every process holding `tty`, the PTY's slave, gets it too.
+fn hang_up(leader: i32, tty: Option<&Path>) {
     let _ = killpg(Pid::from_raw(leader), Signal::SIGHUP);
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return;
-    };
-    for pid in entries
-        .flatten()
-        .filter_map(|entry| entry.file_name().to_str()?.parse::<i32>().ok())
-    {
+    for pid in processes() {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
-        if session_of(&stat) == Some(leader) {
+        if session_of(&stat) == Some(leader) || tty.is_some_and(|tty| holds(pid, tty)) {
             let _ = kill(Pid::from_raw(pid), Signal::SIGHUP);
         }
     }
+}
+
+/// Sends SIGKILL to every process holding `tty`, the PTY's slave: what ignored [`hang_up`]'s
+/// SIGHUP, so the PTY closes and the pane's reader thread, which keeps the pane alive, ends.
+fn kill_holders(tty: &Path) {
+    for pid in processes().filter(|pid| holds(*pid, tty)) {
+        let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
+    }
+}
+
+/// Every process `/proc` lists but the daemon itself.
+fn processes() -> impl Iterator<Item = i32> {
+    let daemon = i32::try_from(std::process::id()).ok();
+    std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<i32>().ok())
+        .filter(move |pid| Some(*pid) != daemon)
+}
+
+/// Whether process `pid` has `tty` open on any of its file descriptors. Another user's
+/// process can't be read, nor signalled, so it never does.
+fn holds(pid: i32, tty: &Path) -> bool {
+    std::fs::read_dir(format!("/proc/{pid}/fd")).is_ok_and(|fds| {
+        fds.flatten()
+            .any(|fd| std::fs::read_link(fd.path()).is_ok_and(|target| target == tty))
+    })
 }
 
 /// The session id in a `/proc/<pid>/stat` line: the fourth field after the command, which is

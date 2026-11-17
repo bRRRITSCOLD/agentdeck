@@ -57,13 +57,26 @@ printf '\033[?2004h\033]0;\342\234\263 Claude Code\007> '
 /// Records its argv and `$AGENTDECK_TASK`; unless resuming (a `resume` argument), writes a
 /// session file as Codex does, under `$CODEX_HOME/sessions` (default `$HOME/.codex/sessions`),
 /// and records the id in `session`; then reads what is typed as [`READ_LIKE_A_TUI`] does.
+///
+/// When its folder holds a file named `lost-session`, a resume (`resume <id>`) does what
+/// codex-cli 0.169.0 does for a session it can't find (#262): prints its error, after its
+/// TUI's first frame, and exits 1 within a second, rather than showing it in a TUI that stays.
 const STUB_CODEX: &str = r#"#!/bin/sh
 log="$(dirname "$0")/../agents/$AGENTDECK_PANE"
 mkdir -p "$log"
 printf '%s' "${AGENTDECK_TASK-unset}" > "$log/task"
 { for arg in "$@"; do printf '%s\0' "$arg"; done; printf '\036'; } >> "$log/argv"
-resuming=
-for arg in "$@"; do [ "$arg" = resume ] && resuming=1; done
+resuming=; session=; previous=
+for arg in "$@"; do
+  [ "$arg" = resume ] && resuming=1
+  [ "$previous" = resume ] && session=$arg
+  previous=$arg
+done
+if [ -n "$session" ] && [ -e lost-session ]; then
+  printf '>_ OpenAI Codex\r\nResuming session\342\200\246\r\n'
+  printf 'ERROR: No saved session found with ID %s. Run `codex resume` without an ID to choose from existing sessions.\r\n' "$session"
+  exit 1
+fi
 if [ -z "$resuming" ]; then
   id=$(cat /proc/sys/kernel/random/uuid)
   dir="${CODEX_HOME:-$HOME/.codex}/sessions/2026/11/11"
