@@ -10,8 +10,9 @@
 use std::path::Path;
 
 use brrritscold_core_gpui::{
-    ActiveTheme as _, Button, ButtonSize, ButtonVariant, DropdownMenu, DropdownMenuContent,
-    DropdownMenuItem, DropdownMenuItemVariant, DropdownMenuSeparator, IconName,
+    ActiveTheme as _, Button, ButtonSize, ButtonVariant, DropdownMenu, DropdownMenuAlign,
+    DropdownMenuContent, DropdownMenuItem, DropdownMenuItemVariant, DropdownMenuSeparator,
+    IconName,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
@@ -208,7 +209,9 @@ fn menu(archived: bool, muted: bool) -> impl IntoElement {
             .item(delete),
     };
     div().debug_selector(|| "workspace menu".into()).child(
+        // Penpot "Screens · Main" → "Workspace menu": end-aligned, 4px below the trigger.
         DropdownMenu::new("workspace-menu")
+            .align(DropdownMenuAlign::End)
             .trigger(
                 Button::new("workspace-menu-trigger")
                     .variant(ButtonVariant::Ghost)

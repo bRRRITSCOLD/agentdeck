@@ -24,7 +24,6 @@ use gpui::{
 use gpui_base::input::InputEvent;
 
 use crate::api::Api;
-use crate::form_enter::form_enter;
 use crate::workspace::failed;
 
 /// The dialog made a workspace.
@@ -146,9 +145,7 @@ impl NewWorkspaceDialog {
                      problem: Option<SharedString>| {
             Field::new()
                 .child(Label::new().child(label))
-                .child(form_enter(
-                    Input::new(input).aria_invalid(problem.is_some()),
-                ))
+                .child(Input::new(input).aria_invalid(problem.is_some()))
                 .child(FieldDescription::new(description))
                 .when_some(problem, |field, why| field.child(FieldError::new(why)))
         };

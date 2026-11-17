@@ -25,7 +25,6 @@ use gpui::{
 use gpui_base::input::InputEvent;
 
 use crate::api::Api;
-use crate::form_enter::form_enter;
 use crate::overview::Snapshot;
 use crate::send_task::{self, Sending, TaskTarget};
 use crate::task_sheet::StartAgentOn;
@@ -324,7 +323,7 @@ impl NewTaskDialog {
             .child(
                 Field::new()
                     .child(Label::new().child("Title"))
-                    .child(form_enter(Input::new(&self.title))),
+                    .child(Input::new(&self.title)),
             )
             .child(
                 Field::new()
@@ -544,6 +543,18 @@ mod tests {
             assert_eq!(harness.made().len(), 1);
             assert_eq!(harness.made()[0].workspace, None);
             assert!(!harness.is_open(cx));
+        }
+
+        #[gpui::test]
+        fn should_stay_open_on_enter_in_a_blank_title(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(None, cx);
+
+            cx.simulate_input("   ");
+            cx.simulate_keystrokes("enter");
+            harness.settle(cx);
+
+            assert_eq!(harness.made(), []);
+            assert!(harness.is_open(cx));
         }
 
         #[gpui::test]

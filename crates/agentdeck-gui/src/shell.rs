@@ -2060,6 +2060,25 @@ mod tests {
         }
     }
 
+    mod workspace_menu {
+        use super::support::{Harness, daemon};
+        use super::*;
+
+        /// Penpot "Screens · Main" → "Workspace menu": its right edge on the trigger's, 4px
+        /// below it.
+        #[gpui::test]
+        fn should_open_end_aligned_4px_below_its_trigger(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(), cx);
+            let trigger = cx.debug_bounds("workspace menu").expect("the menu shows");
+
+            harness.click(trigger.center(), cx);
+
+            let menu = cx.debug_bounds("dropdown-menu-content").expect("it opens");
+            assert_eq!(menu.right(), trigger.right());
+            assert_eq!(menu.top(), trigger.bottom() + px(4.));
+        }
+    }
+
     mod edit {
         use super::support::{Harness, click_menu_item, daemon};
         use super::*;

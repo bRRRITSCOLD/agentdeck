@@ -23,7 +23,6 @@ use gpui::{
 use gpui_base::input::InputEvent;
 
 use crate::api::Api;
-use crate::form_enter::form_enter;
 use crate::workspace::failed;
 
 /// What the field says while the name is blank.
@@ -181,9 +180,7 @@ impl EditWorkspaceDialog {
                 Field::new().child(Label::new().child("Name")).child(
                     div()
                         .debug_selector(|| "edit workspace name".into())
-                        .child(form_enter(
-                            Input::new(&self.name).aria_invalid(problem.is_some()),
-                        )),
+                        .child(Input::new(&self.name).aria_invalid(problem.is_some())),
                 ),
             )
             .when_some(problem, |form, why| {
