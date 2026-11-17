@@ -183,6 +183,7 @@ dependencies = [
  "brrritscold-core-gpui",
  "brrritscold-core-gpui-tokens",
  "chrono",
+ "futures-util",
  "gpui-base",
  "gpui-pre",
  "gpui-pre-platform",

@@ -30,14 +30,15 @@
 //! Closing the window (its own close button or the compositor's) and Quit ask first while an
 //! agent runs, unless `gui.confirm_quit` is off (spec §11): "Quit agentdeck?", Penpot "Screens"
 //! → "Quit · agents running". Quit, or Enter, quits, after saving `gui.confirm_quit = false`
-//! when Don't ask again is ticked; Cancel, or Escape, keeps the app.
+//! when Don't ask again is ticked, and after stopping each running agent when Stop the agents
+//! is; Cancel, or Escape, keeps the app.
 
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use agentdeck_client::ApiError;
-use agentdeck_core::{TaskId, WorkspaceId};
+use agentdeck_core::{PaneId, TaskId, WorkspaceId};
 use agentdeck_notify::Notifier;
 use brrritscold_core_gpui::{
     ActiveTheme as _, Alert, AlertAction, AlertDescription, AlertDialog, AlertDialogAction,
@@ -47,6 +48,7 @@ use brrritscold_core_gpui::{
     Separator, SeparatorOrientation,
 };
 use brrritscold_core_gpui_tokens::primitive::space;
+use futures_util::future::{self, Either};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Decorations, Entity, FocusHandle,
@@ -139,10 +141,12 @@ pub struct Shell {
     _activation: Subscription,
     /// Opens and closes "Quit agentdeck?".
     quit_dialog: DialogHandle,
-    /// How many agents ran when the quit dialog opened.
-    quit_running: usize,
+    /// The panes whose agents ran when the quit dialog opened.
+    quit_running: Vec<PaneId>,
     /// Whether the quit dialog's Don't ask again is ticked.
     dont_ask_again: bool,
+    /// Whether the quit dialog's Stop the agents is ticked.
+    stop_agents: bool,
 }
 
 impl Shell {
@@ -198,8 +202,9 @@ impl Shell {
             alerts: HashMap::new(),
             _activation: activation,
             quit_dialog: DialogHandle::new(false),
-            quit_running: 0,
+            quit_running: Vec::new(),
             dont_ask_again: false,
+            stop_agents: false,
         };
         // The compositor's close button, and Quit, ask first while agents run.
         let this = cx.entity().downgrade();
@@ -228,16 +233,17 @@ impl Shell {
     /// did, so the caller quits only when it didn't. Agent panes whose process runs count, and
     /// shell panes hosting an agent; plain shells don't.
     pub fn ask_to_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let running = (self.sidebar.as_ref()).map_or(0, |sidebar| {
+        let running = (self.sidebar.as_ref()).map_or(Vec::new(), |sidebar| {
             quit::running_agents(sidebar.read(cx).snapshot())
         });
         let confirm = (self.settings.as_ref()).is_none_or(|view| view.read(cx).confirm_quit());
-        if running == 0 || !confirm {
+        if running.is_empty() || !confirm {
             return false;
         }
         if !self.quit_dialog.is_open() {
             self.quit_running = running;
             self.dont_ask_again = false;
+            self.stop_agents = false;
             self.quit_dialog.open(window, cx);
         }
         cx.notify();
@@ -245,55 +251,114 @@ impl Shell {
     }
 
     /// The quit dialog's Quit, and Enter: saves `gui.confirm_quit = false` first when Don't ask
-    /// again is ticked, then quits, whether or not the save went through.
+    /// again is ticked, then quits, whether or not the save went through. With Stop the agents
+    /// ticked it also stops each agent the dialog counted, and waits for the stops up to
+    /// [`quit::STOP_GRACE`] from now, quitting then whether or not they all landed; a failed
+    /// stop is logged, and that agent keeps running. Nothing remembers the tick: the next quit
+    /// leaves agents running unless it is ticked again.
     fn quit_confirmed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.quit_dialog.close(window, cx);
         let saving = (self.settings.clone())
             .filter(|_| self.dont_ask_again)
             .map(|view| view.update(cx, |view, cx| view.set_confirm_quit(false, window, cx)));
+        let stops: Vec<_> = match self.api(cx).filter(|_| self.stop_agents) {
+            Some(api) => (self.quit_running.iter())
+                .map(|pane| {
+                    let stop = api.stop_pane(*pane, cx);
+                    let pane = *pane;
+                    async move {
+                        if let Err(err) = stop.await {
+                            tracing::warn!(%pane, "couldn't stop the agent on quit: {err:#}");
+                        }
+                    }
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        let grace = cx.background_executor().timer(quit::STOP_GRACE);
         cx.spawn(async move |_, cx| {
             if let Some(saving) = saving {
                 saving.await;
+            }
+            if !stops.is_empty() {
+                let stopping = future::join_all(stops);
+                if let Either::Right(_) = future::select(Box::pin(stopping), grace).await {
+                    tracing::warn!("quitting before every agent's stop landed");
+                }
             }
             cx.update(quit::now);
         })
         .detach();
     }
 
-    /// "Quit agentdeck?", Penpot "Screens" → "Quit · agents running": the running count over
-    /// Don't ask again, then Cancel and Quit. Enter and the Quit button dispatch the dialog's
-    /// `Confirm`, caught here on its way down to the dialog, which then closes.
-    fn quit_confirmation(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// One of the quit dialog's horizontal Fields: a Checkbox, `on` or not, labelled `label`,
+    /// whose tick `set` saves; clicking the label ticks it too. Its checkbox is element `id`,
+    /// its label `<id>-label`, and `selector` finds it under test.
+    fn quit_option(
+        id: &'static str,
+        selector: &'static str,
+        label: &'static str,
+        on: bool,
+        set: fn(&mut Shell, bool),
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let this = cx.entity().downgrade();
         let tick = move |on: bool, cx: &mut App| {
             let _ = this.update(cx, |shell, cx| {
-                shell.dont_ask_again = on;
+                set(shell, on);
                 cx.notify();
             });
         };
         let tick_label = tick.clone();
-        let ticked = self.dont_ask_again;
-        // core-gpui's content has no body part, so Don't ask again leads the footer's column,
-        // `space.6` above the buttons, as Penpot places it between the header and the footer.
-        let dont_ask = Field::new()
+        Field::new()
             .orientation(FieldOrientation::Horizontal)
             .child(
-                div().debug_selector(|| "quit dont ask again".into()).child(
-                    Checkbox::new("quit-dont-ask-again")
-                        .checked(ticked)
-                        .accessibility_label("Don't ask again")
+                div().debug_selector(move || selector.into()).child(
+                    Checkbox::new(id)
+                        .checked(on)
+                        .accessibility_label(label)
                         .on_change(move |on, _, cx| tick(on, cx)),
                 ),
             )
             .content(
                 FieldContent::new().child(
                     div()
-                        .id("quit-dont-ask-again-label")
+                        .id(SharedString::from(format!("{id}-label")))
                         .cursor_pointer()
-                        .on_click(move |_, _, cx| tick_label(!ticked, cx))
-                        .child(Label::new().child("Don't ask again")),
+                        .on_click(move |_, _, cx| tick_label(!on, cx))
+                        .child(Label::new().child(label)),
                 ),
-            );
+            )
+    }
+
+    /// "Quit agentdeck?", Penpot "Screens" → "Quit · agents running" (and "· stop ticked"): the
+    /// running count over Don't ask again and Stop the agents, then Cancel and Quit. Enter and
+    /// the Quit button dispatch the dialog's `Confirm`, caught here on its way down to the
+    /// dialog, which then closes.
+    fn quit_confirmation(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // core-gpui's content has no body part, so the options lead the footer's column,
+        // `space.3` apart and `space.6` above the buttons, as Penpot places them between the
+        // header and the footer.
+        let options = div()
+            .flex()
+            .flex_col()
+            .gap(space::S3)
+            .child(Self::quit_option(
+                "quit-dont-ask-again",
+                "quit dont ask again",
+                "Don't ask again",
+                self.dont_ask_again,
+                |shell, on| shell.dont_ask_again = on,
+                cx,
+            ))
+            .child(Self::quit_option(
+                "quit-stop-agents",
+                "quit stop agents",
+                "Stop the agents",
+                self.stop_agents,
+                |shell, on| shell.stop_agents = on,
+                cx,
+            ));
         div()
             .capture_action(cx.listener(|this, _: &Confirm, window, cx| {
                 this.quit_confirmed(window, cx);
@@ -307,14 +372,15 @@ impl Shell {
                                 AlertDialogHeader::new()
                                     .title(AlertDialogTitle::new("Quit agentdeck?"))
                                     .description(AlertDialogDescription::new(quit::still_running(
-                                        self.quit_running,
+                                        self.quit_running.len(),
+                                        self.stop_agents,
                                     ))),
                             )
                             .footer(
                                 AlertDialogFooter::new()
                                     .flex_col()
                                     .gap(space::S6)
-                                    .child(dont_ask)
+                                    .child(options)
                                     .child(
                                         div()
                                             .flex()
@@ -2897,7 +2963,9 @@ mod tests {
     mod quitting {
         use agentdeck_client::types::{GuiSettings, Settings};
         use agentdeck_core::{Agent, AgentState};
-        use gpui::Modifiers;
+        use std::time::Duration;
+
+        use gpui::{Modifiers, point, px};
 
         use super::*;
         use crate::api::fake::default_settings;
@@ -3014,7 +3082,9 @@ mod tests {
 
             assert!(harness.asking(cx));
             assert_eq!(harness.quits(cx), 0);
-            let shown = harness.shell.read_with(cx, |shell, _| shell.quit_running);
+            let shown = harness
+                .shell
+                .read_with(cx, |shell, _| shell.quit_running.len());
             assert_eq!(shown, 2);
         }
 
@@ -3126,6 +3196,149 @@ mod tests {
             harness.press_quit(cx);
             assert!(!harness.asking(cx));
             assert_eq!(harness.quits(cx), 2);
+        }
+        #[gpui::test]
+        fn should_stop_each_running_agent_then_quit_with_stop_the_agents_ticked(
+            cx: &mut TestAppContext,
+        ) {
+            let panes = vec![agent(1), hosting_shell(2), plain_shell(3)];
+            let (harness, cx) = Harness::open(daemon(panes, true), cx);
+            harness.press_quit(cx);
+
+            harness.click("quit stop agents", cx);
+            cx.simulate_keystrokes("enter");
+            harness.settle(cx);
+
+            assert_eq!(*harness.api.stopped.lock().unwrap(), [id(1), id(2)]);
+            assert_eq!(harness.quits(cx), 1);
+        }
+
+        #[gpui::test]
+        fn should_tick_stop_the_agents_from_its_label_too(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(vec![agent(1), agent(2)], true), cx);
+            harness.press_quit(cx);
+            let checkbox = cx.debug_bounds("quit stop agents").expect("the checkbox");
+
+            // The label sits right of the checkbox, on its row.
+            let label = point(checkbox.right() + px(40.), checkbox.center().y);
+            cx.simulate_click(label, Modifiers::default());
+            harness.settle(cx);
+
+            let ticked = harness.shell.read_with(cx, |shell, _| shell.stop_agents);
+            assert!(ticked);
+        }
+
+        #[gpui::test]
+        fn should_leave_the_agents_running_with_stop_the_agents_unticked(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(vec![agent(1)], true), cx);
+            harness.press_quit(cx);
+
+            harness.click("quit stop agents", cx);
+            harness.click("quit stop agents", cx);
+            cx.simulate_keystrokes("enter");
+            harness.settle(cx);
+
+            assert!(harness.api.stopped.lock().unwrap().is_empty());
+            assert_eq!(harness.quits(cx), 1);
+        }
+
+        #[gpui::test]
+        fn should_untick_stop_the_agents_each_time_it_opens(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(vec![agent(1)], true), cx);
+            harness.press_quit(cx);
+            harness.click("quit stop agents", cx);
+            cx.simulate_keystrokes("escape");
+            harness.settle(cx);
+
+            harness.press_quit(cx);
+
+            let ticked = harness.shell.read_with(cx, |shell, _| shell.stop_agents);
+            assert!(!ticked);
+        }
+
+        #[gpui::test]
+        fn should_wait_for_the_stops_up_to_the_kill_grace_then_quit(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(vec![agent(1)], true), cx);
+            let _held = harness.api.hold_stop();
+            harness.press_quit(cx);
+            harness.click("quit stop agents", cx);
+
+            cx.simulate_keystrokes("enter");
+            harness.settle(cx);
+            assert_eq!(*harness.api.stopped.lock().unwrap(), [id(1)]);
+            cx.executor()
+                .advance_clock(crate::quit::STOP_GRACE - Duration::from_millis(1));
+            harness.settle(cx);
+            assert_eq!(harness.quits(cx), 0, "it waits for the stop");
+
+            cx.executor().advance_clock(Duration::from_millis(1));
+            harness.settle(cx);
+            assert_eq!(harness.quits(cx), 1, "it quits once the grace is over");
+        }
+
+        #[gpui::test]
+        fn should_quit_once_a_held_stop_lands(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(vec![agent(1)], true), cx);
+            let release = harness.api.hold_stop();
+            harness.press_quit(cx);
+            harness.click("quit stop agents", cx);
+            cx.simulate_keystrokes("enter");
+            harness.settle(cx);
+            assert_eq!(harness.quits(cx), 0);
+
+            release.send(()).unwrap();
+            harness.settle(cx);
+
+            assert_eq!(harness.quits(cx), 1);
+        }
+
+        #[gpui::test]
+        fn should_log_a_stop_that_fails_and_quit_anyway(cx: &mut TestAppContext) {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("agentdeck-gui.log");
+            let (subscriber, _) = crate::logging::subscriber(Some(&path), Some("info"));
+            let _logging = tracing::subscriber::set_default(subscriber);
+            let (harness, cx) = Harness::open(daemon(vec![agent(1), agent(2)], true), cx);
+            harness.press_quit(cx);
+            harness.click("quit stop agents", cx);
+
+            harness.api.fail_next("the daemon went away");
+            cx.simulate_keystrokes("enter");
+            harness.settle(cx);
+
+            assert_eq!(*harness.api.stopped.lock().unwrap(), [id(2)]);
+            assert_eq!(harness.quits(cx), 1);
+            let log = std::fs::read_to_string(&path).unwrap();
+            let line = (log.lines())
+                .find(|line| line.contains("couldn't stop the agent on quit"))
+                .unwrap_or_else(|| panic!("no failed stop in {log}"));
+            assert!(line.contains("WARN"), "{line}");
+            assert!(line.contains(&id::<PaneId>(1).to_string()), "{line}");
+            assert!(line.contains("the daemon went away"), "{line}");
+        }
+
+        #[gpui::test]
+        fn should_stop_this_quits_agents_only_when_dont_ask_again_is_ticked_too(
+            cx: &mut TestAppContext,
+        ) {
+            let (harness, cx) = Harness::open(daemon(vec![agent(1)], true), cx);
+            harness.press_quit(cx);
+            harness.click("quit dont ask again", cx);
+            harness.click("quit stop agents", cx);
+
+            cx.simulate_keystrokes("enter");
+            harness.settle(cx);
+            assert_eq!(*harness.api.stopped.lock().unwrap(), [id(1)]);
+            assert!(!harness.api.settings_now().gui.confirm_quit);
+
+            harness.press_quit(cx);
+
+            assert_eq!(harness.quits(cx), 2);
+            assert_eq!(
+                *harness.api.stopped.lock().unwrap(),
+                [id(1)],
+                "nothing remembers Stop the agents"
+            );
         }
     }
 

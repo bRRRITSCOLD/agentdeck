@@ -19,6 +19,8 @@ anyhow.workspace = true
 chrono.workspace = true
 brrritscold-core-gpui.workspace = true
 brrritscold-core-gpui-tokens.workspace = true
+# Waiting for the agents' stops on quit, up to a grace period (spec §11).
+futures-util.workspace = true
 gpui.workspace = true
 # `InputEvent`, which core-gpui's `InputState` emits but doesn't re-export.
 gpui-base.workspace = true

@@ -423,6 +423,9 @@ mod stop {
         )
         .await;
         printed(&daemon.client, pane.id, "shell-42").await;
-        assert_ne!(read(&daemon.client, pane.id).await.state, AgentState::Exited);
+        assert_ne!(
+            read(&daemon.client, pane.id).await.state,
+            AgentState::Exited
+        );
     }
 }
