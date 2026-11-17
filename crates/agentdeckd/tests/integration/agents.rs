@@ -1144,6 +1144,47 @@ mod post_v1_panes_id_respawn {
             assert_eq!(pane_session(&daemon.client, pane.id).await, Some(session));
         }
 
+        /// Codex exits 1 at once for a session it can't find, as Claude Code does, so the
+        /// same fallback covers it with no reading of its screen (#262).
+        #[tokio::test]
+        async fn should_start_codex_afresh_on_its_task_200() {
+            let daemon = TestDaemon::start().await;
+            let place = Place::new(&daemon).await;
+            let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
+            let pane = place
+                .launch(&daemon.client, Agent::Codex, Some(task.id))
+                .await;
+            let old = eventually("the codex session", || async {
+                pane_session(&daemon.client, pane.id).await
+            })
+            .await;
+            printed(&daemon.client, pane.id, "\u{1b}]0;codex").await;
+            submit_now(&daemon.client, pane.id, "/exit").await;
+            in_state(&daemon.client, pane.id, AgentState::Exited).await;
+            std::fs::write(
+                std::path::Path::new(&place.workspace.dir).join("lost-session"),
+                "",
+            )
+            .expect("losing the session");
+
+            respawn(&daemon.client, pane.id, PaneRun::Agent).await;
+
+            let launches = launched(&daemon, pane.id, 3).await;
+            assert_eq!(launches[1], with_mcp(Agent::Codex, &["resume", &old]));
+            assert!(!launches[2].contains(&"resume".to_owned()), "{launches:?}");
+            let prompt = launches[2].last().expect("a launch prompt");
+            assert!(prompt.starts_with(&task_header(&task)), "{prompt}");
+            let session = eventually("the new codex session", || async {
+                pane_session(&daemon.client, pane.id)
+                    .await
+                    .filter(|session| *session != old)
+            })
+            .await;
+            assert_eq!(Some(session), codex_session(&daemon, pane.id));
+            assert_eq!(task_var(&daemon, pane.id), Some(task.id.to_string()));
+            launched_no_more_than(&daemon, pane.id, 3).await;
+        }
+
         #[tokio::test]
         async fn should_leave_a_resumed_claude_that_exits_cleanly_exited_200() {
             let daemon = TestDaemon::start().await;
