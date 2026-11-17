@@ -3,7 +3,7 @@
 //! an `OctagonX`) tells them apart, so colour is never the only signal.
 
 use agentdeck_core::AgentState;
-use brrritscold_core_gpui::StateDotState;
+use brrritscold_core_gpui::{StateDot, StateDotState};
 
 /// The mark for `state`; `exit_code` tells a failed exit from a clean one.
 pub fn of(state: AgentState, exit_code: Option<i64>) -> StateDotState {
@@ -20,13 +20,19 @@ pub fn of(state: AgentState, exit_code: Option<i64>) -> StateDotState {
     }
 }
 
+/// The `StateDot` for `state`, drawn still: `working`'s `LoaderCircle` at rest, as Penpot
+/// draws it. A turning mark redraws the whole window 15 times a second, which cost 2–2.3% of a
+/// core in a focused window, above the 1.5% the app allows itself (spec §11).
+pub fn mark(state: StateDotState) -> StateDot {
+    StateDot::new(state).spin(false)
+}
+
 #[cfg(test)]
 pub mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
     use std::time::Duration;
 
-    use brrritscold_core_gpui::StateDot;
     use gpui::{
         AnyElement, Context, Entity, IntoElement, Render, TestAppContext, VisualTestContext, Window,
     };
@@ -59,17 +65,8 @@ pub mod tests {
         cx.run_until_parked();
     }
 
-    /// Blurs the window, then lets the redraw it asks for, and any spinner tick already
-    /// scheduled, play out.
-    pub fn deactivate(cx: &mut VisualTestContext) {
-        cx.deactivate_window();
-        for _ in 0..12 {
-            play_frame(cx);
-        }
-    }
-
     /// Plays one second of a 60 Hz display and returns how often `view` asked to redraw in
-    /// it: above 0 while something in it turns, 0 when it holds still.
+    /// it: 0 while nothing in it moves.
     pub fn redraws_in_one_second<V: 'static>(
         view: &Entity<V>,
         cx: &mut VisualTestContext,
@@ -83,6 +80,14 @@ pub mod tests {
             play_frame(cx);
         }
         redraws.get()
+    }
+
+    /// Redraws `view`, and nothing else, `times` times, a frame each.
+    pub fn redraw<V: 'static>(view: &Entity<V>, times: usize, cx: &mut VisualTestContext) {
+        for _ in 0..times {
+            view.update(cx, |_, cx| cx.notify());
+            play_frame(cx);
+        }
     }
 
     /// Moves the clock on by one 60 Hz frame, delivers the frame and lets whatever it woke
@@ -126,18 +131,9 @@ pub mod tests {
         use super::*;
 
         #[gpui::test]
-        fn should_spin_a_working_agents_mark(cx: &mut TestAppContext) {
+        fn should_hold_a_working_agents_mark_still(cx: &mut TestAppContext) {
             let (host, cx) = host(
-                |_| StateDot::new(of(AgentState::Working, None)).into_any_element(),
-                cx,
-            );
-            assert!(redraws_in_one_second(&host, cx) > 0);
-        }
-
-        #[gpui::test]
-        fn should_hold_an_idle_agents_mark_still(cx: &mut TestAppContext) {
-            let (host, cx) = host(
-                |_| StateDot::new(of(AgentState::Idle, None)).into_any_element(),
+                |_| mark(of(AgentState::Working, None)).into_any_element(),
                 cx,
             );
             assert_eq!(redraws_in_one_second(&host, cx), 0);

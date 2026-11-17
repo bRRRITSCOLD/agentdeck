@@ -13,8 +13,7 @@
 use agentdeck_core::{ChecksState, ReviewState, TaskKind, TaskStatus};
 use brrritscold_core_gpui::{
     ActiveTheme as _, Badge, BadgeVariant, Checks, ChecksState as UiChecksState, Icon, IconName,
-    Select, SelectContent, SelectItem, SelectTrigger, SelectTriggerSize, StateDot, Tooltip,
-    TooltipContent,
+    Select, SelectContent, SelectItem, SelectTrigger, SelectTriggerSize, Tooltip, TooltipContent,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
@@ -470,15 +469,16 @@ fn checks_mark(state: ChecksState) -> (UiChecksState, &'static str) {
 }
 
 /// Penpot `Checks`: the icon and its word, as the Tasks view, the Inbox and the task sheet
-/// show a PR's checks. Running checks turn only while `spin`: [`crate::activity::spins`].
-pub fn checks(state: ChecksState, spin: bool) -> Checks {
+/// show a PR's checks. Running checks are drawn still, as a working agent's mark is
+/// ([`state_dot::mark`]).
+pub fn checks(state: ChecksState) -> Checks {
     let (mark, word) = checks_mark(state);
-    Checks::new(mark).label(word).spin(spin)
+    Checks::new(mark).label(word).spin(false)
 }
 
 /// Penpot `Checks` as the right panel shows it: the icon alone.
-fn checks_icon(state: ChecksState, spin: bool) -> Checks {
-    Checks::new(checks_mark(state).0).spin(spin)
+fn checks_icon(state: ChecksState) -> Checks {
+    Checks::new(checks_mark(state).0).spin(false)
 }
 
 /// The review cell: a badge in the review colour (spec §11), or muted text while one is
@@ -579,15 +579,13 @@ fn unseen_mark(row: &Row, cx: &App) -> Option<Div> {
 /// agent, PR, draft, checks, review, workspace and its `Menu` layer, `space.3` apart, padded
 /// `space.2`; `layout`'s columns only. `picker` is the row's status picker; clicking the
 /// title runs `on_open`. The title cell ends with the [`unseen_mark`] while the task's agent
-/// comments are unseen. A working agent's mark and running checks turn only while `spin`,
-/// which the caller sets from [`crate::activity::spins`]. Tests find a cell as `<column> <id>`.
+/// comments are unseen. Tests find a cell as `<column> <id>`.
 pub fn wide(
     row: &Row,
     picker: Select,
     layout: Layout,
     parts: RowParts,
     on_open: OnOpen,
-    spin: bool,
     cx: &App,
 ) -> AnyElement {
     let s = cx.theme().semantic();
@@ -607,7 +605,7 @@ pub fn wide(
     let agent_cell = cell(Columns::AGENT).debug_selector(move || format!("agent {id}"));
     let agent = match &row.agent {
         Some(agent) => agent_cell
-            .child(StateDot::new(state_dot::of(agent.state, None)).spin(spin))
+            .child(state_dot::mark(state_dot::of(agent.state, None)))
             .child(muted(agent.name.clone(), font_size::XS)),
         None => agent_cell.child(none(cx)),
     };
@@ -651,7 +649,7 @@ pub fn wide(
                 cell(Columns::CHECKS)
                     .debug_selector(move || format!("checks {id}"))
                     .when_some(pr.and_then(|pr| pr.checks), |c, state| {
-                        c.child(checks(state, spin))
+                        c.child(checks(state))
                     }),
             )
         })
@@ -695,16 +693,8 @@ pub fn wide(
 /// its `Menu` layer on top; the status picker, then the checks icon and the review badge
 /// below. Padded `space.2`, the two lines `space.1-5` apart. Clicking the title runs
 /// `on_open`. The [`unseen_mark`] sits just before the agents' mark while the task's agent
-/// comments are unseen. The agents' mark and the checks turn only while `spin`, as in
-/// [`wide`]. Tests find the agents' mark as `panel agent <id>`.
-pub fn panel(
-    row: &Row,
-    picker: Select,
-    parts: RowParts,
-    on_open: OnOpen,
-    spin: bool,
-    cx: &App,
-) -> AnyElement {
+/// comments are unseen. Tests find the agents' mark as `panel agent <id>`.
+pub fn panel(row: &Row, picker: Select, parts: RowParts, on_open: OnOpen, cx: &App) -> AnyElement {
     let s = cx.theme().semantic();
     let kind_icon = match row.kind {
         TaskKind::Plain => IconName::ListTodo,
@@ -759,7 +749,7 @@ pub fn panel(
                         div()
                             .debug_selector(move || format!("panel agent {id}"))
                             .flex_none()
-                            .child(StateDot::new(state_dot::of(agent.state, None)).spin(spin)),
+                            .child(state_dot::mark(state_dot::of(agent.state, None))),
                     )
                 })
                 .child(parts.menu),
@@ -773,7 +763,7 @@ pub fn panel(
                 .child(picker)
                 .child(div().flex_1())
                 .when_some(pr.and_then(|pr| pr.checks), |meta, state| {
-                    meta.child(checks_icon(state, spin))
+                    meta.child(checks_icon(state))
                 })
                 .when_some(pr.and_then(|pr| pr.review), |meta, state| {
                     meta.child(review(state, cx))
@@ -884,38 +874,14 @@ mod tests {
         }
 
         #[gpui::test]
-        fn should_spin_running_checks(cx: &mut TestAppContext) {
-            let (row, cx) = host(
-                |_| checks(ChecksState::Pending, true).into_any_element(),
-                cx,
-            );
-            assert!(redraws_in_one_second(&row, cx) > 0);
-        }
-
-        #[gpui::test]
-        fn should_hold_passing_checks_still(cx: &mut TestAppContext) {
-            let (row, cx) = host(
-                |_| checks_icon(ChecksState::Success, true).into_any_element(),
-                cx,
-            );
+        fn should_hold_running_checks_still(cx: &mut TestAppContext) {
+            let (row, cx) = host(|_| checks(ChecksState::Pending).into_any_element(), cx);
             assert_eq!(redraws_in_one_second(&row, cx), 0);
         }
 
         #[gpui::test]
-        fn should_hold_running_checks_still_without_spin(cx: &mut TestAppContext) {
-            let (row, cx) = host(
-                |_| checks(ChecksState::Pending, false).into_any_element(),
-                cx,
-            );
-            assert_eq!(redraws_in_one_second(&row, cx), 0);
-        }
-
-        #[gpui::test]
-        fn should_hold_the_panels_running_checks_still_without_spin(cx: &mut TestAppContext) {
-            let (row, cx) = host(
-                |_| checks_icon(ChecksState::Pending, false).into_any_element(),
-                cx,
-            );
+        fn should_hold_the_panels_running_checks_still(cx: &mut TestAppContext) {
+            let (row, cx) = host(|_| checks_icon(ChecksState::Pending).into_any_element(), cx);
             assert_eq!(redraws_in_one_second(&row, cx), 0);
         }
     }

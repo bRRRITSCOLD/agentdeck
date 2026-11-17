@@ -30,7 +30,6 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, list,
 };
 
-use crate::activity;
 use crate::api::Api;
 use crate::close_prs::{self, ClosePrs};
 use crate::overview::{PrSync, Snapshot};
@@ -186,9 +185,8 @@ impl InboxView {
         .detach();
     }
 
-    /// The list's `ix`th row, with its status picker. Its marks turn only while `spin`:
-    /// [`activity::spins`].
-    fn item(&mut self, ix: usize, spin: bool, cx: &mut Context<Self>) -> AnyElement {
+    /// The list's `ix`th row, with its status picker.
+    fn item(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.shown.get(ix) else {
             return div().into_any_element();
         };
@@ -213,7 +211,6 @@ impl InboxView {
             self.layout(cx),
             parts,
             open,
-            spin,
             cx,
         ))
     }
@@ -375,9 +372,7 @@ impl Render for InboxView {
             .child(
                 list(
                     self.list.clone(),
-                    cx.processor(|this, ix, window, cx| {
-                        this.item(ix, activity::spins(window, cx), cx)
-                    }),
+                    cx.processor(|this, ix, _, cx| this.item(ix, cx)),
                 )
                 .flex_1()
                 .min_h_0(),
@@ -1532,7 +1527,7 @@ mod tests {
 
         use super::*;
         use crate::overview::fixtures::pr_task;
-        use crate::state_dot::tests::{activate, deactivate, redraws_in_one_second};
+        use crate::state_dot::tests::{activate, redraws_in_one_second};
 
         /// An inbox PR whose checks are running.
         fn running() -> Snapshot {
@@ -1547,17 +1542,9 @@ mod tests {
         }
 
         #[gpui::test]
-        fn should_spin_running_checks_while_the_window_is_active(cx: &mut TestAppContext) {
+        fn should_hold_running_checks_still_while_the_window_is_active(cx: &mut TestAppContext) {
             let (harness, cx) = Harness::open(running(), cx);
             activate(cx);
-            assert!(redraws_in_one_second(&harness.view, cx) > 0);
-        }
-
-        #[gpui::test]
-        fn should_hold_them_still_while_the_window_is_inactive(cx: &mut TestAppContext) {
-            let (harness, cx) = Harness::open(running(), cx);
-            activate(cx);
-            deactivate(cx);
             assert_eq!(redraws_in_one_second(&harness.view, cx), 0);
         }
     }

@@ -55,7 +55,6 @@ use gpui::{
 };
 use gpui_base::actions::Confirm;
 
-use crate::activity;
 use crate::api::Api;
 use crate::connection::{Connection, Status};
 use crate::delete_workspace::{DeleteEvent, DeleteTarget, DeleteWorkspaceDialog};
@@ -138,8 +137,6 @@ pub struct Shell {
     alerts: HashMap<SharedString, notifications::Target>,
     /// Withdraws the notifications about what the window shows once it is focused.
     _activation: Subscription,
-    /// Times the window's input, so its turning marks hold still while the user is away.
-    _activity: [Subscription; 2],
     /// Opens and closes "Quit agentdeck?".
     quit_dialog: DialogHandle,
     /// How many agents ran when the quit dialog opened.
@@ -200,7 +197,6 @@ impl Shell {
             notifier,
             alerts: HashMap::new(),
             _activation: activation,
-            _activity: activity::watch(window, cx),
             quit_dialog: DialogHandle::new(false),
             quit_running: 0,
             dont_ask_again: false,
@@ -1095,7 +1091,6 @@ impl Render for Shell {
                 shell.children(frame::resize_edges(tiling))
             })
             .child(self.quit_confirmation(cx))
-            .child(activity::listener())
     }
 }
 
@@ -2789,108 +2784,93 @@ mod tests {
             }
         }
 
-        /// The working agents' marks, in the sidebar and the panes shown (spec §11).
-        mod spin {
-            use gpui::{Modifiers, point, px};
-
+        /// Frames drawn while only the sidebar redraws, as its footer's tick makes it.
+        mod sidebar_redraws {
             use super::*;
-            use crate::activity::IDLE_AFTER;
             use crate::state_dot::tests::{play_frame, redraws_in_one_second};
 
-            /// The shell over [`daemon`], with the pane shown, 7, working too.
-            fn working(cx: &mut TestAppContext) -> Open {
-                let mut open = Open::new(daemon(), cx);
-                open.turn(7, AgentState::Working);
-                open
-            }
-
             impl Open {
-                /// How often the sidebar and each pane shown asked to redraw in a second.
-                fn redraws(&mut self) -> Vec<usize> {
+                /// Redraws the sidebar, and nothing else, on each of a second's 60 frames.
+                fn redraw_the_sidebar(&mut self) {
                     let sidebar = self.shell.read_with(self.cx, |s, _| s.sidebar.clone());
-                    let panes = self.shell.read_with(self.cx, |s, cx| {
-                        (s.workspace.as_ref()).map_or_else(Vec::new, |v| v.read(cx).shown())
-                    });
-                    let mut redraws = vec![redraws_in_one_second(&sidebar.unwrap(), self.cx)];
-                    for pane in panes {
-                        redraws.push(redraws_in_one_second(&pane, self.cx));
-                    }
-                    redraws
-                }
-
-                /// Lets 30 s pass with no input.
-                fn idle(&mut self) {
-                    self.cx.executor().advance_clock(IDLE_AFTER);
-                    for _ in 0..12 {
+                    let sidebar = sidebar.expect("connected");
+                    for _ in 0..60 {
+                        sidebar.update(self.cx, |_, cx| cx.notify());
                         play_frame(self.cx);
                     }
                 }
             }
 
-            #[gpui::test]
-            fn should_turn_while_the_user_is_at_the_window(cx: &mut TestAppContext) {
-                let mut open = working(cx);
-                let redraws = open.redraws();
-                assert!(
-                    redraws.len() > 1 && redraws.iter().all(|n| *n > 0),
-                    "{redraws:?}"
-                );
+            /// Counts each redraw `view` asks for in `redraws`.
+            fn count<V: 'static>(
+                view: &Entity<V>,
+                redraws: &Rc<std::cell::Cell<usize>>,
+                cx: &mut App,
+            ) -> Subscription {
+                let redraws = redraws.clone();
+                cx.observe(view, move |_, _| redraws.set(redraws.get() + 1))
             }
 
+            /// The views that follow the sidebar's selection and snapshot hear of neither
+            /// changing.
             #[gpui::test]
-            fn should_hold_still_after_30_s_without_input(cx: &mut TestAppContext) {
-                let mut open = working(cx);
-                open.idle();
-                let redraws = open.redraws();
-                assert!(redraws.iter().all(|n| *n == 0), "{redraws:?}");
-            }
-
-            /// A turning mark redraws the view it's in, and that alone: the views around it
-            /// hear of nothing.
-            #[gpui::test]
-            fn should_leave_the_views_without_a_mark_alone_while_the_marks_turn(
-                cx: &mut TestAppContext,
-            ) {
-                let open = working(cx);
+            fn should_leave_the_views_that_follow_it_alone(cx: &mut TestAppContext) {
+                let mut open = Open::new(daemon(), cx);
                 let (panel, inbox, tasks, sheet) = open.shell.read_with(open.cx, |s, _| {
                     let views = (s.panel.clone(), s.inbox.clone(), s.tasks.clone());
                     (views.0, views.1, views.2, s.task_sheet.clone())
                 });
-                let redraws = [
-                    redraws_in_one_second(&panel.expect("connected"), open.cx),
-                    redraws_in_one_second(&inbox.expect("connected"), open.cx),
-                    redraws_in_one_second(&tasks.expect("connected"), open.cx),
-                    redraws_in_one_second(&sheet.expect("connected"), open.cx),
-                ];
-                assert_eq!(redraws, [0; 4], "panel, inbox, tasks, task sheet");
+                let (panel, inbox) = (panel.expect("connected"), inbox.expect("connected"));
+                let (tasks, sheet) = (tasks.expect("connected"), sheet.expect("connected"));
+                let redraws = Rc::new(std::cell::Cell::new(0));
+                let _observing = open.cx.update(|_, cx| {
+                    [
+                        count(&panel, &redraws, cx),
+                        count(&inbox, &redraws, cx),
+                        count(&tasks, &redraws, cx),
+                        count(&sheet, &redraws, cx),
+                    ]
+                });
+                open.redraw_the_sidebar();
+                assert_eq!(
+                    redraws.get(),
+                    0,
+                    "panel, inbox, tasks and task sheet redraws"
+                );
             }
 
-            /// The right panel, holding no turning mark here, is drawn from its cache.
+            /// The right panel is drawn from its cache.
             #[gpui::test]
-            fn should_not_render_the_right_panel_again_while_the_marks_turn(
-                cx: &mut TestAppContext,
-            ) {
-                let open = working(cx);
+            fn should_not_render_the_right_panel_again(cx: &mut TestAppContext) {
+                let mut open = Open::new(daemon(), cx);
                 let panel = open.shell.read_with(open.cx, |s, _| s.panel.clone());
                 let panel = panel.expect("connected");
                 let rendered =
                     |open: &Open| panel.read_with(open.cx, |panel, _| panel.items_rendered.get());
                 let before = rendered(&open);
-                for _ in 0..60 {
-                    play_frame(open.cx);
-                }
+                open.redraw_the_sidebar();
                 assert!(before > 0);
                 assert_eq!(rendered(&open), before);
             }
 
+            /// No mark turns: a working agent's, in the sidebar or a pane header, is drawn
+            /// still (spec §11).
             #[gpui::test]
-            fn should_turn_again_when_the_pointer_moves(cx: &mut TestAppContext) {
-                let mut open = working(cx);
-                open.idle();
-                (open.cx).simulate_mouse_move(point(px(10.), px(10.)), None, Modifiers::default());
-                play_frame(open.cx);
-                let redraws = open.redraws();
-                assert!(redraws.iter().all(|n| *n > 0), "{redraws:?}");
+            fn should_hold_the_working_agents_marks_still(cx: &mut TestAppContext) {
+                let mut open = Open::new(daemon(), cx);
+                open.turn(7, AgentState::Working);
+                let sidebar = open.shell.read_with(open.cx, |s, _| s.sidebar.clone());
+                let panes = open.shell.read_with(open.cx, |s, cx| {
+                    (s.workspace.as_ref()).map_or_else(Vec::new, |v| v.read(cx).shown())
+                });
+                assert!(!panes.is_empty());
+                assert_eq!(
+                    redraws_in_one_second(&sidebar.expect("connected"), open.cx),
+                    0
+                );
+                for pane in panes {
+                    assert_eq!(redraws_in_one_second(&pane, open.cx), 0);
+                }
             }
         }
     }

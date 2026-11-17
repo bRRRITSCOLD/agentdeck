@@ -46,7 +46,6 @@ use gpui::{
 };
 use gpui_base::input::InputEvent;
 
-use crate::activity;
 use crate::api::Api;
 use crate::connection::{Connection, DaemonEvent};
 use crate::keymap::{self, CancelEdit, Submit};
@@ -678,7 +677,7 @@ impl TaskSheet {
 
     /// Penpot `agentdeck/TaskSheetBody`: the status row, the description, the PR line, the
     /// "Comments" heading and the thread, `space.4` apart, padded `space.4` across.
-    fn body(&self, summary: &Summary, spin: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn body(&self, summary: &Summary, cx: &mut Context<Self>) -> AnyElement {
         let s = cx.theme().semantic();
         let status = Select::new("task-sheet-status")
             .trigger(SelectTrigger::new().w(px(STATUS_WIDTH)))
@@ -727,9 +726,7 @@ impl TaskSheet {
                     .children(self.start_agent_button(&summary.start_agent, cx)),
             )
             .child(description)
-            .when_some(summary.pr.as_ref(), |body, pr| {
-                body.child(pr_line(pr, spin, cx))
-            })
+            .when_some(summary.pr.as_ref(), |body, pr| body.child(pr_line(pr, cx)))
             .child(
                 div()
                     .text_size(font_size::SM)
@@ -1012,8 +1009,8 @@ impl TaskSheet {
 }
 
 /// The PR line (Penpot `TaskSheetBody` → `PR`): its reference as a link to the PR, a draft
-/// badge, its checks and its review. Running checks turn only while `spin`.
-fn pr_line(pr: &PrCell, spin: bool, cx: &App) -> AnyElement {
+/// badge, its checks and its review.
+fn pr_line(pr: &PrCell, cx: &App) -> AnyElement {
     div()
         .flex()
         .items_center()
@@ -1022,9 +1019,7 @@ fn pr_line(pr: &PrCell, spin: bool, cx: &App) -> AnyElement {
         .when(pr.draft, |line| {
             line.child(Badge::new().variant(BadgeVariant::Outline).label("draft"))
         })
-        .when_some(pr.checks, |line, state| {
-            line.child(task_row::checks(state, spin))
-        })
+        .when_some(pr.checks, |line, state| line.child(task_row::checks(state)))
         .when_some(pr.review, |line, state| {
             line.child(task_row::review(state, cx))
         })
@@ -1103,15 +1098,13 @@ fn comment(row: CommentRow, cx: &App) -> AnyElement {
 }
 
 impl Render for TaskSheet {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // A turning mark redraws the window, so it holds still while the window is inactive.
-        let spin = activity::spins(window, cx);
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let summary = self.task.and_then(|task| summary(&self.snapshot, task));
         let mut content = SheetContent::new();
         if let Some(summary) = &summary {
             content = content
                 .child(self.header(summary, cx))
-                .child(self.body(summary, spin, cx))
+                .child(self.body(summary, cx))
                 .footer(SheetFooter::new().child(self.composer(cx)));
         }
         Sheet::new("task-sheet")
@@ -2407,7 +2400,7 @@ mod tests {
         mod spin {
             use super::*;
             use crate::overview::fixtures::pr_task;
-            use crate::state_dot::tests::{activate, deactivate, redraws_in_one_second};
+            use crate::state_dot::tests::{activate, redraws_in_one_second};
 
             /// The sheet opened on task 10 as a PR whose checks are running.
             fn running_checks(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
@@ -2428,15 +2421,10 @@ mod tests {
             }
 
             #[gpui::test]
-            fn should_spin_running_checks_while_the_window_is_active(cx: &mut TestAppContext) {
+            fn should_hold_running_checks_still_while_the_window_is_active(
+                cx: &mut TestAppContext,
+            ) {
                 let (harness, cx) = running_checks(cx);
-                assert!(redraws_in_one_second(&harness.sheet, cx) > 0);
-            }
-
-            #[gpui::test]
-            fn should_hold_them_still_while_the_window_is_inactive(cx: &mut TestAppContext) {
-                let (harness, cx) = running_checks(cx);
-                deactivate(cx);
                 assert_eq!(redraws_in_one_second(&harness.sheet, cx), 0);
             }
         }

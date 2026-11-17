@@ -8,9 +8,9 @@
 //! daemon reports a `changed`; `state` and `exit` messages patch pane states in place. What
 //! changed that the user should hear about goes to the window as [`Alerts`] (spec §11).
 //!
-//! The workspace list draws only the rows in view, through GPUI's [`list`]: each step of a
-//! working workspace's spinner redraws the sidebar, and drawing every row made that step cost
-//! more the more workspaces there were (#199).
+//! The workspace list draws only the rows in view, through GPUI's [`list`]: drawing every row
+//! made each redraw cost more the more workspaces there were (#199). The window follows its
+//! selection and snapshot through [`SidebarEvent::Changed`], not through its every redraw.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +19,7 @@ use agentdeck_core::ws::ServerMessage;
 use agentdeck_core::{AgentState, WorkspaceId};
 use brrritscold_core_gpui::{
     ActiveTheme as _, Button, ButtonSize, ButtonVariant, Icon, IconName, Separator, Sidebar,
-    SidebarMenuButton, StateDot, StateDotState,
+    SidebarMenuButton, StateDotState,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
@@ -29,7 +29,6 @@ use gpui::{
     div, list, px,
 };
 
-use crate::activity;
 use crate::api::Api;
 use crate::connection::{Connection, DaemonEvent};
 use crate::count::Count;
@@ -64,8 +63,8 @@ pub enum Selection {
 pub enum SidebarEvent {
     /// Its `+` was clicked: open the new workspace dialog.
     NewWorkspace,
-    /// What it selects, or its snapshot, changed. A redraw alone, as a turning mark's, is no
-    /// change: the views that follow it hear of nothing then.
+    /// What it selects, or its snapshot, changed. A redraw alone is no change: the views that
+    /// follow it hear of nothing then.
     Changed,
 }
 
@@ -365,9 +364,7 @@ impl SidebarView {
             Lead::Icon(icon) => (button.icon(icon), None),
             // The menu button takes an icon, not a part, so the StateDot sits over the gap a
             // 16px icon would leave.
-            Lead::Dot { state, spin } => {
-                (button.pl(space::S8), Some(StateDot::new(state).spin(spin)))
-            }
+            Lead::Dot(state) => (button.pl(space::S8), Some(state_dot::mark(state))),
         };
         div()
             .id(id)
@@ -440,7 +437,7 @@ impl SidebarView {
     }
 
     /// The workspace list's item at `ix`, spaced from the next one: a list has no gap.
-    fn item(&self, ix: usize, spin: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn item(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         #[cfg(test)]
         self.items_rendered.set(self.items_rendered.get() + 1);
         let Items { count, header } = self.items();
@@ -471,10 +468,7 @@ impl SidebarView {
                 ElementId::Name(format!("workspace-{}", w.id).into()),
                 Selection::Workspace(w.id),
                 w.name,
-                Lead::Dot {
-                    state: state_dot::of(w.state, None),
-                    spin,
-                },
+                Lead::Dot(state_dot::of(w.state, None)),
                 w.counts,
                 cx,
             )
@@ -497,11 +491,8 @@ struct Items {
 /// What sits at a row's left end.
 enum Lead {
     Icon(IconName),
-    /// A `StateDot`, turning only while `spin`.
-    Dot {
-        state: StateDotState,
-        spin: bool,
-    },
+    /// A `StateDot`.
+    Dot(StateDotState),
 }
 
 impl EventEmitter<SidebarEvent> for SidebarView {}
@@ -511,8 +502,6 @@ impl EventEmitter<Alerts> for SidebarView {}
 impl Render for SidebarView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
-        // A turning mark redraws the window, so it holds still while the window is inactive.
-        let spin = activity::spins(window, cx);
         // Penpot's `Section` and `Footer`: xs muted text, inset 8px across and 4px down.
         let small = || {
             div()
@@ -613,7 +602,7 @@ impl Render for SidebarView {
                     .child(
                         list(
                             self.list.clone(),
-                            cx.processor(move |this, ix, _, cx| this.item(ix, spin, cx)),
+                            cx.processor(|this, ix, _, cx| this.item(ix, cx)),
                         )
                         .flex_1()
                         .min_h_0()
@@ -832,22 +821,14 @@ mod tests {
 
     mod spin {
         use super::*;
-        use crate::state_dot::tests::{activate, deactivate, redraws_in_one_second};
+        use crate::state_dot::tests::{activate, redraws_in_one_second};
 
         #[gpui::test]
-        fn should_spin_a_working_workspaces_mark_while_the_window_is_active(
+        fn should_hold_a_working_workspaces_mark_still_while_the_window_is_active(
             cx: &mut TestAppContext,
         ) {
             let open = open(two_workspaces(), cx);
             activate(open.cx);
-            assert!(redraws_in_one_second(&open.sidebar, open.cx) > 0);
-        }
-
-        #[gpui::test]
-        fn should_hold_it_still_while_the_window_is_inactive(cx: &mut TestAppContext) {
-            let open = open(two_workspaces(), cx);
-            activate(open.cx);
-            deactivate(open.cx);
             assert_eq!(redraws_in_one_second(&open.sidebar, open.cx), 0);
         }
     }
@@ -855,7 +836,7 @@ mod tests {
     /// [`SidebarEvent::Changed`], which the window follows the selection and snapshot by.
     mod changed {
         use super::*;
-        use crate::state_dot::tests::{activate, redraws_in_one_second};
+        use crate::state_dot::tests::redraw;
 
         /// How many times the sidebar tells of a change from now on.
         fn changes(open: &mut Open) -> (Rc<std::cell::Cell<usize>>, Subscription) {
@@ -903,11 +884,10 @@ mod tests {
         }
 
         #[gpui::test]
-        fn should_tell_of_nothing_while_only_its_marks_turn(cx: &mut TestAppContext) {
+        fn should_tell_of_nothing_on_a_redraw(cx: &mut TestAppContext) {
             let mut open = open(two_workspaces(), cx);
-            activate(open.cx);
             let (changes, _subscription) = changes(&mut open);
-            assert!(redraws_in_one_second(&open.sidebar, open.cx) > 0);
+            redraw(&open.sidebar, 10, open.cx);
             assert_eq!(changes.get(), 0);
         }
     }
@@ -1391,7 +1371,7 @@ mod tests {
         use gpui::{ScrollDelta, ScrollEvent, point};
 
         use super::*;
-        use crate::state_dot::tests::{activate, redraws_in_one_second};
+        use crate::state_dot::tests::redraw;
 
         /// `w01` to `w60` (ids 1 to 60), each with an agent at work, then `old` (id 61),
         /// archived.
@@ -1446,19 +1426,17 @@ mod tests {
         }
 
         #[gpui::test]
-        fn should_render_only_the_rows_in_view_on_a_spinner_step(cx: &mut TestAppContext) {
+        fn should_render_only_the_rows_in_view_on_a_redraw(cx: &mut TestAppContext) {
             let mut open = open(crowded(), cx);
-            activate(open.cx);
             let (before, in_view) = (rendered(&mut open), in_view(&mut open));
             assert!(in_view < 60, "the window holds {in_view} rows");
 
-            let redraws = redraws_in_one_second(&open.sidebar, open.cx);
+            redraw(&open.sidebar, 10, open.cx);
 
-            assert!(redraws > 0, "the marks turn");
-            let per_step = (rendered(&mut open) - before) / redraws;
+            let per_redraw = (rendered(&mut open) - before) / 10;
             assert!(
-                per_step <= in_view,
-                "{per_step} rows a step, {in_view} in view"
+                per_redraw <= in_view,
+                "{per_redraw} rows a redraw, {in_view} in view"
             );
         }
 
