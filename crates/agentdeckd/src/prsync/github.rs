@@ -31,8 +31,9 @@ pub const MAX_LIST_PAGES: u32 = 10;
 const BATCH_SIZE: usize = 25;
 const BATCHES_IN_FLIGHT: usize = 4;
 
-/// How long one request may take before the client gives up on it.
-const TIMEOUT: Duration = Duration::from_secs(30);
+/// How long one request may take before the client gives up on it, unless
+/// [`super::TIMEOUT_VAR`] says otherwise.
+pub const TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The waits before each retry of a query that failed for a reason that may pass: a 5xx, a
 /// failed connection, a timeout, a body cut short. One try, then one more per wait. A
@@ -137,13 +138,9 @@ pub struct Github {
 }
 
 impl Github {
-    /// A client for the GraphQL API at `endpoint`.
-    pub fn new(endpoint: String) -> anyhow::Result<Github> {
-        Github::with_timeout(endpoint, TIMEOUT)
-    }
-
-    /// A client for the GraphQL API at `endpoint` whose requests give up after `timeout`.
-    fn with_timeout(endpoint: String, timeout: Duration) -> anyhow::Result<Github> {
+    /// A client for the GraphQL API at `endpoint` whose requests give up after `timeout`
+    /// ([`TIMEOUT`] unless a test says otherwise).
+    pub fn new(endpoint: String, timeout: Duration) -> anyhow::Result<Github> {
         let http = reqwest::Client::builder()
             .user_agent(concat!("agentdeck/", env!("CARGO_PKG_VERSION")))
             .timeout(timeout)
@@ -1025,7 +1022,7 @@ mod tests {
         #[tokio::test]
         async fn should_name_the_kind_and_cause_of_a_request_reqwest_could_not_build() {
             // No I/O: reqwest refuses the URL before sending anything.
-            let github = Github::new("not a url".into()).expect("a client");
+            let github = Github::new("not a url".into(), TIMEOUT).expect("a client");
 
             let err = github.viewer("gho_test").await.unwrap_err();
 
@@ -1316,7 +1313,7 @@ mod integration_tests {
     const SLOW: Duration = Duration::from_secs(3);
 
     fn github(server: &MockServer) -> Github {
-        Github::with_timeout(server.url("/graphql"), SHORT).expect("a client")
+        Github::new(server.url("/graphql"), SHORT).expect("a client")
     }
 
     /// The close mutation, answered `then` after `delay`.
@@ -1427,8 +1424,8 @@ mod integration_tests {
                 .and_then(|listener| listener.local_addr())
                 .expect("a free port")
                 .port();
-            let github = Github::with_timeout(format!("http://127.0.0.1:{port}/graphql"), SHORT)
-                .expect("a client");
+            let github =
+                Github::new(format!("http://127.0.0.1:{port}/graphql"), SHORT).expect("a client");
             let started = Instant::now();
 
             let err = github.close(TOKEN, ID).await.unwrap_err();

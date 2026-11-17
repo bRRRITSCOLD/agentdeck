@@ -5,8 +5,8 @@
 //! max_age_days`, see [`crate::config`]), and fetches the stored ones that left the list; a
 //! stored one older than the cutoff is aged out instead. The rest are incremental: they
 //! search only the PRs updated since the last good sync began, in any state, then refresh the
-//! [`unsettled`] ones (a finished check run, and maybe a review, doesn't update a PR) and match
-//! inbox PRs to workspaces again from what's stored.
+//! [`unsettled`] ones (a finished check run doesn't update a PR) and match inbox PRs to
+//! workspaces again from what's stored.
 //!
 //! - [`crate::github_auth`]: the token, from the first source that gives one.
 //! - [`github`]: the GraphQL search and the fetch by number.
@@ -42,6 +42,10 @@ const INTERVAL: Duration = Duration::from_secs(120);
 
 /// The environment variable that points PR sync at another GraphQL endpoint (tests use it).
 pub const ENDPOINT_VAR: &str = "AGENTDECK_GITHUB_API";
+
+/// The environment variable holding how many milliseconds one GitHub request may take
+/// (tests use it); [`github::TIMEOUT`] when unset.
+pub const TIMEOUT_VAR: &str = "AGENTDECK_GITHUB_TIMEOUT_MS";
 
 /// The environment variable holding how many seconds pass between full syncs; `0` makes every
 /// sync full (tests use it).
@@ -693,7 +697,8 @@ struct Read {
 /// Whether stored open PR `pr` may change in a way GitHub doesn't count as an update, so no
 /// search or list shows it (spec §8): its checks are pending or haven't started (a check run
 /// finishing doesn't update a PR), or a review is still to come, required or asked for again
-/// after changes were requested (GitHub doesn't document that a review updates one). No
+/// after changes were requested (a submitted review does update a PR, #247, so this arm is a
+/// hedge; #271 weighs dropping it). No
 /// review decision means the repo requires none, and an approved PR waits on nobody.
 fn unsettled(pr: &RemotePr) -> bool {
     matches!(pr.checks, None | Some(ChecksState::Pending))
