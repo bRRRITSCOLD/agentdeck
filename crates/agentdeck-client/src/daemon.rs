@@ -146,6 +146,21 @@ fn to_stop(current: Option<DaemonInfo>, connected: &DaemonInfo) -> Option<u32> {
         .map(|current| current.pid)
 }
 
+/// Whether the executable process `pid` runs from has been replaced or removed on disk since
+/// it started, as `cargo build` or a reinstall does to a running daemon (spec §2). Linux shows
+/// its `/proc/<pid>/exe` link as `<path> (deleted)` once that file is gone. A link that can't be
+/// read (no such process, another user's) reads as `false`.
+pub fn binary_replaced(pid: u32) -> bool {
+    std::fs::read_link(format!("/proc/{pid}/exe"))
+        .is_ok_and(|link| link.as_os_str().as_encoded_bytes().ends_with(b" (deleted)"))
+}
+
+/// Whether the daemon `info` names is older than this client: its API version is lower, or
+/// it still runs from a binary that has since been rebuilt or reinstalled (spec §2).
+pub fn is_older(info: &DaemonInfo) -> bool {
+    info.predates_client() || binary_replaced(info.pid)
+}
+
 /// Sends SIGTERM to `pid` and waits until it has exited, so its lock is free for the next
 /// daemon.
 async fn stop(pid: u32) -> Result<(), DaemonError> {
@@ -400,6 +415,56 @@ mod tests {
                 !Path::new(&stat).exists(),
                 "false is still in /proc after its reaper finished"
             );
+        }
+    }
+
+    mod binary_replaced {
+        use super::*;
+
+        /// `sleep 30` run from a copy of `sleep` in a fresh dir; the dir is returned to remove.
+        fn sleep_from_a_copy(name: &str) -> (Child, PathBuf) {
+            let dir = std::env::temp_dir().join(format!(
+                "agentdeck-binary-replaced-{name}-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).expect("making the temp dir");
+            let sleep = dir.join("sleep");
+            std::fs::copy("/usr/bin/sleep", &sleep).expect("copying sleep");
+            let child = Command::new(&sleep)
+                .arg("30")
+                .spawn()
+                .expect("running the copy of sleep");
+            (child, dir)
+        }
+
+        #[test]
+        fn should_not_say_so_of_a_process_whose_binary_is_still_there() {
+            let (mut child, dir) = sleep_from_a_copy("kept");
+
+            let replaced = binary_replaced(child.id());
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_dir_all(&dir);
+
+            assert!(!replaced);
+        }
+
+        #[test]
+        fn should_say_so_once_its_binary_is_removed() {
+            let (mut child, dir) = sleep_from_a_copy("removed");
+            std::fs::remove_file(dir.join("sleep")).expect("removing the copy");
+
+            let replaced = binary_replaced(child.id());
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_dir_all(&dir);
+
+            assert!(replaced);
+        }
+
+        #[test]
+        fn should_not_say_so_of_a_pid_out_of_range() {
+            assert!(!binary_replaced(u32::MAX));
         }
     }
 
