@@ -57,7 +57,11 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
         paths.config_file(),
         std::env::var(config::PR_MAX_AGE_VAR).ok().as_deref(),
     );
-    let github = prsync::github::Github::new(github_api)?;
+    let timeout = std::env::var(prsync::TIMEOUT_VAR)
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+        .map_or(prsync::github::TIMEOUT, Duration::from_millis);
+    let github = prsync::github::Github::new(github_api, timeout)?;
     let oauth = device::OAuth::new(
         std::env::var(device::OAUTH_VAR).unwrap_or_else(|_| device::DEFAULT_OAUTH.into()),
     )?;

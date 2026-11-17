@@ -40,6 +40,39 @@ async fn full_daemon(server: &MockServer, token: Option<&str>) -> TestDaemon {
     TestDaemon::start_with_github(dirs, &server.url("/graphql")).await
 }
 
+/// How long the daemon's GitHub requests may take in [`timing_out_daemon`]
+/// (`AGENTDECK_GITHUB_TIMEOUT_MS`).
+const TIMEOUT_MS: &str = "300";
+
+/// Longer than [`TIMEOUT_MS`]: how long a slow GitHub holds a request.
+const SLOW: Duration = Duration::from_secs(2);
+
+/// A daemon like [`full_daemon`] whose GitHub requests give up after [`TIMEOUT_MS`].
+async fn timing_out_daemon(server: &MockServer) -> TestDaemon {
+    let dirs = tempfile::tempdir().expect("a temp dir");
+    set_gh_token(dirs.path(), Some(TOKEN));
+    set_daemon_env(
+        dirs.path(),
+        &[
+            ("AGENTDECK_PR_FULL_SYNC_SECS", "0"),
+            ("AGENTDECK_GITHUB_TIMEOUT_MS", TIMEOUT_MS),
+        ],
+    );
+    TestDaemon::start_with_github(dirs, &server.url("/graphql")).await
+}
+
+/// Whether `message` says GitHub didn't answer `server` in time, and why.
+fn says_timed_out(message: Option<&str>, server: &MockServer) -> bool {
+    message
+        == Some(
+            format!(
+                "GitHub didn't answer in time ({}): operation timed out",
+                server.url("/graphql")
+            )
+            .as_str(),
+        )
+}
+
 async fn sync(client: &Client) -> PrSyncStatus {
     let response = client.prs_sync().send().await.expect("sync");
     assert_eq!(response.status().as_u16(), 200);
@@ -452,6 +485,30 @@ mod post_v1_prs_sync {
             status.last_error.as_deref(),
             Some("GitHub answered 403: API rate limit exceeded")
         );
+    }
+
+    #[tokio::test]
+    async fn should_say_github_did_not_answer_in_time_when_a_sync_times_out_200() {
+        let github = MockServer::start_async().await;
+        let mut search = mock_search(&github, TOKEN, &[Pr::open(7)]);
+        let daemon = timing_out_daemon(&github).await;
+        sync(&daemon.client).await;
+
+        search.delete();
+        let slow = github.mock(|_, then| {
+            then.status(200)
+                .delay(SLOW)
+                .json_body(serde_json::json!({ "data": {} }));
+        });
+        let status = sync(&daemon.client).await;
+
+        assert!(
+            says_timed_out(status.last_error.as_deref(), &github),
+            "{:?}",
+            status.last_error
+        );
+        assert_eq!(pr_tasks(&daemon.client).await.len(), 1);
+        slow.assert_calls(3);
     }
 
     #[tokio::test]
@@ -1439,6 +1496,40 @@ mod post_v1_prs_close {
         let refused = task_of(&daemon.client, 8).await;
         assert_eq!(refused.status, TaskStatus::Review);
         assert_eq!(refused.pr.expect("the task's PR").state, PrState::Open);
+    }
+
+    #[tokio::test]
+    async fn should_fail_a_close_that_timed_out_and_still_reads_open_with_why_200() {
+        let github = MockServer::start_async().await;
+        let pr = Pr::open(7);
+        mock_search(&github, TOKEN, std::slice::from_ref(&pr));
+        let daemon = timing_out_daemon(&github).await;
+        sync(&daemon.client).await;
+        mock_node_ids(&github, std::slice::from_ref(&pr));
+        let id = pr.node_id();
+        let close_mutation = github.mock(|when, then| {
+            when.body_includes("closePullRequest(");
+            then.status(200).delay(SLOW).json_body(serde_json::json!({
+                "data": { "closePullRequest": { "pullRequest": { "id": id, "state": "CLOSED" } } }
+            }));
+        });
+        github.mock(|when, then| {
+            when.body_includes("... on PullRequest { state }");
+            then.status(200)
+                .json_body(serde_json::json!({ "data": { "node": { "state": "OPEN" } } }));
+        });
+        let task = task_of(&daemon.client, 7).await;
+
+        let results = close(&daemon.client, vec![task.id]).await;
+
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].ok);
+        assert!(
+            says_timed_out(results[0].error.as_deref(), &github),
+            "{:?}",
+            results[0].error
+        );
+        close_mutation.assert_calls(1);
     }
 
     #[tokio::test]
