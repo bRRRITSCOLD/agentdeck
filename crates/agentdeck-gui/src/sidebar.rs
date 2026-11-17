@@ -64,6 +64,9 @@ pub enum Selection {
 pub enum SidebarEvent {
     /// Its `+` was clicked: open the new workspace dialog.
     NewWorkspace,
+    /// What it selects, or its snapshot, changed. A redraw alone, as a turning mark's, is no
+    /// change: the views that follow it hear of nothing then.
+    Changed,
 }
 
 /// What changed since the last read or `state` message that the user should hear about:
@@ -186,6 +189,7 @@ impl SidebarView {
     pub fn select(&mut self, selection: Selection, cx: &mut Context<Self>) {
         self.picked = Some(selection);
         self.reveal = true;
+        cx.emit(SidebarEvent::Changed);
         cx.notify();
     }
 
@@ -272,6 +276,7 @@ impl SidebarView {
                 cx.emit(Alerts(alerts));
             }
         }
+        cx.emit(SidebarEvent::Changed);
         cx.notify();
     }
 
@@ -308,6 +313,7 @@ impl SidebarView {
                         if !alerts.is_empty() {
                             cx.emit(Alerts(alerts));
                         }
+                        cx.emit(SidebarEvent::Changed);
                     }
                     Err(err) => {
                         this.error = Some(format!("Couldn't read the daemon: {err:#}").into())
@@ -843,6 +849,66 @@ mod tests {
             activate(open.cx);
             deactivate(open.cx);
             assert_eq!(redraws_in_one_second(&open.sidebar, open.cx), 0);
+        }
+    }
+
+    /// [`SidebarEvent::Changed`], which the window follows the selection and snapshot by.
+    mod changed {
+        use super::*;
+        use crate::state_dot::tests::{activate, redraws_in_one_second};
+
+        /// How many times the sidebar tells of a change from now on.
+        fn changes(open: &mut Open) -> (Rc<std::cell::Cell<usize>>, Subscription) {
+            let changes = Rc::new(std::cell::Cell::new(0));
+            let seen = changes.clone();
+            let subscription = open.cx.update(|_, cx| {
+                cx.subscribe(&open.sidebar, move |_, event: &SidebarEvent, _| {
+                    if *event == SidebarEvent::Changed {
+                        seen.set(seen.get() + 1);
+                    }
+                })
+            });
+            (changes, subscription)
+        }
+
+        #[gpui::test]
+        fn should_tell_of_a_new_selection(cx: &mut TestAppContext) {
+            let mut open = open(two_workspaces(), cx);
+            let (changes, _subscription) = changes(&mut open);
+            (open.sidebar).update(open.cx, |sidebar, cx| {
+                sidebar.select(Selection::Workspace(id(2)), cx);
+            });
+            open.settle();
+            assert_eq!(changes.get(), 1);
+        }
+
+        #[gpui::test]
+        fn should_tell_of_a_panes_new_state(cx: &mut TestAppContext) {
+            let mut open = open(two_workspaces(), cx);
+            let (changes, _subscription) = changes(&mut open);
+            open.send(ServerMessage::State {
+                pane: id(11),
+                state: AgentState::Blocked,
+            });
+            assert_eq!(changes.get(), 1);
+        }
+
+        #[gpui::test]
+        fn should_tell_of_a_new_read(cx: &mut TestAppContext) {
+            let mut open = open(two_workspaces(), cx);
+            let (changes, _subscription) = changes(&mut open);
+            (open.sidebar).update(open.cx, |sidebar, cx| sidebar.refresh(cx));
+            open.settle();
+            assert_eq!(changes.get(), 1);
+        }
+
+        #[gpui::test]
+        fn should_tell_of_nothing_while_only_its_marks_turn(cx: &mut TestAppContext) {
+            let mut open = open(two_workspaces(), cx);
+            activate(open.cx);
+            let (changes, _subscription) = changes(&mut open);
+            assert!(redraws_in_one_second(&open.sidebar, open.cx) > 0);
+            assert_eq!(changes.get(), 0);
         }
     }
 

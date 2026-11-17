@@ -93,7 +93,8 @@ pub struct Shell {
     connection: Entity<Connection>,
     /// The sidebar, while connected; a new connection gets a new one.
     sidebar: Option<Entity<SidebarView>>,
-    /// Follows the sidebar's selection.
+    /// Follows the sidebar's selection and snapshot, and opens the new workspace dialog
+    /// from its `+`.
     _selection: Option<Subscription>,
     /// The new workspace dialog, while connected, and what joins it to the sidebar.
     new_workspace: Option<Entity<NewWorkspaceDialog>>,
@@ -360,11 +361,21 @@ impl Shell {
                     let task_sheet =
                         cx.new(|cx| TaskSheet::new(api.clone(), &connection, window, cx));
                     let sidebar = cx.new(|cx| SidebarView::new(api, &connection, cx));
-                    self._selection =
-                        Some(cx.observe_in(&sidebar, window, |shell, _, window, cx| {
-                            shell.follow_selection(window, cx);
-                            shell.withdraw_seen(window, cx);
-                        }));
+                    self._selection = Some(cx.subscribe_in(
+                        &sidebar,
+                        window,
+                        |shell, _, event: &SidebarEvent, window, cx| match event {
+                            SidebarEvent::Changed => {
+                                shell.follow_selection(window, cx);
+                                shell.withdraw_seen(window, cx);
+                            }
+                            SidebarEvent::NewWorkspace => {
+                                if let Some(dialog) = &shell.new_workspace {
+                                    dialog.update(cx, |dialog, cx| dialog.open(window, cx));
+                                }
+                            }
+                        },
+                    ));
                     self._new_workspace = vec![
                         cx.subscribe_in(
                             &sidebar,
@@ -373,12 +384,6 @@ impl Shell {
                                 shell.notify(&alerts.0, window, cx);
                             },
                         ),
-                        cx.subscribe_in(&sidebar, window, |shell, _, event, window, cx| {
-                            let SidebarEvent::NewWorkspace = event;
-                            if let Some(dialog) = &shell.new_workspace {
-                                dialog.update(cx, |dialog, cx| dialog.open(window, cx));
-                            }
-                        }),
                         // A sync that changes no task broadcasts nothing, yet moves when PRs
                         // last synced.
                         cx.subscribe(&inbox, |shell, _, _: &Synced, cx| {
@@ -2833,6 +2838,26 @@ mod tests {
                 open.idle();
                 let redraws = open.redraws();
                 assert!(redraws.iter().all(|n| *n == 0), "{redraws:?}");
+            }
+
+            /// A turning mark redraws the view it's in, and that alone: the views around it
+            /// hear of nothing.
+            #[gpui::test]
+            fn should_leave_the_views_without_a_mark_alone_while_the_marks_turn(
+                cx: &mut TestAppContext,
+            ) {
+                let open = working(cx);
+                let (panel, inbox, tasks, sheet) = open.shell.read_with(open.cx, |s, _| {
+                    let views = (s.panel.clone(), s.inbox.clone(), s.tasks.clone());
+                    (views.0, views.1, views.2, s.task_sheet.clone())
+                });
+                let redraws = [
+                    redraws_in_one_second(&panel.expect("connected"), open.cx),
+                    redraws_in_one_second(&inbox.expect("connected"), open.cx),
+                    redraws_in_one_second(&tasks.expect("connected"), open.cx),
+                    redraws_in_one_second(&sheet.expect("connected"), open.cx),
+                ];
+                assert_eq!(redraws, [0; 4], "panel, inbox, tasks, task sheet");
             }
 
             #[gpui::test]
