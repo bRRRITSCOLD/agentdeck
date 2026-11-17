@@ -250,6 +250,11 @@ impl Terminals {
     pub fn close(&self) {
         self.shared.closing.store(true, Ordering::SeqCst);
     }
+
+    /// Whether the daemon is stopping ([`Terminals::close`]).
+    pub fn is_closing(&self) -> bool {
+        self.shared.closing.load(Ordering::SeqCst)
+    }
 }
 
 impl Shared {

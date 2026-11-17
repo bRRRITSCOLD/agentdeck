@@ -4,10 +4,12 @@
 //!
 //! - [`codex`]: finding the session id a Codex pane's CLI chose.
 //! - [`delivery`]: typing the user's new task comment into the task's live agent pane.
+//! - [`restart`]: starting an exited pane again, afresh once when its resume fails at once.
 //! - [`resume`]: re-spawning the panes that were alive when the daemon last stopped.
 
 pub mod codex;
 pub mod delivery;
+pub mod restart;
 pub mod resume;
 
 use std::path::{Path, PathBuf};

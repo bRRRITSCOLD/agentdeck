@@ -14,12 +14,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use agentdeck_core::ws::Entity;
-use agentdeck_core::{AgentState, PaneId};
+use agentdeck_core::{Agent, AgentState, PaneId};
 use uuid::Uuid;
 
 use crate::db::{self, Db};
 use crate::events::Events;
 use crate::terminal::Terminals;
+use crate::terminal::pane::Launch;
 
 /// How often the sessions dir is looked at while waiting for a new pane's file.
 const POLL: Duration = Duration::from_millis(250);
@@ -96,6 +97,24 @@ pub fn new_session(
         })
         .max()
         .map(|(_, id)| id)
+}
+
+/// For a Codex launch, its sessions dir and the session files already there, to find the one
+/// it writes ([`watch`]). `None` for any other agent, and for a shell.
+pub fn sessions_before(
+    agent: Option<Agent>,
+    launch: &Launch,
+) -> Option<(PathBuf, HashSet<PathBuf>)> {
+    (agent == Some(Agent::Codex))
+        .then(|| sessions_dir(&launch.env))
+        .flatten()
+        .map(|dir| {
+            let before = session_files(&dir)
+                .into_iter()
+                .map(|(path, _)| path)
+                .collect();
+            (dir, before)
+        })
 }
 
 /// Watches `dir` for pane `id`'s session file, which `before` (taken just before launch)

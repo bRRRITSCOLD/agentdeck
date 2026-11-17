@@ -17,11 +17,21 @@ use super::TestDaemon;
 /// waits for a line there; then sets the idle title and reads what is typed as
 /// [`READ_LIKE_A_TUI`] does. It stays in the foreground (no `exec`), so the pane's foreground
 /// process is `claude` and the claude rules apply.
+///
+/// When its folder holds a file named `lost-session`, a resume (`--resume <id>`) prints what
+/// Claude Code prints for a session it can't find and exits 1 at once; with a file named
+/// `broken`, every start does.
 const STUB_CLAUDE: &str = r#"#!/bin/sh
 log="$(dirname "$0")/../agents/$AGENTDECK_PANE"
 mkdir -p "$log"
 printf '%s' "${AGENTDECK_TASK-unset}" > "$log/task"
 { for arg in "$@"; do printf '%s\0' "$arg"; done; printf '\036'; } >> "$log/argv"
+session=; previous=
+for arg in "$@"; do [ "$previous" = --resume ] && session=$arg; previous=$arg; done
+if [ -e broken ] || { [ -n "$session" ] && [ -e lost-session ]; }; then
+  printf 'No conversation found with session ID: %s\r\n' "$session"
+  exit 1
+fi
 if [ -e report-back ]; then
   config=; previous=
   for arg in "$@"; do [ "$previous" = --mcp-config ] && config=$arg; previous=$arg; done

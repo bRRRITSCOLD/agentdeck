@@ -86,7 +86,13 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
         terminals.hosting(),
     ));
     terminals.run_state_timer();
-    agents::resume::resume_panes(&db, &terminals)
+    let restarter = agents::restart::Restarter {
+        db: db.clone(),
+        claims: claims.clone(),
+        terminals: terminals.clone(),
+        events: events.clone(),
+    };
+    agents::resume::resume_panes(&restarter)
         .await
         .map_err(|err| anyhow::anyhow!("resuming panes: {err}"))?;
     let token = auth::new_token();

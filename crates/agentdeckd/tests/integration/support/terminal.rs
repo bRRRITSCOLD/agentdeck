@@ -118,6 +118,20 @@ where
     }
 }
 
+/// Fails the test with `what` unless `check` holds on every poll for `period`: for something
+/// that must not happen, once whatever would make it happen has had its chance.
+pub async fn holds_for<F, Fut>(what: &str, period: Duration, mut check: F)
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    let until = Instant::now() + period;
+    while Instant::now() < until {
+        assert!(check().await, "{what}");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 /// The pane's raw output tail.
 pub async fn tail(client: &Client, pane: PaneId, bytes: Option<u64>) -> Vec<u8> {
     let mut request = client.pane_tail().id(pane);
