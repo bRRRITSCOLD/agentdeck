@@ -25,9 +25,9 @@ use std::sync::Arc;
 
 use agentdeck_core::{InstructionId, PaneId, TaskId, TaskStatus, WorkspaceId};
 use brrritscold_core_gpui::{
-    ActiveTheme as _, Button, ButtonSize, ButtonVariant, DropdownMenu, DropdownMenuContent,
-    DropdownMenuItem, DropdownMenuItemVariant, DropdownMenuLabel, DropdownMenuSeparator, Icon,
-    IconName, Input, InputState, Separator, Textarea, TextareaState,
+    ActiveTheme as _, Button, ButtonSize, ButtonVariant, DropdownMenu, DropdownMenuAlign,
+    DropdownMenuContent, DropdownMenuItem, DropdownMenuItemVariant, DropdownMenuLabel,
+    DropdownMenuSeparator, Icon, IconName, Input, InputState, Separator, Textarea, TextareaState,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
@@ -949,9 +949,12 @@ fn instruction_menu(
     div()
         .debug_selector(move || format!("instruction menu {instruction}"))
         .child(
+            // Penpot "Screens · Dialogs" → "Send to agent · hosted agent": end-aligned, 4px
+            // below the trigger.
             DropdownMenu::new(SharedString::from(format!(
                 "instruction-menu-{instruction}"
             )))
+            .align(DropdownMenuAlign::End)
             .trigger(
                 Button::new(SharedString::from(format!(
                     "instruction-menu-trigger-{instruction}"
@@ -1131,6 +1134,23 @@ mod tests {
 
             let selector = format!("instruction menu {}", id::<InstructionId>(30));
             assert!(cx.debug_bounds(selector.leak()).is_some());
+        }
+
+        /// Penpot "Screens · Dialogs" → "Send to agent · hosted agent": its right edge on the
+        /// trigger's, 4px below it.
+        #[gpui::test]
+        fn should_open_its_menu_end_aligned_4px_below_its_trigger(cx: &mut TestAppContext) {
+            let (_, _, cx) = with_an_instruction(cx);
+            settle(cx);
+            let selector = format!("instruction menu {}", id::<InstructionId>(30));
+            let trigger = cx.debug_bounds(selector.leak()).expect("the menu shows");
+
+            cx.simulate_click(trigger.center(), Modifiers::default());
+            settle(cx);
+
+            let menu = cx.debug_bounds("dropdown-menu-content").expect("it opens");
+            assert_eq!(menu.right(), trigger.right());
+            assert_eq!(menu.top(), trigger.bottom() + px(4.));
         }
 
         #[gpui::test]

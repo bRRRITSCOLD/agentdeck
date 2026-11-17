@@ -32,9 +32,9 @@ use agentdeck_core::{
 };
 use brrritscold_core_gpui::{
     ActiveTheme as _, Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, DialogHandle,
-    DropdownMenu, DropdownMenuContent, DropdownMenuItem, FieldError, Icon, IconName, Input,
-    InputState, Select, SelectTrigger, Sheet, SheetContent, SheetDescription, SheetFooter,
-    SheetTitle, Textarea, TextareaState, Tooltip, TooltipContent, TooltipContentSide,
+    DropdownMenu, DropdownMenuAlign, DropdownMenuContent, DropdownMenuItem, FieldError, Icon,
+    IconName, Input, InputState, Select, SelectTrigger, Sheet, SheetContent, SheetDescription,
+    SheetFooter, SheetTitle, Textarea, TextareaState, Tooltip, TooltipContent, TooltipContentSide,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use chrono::{DateTime, Utc};
@@ -941,7 +941,10 @@ impl TaskSheet {
             .top(space::S4)
             .right(space::S12)
             .child(
+                // Penpot "Screens · Task sheet" → "Task sheet · send to agent": end-aligned,
+                // 4px below the trigger.
                 DropdownMenu::new("task-sheet-menu")
+                    .align(DropdownMenuAlign::End)
                     .trigger(
                         Button::new("task-sheet-menu-trigger")
                             .variant(ButtonVariant::Ghost)
@@ -1831,6 +1834,20 @@ mod tests {
                 assert_eq!(menu.top() - sheet.top(), px(16.));
                 assert_eq!(sheet.right() - menu.right(), px(48.));
                 assert!(title.right() <= menu.left(), "{title:?} clear of {menu:?}");
+            }
+
+            /// Penpot "Screens · Task sheet" → "Task sheet · send to agent": its right edge on
+            /// the trigger's, 4px below it.
+            #[gpui::test]
+            fn should_open_end_aligned_4px_below_its_trigger(cx: &mut TestAppContext) {
+                let (harness, cx) = open_with(with_agent(), cx);
+                let trigger = cx.debug_bounds("task sheet menu").expect("the menu shows");
+
+                click("task sheet menu", &harness, cx);
+
+                let menu = cx.debug_bounds("dropdown-menu-content").expect("it opens");
+                assert_eq!(menu.right(), trigger.right());
+                assert_eq!(menu.top(), trigger.bottom() + px(4.));
             }
         }
 
