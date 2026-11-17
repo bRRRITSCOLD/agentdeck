@@ -10,7 +10,7 @@
 //! Both lists draw only the items in view, through GPUI's [`list`](gpui::list): an inbox holds
 //! hundreds of PRs, and drawing every row made each frame take hundreds of milliseconds.
 
-use agentdeck_core::{ChecksState, ReviewState, TaskKind, TaskStatus};
+use agentdeck_core::{ChecksState, PrState, ReviewState, TaskKind, TaskStatus};
 use brrritscold_core_gpui::{
     ActiveTheme as _, Badge, BadgeVariant, Checks, ChecksState as UiChecksState, Icon, IconName,
     Select, SelectContent, SelectItem, SelectTrigger, SelectTriggerSize, Tooltip, TooltipContent,
@@ -18,13 +18,13 @@ use brrritscold_core_gpui::{
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, Div, ElementId, InteractiveElement as _, IntoElement, ListAlignment,
+    AnyElement, App, Div, ElementId, Hsla, InteractiveElement as _, IntoElement, ListAlignment,
     ListState, MouseButton, ParentElement as _, Pixels, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, canvas, div, px,
 };
 
 use crate::state_dot;
-use crate::task_list::Row;
+use crate::task_list::{PrCell, Row};
 
 /// How far past the viewport a list draws, so a short scroll shows rows at once.
 pub const OVERDRAW: Pixels = px(200.);
@@ -557,6 +557,25 @@ fn title(row: &Row, on_open: OnOpen, error: Option<SharedString>, cx: &App) -> A
     }
 }
 
+/// Penpot `TaskRow`'s kind icon and its colour (spec §11, PR state): a plain task's
+/// `ListTodo` in `foreground`; a PR task's PR state as GitHub shows it. Open is
+/// `GitPullRequest` in `foreground`, or `GitPullRequestDraft` in `muted-foreground` while a
+/// draft; merged is `GitMerge` in `merged`; closed, draft or not, is `GitPullRequestClosed` in
+/// `destructive`. A PR task the sync hasn't filled in yet shows as open.
+fn kind_icon(kind: TaskKind, pr: Option<&PrCell>, cx: &App) -> (IconName, Hsla) {
+    let s = cx.theme().semantic();
+    match (kind, pr) {
+        (TaskKind::Plain, _) => (IconName::ListTodo, s.foreground),
+        (TaskKind::Pr, None) => (IconName::GitPullRequest, s.foreground),
+        (TaskKind::Pr, Some(pr)) => match (pr.state, pr.draft) {
+            (PrState::Open, false) => (IconName::GitPullRequest, s.foreground),
+            (PrState::Open, true) => (IconName::GitPullRequestDraft, s.muted_foreground),
+            (PrState::Merged, _) => (IconName::GitMerge, s.merged),
+            (PrState::Closed, _) => (IconName::GitPullRequestClosed, s.destructive),
+        },
+    }
+}
+
 /// Penpot `TaskRow`'s `Unseen` layer, while an agent's comments on the task are unseen: a
 /// 14px lucide `MessageSquareDot` in `foreground`. A speech bubble, so it can't be read as
 /// a state mark in either mode. Tests find it as `unseen <id>`.
@@ -597,10 +616,7 @@ pub fn wide(
             .text_color(s.muted_foreground)
             .child(text)
     };
-    let kind_icon = match row.kind {
-        TaskKind::Plain => IconName::ListTodo,
-        TaskKind::Pr => IconName::GitPullRequest,
-    };
+    let (icon, icon_color) = kind_icon(row.kind, row.pr.as_ref(), cx);
     let id = row.id;
     let agent_cell = cell(Columns::AGENT).debug_selector(move || format!("agent {id}"));
     let agent = match &row.agent {
@@ -623,7 +639,7 @@ pub fn wide(
         .child(
             cell(Columns::ICON)
                 .justify_center()
-                .child(Icon::new(kind_icon).size(px(14.)).text_color(s.foreground)),
+                .child(Icon::new(icon).size(px(14.)).text_color(icon_color)),
         )
         .child(
             div()
@@ -696,10 +712,7 @@ pub fn wide(
 /// comments are unseen. Tests find the agents' mark as `panel agent <id>`.
 pub fn panel(row: &Row, picker: Select, parts: RowParts, on_open: OnOpen, cx: &App) -> AnyElement {
     let s = cx.theme().semantic();
-    let kind_icon = match row.kind {
-        TaskKind::Plain => IconName::ListTodo,
-        TaskKind::Pr => IconName::GitPullRequest,
-    };
+    let (icon, icon_color) = kind_icon(row.kind, row.pr.as_ref(), cx);
     let pr = row.pr.as_ref();
     let id = row.id;
     div()
@@ -721,7 +734,7 @@ pub fn panel(row: &Row, picker: Select, parts: RowParts, on_open: OnOpen, cx: &A
                     div()
                         .flex_none()
                         .pt(px(1.5))
-                        .child(Icon::new(kind_icon).size(px(14.)).text_color(s.foreground)),
+                        .child(Icon::new(icon).size(px(14.)).text_color(icon_color)),
                 )
                 .child(
                     div()
@@ -848,6 +861,79 @@ mod tests {
                 let layout = Table::Inbox.fit(px(891.), select);
                 assert!(layout.checks && layout.review, "{layout:?}");
             }
+        }
+    }
+
+    mod kind_icon {
+        use brrritscold_core_gpui::{Theme, ThemePreference};
+        use brrritscold_core_gpui_tokens::Semantic;
+        use gpui::TestAppContext;
+
+        use super::*;
+
+        fn pr(state: PrState, draft: bool) -> PrCell {
+            PrCell {
+                repo: "widgets".into(),
+                reference: "widgets #1".into(),
+                state,
+                draft,
+                checks: None,
+                review: None,
+                url: "https://github.com/acme/widgets/pull/1".into(),
+            }
+        }
+
+        #[gpui::test]
+        fn should_show_the_prs_state_as_github_does_in_both_modes(cx: &mut TestAppContext) {
+            cx.update(brrritscold_core_gpui::init);
+            for (preference, s) in [
+                (ThemePreference::Light, Semantic::LIGHT),
+                (ThemePreference::Dark, Semantic::DARK),
+            ] {
+                cx.update(|cx| Theme::set_preference(preference, cx));
+                let cases = [
+                    (
+                        "open",
+                        Some(pr(PrState::Open, false)),
+                        (IconName::GitPullRequest, s.foreground),
+                    ),
+                    (
+                        "open draft",
+                        Some(pr(PrState::Open, true)),
+                        (IconName::GitPullRequestDraft, s.muted_foreground),
+                    ),
+                    (
+                        "merged",
+                        Some(pr(PrState::Merged, false)),
+                        (IconName::GitMerge, s.merged),
+                    ),
+                    (
+                        "closed",
+                        Some(pr(PrState::Closed, false)),
+                        (IconName::GitPullRequestClosed, s.destructive),
+                    ),
+                    // GitHub shows a closed draft as closed.
+                    (
+                        "closed draft",
+                        Some(pr(PrState::Closed, true)),
+                        (IconName::GitPullRequestClosed, s.destructive),
+                    ),
+                    // Not synced yet.
+                    ("unknown", None, (IconName::GitPullRequest, s.foreground)),
+                ];
+                for (case, pr, want) in cases {
+                    let got = cx.read(|cx| kind_icon(TaskKind::Pr, pr.as_ref(), cx));
+                    assert_eq!(got, want, "{case} in {preference:?}");
+                }
+            }
+        }
+
+        #[gpui::test]
+        fn should_keep_a_plain_tasks_icon(cx: &mut TestAppContext) {
+            cx.update(brrritscold_core_gpui::init);
+            cx.update(|cx| Theme::set_preference(ThemePreference::Light, cx));
+            let got = cx.read(|cx| kind_icon(TaskKind::Plain, None, cx));
+            assert_eq!(got, (IconName::ListTodo, Semantic::LIGHT.foreground));
         }
     }
 
