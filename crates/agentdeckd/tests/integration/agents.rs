@@ -15,7 +15,9 @@ use agentdeck_core::{Agent, AgentState, CommentId, PaneId, PaneKind, TaskId, Wor
 use crate::support::agents::{
     codex_session, launches, task_brief, task_header, task_var, trust_answer, typed, with_mcp,
 };
-use crate::support::terminal::{Place, daemon_with_shell_rules, eventually, in_state, printed, sh};
+use crate::support::terminal::{
+    Place, daemon_with_shell_rules, eventually, holds_for, in_state, printed, sh,
+};
 use crate::support::{TestDaemon, error_response};
 
 async fn task(client: &Client, workspace: WorkspaceId, title: &str, body: &str) -> Task {
@@ -126,6 +128,36 @@ async fn launched(daemon: &TestDaemon, pane: PaneId, n: usize) -> Vec<Vec<String
         (launches.len() >= n).then_some(launches)
     })
     .await
+}
+
+/// How long a test waits to see that the daemon starts no further launch of a pane's agent:
+/// it starts one afresh as soon as a resume exits, well within this.
+const NO_FURTHER_LAUNCH: Duration = Duration::from_secs(1);
+
+/// Fails unless the pane's stub stays launched exactly `n` times for [`NO_FURTHER_LAUNCH`].
+async fn launched_no_more_than(daemon: &TestDaemon, pane: PaneId, n: usize) {
+    holds_for(
+        &format!("the stub agent to stay at {n} launches"),
+        NO_FURTHER_LAUNCH,
+        || async { launches(daemon, pane).len() == n },
+    )
+    .await;
+}
+
+/// Asserts `launch` starts claude afresh, on a session other than `old`, with `task`'s launch
+/// prompt; returns its session.
+fn fresh_claude(launch: &[String], old: &str, task: &Task) -> String {
+    let session = launch
+        .iter()
+        .skip_while(|arg| *arg != "--session-id")
+        .nth(1)
+        .unwrap_or_else(|| panic!("a fresh start on a session: {launch:?}"))
+        .clone();
+    assert_ne!(session, old, "a new session");
+    assert!(!launch.contains(&"--resume".to_owned()), "{launch:?}");
+    let prompt = launch.last().expect("a launch prompt");
+    assert!(prompt.starts_with(&task_header(task)), "{prompt}");
+    session
 }
 
 async fn pane(client: &Client, id: PaneId) -> Pane {
@@ -858,6 +890,33 @@ mod resume_after_restart {
     }
 
     #[tokio::test]
+    async fn should_start_a_claude_that_cannot_find_its_session_afresh_on_its_task() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
+        let claude = place
+            .launch(&daemon.client, Agent::Claude, Some(task.id))
+            .await;
+        let old = claude.session_id.clone().expect("a claude session");
+        in_state(&daemon.client, claude.id, AgentState::Idle).await;
+        let (_, dirs) = daemon.terminate();
+        std::fs::write(
+            std::path::Path::new(&place.workspace.dir).join("lost-session"),
+            "",
+        )
+        .expect("losing the session");
+
+        let daemon = TestDaemon::start_in(dirs).await;
+
+        let launches = launched(&daemon, claude.id, 3).await;
+        assert_eq!(launches[1], with_mcp(Agent::Claude, &["--resume", &old]));
+        let session = fresh_claude(&launches[2], &old, &task);
+        let fresh = in_state(&daemon.client, claude.id, AgentState::Idle).await;
+        assert_eq!(fresh.session_id, Some(session));
+        assert_eq!(fresh.task_id, Some(task.id));
+    }
+
+    #[tokio::test]
     async fn should_bring_other_panes_back_as_a_shell_in_their_cwd() {
         let daemon = TestDaemon::start().await;
         let place = Place::new(&daemon).await;
@@ -1032,6 +1091,76 @@ mod post_v1_panes_id_respawn {
                 .then_some(())
         })
         .await;
+    }
+
+    mod resume_that_fails_at_once {
+        use super::*;
+
+        /// An exited claude on `task` whose next starts find `file` in its folder.
+        async fn exited_with(daemon: &TestDaemon, task: &Task, place: &Place, file: &str) -> Pane {
+            let pane = exited_agent(daemon, place, Agent::Claude, task).await;
+            std::fs::write(std::path::Path::new(&place.workspace.dir).join(file), "")
+                .expect("writing the stub's file");
+            pane
+        }
+
+        #[tokio::test]
+        async fn should_start_claude_afresh_on_its_task_200() {
+            let daemon = TestDaemon::start().await;
+            let place = Place::new(&daemon).await;
+            let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
+            let pane = exited_with(&daemon, &task, &place, "lost-session").await;
+            let old = pane.session_id.clone().expect("a claude session");
+
+            respawn(&daemon.client, pane.id, PaneRun::Agent).await;
+
+            let launches = launched(&daemon, pane.id, 3).await;
+            assert_eq!(launches[1], with_mcp(Agent::Claude, &["--resume", &old]));
+            let session = fresh_claude(&launches[2], &old, &task);
+            let fresh = in_state(&daemon.client, pane.id, AgentState::Idle).await;
+            assert_eq!(
+                (fresh.kind, fresh.agent, fresh.session_id),
+                (PaneKind::Agent, Some(Agent::Claude), Some(session))
+            );
+            assert_eq!(task_var(&daemon, pane.id), Some(task.id.to_string()));
+            launched_no_more_than(&daemon, pane.id, 3).await;
+        }
+
+        #[tokio::test]
+        async fn should_start_it_afresh_only_once_when_that_fails_too_200() {
+            let daemon = TestDaemon::start().await;
+            let place = Place::new(&daemon).await;
+            let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
+            let pane = exited_with(&daemon, &task, &place, "broken").await;
+            let old = pane.session_id.clone().expect("a claude session");
+
+            respawn(&daemon.client, pane.id, PaneRun::Agent).await;
+
+            let launches = launched(&daemon, pane.id, 3).await;
+            let session = fresh_claude(&launches[2], &old, &task);
+            let exited = in_state(&daemon.client, pane.id, AgentState::Exited).await;
+            assert_eq!(exited.exit_code, Some(1));
+            launched_no_more_than(&daemon, pane.id, 3).await;
+            assert_eq!(pane_session(&daemon.client, pane.id).await, Some(session));
+        }
+
+        #[tokio::test]
+        async fn should_leave_a_resumed_claude_that_exits_cleanly_exited_200() {
+            let daemon = TestDaemon::start().await;
+            let place = Place::new(&daemon).await;
+            let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
+            let pane = exited_agent(&daemon, &place, Agent::Claude, &task).await;
+            let old = pane.session_id.clone().expect("a claude session");
+
+            respawn(&daemon.client, pane.id, PaneRun::Agent).await;
+            in_state(&daemon.client, pane.id, AgentState::Idle).await;
+            submit_now(&daemon.client, pane.id, "/exit").await;
+
+            let exited = in_state(&daemon.client, pane.id, AgentState::Exited).await;
+            assert_eq!(exited.exit_code, Some(0));
+            launched_no_more_than(&daemon, pane.id, 2).await;
+            assert_eq!(pane_session(&daemon.client, pane.id).await, Some(old));
+        }
     }
 
     #[tokio::test]

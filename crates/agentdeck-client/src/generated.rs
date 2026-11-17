@@ -4951,7 +4951,7 @@ impl Client {
     }
     ///Starts an exited pane again in place, keeping its id, its place in the tab's layout, its
     ///
-    ///`cwd` and its task link (spec §4). `run: "agent"`, for an agent pane only (`unsupported_kind`), runs its agent again: claude and codex resume their session when it is known, else start fresh with a new launch prompt; an `other` agent runs its argv again. `run: "shell"` turns the pane into a shell pane running `$SHELL`, with hosting on. The state starts over. `running` (409) while its process hasn't exited; `invalid_dir` when its `cwd` is gone; `invalid_argv` when the program can't start, and the pane stays exited.
+    ///`cwd` and its task link (spec §4). `run: "agent"`, for an agent pane only (`unsupported_kind`), runs its agent again: claude and codex resume their session when it is known, else start fresh with a new launch prompt; an `other` agent runs its argv again. A resume that exits non-zero within 10 s, as one of a session the agent can no longer find does, is followed by a fresh start, once. `run: "shell"` turns the pane into a shell pane running `$SHELL`, with hosting on. The state starts over. `running` (409) while its process hasn't exited; `invalid_dir` when its `cwd` is gone; `invalid_argv` when the program can't start, and the pane stays exited.
     ///
     ///Sends a `POST` request to `/v1/panes/{id}/respawn`
     ///
