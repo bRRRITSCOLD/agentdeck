@@ -397,3 +397,35 @@ mod resume_after_restart {
         assert_eq!(read(&daemon.client, pane.id).await.hosted_agent, None);
     }
 }
+
+mod stop {
+    use super::*;
+
+    #[tokio::test]
+    async fn should_stop_the_hosted_agent_and_leave_the_shell_running_204() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let pane = shell(&daemon, &place).await;
+        run(&daemon.client, pane.id, "claude").await;
+        hosting(&daemon.client, pane.id, Some(Agent::Claude)).await;
+
+        let response = (daemon.client.pane_stop().id(pane.id).send().await).expect("stop");
+
+        assert_eq!(response.status().as_u16(), 204);
+        let after = hosting(&daemon.client, pane.id, None).await;
+        assert_ne!(after.state, AgentState::Exited);
+        // The stub leaves the terminal raw, as a killed TUI does: a newline ends the line.
+        input(
+            &daemon.client,
+            pane.id,
+            "stty sane; echo shell-$((40+2))\n",
+            false,
+        )
+        .await;
+        printed(&daemon.client, pane.id, "shell-42").await;
+        assert_ne!(
+            read(&daemon.client, pane.id).await.state,
+            AgentState::Exited
+        );
+    }
+}

@@ -4968,6 +4968,23 @@ impl Client {
     pub fn pane_respawn(&self) -> builder::PaneRespawn<'_> {
         builder::PaneRespawn::new(self)
     }
+    ///Stops the pane's agent and keeps the pane, with its place in the layout, its session and
+    ///
+    ///its task link: SIGHUP, then SIGKILL after 3 s, as `DELETE` does. An agent pane's process is stopped, and the pane reads as exited once it has, so `POST /v1/panes/{id}/respawn` (Restart agent) resumes the session later and a restarted daemon doesn't resume it. A shell pane's hosted agent is stopped, its process group alone, and the shell keeps running. Answers once the signal is sent: the `state` and `exit` events, or `changed` for a hosted agent, follow. `exited` (409) when the process has already exited; `no_agent` (409) for a shell pane hosting no agent.
+    ///
+    ///Sends a `POST` request to `/v1/panes/{id}/stop`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///```ignore
+    ///let response = client.pane_stop()
+    ///    .id(id)
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn pane_stop(&self) -> builder::PaneStop<'_> {
+        builder::PaneStop::new(self)
+    }
     ///The pane's raw output: the last `bytes` bytes of the 256 KiB it keeps. Empty for a pane
     ///
     ///whose process isn't running in this daemon.
@@ -6577,6 +6594,73 @@ pub mod builder {
             let response = result?;
             match response.status().as_u16() {
                 200u16 => ResponseValue::from_response(response).await,
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::pane_stop`]
+    ///
+    ///[`Client::pane_stop`]: super::Client::pane_stop
+    #[derive(Debug, Clone)]
+    pub struct PaneStop<'a> {
+        client: &'a super::Client,
+        id: Result<agentdeck_core::PaneId, String>,
+    }
+    impl<'a> PaneStop<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self {
+                client: client,
+                id: Err("id was not initialized".to_string()),
+            }
+        }
+        pub fn id<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<agentdeck_core::PaneId>,
+        {
+            self.id = value
+                .try_into()
+                .map_err(|_| "conversion to `agentdeck_core :: PaneId` for id failed".to_string());
+            self
+        }
+        ///Sends a `POST` request to `/v1/panes/{id}/stop`
+        pub async fn send(self) -> Result<ResponseValue<()>, Error<types::Error>> {
+            let Self { client, id } = self;
+            let id = id.map_err(Error::InvalidRequest)?;
+            let url = format!(
+                "{}/v1/panes/{}/stop",
+                client.baseurl,
+                encode_path(&id.to_string()),
+            );
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .post(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "pane_stop",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                204u16 => Ok(ResponseValue::empty(response)),
                 400u16..=499u16 => Err(Error::ErrorResponse(
                     ResponseValue::from_response(response).await?,
                 )),

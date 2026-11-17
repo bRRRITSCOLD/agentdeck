@@ -2280,6 +2280,35 @@
         "summary": "Starts an exited pane again in place, keeping its id, its place in the tab's layout, its"
       }
     },
+    "/v1/panes/{id}/stop": {
+      "post": {
+        "description": "its task link: SIGHUP, then SIGKILL after 3 s, as `DELETE` does. An agent pane's process is stopped, and the pane reads as exited once it has, so `POST /v1/panes/{id}/respawn` (Restart agent) resumes the session later and a restarted daemon doesn't resume it. A shell pane's hosted agent is stopped, its process group alone, and the shell keeps running. Answers once the signal is sent: the `state` and `exit` events, or `changed` for a hosted agent, follow. `exited` (409) when the process has already exited; `no_agent` (409) for a shell pane hosting no agent.",
+        "operationId": "pane_stop",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/PaneId"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Stops the pane's agent and keeps the pane, with its place in the layout, its session and"
+      }
+    },
     "/v1/panes/{id}/tail": {
       "get": {
         "description": "whose process isn't running in this daemon.",

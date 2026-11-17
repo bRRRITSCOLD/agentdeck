@@ -546,6 +546,14 @@ async fn agent(client: &Client, command: AgentCommand) -> anyhow::Result<Output>
             };
             Output::new(&linked, human)
         }
+        AgentCommand::Stop { pane } => {
+            let pane = pane_id(client, &pane).await?;
+            panes::stop(client, pane).await?;
+            Output::new(
+                &json!({ "id": pane, "stopped": true }),
+                format!("stopped {pane}\n"),
+            )
+        }
         AgentCommand::Send { pane, text, now } => {
             let pane = pane_id(client, &pane).await?;
             let accepted = client

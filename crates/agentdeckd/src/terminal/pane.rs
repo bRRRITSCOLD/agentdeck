@@ -24,6 +24,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -270,6 +271,15 @@ fn not_on_path(program: &str, path: Option<&OsStr>, cwd: &Path) -> bool {
 #[derive(Debug)]
 pub struct Exited;
 
+/// Why [`Pane::stop`] had nothing to stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NothingToStop {
+    /// The pane's process has exited.
+    Exited,
+    /// A shell pane hosting no agent: the shell isn't stopped.
+    NoAgent,
+}
+
 /// What a pane shows right now.
 #[derive(Debug, Clone)]
 pub struct Status {
@@ -299,6 +309,9 @@ pub struct Pane {
     events: Events,
     /// The origin of the pane's own clock, for [`LastOutput`].
     started: Instant,
+    /// Whether [`Pane::stop`] signalled the pane's own process, so its exit is no failed
+    /// resume to start afresh from (spec §6).
+    stopped: AtomicBool,
 }
 
 /// Everything one chunk of output changes, behind [`Pane::live`].
@@ -407,6 +420,7 @@ impl Pane {
             pid: child.process_id().and_then(|pid| i32::try_from(pid).ok()),
             events,
             started: Instant::now(),
+            stopped: AtomicBool::new(false),
         });
 
         let thread = |role: &str| std::thread::Builder::new().name(format!("pane-{role}-{id}"));
@@ -822,6 +836,42 @@ impl Pane {
         for group in [self.pid, foreground].into_iter().flatten() {
             let _ = killpg(Pid::from_raw(group), signal);
         }
+    }
+
+    /// Sends `signal` to what stopping the pane ends (spec §4): in a shell pane, the process
+    /// group of the agent it hosts, in the foreground, leaving the shell running; in an agent
+    /// pane, the pane's process, as [`Pane::signal`] does. Called again after a grace period,
+    /// it reaches only what is still there: a hosted agent still in the foreground, or a
+    /// process that hasn't exited.
+    pub fn stop(&self, signal: Signal) -> Result<(), NothingToStop> {
+        let hosting = {
+            let live = self.live();
+            if live.tracker.state() == AgentState::Exited {
+                return Err(NothingToStop::Exited);
+            }
+            live.hosting.as_ref().map(|hosting| hosting.hosted)
+        };
+        match hosting {
+            None => {
+                self.stopped.store(true, Ordering::SeqCst);
+                self.signal(signal);
+            }
+            Some(None) => return Err(NothingToStop::NoAgent),
+            // The hosted agent leads the foreground group; the shell's own group is the
+            // shell, which a stale `hosted` (the agent just left) must never reach.
+            Some(Some(_)) => match self.master().process_group_leader() {
+                Some(group) if Some(group) != self.pid => {
+                    let _ = killpg(Pid::from_raw(group), signal);
+                }
+                _ => return Err(NothingToStop::NoAgent),
+            },
+        }
+        Ok(())
+    }
+
+    /// Whether [`Pane::stop`] signalled the pane's own process.
+    pub fn stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
     }
 
     /// The process in the foreground, from `/proc`: `None` when its name can't be read.

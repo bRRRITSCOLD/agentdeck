@@ -1289,3 +1289,180 @@ mod post_v1_panes_id_respawn {
         pane(client, id).await.session_id
     }
 }
+
+mod post_v1_panes_id_stop {
+    use agentdeck_client::types::{NewPane, PaneRespawn, PaneRun};
+
+    use super::*;
+    use crate::support::terminal::alive;
+
+    async fn stop(client: &Client, pane: PaneId) -> u16 {
+        let response = client.pane_stop().id(pane).send().await.expect("stop");
+        response.status().as_u16()
+    }
+
+    /// The status and error code a refused stop of `pane` answers with.
+    async fn refused(client: &Client, pane: PaneId) -> (u16, Option<String>) {
+        let (status, body) = error_response(client.pane_stop().id(pane).send().await);
+        (status, body.error_code)
+    }
+
+    /// A claude pane at its prompt, launched on its own session.
+    async fn idle_claude(daemon: &TestDaemon, place: &Place) -> Pane {
+        let pane = place.launch(&daemon.client, Agent::Claude, None).await;
+        printed(&daemon.client, pane.id, "\u{1b}]0;\u{2733} Claude Code").await;
+        pane
+    }
+
+    #[tokio::test]
+    async fn should_stop_the_agent_and_keep_the_pane_exited_204() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let launched = idle_claude(&daemon, &place).await;
+
+        assert_eq!(stop(&daemon.client, launched.id).await, 204);
+
+        let stopped = in_state(&daemon.client, launched.id, AgentState::Exited).await;
+        assert_eq!(
+            (stopped.kind, stopped.agent, &stopped.session_id),
+            (PaneKind::Agent, Some(Agent::Claude), &launched.session_id)
+        );
+        let tabs = (daemon.client.tab_list().id(place.workspace.id).send().await)
+            .expect("list tabs")
+            .into_inner();
+        assert_eq!(tabs[0].id, place.tab.id, "the pane's tab stays");
+    }
+
+    #[tokio::test]
+    async fn should_kill_a_process_that_ignores_sighup_after_3_s_204() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let script = "trap '' HUP; echo pid:$$; while :; do sleep 0.1; done";
+        let pane = (daemon.client.pane_create())
+            .body(NewPane {
+                argv: Some(sh(script).iter().map(|arg| (*arg).to_owned()).collect()),
+                ..place.new_agent(Agent::Other, None)
+            })
+            .send()
+            .await
+            .expect("launch an other agent")
+            .into_inner();
+        let text = printed(&daemon.client, pane.id, "pid:").await;
+        let pid: u32 = text[text.find("pid:").expect("a pid") + 4..]
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .and_then(|digits| digits.parse().ok())
+            .expect("a pid");
+
+        assert_eq!(stop(&daemon.client, pane.id).await, 204);
+
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        assert!(alive(pid), "SIGHUP alone shouldn't stop it");
+        in_state(&daemon.client, pane.id, AgentState::Exited).await;
+        assert!(!alive(pid));
+    }
+
+    #[tokio::test]
+    async fn should_resume_a_stopped_claude_on_restart_agent_200() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let pane = idle_claude(&daemon, &place).await;
+        let session = pane.session_id.clone().expect("a claude session");
+        stop(&daemon.client, pane.id).await;
+        in_state(&daemon.client, pane.id, AgentState::Exited).await;
+
+        (daemon.client.pane_respawn().id(pane.id))
+            .body(PaneRespawn {
+                run: PaneRun::Agent,
+            })
+            .send()
+            .await
+            .expect("respawn");
+
+        assert_eq!(
+            launched(&daemon, pane.id, 2).await[1],
+            with_mcp(Agent::Claude, &["--resume", &session])
+        );
+        in_state(&daemon.client, pane.id, AgentState::Idle).await;
+    }
+
+    #[tokio::test]
+    async fn should_not_start_afresh_a_resume_stopped_at_once_204() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let pane = idle_claude(&daemon, &place).await;
+        stop(&daemon.client, pane.id).await;
+        in_state(&daemon.client, pane.id, AgentState::Exited).await;
+        (daemon.client.pane_respawn().id(pane.id))
+            .body(PaneRespawn {
+                run: PaneRun::Agent,
+            })
+            .send()
+            .await
+            .expect("respawn");
+        in_state(&daemon.client, pane.id, AgentState::Idle).await;
+
+        assert_eq!(stop(&daemon.client, pane.id).await, 204);
+
+        in_state(&daemon.client, pane.id, AgentState::Exited).await;
+        launched_no_more_than(&daemon, pane.id, 2).await;
+        assert_eq!(pane_now(&daemon.client, pane.id).await, AgentState::Exited);
+    }
+
+    #[tokio::test]
+    async fn should_not_resume_a_stopped_pane_after_a_restart_204() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let pane = idle_claude(&daemon, &place).await;
+        stop(&daemon.client, pane.id).await;
+        in_state(&daemon.client, pane.id, AgentState::Exited).await;
+        let (_, dirs) = daemon.terminate();
+
+        let daemon = TestDaemon::start_in(dirs).await;
+
+        assert_eq!(pane_now(&daemon.client, pane.id).await, AgentState::Exited);
+        assert_eq!(launches(&daemon, pane.id).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn should_refuse_a_pane_whose_process_has_exited_409() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let pane = idle_claude(&daemon, &place).await;
+        submit_now(&daemon.client, pane.id, "/exit").await;
+        in_state(&daemon.client, pane.id, AgentState::Exited).await;
+
+        assert_eq!(
+            refused(&daemon.client, pane.id).await,
+            (409, Some("exited".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn should_refuse_a_shell_hosting_no_agent_and_leave_it_running_409() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let shell = place.spawn(&daemon.client, &["sh"]).await;
+        printed(&daemon.client, shell.id, "$ ").await;
+
+        assert_eq!(
+            refused(&daemon.client, shell.id).await,
+            (409, Some("no_agent".into()))
+        );
+        type_now(&daemon.client, shell.id, "echo still-$((40+2))\r").await;
+        printed(&daemon.client, shell.id, "still-42").await;
+    }
+
+    #[tokio::test]
+    async fn should_answer_404_for_an_unknown_pane_404() {
+        let daemon = TestDaemon::start().await;
+
+        let (status, code) = refused(&daemon.client, uuid::Uuid::now_v7().into()).await;
+
+        assert_eq!((status, code.as_deref()), (404, Some("not_found")));
+    }
+
+    async fn pane_now(client: &Client, id: PaneId) -> AgentState {
+        pane(client, id).await.state
+    }
+}

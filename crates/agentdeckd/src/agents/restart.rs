@@ -195,7 +195,7 @@ impl Restarter {
     /// non-zero within [`FAILED_RESUME_WITHIN`], as a resume of a session the agent can no
     /// longer find does. `feed`, subscribed before the spawn, carries its exit. The fresh
     /// start isn't watched, so a pane whose agent fails either way stays exited after it.
-    /// Nothing starts for a pane closed meanwhile, or while the daemon stops.
+    /// Nothing starts for a pane closed or stopped meanwhile, or while the daemon stops.
     pub fn fall_back_if_resume_fails(
         &self,
         id: PaneId,
@@ -209,7 +209,8 @@ impl Restarter {
             let Ok(Some(Some(code))) = exit.await else {
                 return;
             };
-            let live = restarter.terminals.get(id).is_some();
+            // A pane stopped on purpose (`POST /v1/panes/{id}/stop`) failed nothing.
+            let live = (restarter.terminals.get(id)).is_some_and(|pane| !pane.stopped());
             if code == 0 || !live || restarter.terminals.is_closing() {
                 return;
             }

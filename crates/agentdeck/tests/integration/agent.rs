@@ -1,4 +1,4 @@
-//! `agentdeck agent ls | new | send | link` and `agentdeck tail`, against `sh` panes and the
+//! `agentdeck agent ls | new | send | link | stop` and `agentdeck tail`, against `sh` panes and the
 //! stub `claude` and `codex`; never a real agent.
 
 use agentdeck_core::Layout;
@@ -227,6 +227,58 @@ mod agent_link {
         let stderr = env.fails(&["agent", "link", &pane, "--task", text(&task, "id")]);
 
         assert!(stderr.contains("(invalid_task)"), "{stderr}");
+    }
+}
+
+mod agent_stop {
+    use super::*;
+
+    /// The pane's state, as `agent ls` lists it.
+    fn state(env: &TestEnv, pane: &str) -> String {
+        let list = env.json(&["agent", "ls"]);
+        let listed = (list.as_array().expect("a list").iter()).find(|p| p["id"] == pane);
+        text(listed.expect("the pane is listed"), "state").to_owned()
+    }
+
+    #[test]
+    fn should_stop_the_agent_and_keep_its_pane_exited() {
+        let env = TestEnv::new();
+        env.workspace("web");
+        let pane = env.json(&["agent", "new", "--ws", "web"]);
+        let id = text(&pane, "id");
+
+        let stdout = env.ok(&["agent", "stop", short(id)]);
+
+        assert_eq!(stdout, format!("stopped {id}\n"));
+        eventually("the agent to stop", || {
+            (state(&env, id) == "exited").then_some(())
+        });
+    }
+
+    #[test]
+    fn should_print_what_it_stopped_as_json() {
+        let env = TestEnv::new();
+        env.workspace("web");
+        let pane = env.json(&["agent", "new", "--ws", "web"]);
+        let id = text(&pane, "id");
+
+        let stopped = env.json(&["agent", "stop", id]);
+
+        assert_eq!(stopped, serde_json::json!({ "id": id, "stopped": true }));
+    }
+
+    #[test]
+    fn should_fail_for_a_pane_whose_process_exited() {
+        let env = TestEnv::new();
+        let ws = env.workspace("web");
+        let pane = shell_pane(&env, &ws, "exit 0");
+        eventually("the pane to exit", || {
+            (state(&env, &pane) == "exited").then_some(())
+        });
+
+        let stderr = env.fails(&["agent", "stop", &pane]);
+
+        assert!(stderr.contains("(exited)"), "{stderr}");
     }
 }
 
