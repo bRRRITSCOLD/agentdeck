@@ -120,8 +120,9 @@ pub enum GithubError {
     /// The response held GraphQL errors and no data.
     #[error("GitHub GraphQL errors: {0}")]
     GraphQl(String),
-    /// The request failed, or the response wasn't the JSON asked for.
-    #[error("calling GitHub: {0}")]
+    /// The request failed, or the response wasn't the JSON asked for. Its message says why:
+    /// a timeout, a failed connection and their causes.
+    #[error("{}", transit(.0))]
     Http(#[from] reqwest::Error),
     /// The response's data didn't have the expected shape.
     #[error("unexpected GitHub response: {0}")]
@@ -451,6 +452,84 @@ impl GithubError {
     fn not_sent(&self) -> bool {
         matches!(self, GithubError::Http(err) if err.is_connect())
     }
+}
+
+/// What kind of failure a request met on its way to GitHub or back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Transit {
+    /// GitHub didn't answer within the client's timeout.
+    Timeout,
+    /// No connection: refused, the host not found, a failed TLS handshake.
+    Connect,
+    /// The response arrived but its body couldn't be read or wasn't the JSON asked for.
+    Response,
+    /// Anything else, such as a request reqwest couldn't build.
+    Other,
+}
+
+impl Transit {
+    fn of(err: &reqwest::Error) -> Transit {
+        if err.is_timeout() {
+            Transit::Timeout
+        } else if err.is_connect() {
+            Transit::Connect
+        } else if err.is_body() || err.is_decode() {
+            Transit::Response
+        } else {
+            Transit::Other
+        }
+    }
+
+    fn words(self) -> &'static str {
+        match self {
+            Transit::Timeout => "GitHub didn't answer in time",
+            Transit::Connect => "couldn't connect to GitHub",
+            Transit::Response => "couldn't read GitHub's response",
+            Transit::Other => "calling GitHub failed",
+        }
+    }
+}
+
+/// How hyper wraps every failed connection; [`Transit::Connect`]'s words already say it.
+const HYPER_CONNECT: &str = "client error (Connect)";
+
+/// Why a request failed in transit (spec §8): its kind, then the causes reqwest wraps, such
+/// as `operation timed out` or `Connection refused (os error 111)`. reqwest's own words
+/// (`error sending request for url (…)`) say nothing the kind doesn't. The token travels only
+/// in a header, so no cause carries it.
+fn transit(err: &reqwest::Error) -> String {
+    let mut causes = Vec::new();
+    let mut cause = std::error::Error::source(err);
+    while let Some(err) = cause {
+        causes.push(err.to_string());
+        cause = err.source();
+    }
+    describe(Transit::of(err), err.url(), &causes)
+}
+
+/// `kind`'s words, the endpoint `url` without credentials, query or fragment, then each of
+/// `causes` (outermost first) but hyper's connect wrapper and a repeat of the one before.
+fn describe(kind: Transit, url: Option<&reqwest::Url>, causes: &[String]) -> String {
+    let mut message = kind.words().to_owned();
+    if let Some(url) = url {
+        let mut url = url.clone();
+        // Neither fails on an http(s) URL, the only kind a request has.
+        let _ = url.set_username("");
+        let _ = url.set_password(None);
+        url.set_query(None);
+        url.set_fragment(None);
+        message.push_str(&format!(" ({url})"));
+    }
+    let mut last: Option<&str> = None;
+    for cause in causes {
+        if cause == HYPER_CONNECT || last == Some(cause.as_str()) {
+            continue;
+        }
+        message.push_str(": ");
+        message.push_str(cause);
+        last = Some(cause);
+    }
+    message
 }
 
 /// The `message` of a JSON error body, as GitHub's REST-style errors carry one.
@@ -843,6 +922,120 @@ mod tests {
         }
     }
 
+    mod transit {
+        use super::*;
+
+        fn endpoint() -> reqwest::Url {
+            reqwest::Url::parse(DEFAULT_ENDPOINT).expect("a URL")
+        }
+
+        fn causes(causes: &[&str]) -> Vec<String> {
+            causes.iter().map(|cause| (*cause).to_owned()).collect()
+        }
+
+        #[test]
+        fn should_say_github_did_not_answer_in_time_and_why() {
+            let message = describe(
+                Transit::Timeout,
+                Some(&endpoint()),
+                &causes(&["operation timed out"]),
+            );
+
+            assert_eq!(
+                message,
+                "GitHub didn't answer in time (https://api.github.com/graphql): operation timed out"
+            );
+        }
+
+        #[test]
+        fn should_say_it_could_not_connect_with_each_cause_but_hypers_wrapper() {
+            let message = describe(
+                Transit::Connect,
+                Some(&endpoint()),
+                &causes(&[
+                    "client error (Connect)",
+                    "tcp connect error",
+                    "Connection refused (os error 111)",
+                ]),
+            );
+
+            assert_eq!(
+                message,
+                "couldn't connect to GitHub (https://api.github.com/graphql): tcp connect error: \
+                 Connection refused (os error 111)"
+            );
+        }
+
+        #[test]
+        fn should_name_any_other_failure_with_its_causes() {
+            let message = describe(
+                Transit::Other,
+                Some(&endpoint()),
+                &causes(&["connection closed before message completed"]),
+            );
+
+            assert_eq!(
+                message,
+                "calling GitHub failed (https://api.github.com/graphql): \
+                 connection closed before message completed"
+            );
+        }
+
+        #[test]
+        fn should_say_the_response_could_not_be_read() {
+            let message = describe(
+                Transit::Response,
+                Some(&endpoint()),
+                &causes(&["expected ident at line 1 column 2"]),
+            );
+
+            assert_eq!(
+                message,
+                "couldn't read GitHub's response (https://api.github.com/graphql): \
+                 expected ident at line 1 column 2"
+            );
+        }
+
+        #[test]
+        fn should_leave_out_the_urls_credentials_query_and_fragment() {
+            let url = reqwest::Url::parse(
+                "https://octocat:gho_secret@ghe.example.com:8443/api/graphql?access_token=gho_x#f",
+            )
+            .expect("a URL");
+
+            let message = describe(Transit::Timeout, Some(&url), &[]);
+
+            assert_eq!(
+                message,
+                "GitHub didn't answer in time (https://ghe.example.com:8443/api/graphql)"
+            );
+        }
+
+        #[test]
+        fn should_say_a_cause_repeated_back_to_back_once() {
+            let message = describe(
+                Transit::Other,
+                None,
+                &causes(&["connection closed", "connection closed"]),
+            );
+
+            assert_eq!(message, "calling GitHub failed: connection closed");
+        }
+
+        #[tokio::test]
+        async fn should_name_the_kind_and_cause_of_a_request_reqwest_could_not_build() {
+            // No I/O: reqwest refuses the URL before sending anything.
+            let github = Github::new("not a url".into()).expect("a client");
+
+            let err = github.viewer("gho_test").await.unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                "calling GitHub failed: relative URL without a base"
+            );
+        }
+    }
+
     mod parse_search {
         use super::*;
 
@@ -1189,6 +1382,13 @@ mod integration_tests {
                 matches!(&err, GithubError::Http(err) if err.is_timeout()),
                 "{err:?}"
             );
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "GitHub didn't answer in time ({}): operation timed out",
+                    server.url("/graphql")
+                )
+            );
         }
 
         #[tokio::test]
@@ -1236,6 +1436,13 @@ mod integration_tests {
             assert!(
                 matches!(&err, GithubError::Http(err) if err.is_connect()),
                 "{err:?}"
+            );
+            let message = err.to_string();
+            assert!(
+                message.starts_with(&format!(
+                    "couldn't connect to GitHub (http://127.0.0.1:{port}/graphql): tcp connect error: "
+                )) && message.contains("refused"),
+                "{message}"
             );
             // Each refusal is at once, so the time taken is the waits between the tries.
             assert!(
