@@ -1,6 +1,6 @@
-//! Which core-gpui [`StateDot`](brrritscold_core_gpui::StateDot) a pane's or a workspace's
-//! agent state gets (spec §11). Blocked and a failed exit share red; the shape (a filled dot vs
-//! an `OctagonX`) tells them apart, so colour is never the only signal.
+//! Which core-gpui [`StateDot`] a pane's or a workspace's agent state gets (spec §11), drawn
+//! still ([`mark`]). Blocked and a failed exit share red; the shape (a filled dot vs an
+//! `OctagonX`) tells them apart, so colour is never the only signal.
 
 use agentdeck_core::AgentState;
 use brrritscold_core_gpui::{StateDot, StateDotState};
@@ -21,8 +21,8 @@ pub fn of(state: AgentState, exit_code: Option<i64>) -> StateDotState {
 }
 
 /// The `StateDot` for `state`, drawn still: `working`'s `LoaderCircle` at rest, as Penpot
-/// draws it. A turning mark redraws the whole window 15 times a second, which cost 2–2.3% of a
-/// core in a focused window, above the 1.5% the app allows itself (spec §11).
+/// draws it. A turning mark redraws the whole window 15 times a second, which cost 1.9–2.4%
+/// of a core in a focused window, above the 1.5% the app allows itself (spec §11).
 pub fn mark(state: StateDotState) -> StateDot {
     StateDot::new(state).spin(false)
 }
