@@ -172,6 +172,16 @@ where
     }
 }
 
+/// Whether `gh` no longer gives `token`, the token it gave at the last read: after
+/// `gh auth logout`, or a login to another account. `gh auth logout` doesn't revoke the token,
+/// so GitHub would go on taking it.
+async fn gh_moved_on<F>(token: &str, gh: impl FnOnce() -> F) -> bool
+where
+    F: Future<Output = Result<String, gh::NoToken>>,
+{
+    !matches!(gh().await, Ok(current) if current == token)
+}
+
 /// Why there's no token to sync with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum NoToken {
@@ -295,6 +305,23 @@ impl GithubAuth {
     /// The token, unless no source gave one or GitHub rejected it.
     pub fn token(&self) -> Option<String> {
         self.state().token.clone()
+    }
+
+    /// The token to call GitHub with: the one last read, unless there's none or `gh` gave it
+    /// and no longer does; then the sources are read again, as [`Self::reread`] does.
+    pub async fn current_token(&self) -> Result<String, NoToken> {
+        let (source, token) = {
+            let state = self.state();
+            (state.source, state.token.clone())
+        };
+        match token {
+            Some(token)
+                if source != TokenSource::Gh || !gh_moved_on(&token, gh::gh_auth_token).await =>
+            {
+                Ok(token)
+            }
+            _ => self.reread().await,
+        }
     }
 
     /// `GET /v1/github/auth`.
@@ -806,6 +833,25 @@ mod tests {
         #[tokio::test]
         async fn should_find_none_when_no_source_gives_one() {
             assert_eq!(find(&store(&[]), &env(&[]), gh_logged_out).await, None);
+        }
+    }
+
+    mod gh_moved_on {
+        use super::*;
+
+        #[tokio::test]
+        async fn should_stay_while_gh_gives_the_same_token() {
+            assert!(!gh_moved_on("gho_gh", gh_token).await);
+        }
+
+        #[tokio::test]
+        async fn should_move_on_once_gh_logs_out() {
+            assert!(gh_moved_on("gho_gh", gh_logged_out).await);
+        }
+
+        #[tokio::test]
+        async fn should_move_on_once_gh_gives_another_token() {
+            assert!(gh_moved_on("gho_old", gh_token).await);
         }
     }
 

@@ -289,11 +289,7 @@ impl PrSync {
             return results;
         }
         let auth = &self.inner.auth;
-        let token = match auth.token() {
-            Some(token) => Ok(token),
-            None => auth.reread().await,
-        };
-        let Ok(mut token) = token else {
+        let Ok(mut token) = auth.current_token().await else {
             for (i, _) in &open {
                 results[*i] = PrCloseResult::failed(task_ids[*i], NOT_SIGNED_IN);
             }
@@ -384,10 +380,7 @@ impl PrSync {
         since: Option<DateTime<Utc>>,
     ) -> Result<Synced, SyncError> {
         let auth = &self.inner.auth;
-        let token = match auth.token() {
-            Some(token) => token,
-            None => auth.reread().await?,
-        };
+        let token = auth.current_token().await?;
         let workspaces = self.workspace_dirs().await?;
         let clones =
             Arc::new(tokio::task::spawn_blocking(move || Clones::scan(&workspaces)).await?);
