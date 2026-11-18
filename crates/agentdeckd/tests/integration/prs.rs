@@ -473,6 +473,41 @@ mod post_v1_prs_sync {
     }
 
     #[tokio::test]
+    async fn should_log_out_once_gh_logs_out_though_github_still_takes_its_token_200() {
+        let github = MockServer::start_async().await;
+        mock_search(&github, TOKEN, &[]);
+        let daemon = daemon(&github, Some(TOKEN)).await;
+        sync(&daemon.client).await;
+
+        set_gh_token(daemon.root(), None);
+        let status = sync(&daemon.client).await;
+
+        assert_eq!(status.login, GhLogin::LoggedOut);
+        assert!(
+            status
+                .last_error
+                .as_deref()
+                .is_some_and(|err| err.starts_with("no GitHub token")),
+            "{status:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_sync_with_the_token_gh_gives_after_another_login_200() {
+        let github = MockServer::start_async().await;
+        mock_search(&github, "gho_old", &[]);
+        let daemon = daemon(&github, Some("gho_old")).await;
+        sync(&daemon.client).await;
+
+        mock_search(&github, "gho_new", &[Pr::open(7)]);
+        set_gh_token(daemon.root(), Some("gho_new"));
+        let status = sync(&daemon.client).await;
+
+        assert_eq!(status.login, GhLogin::LoggedIn);
+        assert_eq!(pr_tasks(&daemon.client).await.len(), 1);
+    }
+
+    #[tokio::test]
     async fn should_report_a_github_failure_briefly_after_three_tries_and_keep_the_tasks_200() {
         let github = MockServer::start_async().await;
         let mut search = mock_search(&github, TOKEN, &[Pr::open(7)]);
@@ -1694,6 +1729,21 @@ mod post_v1_prs_close {
         assert_eq!(results, [ok(&task)]);
         lookup.assert_calls(1);
         close_mock.assert_calls(1);
+    }
+
+    #[tokio::test]
+    async fn should_not_close_with_the_gh_token_once_gh_logs_out_200() {
+        let github = MockServer::start_async().await;
+        let pr = Pr::open(7);
+        let daemon = synced(&github, std::slice::from_ref(&pr)).await;
+        let task = task_of(&daemon.client, 7).await;
+        let lookup = mock_node_ids(&github, std::slice::from_ref(&pr));
+
+        set_gh_token(daemon.root(), None);
+        let results = close(&daemon.client, vec![task.id]).await;
+
+        assert_eq!(results, [failed(task.id, "Not signed in to GitHub")]);
+        lookup.assert_calls(0);
     }
 
     #[tokio::test]
