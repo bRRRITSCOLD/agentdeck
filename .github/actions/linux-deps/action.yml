@@ -1,0 +1,22 @@
+name: Linux deps
+description: >
+  Installs agentdeck's system packages with script/install-linux-deps.sh, from a weekly
+  actions/cache of their .debs, so most runs never download from an Ubuntu mirror.
+
+runs:
+  using: composite
+  steps:
+    - id: week
+      shell: bash
+      run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+    # Keyed on the script, so a changed package list starts afresh, and on the ISO week, so
+    # updated packages are picked up. A new week restores last week's and tops it up.
+    - uses: actions/cache@v6
+      with:
+        path: ${{ runner.temp }}/apt-debs
+        key: apt-debs-${{ hashFiles('script/install-linux-deps.sh') }}-${{ steps.week.outputs.week }}
+        restore-keys: apt-debs-${{ hashFiles('script/install-linux-deps.sh') }}-
+    - shell: bash
+      run: script/install-linux-deps.sh
+      env:
+        APT_DEB_CACHE: ${{ runner.temp }}/apt-debs
