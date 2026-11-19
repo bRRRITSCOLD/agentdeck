@@ -21,6 +21,8 @@ use super::TestDaemon;
 /// When its folder holds a file named `lost-session`, a resume (`--resume <id>`) prints what
 /// Claude Code prints for a session it can't find and exits 1 at once; with a file named
 /// `broken`, every start does.
+///
+/// `claude mcp …` is [`STUB_CLAUDE_MCP`]'s, which runs first.
 const STUB_CLAUDE: &str = r#"#!/bin/sh
 log="$(dirname "$0")/../agents/$AGENTDECK_PANE"
 mkdir -p "$log"
@@ -111,10 +113,43 @@ stty sane 2>/dev/null
 printf '\033[?2004l\033]0;\007' 2>/dev/null
 "#;
 
+/// `claude mcp …` as Claude Code 2.1.328 does it (checked against a temp `HOME` on
+/// 2026-11-19): `add --scope user agentdeck -- <cli> mcp` writes `mcpServers.agentdeck` to
+/// `$CLAUDE_CONFIG_DIR/.claude.json`, else `$HOME/.claude.json`, and fails with "already
+/// exists" when it is there; `remove --scope user agentdeck` drops it. Each call's argv is
+/// appended to `<root>/claude-mcp` as the agents' are; a file `<root>/claude-mcp-fails` makes
+/// every call print its text and exit 1. It refuses a `HOME` outside the test's root, so no
+/// test can reach the real config.
+const STUB_CLAUDE_MCP: &str = r#"
+if [ "$1" = mcp ]; then
+  root=$(cd "$(dirname "$0")/.." && pwd)
+  case "$HOME" in "$root"/*) ;; *) echo "stub claude: HOME=$HOME is outside $root" >&2; exit 3 ;; esac
+  { for arg in "$@"; do printf '%s\0' "$arg"; done; printf '\036'; } >> "$root/claude-mcp"
+  if [ -e "$root/claude-mcp-fails" ]; then cat "$root/claude-mcp-fails" >&2; exit 1; fi
+  config="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
+  case "$2" in
+    add)
+      if grep -q '"agentdeck"' "$config" 2>/dev/null; then
+        echo 'MCP server agentdeck already exists in user config' >&2; exit 1
+      fi
+      printf '{"mcpServers":{"agentdeck":{"type":"stdio","command":"%s","args":["%s"],"env":{}}}}\n' "$7" "$8" > "$config"
+      echo "Added stdio MCP server agentdeck with command: $7 $8 to user config" ;;
+    remove)
+      printf '{"mcpServers":{}}\n' > "$config"
+      echo 'Removed MCP server agentdeck from user config' ;;
+  esac
+  exit 0
+fi
+"#;
+
 /// Writes the stub agents into `bin`, the dir the stub `gh` is in.
 pub fn install(bin: &Path) {
     for (name, script) in [("claude", STUB_CLAUDE), ("codex", STUB_CODEX)] {
         let path = bin.join(name);
+        let script = match name {
+            "claude" => script.replacen("#!/bin/sh\n", &format!("#!/bin/sh{STUB_CLAUDE_MCP}"), 1),
+            _ => script.to_owned(),
+        };
         std::fs::write(&path, format!("{script}{READ_LIKE_A_TUI}")).expect("writing a stub agent");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
             .expect("making a stub agent executable");

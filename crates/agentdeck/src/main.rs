@@ -52,7 +52,7 @@ fn main() -> ExitCode {
 
 /// Runs the command and prints its output; `false` when it failed after printing.
 async fn run(cli: Cli) -> anyhow::Result<bool> {
-    if let Command::Mcp = cli.command {
+    if let Command::Mcp { command: None } = cli.command {
         mcp::serve().await?;
         return Ok(true);
     }

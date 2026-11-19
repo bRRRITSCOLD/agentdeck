@@ -577,6 +577,11 @@ impl Shell {
             let sidebar = sidebar.read(cx);
             (sidebar.selection(), sidebar.snapshot().clone())
         };
+        let opened_settings =
+            selection == Selection::Settings && self.selection != Some(Selection::Settings);
+        if let (true, Some(settings)) = (opened_settings, &self.settings) {
+            settings.update(cx, |settings, cx| settings.reread_agents(window, cx));
+        }
         self.selection = Some(selection);
         if let (Some(panel), Selection::Workspace(workspace)) = (&self.panel, selection) {
             let snapshot = snapshot.clone();
@@ -3219,6 +3224,12 @@ mod tests {
                     .shell
                     .read_with(cx, |shell, _| shell.sidebar.clone().unwrap());
                 sidebar.update(cx, |sidebar, cx| sidebar.select(Selection::Settings, cx));
+                harness.settle(cx);
+                // General is last, under the fold.
+                let settings = harness
+                    .shell
+                    .read_with(cx, |shell, _| shell.settings.clone().unwrap());
+                settings.update(cx, |settings, cx| settings.scroll_to_bottom(cx));
                 harness.settle(cx);
                 harness.click("settings confirm quit", cx);
             }
