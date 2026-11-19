@@ -4,9 +4,9 @@ An agent workspace GUI for Linux. Agents run as real CLIs (Claude Code, Codex, a
 
 It is three programs in one Cargo workspace:
 
-- `agentdeckd`, a local daemon that owns the terminals and the data;
-- `agentdeck-gui`, a GPUI window that attaches to the daemon;
-- `agentdeck`, a CLI (and MCP server) that agents and scripts use.
+- `agentdeckd`, a local daemon that owns the terminals and the data
+- `agentdeck-gui`, a GPUI window that attaches to the daemon
+- `agentdeck`, a CLI (and MCP server) that agents and scripts use
 
 The decisions are in [the v1 map](https://github.com/bRRRITSCOLD/agentdeck/issues/1), and the spec is [`docs/spec.md`](docs/spec.md).
 
