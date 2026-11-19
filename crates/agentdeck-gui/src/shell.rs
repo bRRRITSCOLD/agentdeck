@@ -3013,7 +3013,7 @@ mod tests {
         struct Harness {
             shell: Entity<Shell>,
             api: Arc<FakeApi>,
-            _remote: Remote,
+            remote: Remote,
         }
 
         impl Harness {
@@ -3041,7 +3041,7 @@ mod tests {
                 let harness = Harness {
                     shell: shell.unwrap(),
                     api,
-                    _remote: remote,
+                    remote,
                 };
                 harness.settle(cx);
                 (harness, cx)
@@ -3196,6 +3196,76 @@ mod tests {
             harness.press_quit(cx);
             assert!(!harness.asking(cx));
             assert_eq!(harness.quits(cx), 2);
+        }
+
+        mod after_dont_ask_again {
+            use agentdeck_client::ws::Event;
+            use agentdeck_core::ws::{Entity as Changed, ServerMessage};
+
+            use super::*;
+
+            /// Quits with Don't ask again ticked, so the next quit doesn't ask.
+            fn dont_ask_again(harness: &Harness, cx: &mut VisualTestContext) {
+                harness.press_quit(cx);
+                harness.click("quit dont ask again", cx);
+                cx.simulate_keystrokes("enter");
+                harness.settle(cx);
+                assert!(!harness.api.settings_now().gui.confirm_quit);
+            }
+
+            /// Opens Settings and flips "Ask before quitting while agents run".
+            fn flip_the_switch(harness: &Harness, cx: &mut VisualTestContext) {
+                let sidebar = harness
+                    .shell
+                    .read_with(cx, |shell, _| shell.sidebar.clone().unwrap());
+                sidebar.update(cx, |sidebar, cx| sidebar.select(Selection::Settings, cx));
+                harness.settle(cx);
+                harness.click("settings confirm quit", cx);
+            }
+
+            #[gpui::test]
+            fn should_ask_again_once_the_settings_switch_turns_it_back_on(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open(daemon(vec![agent(1)], true), cx);
+                dont_ask_again(&harness, cx);
+
+                flip_the_switch(&harness, cx);
+                harness.press_quit(cx);
+
+                assert!(harness.asking(cx));
+                assert_eq!(harness.quits(cx), 1);
+            }
+
+            #[gpui::test]
+            fn should_ask_again_once_the_switch_turns_it_back_on_after_reopening(
+                cx: &mut TestAppContext,
+            ) {
+                let (harness, cx) = Harness::open(daemon(vec![agent(1)], false), cx);
+
+                flip_the_switch(&harness, cx);
+                harness.press_quit(cx);
+
+                assert!(harness.asking(cx));
+                assert_eq!(harness.quits(cx), 0);
+            }
+
+            #[gpui::test]
+            fn should_ask_again_once_another_client_turns_it_back_on(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open(daemon(vec![agent(1)], true), cx);
+                dont_ask_again(&harness, cx);
+
+                harness.api.set_settings(default_settings());
+                (harness.remote.events)
+                    .try_send(Event::Message(ServerMessage::Changed {
+                        entity: Changed::Settings,
+                        id: "settings".into(),
+                    }))
+                    .unwrap();
+                harness.settle(cx);
+                harness.press_quit(cx);
+
+                assert!(harness.asking(cx));
+                assert_eq!(harness.quits(cx), 1);
+            }
         }
         #[gpui::test]
         fn should_stop_each_running_agent_then_quit_with_stop_the_agents_ticked(
