@@ -4,6 +4,7 @@
 //! It reads the workspace's tabs, panes and linked tasks when it opens and again whenever the
 //! daemon reports a tab, pane or task `changed`. Each shown pane keeps its view, and so its
 //! terminal, across reads; leaving a tab drops its panes' views, which detaches them.
+//! A tab still titled "shell" reads as the agent a pane in it hosts ([`tab_label`]).
 //!
 //! It handles the tab and pane shortcuts in [`keymap`]'s workspace context, opens a tab with a
 //! shell from its `NewTab` button or shortcut, and carries out each pane menu's
@@ -19,7 +20,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use agentdeck_client::types::{PaneRun, Tab};
+use agentdeck_client::types::{Pane, PaneRun, Tab};
 use agentdeck_client::ws;
 use agentdeck_core::ws::{Entity as Changed, ServerMessage};
 use agentdeck_core::{
@@ -388,6 +389,14 @@ impl WorkspaceView {
         }
     }
 
+    /// What each tab's trigger reads, in order.
+    #[cfg(test)]
+    pub fn tab_labels(&self) -> Vec<SharedString> {
+        (self.read.tabs.iter())
+            .map(|tab| tab_label(tab, &self.read.panes))
+            .collect()
+    }
+
     /// The tab it shows.
     #[cfg(test)]
     pub fn selected(&self) -> Option<TabId> {
@@ -606,7 +615,10 @@ impl WorkspaceView {
     fn tabs_row(&self, cx: &mut Context<Self>) -> Div {
         let list = self.read.tabs.iter().fold(
             TabsList::new().variant(TabsListVariant::Line),
-            |list, tab: &Tab| list.trigger(TabsTrigger::new(tab.id.to_string(), tab.title.clone())),
+            |list, tab: &Tab| {
+                let label = tab_label(tab, &self.read.panes);
+                list.trigger(TabsTrigger::new(tab.id.to_string(), label))
+            },
         );
         let on_select = cx.listener(|this, value: &SharedString, window, cx| {
             if let Ok(tab) = value.parse() {
@@ -681,6 +693,29 @@ impl WorkspaceView {
                 .child(self.split(a, ratio.get()))
                 .child(self.split(b, 1. - ratio.get())),
         }
+    }
+}
+
+/// The title a tab opened with a shell gets (`+`, `agentdeck`'s `new_shell_tab`).
+const SHELL_TAB: &str = "shell";
+
+/// What `tab`'s trigger in the tabs row reads: its title, except that a tab still titled
+/// "shell" names the agent the first pane in it, in layout order, hosts, as `agent new` names
+/// a tab (spec §11, Penpot "Screens · Main" → "Pane · hosted agent · shell tab"). Display
+/// only: the saved title stays "shell".
+pub fn tab_label(tab: &Tab, panes: &[Pane]) -> SharedString {
+    let hosted = || {
+        let layout = tab.layout.as_ref()?;
+        layout.panes().into_iter().find_map(|id| {
+            let pane = panes.iter().find(|pane| pane.id == id)?;
+            crate::pane::in_shell(pane)
+                .then_some(pane.hosted_agent)
+                .flatten()
+        })
+    };
+    match (tab.title == SHELL_TAB).then(hosted).flatten() {
+        Some(agent) => agent.as_str().into(),
+        None => tab.title.clone().into(),
     }
 }
 
@@ -1958,6 +1993,228 @@ mod tests {
                 .read_with(cx, |pane, _| pane.task().cloned());
             assert_eq!(task.as_deref(), Some("task 3"));
             harness.draw(cx);
+        }
+    }
+
+    mod hosted_agent {
+        use agentdeck_core::Agent;
+
+        use super::*;
+
+        /// The title `agent` sets: Claude Code's; Codex sets none.
+        fn title_of(agent: Agent) -> &'static str {
+            match agent {
+                Agent::Claude => "✳ Claude Code",
+                _ => "",
+            }
+        }
+
+        /// Pane 7, the shell in a tab still titled "shell", hosting `agent` as the daemon
+        /// reports it: the agent's title and its rules' state.
+        fn hosting(agent: Agent) -> Pane {
+            Pane {
+                hosted_agent: Some(agent),
+                title: title_of(agent).into(),
+                state: AgentState::Working,
+                ..shell_pane(7, id(1))
+            }
+        }
+
+        /// Pane 7 once its hosted `agent` left: the daemon still reports the title the agent
+        /// set last, and the `shell` rules' state.
+        fn left(agent: Agent) -> Pane {
+            Pane {
+                title: title_of(agent).into(),
+                state: AgentState::Unknown,
+                ..shell_pane(7, id(1))
+            }
+        }
+
+        fn shell_tab() -> Tab {
+            Tab {
+                title: "shell".into(),
+                ..tab(1, id(1), 0, Some(id(7)))
+            }
+        }
+
+        fn open(pane: Pane, cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
+            Harness::open(vec![shell_tab()], vec![pane], cx)
+        }
+
+        /// The daemon reports pane 7 as `pane` now, with a `changed` pane event.
+        fn becomes(harness: &Harness, pane: Pane, cx: &mut VisualTestContext) {
+            harness.api.set_panes(vec![pane]);
+            harness.changed(Changed::Pane, cx);
+        }
+
+        /// What the header shows: its title, its state and whether it says "in shell".
+        fn header(harness: &Harness, cx: &mut VisualTestContext) -> (String, AgentState, bool) {
+            harness.draw(cx);
+            let (title, state) = harness
+                .pane(0, cx)
+                .read_with(cx, |pane, _| (pane.title().to_string(), pane.pane().state));
+            (title, state, cx.debug_bounds("in shell").is_some())
+        }
+
+        fn tab_labels(harness: &Harness, cx: &mut VisualTestContext) -> Vec<SharedString> {
+            harness.view.read_with(cx, |view, _| view.tab_labels())
+        }
+
+        fn saved_titles(harness: &Harness, cx: &mut VisualTestContext) -> Vec<String> {
+            harness.view.read_with(cx, |view, _| {
+                view.read.tabs.iter().map(|tab| tab.title.clone()).collect()
+            })
+        }
+
+        #[gpui::test]
+        fn should_name_the_agent_in_the_header_once_the_pane_hosts_one(cx: &mut TestAppContext) {
+            let (harness, cx) = open(shell_pane(7, id(1)), cx);
+
+            becomes(&harness, hosting(Agent::Claude), cx);
+
+            assert_eq!(
+                header(&harness, cx),
+                ("✳ Claude Code".into(), AgentState::Working, true)
+            );
+        }
+
+        #[gpui::test]
+        fn should_title_the_shell_tab_after_the_agent_once_the_pane_hosts_one(
+            cx: &mut TestAppContext,
+        ) {
+            let (harness, cx) = open(shell_pane(7, id(1)), cx);
+
+            becomes(&harness, hosting(Agent::Claude), cx);
+
+            assert_eq!(tab_labels(&harness, cx), ["claude"]);
+            assert_eq!(saved_titles(&harness, cx), ["shell"], "display only");
+        }
+
+        #[gpui::test]
+        fn should_read_as_a_shell_again_once_the_agent_leaves(cx: &mut TestAppContext) {
+            let (harness, cx) = open(shell_pane(7, id(1)), cx);
+            becomes(&harness, hosting(Agent::Claude), cx);
+
+            becomes(&harness, left(Agent::Claude), cx);
+
+            assert_eq!(
+                header(&harness, cx),
+                ("sh".into(), AgentState::Unknown, false)
+            );
+            assert_eq!(tab_labels(&harness, cx), ["shell"]);
+        }
+
+        #[gpui::test]
+        fn should_drop_the_title_the_agent_set_live_once_it_leaves(cx: &mut TestAppContext) {
+            let (harness, cx) = open(shell_pane(7, id(1)), cx);
+            // The pane's terminal attaches on the connection's first channel.
+            harness.deliver(
+                ServerMessage::Attached {
+                    channel: 1,
+                    pane: id(7),
+                    cols: 80,
+                    rows: 24,
+                    title: String::new(),
+                    state: AgentState::Unknown,
+                },
+                cx,
+            );
+            becomes(&harness, hosting(Agent::Claude), cx);
+            let title = |title: &str| ServerMessage::Title {
+                channel: 1,
+                title: title.into(),
+            };
+            harness.deliver(title("✳ Claude Code"), cx);
+
+            becomes(&harness, left(Agent::Claude), cx);
+
+            assert_eq!(header(&harness, cx).0, "sh");
+            harness.deliver(title("~/w"), cx);
+            assert_eq!(header(&harness, cx).0, "~/w", "the shell's own title shows");
+        }
+
+        #[gpui::test]
+        fn should_follow_an_agent_hosted_when_first_read(cx: &mut TestAppContext) {
+            let (harness, cx) = open(hosting(Agent::Codex), cx);
+
+            assert_eq!(
+                header(&harness, cx),
+                ("codex".into(), AgentState::Working, true)
+            );
+            assert_eq!(tab_labels(&harness, cx), ["codex"]);
+        }
+
+        #[gpui::test]
+        fn should_read_as_a_shell_once_an_agent_hosted_when_first_read_leaves(
+            cx: &mut TestAppContext,
+        ) {
+            let (harness, cx) = open(hosting(Agent::Codex), cx);
+
+            becomes(&harness, left(Agent::Codex), cx);
+
+            assert_eq!(
+                header(&harness, cx),
+                ("sh".into(), AgentState::Unknown, false)
+            );
+            assert_eq!(tab_labels(&harness, cx), ["shell"]);
+        }
+    }
+
+    mod tab_label {
+        use agentdeck_core::{Agent, PaneKind};
+
+        use super::*;
+
+        fn hosting(n: u32, agent: Agent) -> Pane {
+            Pane {
+                hosted_agent: Some(agent),
+                ..shell_pane(n, id(1))
+            }
+        }
+
+        fn titled(title: &str, tab: Tab) -> Tab {
+            Tab {
+                title: title.into(),
+                ..tab
+            }
+        }
+
+        #[test]
+        fn should_name_the_agent_the_first_pane_in_layout_order_hosts() {
+            let tab = titled("shell", split_tab(1, 0, 7, 8));
+            let panes = [hosting(8, Agent::Claude), hosting(7, Agent::Codex)];
+
+            assert_eq!(tab_label(&tab, &panes), "codex");
+        }
+
+        #[test]
+        fn should_skip_panes_hosting_no_agent() {
+            let tab = titled("shell", split_tab(1, 0, 7, 8));
+            let panes = [shell_pane(7, id(1)), hosting(8, Agent::Claude)];
+
+            assert_eq!(tab_label(&tab, &panes), "claude");
+        }
+
+        #[test]
+        fn should_keep_the_title_while_no_pane_hosts_an_agent() {
+            let tab = titled("shell", split_tab(1, 0, 7, 8));
+            let agent = Pane {
+                kind: PaneKind::Agent,
+                agent: Some(Agent::Claude),
+                ..shell_pane(8, id(1))
+            };
+
+            assert_eq!(tab_label(&tab, &[shell_pane(7, id(1)), agent]), "shell");
+        }
+
+        #[test]
+        fn should_keep_a_title_the_user_or_a_launch_gave() {
+            let panes = [hosting(7, Agent::Codex)];
+
+            for title in ["notes", "claude", "Shell"] {
+                let tab = titled(title, tab(1, id(1), 0, Some(id(7))));
+                assert_eq!(tab_label(&tab, &panes), title);
+            }
         }
     }
 }

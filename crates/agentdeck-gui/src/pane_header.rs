@@ -8,8 +8,8 @@ use brrritscold_core_gpui::{
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _,
-    Window, div,
+    AnyElement, App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
+    SharedString, Styled as _, Window, div,
 };
 
 use crate::state_dot;
@@ -172,6 +172,7 @@ impl RenderOnce for PaneHeader {
             .when(self.in_shell, |header| {
                 header.child(
                     div()
+                        .debug_selector(|| "in shell".into())
                         .flex_none()
                         .whitespace_nowrap()
                         .text_size(font_size::XS)
