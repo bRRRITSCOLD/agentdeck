@@ -7,7 +7,8 @@
 //! layout.
 //!
 //! A shell pane hosting an agent (spec §3, §7) is an agent pane for all of that, and its
-//! header says "in shell" (Penpot "Screens" → "Pane · hosted agent").
+//! header says "in shell" (Penpot "Screens" → "Pane · hosted agent"). Once the agent leaves,
+//! the title it showed by then no longer shows, so the header reads as the shell's again.
 //!
 //! An agent pane whose agent exited names no agent (Penpot "Screens" → "Pane · agent
 //! exited"): its title is "Agent exited", Link to task leaves its menu, and its header offers
@@ -59,16 +60,17 @@ pub fn in_shell(pane: &Pane) -> bool {
 }
 
 /// The title a pane's header shows: "Agent exited" for an agent pane whose agent exited; else
-/// the first that isn't empty of the terminal's live title and the one read over REST; else
-/// the agent, else the program run.
-pub fn shown_title(live: Option<&str>, pane: &Pane) -> SharedString {
+/// the first of the terminal's live title and the one read over REST that is neither empty
+/// nor `left`, the title a shell's hosted agent left behind; else the agent, else the program
+/// run.
+pub fn shown_title(live: Option<&str>, pane: &Pane, left: Option<&str>) -> SharedString {
     if exited_agent(pane).is_some() {
         return AGENT_EXITED.into();
     }
     if let Some(title) = [live, Some(pane.title.as_str())]
         .into_iter()
         .flatten()
-        .find(|title| !title.is_empty())
+        .find(|title| !title.is_empty() && Some(*title) != left)
     {
         return SharedString::from(title.to_owned());
     }
@@ -140,6 +142,9 @@ pub struct PaneView {
     task: Option<SharedString>,
     /// The title the terminal reported last.
     live_title: Option<SharedString>,
+    /// The title shown when the shell's hosted agent left: the agent's, so it no longer shows,
+    /// whether it comes live or over REST. Kept until the shell hosts an agent again.
+    left_title: Option<SharedString>,
     /// Being closed: shown dimmed until it goes.
     closing: bool,
     terminal: Entity<TerminalView>,
@@ -170,6 +175,7 @@ impl PaneView {
             pane,
             task,
             live_title: None,
+            left_title: None,
             closing: false,
             terminal,
             _subscriptions: [titles, states],
@@ -184,6 +190,11 @@ impl PaneView {
     /// Takes a fresh read of the pane and its task's title.
     pub fn update(&mut self, pane: Pane, task: Option<SharedString>, cx: &mut Context<Self>) {
         if (&self.pane, &self.task) != (&pane, &task) {
+            match (in_shell(&self.pane), in_shell(&pane)) {
+                (true, false) => self.left_title = Some(self.title()),
+                (_, true) => self.left_title = None,
+                (false, false) => {}
+            }
             self.pane = pane;
             self.task = task;
             cx.notify();
@@ -192,7 +203,11 @@ impl PaneView {
 
     /// The title its header shows.
     pub fn title(&self) -> SharedString {
-        shown_title(self.live_title.as_deref(), &self.pane)
+        shown_title(
+            self.live_title.as_deref(),
+            &self.pane,
+            self.left_title.as_deref(),
+        )
     }
 
     /// The pane as last read, with the state broadcasts since applied.
@@ -510,7 +525,7 @@ mod tests {
                 ..shell_pane(1, id(1))
             };
 
-            assert_eq!(shown_title(Some("live"), &pane), "live");
+            assert_eq!(shown_title(Some("live"), &pane, None), "live");
         }
 
         #[test]
@@ -520,8 +535,8 @@ mod tests {
                 ..shell_pane(1, id(1))
             };
 
-            assert_eq!(shown_title(None, &pane), "read");
-            assert_eq!(shown_title(Some(""), &pane), "read");
+            assert_eq!(shown_title(None, &pane, None), "read");
+            assert_eq!(shown_title(Some(""), &pane, None), "read");
         }
 
         #[test]
@@ -532,7 +547,7 @@ mod tests {
                 ..shell_pane(1, id(1))
             };
 
-            assert_eq!(shown_title(None, &pane), "codex");
+            assert_eq!(shown_title(None, &pane, None), "codex");
         }
 
         #[test]
@@ -543,15 +558,30 @@ mod tests {
             };
 
             assert_eq!(
-                shown_title(Some("✳ Fix the login bug"), &pane),
+                shown_title(Some("✳ Fix the login bug"), &pane, None),
                 "Agent exited"
             );
-            assert_eq!(shown_title(None, &exited(Agent::Codex)), "Agent exited");
+            assert_eq!(
+                shown_title(None, &exited(Agent::Codex), None),
+                "Agent exited"
+            );
+        }
+
+        #[test]
+        fn should_skip_the_title_a_hosted_agent_left_behind() {
+            let pane = Pane {
+                title: "✳ Claude Code".into(),
+                ..shell_pane(1, id(1))
+            };
+            let left = Some("✳ Claude Code");
+
+            assert_eq!(shown_title(Some("✳ Claude Code"), &pane, left), "sh");
+            assert_eq!(shown_title(Some("~/w"), &pane, left), "~/w");
         }
 
         #[test]
         fn should_name_the_program_of_an_untitled_shell() {
-            assert_eq!(shown_title(None, &shell_pane(1, id(1))), "sh");
+            assert_eq!(shown_title(None, &shell_pane(1, id(1)), None), "sh");
         }
     }
 }
