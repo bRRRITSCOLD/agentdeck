@@ -1,6 +1,10 @@
 //! `agentdeck mcp`: an MCP server over stdio with the spec §10 tools. Each tool defaults to
 //! the caller's workspace (`$AGENTDECK_WORKSPACE`) and pane (`$AGENTDECK_PANE`), and a task
 //! tool to the task that pane is linked to now.
+//!
+//! It starts outside a pane too, as it does for an agent the user started elsewhere with
+//! agentdeck in its own MCP config (`agentdeck mcp install`). A tool that needs the caller's
+//! pane then fails saying it isn't in one.
 
 use agentdeck_client::Client;
 use agentdeck_client::types::{NewComment, NewTask, TaskPatch};
@@ -26,6 +30,10 @@ pub async fn serve() -> anyhow::Result<()> {
     running.waiting().await?;
     Ok(())
 }
+
+/// Why a tool that needs the caller's pane can't run: an agent started outside agentdeck,
+/// with agentdeck in its own MCP config (spec §10).
+const NOT_IN_A_PANE: &str = "you aren't in an agentdeck pane (no $AGENTDECK_PANE)";
 
 /// Who is calling: the workspace and pane the agent runs in, when it runs in one.
 #[derive(Debug, Clone, Default)]
@@ -370,6 +378,10 @@ impl Server {
     )]
     async fn task_comment(&self, Parameters(args): Parameters<TaskComment>) -> ToolResult {
         respond(async {
+            // Without a pane the comment would be the user's, and go to the task's agent.
+            if self.caller.pane.is_none() {
+                anyhow::bail!("{NOT_IN_A_PANE}, so a comment from here would show as the user's");
+            }
             let client = daemon::connect().await?.client;
             let task = self.task(&client, args.task.as_deref(), "task").await?;
             let new = NewComment {

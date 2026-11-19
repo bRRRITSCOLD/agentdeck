@@ -311,8 +311,33 @@ mod agentdeck_mcp {
 
                 assert_eq!(result["isError"], true, "{tool}: {result}");
                 let message = result["content"][0]["text"].as_str().unwrap();
-                assert!(message.contains("name a task"), "{tool}: {message}");
+                assert!(
+                    message.contains("you aren't in an agentdeck pane"),
+                    "{tool}: {message}"
+                );
             }
+        }
+
+        #[test]
+        fn should_not_comment_as_the_user_outside_a_pane() {
+            let env = TestEnv::new();
+            let task = env.json(&["task", "add", "Fix the build"]);
+            let mut mcp = McpClient::start(&env, &[]);
+            mcp.initialize();
+
+            let result = mcp.call(
+                "task_comment",
+                json!({ "task": task["id"], "body": "PR opened" }),
+            );
+
+            assert_eq!(result["isError"], true, "{result}");
+            let message = result["content"][0]["text"].as_str().unwrap();
+            assert!(
+                message.contains("you aren't in an agentdeck pane"),
+                "{message}"
+            );
+            let comments = env.json(&["comment", "ls", "--task", text(&task, "id")]);
+            assert_eq!(comments, json!([]));
         }
 
         #[test]

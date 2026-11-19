@@ -736,3 +736,47 @@ pub struct GuiPatch {
     /// A new `gui.confirm_quit`.
     pub confirm_quit: Option<bool>,
 }
+
+/// `GET /v1/agents/mcp`, and what `PUT /v1/agents/mcp` answers: whether agentdeck's MCP server
+/// is in each agent CLI's own config, so agents the user starts in a shell pane have it too
+/// (spec §6, §11).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct McpRegistration {
+    /// The `agentdeck` CLI the entry runs as `<command> mcp`: the one beside agentdeckd, else
+    /// `agentdeck` from `PATH`, as the launch flags resolve it (spec §6).
+    pub command: String,
+    /// Claude Code: its user config, changed with `claude mcp add --scope user`.
+    pub claude: McpAgent,
+    /// Codex: `[mcp_servers.agentdeck]` in its `config.toml`.
+    pub codex: McpAgent,
+}
+
+/// Where agentdeck's MCP server stands in one agent CLI's config.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct McpAgent {
+    /// Whether the entry is there.
+    pub state: McpState,
+    /// The config file, with `~` for `$HOME`: `~/.claude.json` (or under `$CLAUDE_CONFIG_DIR`),
+    /// `~/.codex/config.toml` (or under `$CODEX_HOME`).
+    pub config: String,
+    /// Why the config couldn't be read (`unreadable`), or, from `PUT`, why adding the entry
+    /// failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Whether an agent CLI's config holds agentdeck's MCP server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum McpState {
+    /// The agent CLI isn't on agentdeckd's `PATH`; adding skips it.
+    NotInstalled,
+    /// No `agentdeck` entry.
+    Missing,
+    /// An `agentdeck` entry that runs another command; adding replaces it.
+    Outdated,
+    /// An entry that runs this `agentdeck mcp`.
+    Added,
+    /// The config couldn't be read or doesn't parse; `error` says why.
+    Unreadable,
+}

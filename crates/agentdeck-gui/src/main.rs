@@ -3,6 +3,7 @@
 //! `--version` prints the version. Otherwise it opens the main window, which connects to the
 //! daemon, starting `agentdeckd` when nothing answers (spec §2).
 
+mod agents_section;
 mod api;
 mod close_prs;
 mod connection;

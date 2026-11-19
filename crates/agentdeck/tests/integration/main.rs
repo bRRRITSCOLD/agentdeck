@@ -8,6 +8,7 @@ mod config;
 mod daemon;
 mod instruction;
 mod mcp;
+mod mcp_install;
 mod pr;
 mod support;
 mod task;

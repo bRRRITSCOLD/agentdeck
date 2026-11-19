@@ -9,8 +9,8 @@ use agentdeck_client::instructions;
 use agentdeck_client::panes::{self, pane_if_any};
 use agentdeck_client::types::{
     Comment, DeviceSignIn, DirtyReport, GithubAuthInfo, GithubClientIdBody, GithubTokenBody,
-    InstructionPatch, NewComment, NewInstruction, NewTask, NewWorkspace, Pane, PaneRun, PrClose,
-    PrCloseResult, Settings, SettingsPatch, Tab, TaskPatch,
+    InstructionPatch, McpRegistration, NewComment, NewInstruction, NewTask, NewWorkspace, Pane,
+    PaneRun, PrClose, PrCloseResult, Settings, SettingsPatch, Tab, TaskPatch,
 };
 use agentdeck_client::{ApiError, Client};
 use agentdeck_core::{
@@ -182,6 +182,13 @@ pub trait Api: Send + Sync {
 
     /// Cancels the sign-in running, if any.
     fn cancel_sign_in(&self, cx: &App) -> Task<anyhow::Result<()>>;
+
+    /// Whether agentdeck's MCP server is in Claude Code's and Codex's own config.
+    fn mcp_registration(&self, cx: &App) -> Task<anyhow::Result<McpRegistration>>;
+
+    /// Adds agentdeck's MCP server to Claude Code and Codex where it isn't yet; answers with
+    /// where it stands after, `error` on an agent it couldn't be added to.
+    fn add_mcp(&self, cx: &App) -> Task<anyhow::Result<McpRegistration>>;
 }
 
 pub use agentdeck_client::panes::PaneAt;
@@ -577,6 +584,22 @@ impl Api for Daemon {
             Ok(())
         })
     }
+
+    fn mcp_registration(&self, cx: &App) -> Task<anyhow::Result<McpRegistration>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            let read = (client.agents_mcp_get().send().await).map_err(ApiError::from)?;
+            Ok(read.into_inner())
+        })
+    }
+
+    fn add_mcp(&self, cx: &App) -> Task<anyhow::Result<McpRegistration>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            let added = (client.agents_mcp_install().send().await).map_err(ApiError::from)?;
+            Ok(added.into_inner())
+        })
+    }
 }
 
 /// Reads a [`WorkspacePanes`]: the tabs, then each pane in their layouts, then each task
@@ -689,6 +712,25 @@ pub(crate) mod fake {
         }
     }
 
+    /// agentdeck in neither Claude Code's config nor Codex's, both installed.
+    pub fn mcp_missing() -> McpRegistration {
+        use agentdeck_client::types::{McpAgent, McpState};
+
+        McpRegistration {
+            command: "/opt/agentdeck/bin/agentdeck".into(),
+            claude: McpAgent {
+                state: McpState::Missing,
+                config: "~/.claude.json".into(),
+                error: None,
+            },
+            codex: McpAgent {
+                state: McpState::Missing,
+                config: "~/.codex/config.toml".into(),
+                error: None,
+            },
+        }
+    }
+
     /// No token from any source and no client ID.
     pub fn signed_out() -> GithubAuthInfo {
         GithubAuthInfo {
@@ -788,6 +830,12 @@ pub(crate) mod fake {
         pub sign_ins: Mutex<usize>,
         /// How many sign-ins were cancelled.
         pub cancelled_sign_ins: Mutex<usize>,
+        /// Where agentdeck's MCP server stands; in neither agent when unset.
+        mcp: Mutex<Option<McpRegistration>>,
+        /// What adding it answers; both added when unset.
+        mcp_added: Mutex<Option<McpRegistration>>,
+        /// How many times agentdeck's MCP server was added.
+        pub mcp_adds: Mutex<usize>,
     }
 
     impl FakeApi {
@@ -925,6 +973,20 @@ pub(crate) mod fake {
             if let Some(w) = snapshot.workspaces.iter_mut().find(|w| w.id == workspace) {
                 w.archived_at = archived.then(|| "2026-11-14T00:00:00Z".to_owned());
             }
+        }
+
+        /// Where agentdeck's MCP server stands now.
+        pub fn mcp_now(&self) -> McpRegistration {
+            self.mcp.lock().unwrap().clone().unwrap_or_else(mcp_missing)
+        }
+
+        pub fn set_mcp(&self, registration: McpRegistration) {
+            *self.mcp.lock().unwrap() = Some(registration);
+        }
+
+        /// Makes adding answer `registration`, as the daemon does when an agent failed.
+        pub fn set_mcp_added(&self, registration: McpRegistration) {
+            *self.mcp_added.lock().unwrap() = Some(registration);
         }
 
         /// The scripted failure, if any, taking it.
@@ -1516,6 +1578,33 @@ pub(crate) mod fake {
         fn cancel_sign_in(&self, _cx: &App) -> Task<anyhow::Result<()>> {
             *self.cancelled_sign_ins.lock().unwrap() += 1;
             Task::ready(Ok(()))
+        }
+
+        fn mcp_registration(&self, _cx: &App) -> Task<anyhow::Result<McpRegistration>> {
+            Task::ready(Ok(self.mcp_now()))
+        }
+
+        fn add_mcp(&self, _cx: &App) -> Task<anyhow::Result<McpRegistration>> {
+            use agentdeck_client::types::McpState;
+
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            *self.mcp_adds.lock().unwrap() += 1;
+            let added = self.mcp_added.lock().unwrap().clone().unwrap_or_else(|| {
+                let mut added = self.mcp_now();
+                for agent in [&mut added.claude, &mut added.codex] {
+                    if agent.state != McpState::NotInstalled {
+                        agent.state = McpState::Added;
+                    }
+                }
+                added
+            });
+            let mut now = added.clone();
+            now.claude.error = None;
+            now.codex.error = None;
+            self.set_mcp(now);
+            Task::ready(Ok(added))
         }
     }
 }

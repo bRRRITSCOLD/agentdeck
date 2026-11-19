@@ -53,8 +53,25 @@ pub enum Command {
         #[arg(long, value_name = "N")]
         bytes: Option<u64>,
     },
-    /// Serve MCP over stdin and stdout.
-    Mcp,
+    /// Serve MCP over stdin and stdout; `mcp install` adds this server to your agents' config.
+    Mcp {
+        /// What to do instead of serving.
+        #[command(subcommand)]
+        command: Option<McpCommand>,
+    },
+}
+
+/// `agentdeck mcp …`.
+#[derive(Debug, Subcommand)]
+pub enum McpCommand {
+    /// Add agentdeck's MCP server to Claude Code's and Codex's own config, so agents you start
+    /// yourself in a shell pane have its tools. Shows what it changes and asks first; running
+    /// it again changes nothing.
+    Install {
+        /// Add it without asking.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 /// `agentdeck daemon …`.
