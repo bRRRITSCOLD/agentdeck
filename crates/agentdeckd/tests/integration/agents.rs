@@ -532,6 +532,31 @@ mod comment_delivery {
     }
 
     #[tokio::test]
+    async fn should_go_only_to_the_newest_of_two_agents_linked_after_they_started() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
+        let older = place.launch(&daemon.client, Agent::Claude, None).await;
+        let newer = place.launch(&daemon.client, Agent::Claude, None).await;
+        for pane in [older.id, newer.id] {
+            in_state(&daemon.client, pane, AgentState::Idle).await;
+            link(&daemon.client, pane, Some(task.id)).await;
+        }
+
+        let created = comment(&daemon.client, &task, "Also check Firefox", None).await;
+
+        delivered_to(&daemon.client, task.id, created.id, newer.id).await;
+        assert_eq!(
+            typed_through_marker(&daemon, newer.id).await,
+            format!("{}Also check Firefox\nmarker\n", task_brief(&task))
+        );
+        assert_eq!(
+            typed_through_marker(&daemon, older.id).await,
+            format!("{}marker\n", task_brief(&task))
+        );
+    }
+
+    #[tokio::test]
     async fn should_type_the_task_then_its_waiting_comments_into_an_agent_linked_to_it() {
         let daemon = TestDaemon::start().await;
         let place = Place::new(&daemon).await;

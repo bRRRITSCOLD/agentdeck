@@ -14,7 +14,7 @@ use agentdeck_core::{Agent, AgentState, CommentAuthor, PaneId, PaneKind, TaskId}
 
 use crate::support::TestDaemon;
 use crate::support::agents::{launches, task_brief, typed};
-use crate::support::terminal::{Place, eventually, in_state, printed};
+use crate::support::terminal::{Place, eventually, holds_for, in_state, printed};
 use crate::support::ws::{Frame, Ws};
 
 /// An interactive `sh` pane, at its prompt.
@@ -308,6 +308,133 @@ mod comment_delivery {
         .await;
         let delivered = read_comment(&daemon.client, task.id, &held).await;
         assert_eq!(delivered.delivered_to_pane, Some(pane.id));
+    }
+
+    /// A shell pane hosting claude, linked to `task` and told it.
+    async fn hosting_on_task(daemon: &TestDaemon, place: &Place, task: &Task) -> Pane {
+        let pane = shell(daemon, place).await;
+        run(&daemon.client, pane.id, "claude").await;
+        hosting(&daemon.client, pane.id, Some(Agent::Claude)).await;
+        link(&daemon.client, pane.id, task.id).await;
+        submitted(daemon, pane.id, &task_brief(task)).await;
+        pane
+    }
+
+    /// A launched claude pane, linked to `task` and told it.
+    async fn launched_on_task(daemon: &TestDaemon, place: &Place, task: &Task) -> Pane {
+        let pane = place.launch(&daemon.client, Agent::Claude, None).await;
+        in_state(&daemon.client, pane.id, AgentState::Idle).await;
+        link(&daemon.client, pane.id, task.id).await;
+        submitted(daemon, pane.id, &task_brief(task)).await;
+        pane
+    }
+
+    /// Adds a comment to `task` and checks that only `newest` has it typed in, and that
+    /// `older` keeps only the task's brief.
+    async fn reaches_only(daemon: &TestDaemon, task: &Task, newest: PaneId, older: PaneId) {
+        let new = comment(&daemon.client, task.id, "Then open the PR", None).await;
+
+        submitted(
+            daemon,
+            newest,
+            &format!("{}Then open the PR\n", task_brief(task)),
+        )
+        .await;
+        // Long past the 400 ms an agent's state takes to settle: the older agent would have it.
+        holds_for(
+            "the older agent to have only its task",
+            Duration::from_millis(1_500),
+            || async { typed(daemon, older) == task_brief(task) },
+        )
+        .await;
+        let delivered = read_comment(&daemon.client, task.id, &new).await;
+        assert_eq!(delivered.delivered_to_pane, Some(newest));
+    }
+
+    #[tokio::test]
+    async fn should_type_a_new_comment_only_into_the_newest_of_two_hosted_agents() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let task = task(&daemon.client, &place, "Fix it").await;
+        let older = hosting_on_task(&daemon, &place, &task).await;
+        let newer = hosting_on_task(&daemon, &place, &task).await;
+
+        reaches_only(&daemon, &task, newer.id, older.id).await;
+    }
+
+    #[tokio::test]
+    async fn should_type_a_new_comment_only_into_the_newest_of_two_shells_linked_before_hosting() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let task = task(&daemon.client, &place, "Fix it").await;
+        let older = shell(&daemon, &place).await;
+        let newer = shell(&daemon, &place).await;
+        for pane in [older.id, newer.id] {
+            link(&daemon.client, pane, task.id).await;
+        }
+        // The newer pane's agent starts first: newest goes by the pane, not by its agent.
+        for pane in [newer.id, older.id] {
+            run(&daemon.client, pane, "claude").await;
+            submitted(&daemon, pane, &task_brief(&task)).await;
+        }
+
+        reaches_only(&daemon, &task, newer.id, older.id).await;
+    }
+
+    #[tokio::test]
+    async fn should_hold_a_new_comment_for_the_newest_hosted_agent_while_it_is_blocked() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let task = task(&daemon.client, &place, "Fix it").await;
+        let older = hosting_on_task(&daemon, &place, &task).await;
+        let untrusted = std::path::Path::new(&place.workspace.dir).join("untrusted");
+        std::fs::write(&untrusted, "").expect("marking the folder untrusted");
+        let newer = shell(&daemon, &place).await;
+        link(&daemon.client, newer.id, task.id).await;
+        run(&daemon.client, newer.id, "claude").await;
+        in_state(&daemon.client, newer.id, AgentState::Blocked).await;
+        std::fs::remove_file(&untrusted).expect("trusting the folder");
+
+        let new = comment(&daemon.client, task.id, "Then open the PR", None).await;
+        holds_for(
+            "the older agent to have only its task",
+            Duration::from_millis(1_500),
+            || async { typed(&daemon, older.id) == task_brief(&task) },
+        )
+        .await;
+        input(&daemon.client, newer.id, "\r", false).await;
+
+        submitted(
+            &daemon,
+            newer.id,
+            &format!("{}Then open the PR\n", task_brief(&task)),
+        )
+        .await;
+        let delivered = read_comment(&daemon.client, task.id, &new).await;
+        assert_eq!(delivered.delivered_to_pane, Some(newer.id));
+        assert_eq!(typed(&daemon, older.id), task_brief(&task));
+    }
+
+    #[tokio::test]
+    async fn should_type_a_new_comment_only_into_a_hosted_agent_newer_than_a_launched_one() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let task = task(&daemon.client, &place, "Fix it").await;
+        let older = launched_on_task(&daemon, &place, &task).await;
+        let newer = hosting_on_task(&daemon, &place, &task).await;
+
+        reaches_only(&daemon, &task, newer.id, older.id).await;
+    }
+
+    #[tokio::test]
+    async fn should_type_a_new_comment_only_into_a_launched_agent_newer_than_a_hosted_one() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let task = task(&daemon.client, &place, "Fix it").await;
+        let older = hosting_on_task(&daemon, &place, &task).await;
+        let newer = launched_on_task(&daemon, &place, &task).await;
+
+        reaches_only(&daemon, &task, newer.id, older.id).await;
     }
 
     #[tokio::test]
