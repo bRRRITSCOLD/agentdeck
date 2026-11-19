@@ -86,6 +86,20 @@ async fn delivered_to(client: &Client, task: TaskId, id: CommentId, pane: PaneId
     .await
 }
 
+/// Launches an agent of `agent` on `task` and has it exit at its prompt.
+async fn exited_agent(daemon: &TestDaemon, place: &Place, agent: Agent, task: &Task) -> Pane {
+    let pane = place.launch(&daemon.client, agent, Some(task.id)).await;
+    // Each stub sets its title once it reads what is typed; the codex stub never idles.
+    let title = match agent {
+        Agent::Claude => "\u{1b}]0;\u{2733} Claude Code",
+        _ => "\u{1b}]0;codex",
+    };
+    printed(&daemon.client, pane.id, title).await;
+    submit_now(&daemon.client, pane.id, "/exit").await;
+    in_state(&daemon.client, pane.id, AgentState::Exited).await;
+    pane
+}
+
 /// Links `pane` to `task`, or unlinks it.
 async fn link(client: &Client, pane: PaneId, task: Option<TaskId>) {
     client
@@ -1044,6 +1058,29 @@ mod resume_as_a_shell {
     }
 }
 
+mod patch_v1_panes_id {
+    use super::*;
+
+    #[tokio::test]
+    async fn should_unlink_an_agent_pane_whose_agent_exited_200() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
+        let pane = exited_agent(&daemon, &place, Agent::Claude, &task).await;
+
+        let response = (daemon.client.pane_update().id(pane.id))
+            .body(PanePatch { task_id: None })
+            .send()
+            .await
+            .expect("unlink");
+
+        assert_eq!(response.status().as_u16(), 200);
+        let unlinked = response.into_inner();
+        assert_eq!(unlinked.task_id, None);
+        assert_eq!(unlinked.state, AgentState::Exited);
+    }
+}
+
 mod post_v1_panes_id_respawn {
     use agentdeck_client::types::{PaneRespawn, PaneRun};
 
@@ -1072,20 +1109,6 @@ mod post_v1_panes_id_respawn {
                 .await,
         );
         (status, body.error_code)
-    }
-
-    /// Launches an agent of `agent` on `task` and has it exit at its prompt.
-    async fn exited_agent(daemon: &TestDaemon, place: &Place, agent: Agent, task: &Task) -> Pane {
-        let pane = place.launch(&daemon.client, agent, Some(task.id)).await;
-        // Each stub sets its title once it reads what is typed; the codex stub never idles.
-        let title = match agent {
-            Agent::Claude => "\u{1b}]0;\u{2733} Claude Code",
-            _ => "\u{1b}]0;codex",
-        };
-        printed(&daemon.client, pane.id, title).await;
-        submit_now(&daemon.client, pane.id, "/exit").await;
-        in_state(&daemon.client, pane.id, AgentState::Exited).await;
-        pane
     }
 
     #[tokio::test]

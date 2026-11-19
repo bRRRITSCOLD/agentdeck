@@ -10,7 +10,8 @@
 //! shell from its `NewTab` button or shortcut, and carries out each pane menu's
 //! [`PaneRequest`], or the same request by shortcut on the focused pane. Closing a pane that is
 //! still running asks first. Linking an agent pane to a task goes up to the window as
-//! [`LinkPane`], since the window holds the workspace's tasks. Restart agent and Open shell
+//! [`LinkPane`], since the window holds the workspace's tasks; unlinking any linked pane
+//! happens here. Restart agent and Open shell
 //! start an exited agent pane again in place; its view is made afresh, so it attaches the new
 //! process. A workspace with no tabs when it opens gets a shell tab.
 //!
@@ -251,6 +252,15 @@ impl WorkspaceView {
                     tab,
                 });
             }
+            PaneRequest::UnlinkTask => {
+                let Some(task) = pane.task_id else {
+                    return;
+                };
+                let title = (self.read.tasks.iter())
+                    .find(|t| t.id == task)
+                    .map_or_else(|| "the task".to_owned(), |t| t.title.clone());
+                self.unlink_task(pane.id, title, window, cx);
+            }
             PaneRequest::RestartAgent => {
                 let Some(agent) = crate::pane::exited_agent(pane) else {
                     return;
@@ -272,6 +282,26 @@ impl WorkspaceView {
                 );
             }
         }
+    }
+
+    /// Unlinks `pane` from its task, titled `title`, and says so; a failure toasts why. The
+    /// header drops the task once the daemon's `changed` brings the pane back unlinked.
+    fn unlink_task(
+        &mut self,
+        pane: PaneId,
+        title: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let unlinking = self.api.link_task(pane, None, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let unlinked = unlinking.await;
+            let _ = this.update_in(cx, |_, window, cx| match unlinked {
+                Ok(()) => Notice::new(format!("Unlinked {title}")).show(window, cx),
+                Err(err) => failed(format!("Couldn't unlink {title}"), &err, window, cx),
+            });
+        })
+        .detach();
     }
 
     /// Starts exited `pane` again in place running `run`, then shows it afresh and focuses
@@ -1624,6 +1654,112 @@ mod tests {
             #[gpui::test]
             fn should_ask_nothing_for_a_shell(cx: &mut TestAppContext) {
                 assert!(ask(shell_pane(7, id(1)), cx).is_empty());
+            }
+        }
+
+        mod unlink_task {
+            use agentdeck_client::types::Task as LinkedTask;
+            use agentdeck_core::{Agent, PaneKind, TaskStatus};
+
+            use super::*;
+
+            /// A window showing `pane`, linked to `linked`, with the task's title read.
+            fn linked(
+                pane: Pane,
+                linked: LinkedTask,
+                cx: &mut TestAppContext,
+            ) -> (Harness, &mut VisualTestContext) {
+                let pane = Pane {
+                    task_id: Some(linked.id),
+                    ..pane
+                };
+                let (harness, cx) =
+                    Harness::open(vec![tab(1, id(1), 0, Some(id(7)))], vec![pane], cx);
+                harness.api.set_tasks(vec![linked]);
+                harness.changed(Changed::Task, cx);
+                (harness, cx)
+            }
+
+            /// A shell pane, 7, linked to task 30.
+            fn linked_shell(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
+                linked(
+                    shell_pane(7, id(1)),
+                    task(30, TaskKind::Plain, Some(id(1))),
+                    cx,
+                )
+            }
+
+            fn exited_agent() -> Pane {
+                Pane {
+                    kind: PaneKind::Agent,
+                    agent: Some(Agent::Claude),
+                    state: AgentState::Exited,
+                    exit_code: Some(0),
+                    ..shell_pane(7, id(1))
+                }
+            }
+
+            fn last_toast(cx: &mut VisualTestContext) -> crate::notice::Notice {
+                let shown = cx.update(|_, cx| crate::notice::shown(cx));
+                shown.last().cloned().expect("a toast")
+            }
+
+            #[gpui::test]
+            fn should_unlink_the_pane_and_say_so(cx: &mut TestAppContext) {
+                let (harness, cx) = linked_shell(cx);
+
+                harness.request(0, PaneRequest::UnlinkTask, cx);
+
+                assert_eq!(*harness.api.linked.lock().unwrap(), [(id(7), None)]);
+                let toast = last_toast(cx);
+                assert_eq!(toast.title, "Unlinked task 30");
+                assert_eq!(toast.description, None);
+            }
+
+            #[gpui::test]
+            fn should_unlink_an_exited_agent_from_a_done_task(cx: &mut TestAppContext) {
+                let done = LinkedTask {
+                    status: TaskStatus::Done,
+                    ..task(30, TaskKind::Plain, Some(id(1)))
+                };
+                let (harness, cx) = linked(exited_agent(), done, cx);
+
+                harness.request(0, PaneRequest::UnlinkTask, cx);
+
+                assert_eq!(*harness.api.linked.lock().unwrap(), [(id(7), None)]);
+                assert_eq!(last_toast(cx).title, "Unlinked task 30");
+            }
+
+            #[gpui::test]
+            fn should_drop_the_task_from_the_header_once_the_pane_reads_back_unlinked(
+                cx: &mut TestAppContext,
+            ) {
+                let (harness, cx) = linked_shell(cx);
+
+                harness.request(0, PaneRequest::UnlinkTask, cx);
+                harness.changed(Changed::Pane, cx);
+
+                let task = harness
+                    .pane(0, cx)
+                    .read_with(cx, |pane, _| pane.task().cloned());
+                assert_eq!(task, None);
+                harness.draw(cx);
+            }
+
+            #[gpui::test]
+            fn should_say_why_it_could_not_unlink(cx: &mut TestAppContext) {
+                let (harness, cx) = linked_shell(cx);
+                harness.api.fail_next("pane 7 is gone");
+
+                harness.request(0, PaneRequest::UnlinkTask, cx);
+
+                let toast = last_toast(cx);
+                assert_eq!(toast.title, "Couldn't unlink task 30");
+                assert_eq!(toast.description.as_deref(), Some("pane 7 is gone"));
+                let task = harness
+                    .pane(0, cx)
+                    .read_with(cx, |pane, _| pane.task().cloned());
+                assert_eq!(task.as_deref(), Some("task 30"), "the link stays shown");
             }
         }
 

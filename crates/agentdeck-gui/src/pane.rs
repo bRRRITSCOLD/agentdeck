@@ -2,9 +2,9 @@
 //!
 //! The header's title is the terminal's live one, then the one read over REST, then a name
 //! for what runs there. Its state follows the daemon's `state` and `exit` broadcasts between
-//! reads. Its menu asks the workspace holding it for a split, a close, its id copied or, for
-//! an agent, a link to a task, as a [`PaneRequest`]: only the workspace knows the tab's
-//! layout.
+//! reads. Its menu asks the workspace holding it for a split, a close, its id copied, for an
+//! agent, a link to a task or, for a pane linked to one, an unlink, as a [`PaneRequest`]: only
+//! the workspace knows the tab's layout.
 //!
 //! A shell pane hosting an agent (spec §3, §7) is an agent pane for all of that, and its
 //! header says "in shell" (Penpot "Screens" → "Pane · hosted agent"). Once the agent leaves,
@@ -93,6 +93,8 @@ pub enum PaneRequest {
     Close,
     /// Link the agent in it to a task, or unlink it: agent panes only.
     LinkTask,
+    /// Unlink it from its task: every pane linked to one.
+    UnlinkTask,
     /// Run its agent again: exited agent panes only.
     RestartAgent,
     /// Turn it into a shell: exited agent panes only.
@@ -114,7 +116,8 @@ pub fn header_actions(pane: &Pane) -> Vec<(&'static str, PaneRequest)> {
 }
 
 /// The menu items before the separator and Close pane for `pane`: the splits, then, for an
-/// agent pane or a shell pane hosting an agent, Link to task, then Copy pane id.
+/// agent pane or a shell pane hosting an agent, Link to task, then, for any pane linked to a
+/// task, Unlink task, then Copy pane id.
 pub fn menu_items(pane: &Pane) -> Vec<(&'static str, IconName, PaneRequest)> {
     let mut items = vec![
         (
@@ -130,6 +133,9 @@ pub fn menu_items(pane: &Pane) -> Vec<(&'static str, IconName, PaneRequest)> {
     ];
     if running_agent(pane).is_some() {
         items.push(("Link to task", IconName::Link, PaneRequest::LinkTask));
+    }
+    if pane.task_id.is_some() {
+        items.push(("Unlink task", IconName::Unlink, PaneRequest::UnlinkTask));
     }
     items.push(("Copy pane id", IconName::Copy, PaneRequest::CopyId));
     items
@@ -427,6 +433,64 @@ mod tests {
                 labels(&exited(Agent::Claude)),
                 ["Split right", "Split down", "Copy pane id"]
             );
+        }
+
+        mod linked_to_a_task {
+            use super::*;
+
+            fn linked(pane: Pane) -> Pane {
+                Pane {
+                    task_id: Some(id(30)),
+                    ..pane
+                }
+            }
+
+            #[test]
+            fn should_offer_unlink_task_after_link_to_task_for_a_running_agent() {
+                let pane = linked(agent_pane(Agent::Claude));
+
+                assert_eq!(
+                    labels(&pane),
+                    [
+                        "Split right",
+                        "Split down",
+                        "Link to task",
+                        "Unlink task",
+                        "Copy pane id"
+                    ]
+                );
+                assert_eq!(menu_items(&pane)[3].2, PaneRequest::UnlinkTask);
+            }
+
+            #[test]
+            fn should_offer_unlink_task_for_a_shell_hosting_an_agent() {
+                assert_eq!(
+                    labels(&linked(hosting(Agent::Claude))),
+                    [
+                        "Split right",
+                        "Split down",
+                        "Link to task",
+                        "Unlink task",
+                        "Copy pane id"
+                    ]
+                );
+            }
+
+            #[test]
+            fn should_offer_unlink_task_for_a_shell_hosting_none() {
+                assert_eq!(
+                    labels(&linked(shell_pane(1, id(1)))),
+                    ["Split right", "Split down", "Unlink task", "Copy pane id"]
+                );
+            }
+
+            #[test]
+            fn should_offer_unlink_task_once_the_agent_exited() {
+                assert_eq!(
+                    labels(&linked(exited(Agent::Codex))),
+                    ["Split right", "Split down", "Unlink task", "Copy pane id"]
+                );
+            }
         }
     }
 
