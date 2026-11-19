@@ -459,6 +459,51 @@ mod patch_v1_panes_id {
     }
 
     #[tokio::test]
+    async fn should_unlink_a_pane_whose_process_has_exited_200() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let task = task(&daemon, Some(place.workspace.id)).await;
+        let mut new = place.new_pane(&sh("exit 3"));
+        new.task_id = Some(task.id);
+        let pane = (daemon.client.pane_create().body(new).send().await).expect("spawn");
+        in_state(&daemon.client, pane.id, AgentState::Exited).await;
+
+        let unlinked = link(&daemon, pane.id, None).send().await.expect("unlink");
+
+        assert_eq!(unlinked.status().as_u16(), 200);
+        assert_eq!(unlinked.into_inner().task_id, None);
+        let read = (daemon.client.pane_get().id(pane.id).send().await).expect("read");
+        assert_eq!(read.into_inner().task_id, None);
+    }
+
+    #[tokio::test]
+    async fn should_unlink_a_pane_from_a_task_done_since_200() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let pane = place.spawn(&daemon.client, &sh("sleep 60")).await;
+        let task = task(&daemon, Some(place.workspace.id)).await;
+        link(&daemon, pane.id, Some(task.id))
+            .send()
+            .await
+            .expect("link");
+        daemon
+            .client
+            .task_update()
+            .id(task.id)
+            .body(TaskPatch {
+                status: Some(TaskStatus::Done),
+                ..TaskPatch::default()
+            })
+            .send()
+            .await
+            .expect("finish the task");
+
+        let unlinked = link(&daemon, pane.id, None).send().await.expect("unlink");
+
+        assert_eq!(unlinked.into_inner().task_id, None);
+    }
+
+    #[tokio::test]
     async fn should_send_changed_for_the_pane_and_its_old_and_new_task_200() {
         let daemon = TestDaemon::start().await;
         let place = Place::new(&daemon).await;

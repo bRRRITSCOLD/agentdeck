@@ -497,6 +497,33 @@ mod authorship {
     }
 }
 
+mod unlink {
+    use super::*;
+
+    #[tokio::test]
+    async fn should_unlink_the_shell_once_its_hosted_agent_exited_200() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let pane = shell(&daemon, &place).await;
+        let task = task(&daemon.client, &place, "Fix it").await;
+        link(&daemon.client, pane.id, task.id).await;
+        run(&daemon.client, pane.id, "claude").await;
+        hosting(&daemon.client, pane.id, Some(Agent::Claude)).await;
+        exit_agent(&daemon.client, pane.id).await;
+        hosting(&daemon.client, pane.id, None).await;
+
+        let response = (daemon.client.pane_update().id(pane.id))
+            .body(PanePatch { task_id: None })
+            .send()
+            .await
+            .expect("unlink");
+
+        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(response.into_inner().task_id, None);
+        assert_eq!(read(&daemon.client, pane.id).await.task_id, None);
+    }
+}
+
 mod resume_after_restart {
     use super::*;
 
