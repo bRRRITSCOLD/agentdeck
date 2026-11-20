@@ -97,6 +97,38 @@ mod starting_the_daemon {
     }
 
     #[test]
+    fn should_fail_without_starting_another_when_a_live_daemon_refuses_connections() {
+        let env = TestEnv::new();
+        // A live daemon this process can't connect to, as from inside a sandbox with no
+        // network: its pid runs and it holds the lock.
+        let _lock = env.hold_lock();
+        let mut stand_in = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("running sleep");
+        let unreachable = stale_info(stand_in.id());
+        env.write_daemon_info(&unreachable);
+
+        let run = env.run(&["ws", "ls"]);
+        let info = env.daemon_info();
+        let _ = stand_in.kill();
+        let _ = stand_in.wait();
+
+        assert!(!run.success, "agentdeck succeeded without a daemon");
+        assert!(
+            run.stderr.contains(&format!(
+                "agentdeckd is running (pid {}) but this process can't connect to 127.0.0.1:{}",
+                unreachable.pid, unreachable.port
+            )),
+            "{}",
+            run.stderr
+        );
+        assert!(run.stderr.contains("MCP tools"), "{}", run.stderr);
+        assert_eq!(info, Some(unreachable), "daemon.json was rewritten");
+        assert_eq!(env.daemon_log(), "", "another agentdeckd was started");
+    }
+
+    #[test]
     fn should_fail_when_the_daemon_exits_before_serving() {
         let env = TestEnv::new();
         let false_bin = OsString::from("/bin/false");
@@ -206,11 +238,13 @@ mod connecting_while_a_killed_daemon_exits {
             .spawn()
             .expect("running agentdeck");
 
-        eventually("the started daemon to wait for the lock", || {
-            let waiting = env.daemon_log().contains("waiting for the agentdeckd");
-            let gave_up = cli.try_wait().expect("polling agentdeck").is_some();
-            (waiting || gave_up).then_some(())
-        });
+        // The client gives a live daemon it can't reach 2 s to exit before it gives up; the
+        // killed one lets go of the lock well within that.
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            cli.try_wait().expect("polling agentdeck").is_none(),
+            "agentdeck gave up while the killed daemon still held its lock"
+        );
         drop(lock);
         let run = Run::from(cli.wait_with_output().expect("waiting on agentdeck"));
 
@@ -292,25 +326,28 @@ mod connecting_to_a_daemon_that_never_answers {
     }
 
     #[test]
-    fn should_fail_once_the_silent_daemon_keeps_its_lock_for_10s() {
+    fn should_fail_without_starting_another_while_the_silent_daemon_holds_its_lock() {
         let env = TestEnv::new();
         let _lock = env.hold_lock();
         let (mut stand_in, silent) = silent_daemon();
         env.write_daemon_info(&silent);
 
-        // 1 s for the client's probe, the started daemon's 10 s wait for the lock, then the
-        // client's 2 s grace, with room to spare.
-        let run = ws_ls_within(&env, Duration::from_secs(30));
+        // 1 s for each probe, through the client's 2 s wait for the silent daemon to exit,
+        // with room to spare.
+        let run = ws_ls_within(&env, Duration::from_secs(10));
         let _ = stand_in.kill();
         let _ = stand_in.wait();
 
         assert!(!run.success, "agentdeck succeeded against a silent daemon");
-        assert!(run.stderr.contains("exited"), "{}", run.stderr);
         assert!(
-            env.daemon_log().contains("hasn't exited after 10s"),
+            run.stderr.contains(&format!(
+                "agentdeckd is running (pid {}) but this process can't connect to 127.0.0.1:{}",
+                silent.pid, silent.port
+            )),
             "{}",
-            env.daemon_log()
+            run.stderr
         );
+        assert_eq!(env.daemon_log(), "", "another agentdeckd was started");
     }
 }
 

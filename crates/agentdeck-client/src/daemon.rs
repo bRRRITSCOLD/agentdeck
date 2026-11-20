@@ -1,10 +1,13 @@
 //! Reaching the daemon (spec §2): read `daemon.json`, and start `agentdeckd` detached when
-//! nothing answers there. The CLI and the GUI both connect through [`connect`], and
+//! no daemon runs there. A live daemon this process can't connect to, as from inside a
+//! sandbox with no network, is an error rather than a reason to start another. The CLI, its
+//! MCP server and the GUI all connect through [`connect`], and
 //! [`restart`] replaces a daemon older than them. A daemon a client starts is its child, so a
 //! thread waits on it and reaps it whenever it exits: a long-lived client such as the GUI
 //! never keeps it as a zombie.
 
 use std::ffi::OsString;
+use std::fs::{File, TryLockError};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -38,6 +41,10 @@ const POLL: Duration = Duration::from_millis(25);
 /// How long the daemon in `daemon.json` gets to answer `/v1/health`, as the daemon's own check
 /// gives it (spec §2). A stopped or hung daemon still accepts connections and never answers.
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// How long a live daemon that holds the lock but can't be reached gets to exit, as one that
+/// was killed does while the kernel closes its files, before [`connect`] gives up on it.
+const HOLDER_EXIT_GRACE: Duration = Duration::from_secs(2);
 
 /// The running daemon: a client for its API, and the `daemon.json` it was reached through,
 /// whose port and token also open its WebSocket.
@@ -100,6 +107,21 @@ pub enum DaemonError {
         /// The daemon's pid.
         pid: u32,
     },
+    /// `daemon.json` names a live daemon that holds the lock, and this process can't reach it.
+    /// Another daemon couldn't start beside it, so none is started.
+    #[error(
+        "agentdeckd is running (pid {pid}) but this process can't connect to 127.0.0.1:{port} \
+         ({why}). A sandbox may block local network; in an agent, use agentdeck's MCP tools \
+         instead"
+    )]
+    Unreachable {
+        /// The running daemon's pid.
+        pid: u32,
+        /// The port `daemon.json` gives.
+        port: u16,
+        /// Why the health check failed: the innermost error, or that it timed out.
+        why: String,
+    },
     /// The started `agentdeckd` is still running but never answered.
     #[error("{} didn't write {} in {START_TIMEOUT:?}", program.display(), daemon_json.display())]
     Timeout {
@@ -110,12 +132,30 @@ pub enum DaemonError {
     },
 }
 
-/// The running daemon, started first if nothing answers at `daemon.json`. Polls with
-/// `tokio::time`, so it runs inside a tokio runtime.
+/// The running daemon, started first when none runs at `daemon.json`. A live daemon there
+/// that holds the lock but can't be reached gets 2 s to exit, then is
+/// [`DaemonError::Unreachable`]. Polls with `tokio::time`, so it runs inside a tokio runtime.
 pub async fn connect() -> Result<Daemon, DaemonError> {
     let daemon_json = daemon_json(std::env::var_os("XDG_RUNTIME_DIR"))?;
-    if let Some(daemon) = reachable(&daemon_json).await {
-        return Ok(daemon);
+    let deadline = Instant::now() + HOLDER_EXIT_GRACE;
+    loop {
+        match probe(&daemon_json).await {
+            Probe::Serves(daemon) => return Ok(daemon),
+            Probe::NoDaemon => break,
+            Probe::Unreachable { info, why } => {
+                if !holds_lock(&daemon_json.with_file_name("lock")) {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    return Err(DaemonError::Unreachable {
+                        pid: info.pid,
+                        port: info.port,
+                        why,
+                    });
+                }
+            }
+        }
+        tokio::time::sleep(POLL).await;
     }
     let program = program(
         std::env::var_os(DAEMON_VAR),
@@ -205,20 +245,75 @@ fn program(
         .unwrap_or_else(|| "agentdeckd".into())
 }
 
-/// The daemon, when `daemon.json` names a live process that answers `/v1/health` within
-/// [`HEALTH_TIMEOUT`]. A missing or unreadable file, a dead pid, a refused connection and no
-/// answer in time all mean no daemon.
-async fn reachable(daemon_json: &Path) -> Option<Daemon> {
-    let info = read(daemon_json)?;
+/// What `daemon.json` leads to.
+enum Probe {
+    /// A daemon that answers `/v1/health`.
+    Serves(Daemon),
+    /// A missing or unreadable file, or a pid that isn't running.
+    NoDaemon,
+    /// A live pid that doesn't answer `/v1/health` within [`HEALTH_TIMEOUT`]: a refused
+    /// connection, one a sandbox forbids, or no answer in time.
+    Unreachable {
+        /// What `daemon.json` held.
+        info: DaemonInfo,
+        /// Why it didn't answer.
+        why: String,
+    },
+}
+
+/// Reads `daemon_json` and asks the live daemon it names for `/v1/health`.
+async fn probe(daemon_json: &Path) -> Probe {
+    let Some(info) = read(daemon_json) else {
+        return Probe::NoDaemon;
+    };
     if !alive(info.pid) {
-        return None;
+        return Probe::NoDaemon;
     }
-    let client = crate::authenticated(&info.base_url(), &info.token).ok()?;
-    tokio::time::timeout(HEALTH_TIMEOUT, client.health().send())
-        .await
-        .ok()?
-        .ok()?;
-    Some(Daemon { client, info })
+    let client = match crate::authenticated(&info.base_url(), &info.token) {
+        Ok(client) => client,
+        Err(err) => {
+            let why = innermost(&err);
+            return Probe::Unreachable { info, why };
+        }
+    };
+    let why = match tokio::time::timeout(HEALTH_TIMEOUT, client.health().send()).await {
+        Ok(Ok(_)) => return Probe::Serves(Daemon { client, info }),
+        Ok(Err(err)) => innermost(&err),
+        Err(_) => format!("no answer in {HEALTH_TIMEOUT:?}"),
+    };
+    Probe::Unreachable { info, why }
+}
+
+/// The daemon, when `daemon.json` names a live process that answers `/v1/health`.
+async fn reachable(daemon_json: &Path) -> Option<Daemon> {
+    match probe(daemon_json).await {
+        Probe::Serves(daemon) => Some(daemon),
+        Probe::NoDaemon | Probe::Unreachable { .. } => None,
+    }
+}
+
+/// The message of the innermost error in `err`'s chain, which names the cause ("Connection
+/// refused (os error 111)") where the outer ones name only the request.
+fn innermost(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut inner = err;
+    while let Some(source) = inner.source() {
+        inner = source;
+    }
+    inner.to_string()
+}
+
+/// Whether a daemon holds `lock` (spec §2), tried with a shared lock that is let go at once.
+/// A missing file is free. A file that can't be opened or locked counts as held, so the pid
+/// alone decides: this process can't tell.
+fn holds_lock(lock: &Path) -> bool {
+    let file = match File::open(lock) {
+        Ok(file) => file,
+        Err(err) => return err.kind() != std::io::ErrorKind::NotFound,
+    };
+    match file.try_lock_shared() {
+        Ok(()) => false,
+        Err(TryLockError::WouldBlock | TryLockError::Error(_)) => true,
+    }
 }
 
 /// What `daemon_json` holds; `None` when it is missing or unreadable.
@@ -465,6 +560,84 @@ mod tests {
         #[test]
         fn should_not_say_so_of_a_pid_out_of_range() {
             assert!(!binary_replaced(u32::MAX));
+        }
+    }
+
+    mod holds_lock {
+        use super::*;
+
+        /// A fresh dir for one test's lock file; the caller removes it.
+        fn lock_in(name: &str) -> (PathBuf, PathBuf) {
+            let dir = std::env::temp_dir().join(format!(
+                "agentdeck-holds-lock-{name}-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).expect("making the temp dir");
+            let lock = dir.join("lock");
+            (dir, lock)
+        }
+
+        #[test]
+        fn should_be_false_without_a_lock_file() {
+            let (dir, lock) = lock_in("missing");
+
+            let held = holds_lock(&lock);
+            let _ = std::fs::remove_dir_all(&dir);
+
+            assert!(!held);
+        }
+
+        #[test]
+        fn should_be_false_while_nobody_holds_it() {
+            let (dir, lock) = lock_in("free");
+            File::create(&lock).expect("creating the lock file");
+
+            let held = holds_lock(&lock);
+            let _ = std::fs::remove_dir_all(&dir);
+
+            assert!(!held);
+        }
+
+        #[test]
+        fn should_be_true_while_a_daemon_holds_it() {
+            let (dir, lock) = lock_in("held");
+            let daemon = File::create(&lock).expect("creating the lock file");
+            daemon
+                .try_lock()
+                .expect("taking the lock as a daemon would");
+
+            let held = holds_lock(&lock);
+            drop(daemon);
+            let _ = std::fs::remove_dir_all(&dir);
+
+            assert!(held);
+        }
+
+        #[test]
+        fn should_let_go_of_it_at_once() {
+            let (dir, lock) = lock_in("released");
+            File::create(&lock).expect("creating the lock file");
+
+            holds_lock(&lock);
+            let taken = File::open(&lock).expect("opening the lock").try_lock();
+            let _ = std::fs::remove_dir_all(&dir);
+
+            assert!(taken.is_ok(), "the check kept the lock: {taken:?}");
+        }
+    }
+
+    mod innermost {
+        use super::*;
+
+        #[test]
+        fn should_give_the_cause_at_the_bottom_of_the_chain() {
+            let cause = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+            let err = DaemonError::Poll {
+                program: "agentdeckd".into(),
+                source: cause,
+            };
+
+            assert_eq!(innermost(&err), "connection refused");
         }
     }
 
