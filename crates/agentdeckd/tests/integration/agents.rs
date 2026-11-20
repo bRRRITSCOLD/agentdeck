@@ -1472,6 +1472,35 @@ mod post_v1_panes_id_stop {
         assert_eq!(launches(&daemon, pane.id).len(), 1);
     }
 
+    /// Quit with Stop the agents, then a daemon restart inside the kill grace (issue #321):
+    /// the agent hasn't exited yet when the daemon stops, and still mustn't come back.
+    #[tokio::test]
+    async fn should_not_resume_a_pane_stopped_just_before_a_restart_204() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let script = "trap '' HUP; echo ready; while :; do sleep 0.1; done";
+        let pane = (daemon.client.pane_create())
+            .body(NewPane {
+                argv: Some(sh(script).iter().map(|arg| (*arg).to_owned()).collect()),
+                ..place.new_agent(Agent::Other, None)
+            })
+            .send()
+            .await
+            .expect("launch an other agent")
+            .into_inner();
+        printed(&daemon.client, pane.id, "ready").await;
+        assert_eq!(stop(&daemon.client, pane.id).await, 204);
+        let (_, dirs) = daemon.terminate();
+
+        let daemon = TestDaemon::start_in(dirs).await;
+
+        let row = super::pane(&daemon.client, pane.id).await;
+        assert_eq!(
+            (row.kind, row.agent, row.state),
+            (PaneKind::Agent, Some(Agent::Other), AgentState::Exited)
+        );
+    }
+
     #[tokio::test]
     async fn should_refuse_a_pane_whose_process_has_exited_409() {
         let daemon = TestDaemon::start().await;
