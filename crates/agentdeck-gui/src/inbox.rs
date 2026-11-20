@@ -59,8 +59,17 @@ fn cutoff(days: u32) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Synced;
 
-/// The banner's title while no GitHub token works.
+/// The banner's title while no GitHub token works and no PR sync ever named a login.
 pub const LOGGED_OUT: &str = "Not signed in to GitHub, so PRs don't sync.";
+
+/// The banner's title while no GitHub token works: whose PRs it shows once a sync ran as
+/// `synced_as` (Penpot "Inbox · logged out · synced before"), else [`LOGGED_OUT`].
+pub fn logged_out_title(synced_as: Option<&str>) -> SharedString {
+    match synced_as {
+        Some(login) => format!("Synced as {login}. Sign in to refresh.").into(),
+        None => LOGGED_OUT.into(),
+    }
+}
 
 /// The cutoff line's "Settings" or the banner's Open Settings was clicked: show Settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,15 +330,16 @@ fn settings_link(cx: &mut Context<InboxView>) -> impl IntoElement {
         .child("Settings")
 }
 
-/// The banner while no GitHub token works: what's wrong, and **Open Settings** to fix it.
-fn logged_out_banner(cx: &mut Context<InboxView>) -> impl IntoElement {
+/// The banner while no GitHub token works: what's wrong, or whose PRs show, and **Open
+/// Settings** to fix it.
+fn logged_out_banner(title: SharedString, cx: &mut Context<InboxView>) -> impl IntoElement {
     div()
         .flex_none()
         .debug_selector(|| "logged out banner".into())
         .child(
             Alert::new()
                 .icon(IconName::Info)
-                .title(AlertTitle::new(LOGGED_OUT))
+                .title(AlertTitle::new(title))
                 // Centred on the one-line alert, as Penpot's `Action` sits.
                 .action(
                     AlertAction::new().top(space::S1_5).child(
@@ -401,9 +411,12 @@ impl Render for InboxView {
             .child(self.header(cx))
             // Penpot "Inbox · logged out": a default `Alert` over the columns, its action a
             // link to Settings.
-            .when(
-                (self.snapshot.pr_sync.as_ref()).is_some_and(|s| s.login == GhLogin::LoggedOut),
-                |content| content.child(logged_out_banner(cx)),
+            .when_some(
+                (self.snapshot.pr_sync.as_ref()).filter(|s| s.login == GhLogin::LoggedOut),
+                |content, status| {
+                    let title = logged_out_title(status.synced_as.as_deref());
+                    content.child(logged_out_banner(title, cx))
+                },
             )
             .child(table)
             .when(self.shown.is_empty(), |content| {
@@ -706,6 +719,30 @@ mod tests {
         assert!(cx.debug_bounds("logged out banner").is_some());
         let label = cx.update(|_, cx| harness.view.read(cx).sync_label(chrono::Utc::now()));
         assert_eq!(label, "Not signed in");
+    }
+
+    #[test]
+    fn should_name_the_login_prs_last_synced_as_in_the_banner() {
+        assert_eq!(
+            logged_out_title(Some("bRRRITSCOLD")),
+            "Synced as bRRRITSCOLD. Sign in to refresh."
+        );
+    }
+
+    #[test]
+    fn should_say_prs_do_not_sync_when_no_sync_named_a_login() {
+        assert_eq!(logged_out_title(None), LOGGED_OUT);
+    }
+
+    #[gpui::test]
+    fn should_show_the_banner_after_a_sync_as_a_login(cx: &mut TestAppContext) {
+        let mut snapshot = logged_out();
+        pr_sync(&mut snapshot).synced_as = Some("bRRRITSCOLD".into());
+        let (harness, cx) = Harness::open(snapshot, cx);
+        harness.draw(cx);
+
+        assert!(cx.debug_bounds("logged out banner").is_some());
+        assert!(cx.debug_bounds("open settings").is_some());
     }
 
     #[gpui::test]
@@ -1686,6 +1723,57 @@ mod tests {
                 let toast = shown.last().expect("a toast");
                 assert_eq!(toast.title, "Couldn't close gadgets #4");
                 assert_eq!(toast.description.as_deref(), Some("Must have admin rights"));
+            }
+        }
+
+        mod unreachable {
+            use super::*;
+            use crate::overview::fixtures::unreachable_pr_task;
+
+            /// [`prs`] with PR 5, open but out of the GitHub sign-in's sight.
+            fn with_unreachable() -> Snapshot {
+                let mut snapshot = prs();
+                snapshot
+                    .tasks
+                    .push(unreachable_pr_task(5, "acme/secret", None));
+                snapshot
+            }
+
+            #[gpui::test]
+            fn should_explain_on_hovering_the_title_of_a_pr_the_sign_in_cannot_see(
+                cx: &mut TestAppContext,
+            ) {
+                let (_harness, cx) = Harness::open(with_unreachable(), cx);
+                let title = bounds(format!("task title {}", id::<TaskId>(5)), cx);
+
+                let tooltip = tooltip_on(title.center(), cx).expect("a tooltip on hover");
+
+                assert!(
+                    tooltip.bottom() < title.top(),
+                    "{tooltip:?} above {title:?}"
+                );
+                let other = bounds(format!("task title {}", id::<TaskId>(1)), cx);
+                assert!(tooltip_on(other.center(), cx).is_none());
+            }
+
+            #[gpui::test]
+            fn should_not_offer_a_pr_the_sign_in_cannot_see_in_select_mode(
+                cx: &mut TestAppContext,
+            ) {
+                let (harness, cx) = Harness::open(with_unreachable(), cx);
+                click("inbox select".into(), cx);
+
+                assert!(shown_at(row_selector("select", 1), cx));
+                assert!(!shown_at(row_selector("select", 5), cx));
+                click("inbox select all inbox".into(), cx);
+                assert_eq!(picked(&harness, cx), [id(1), id(4)]);
+            }
+
+            #[gpui::test]
+            fn should_keep_listing_a_pr_the_sign_in_cannot_see(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open(with_unreachable(), cx);
+
+                assert!(harness.shown(cx).contains(&id(5)));
             }
         }
     }

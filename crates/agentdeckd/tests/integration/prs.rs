@@ -16,8 +16,9 @@ use agentdeck_core::ws::{Entity, ServerMessage};
 
 use crate::support::git::git;
 use crate::support::github::{
-    BATCH, Pr, days_ago, mock_close, mock_close_refused, mock_fetch, mock_list, mock_list_page,
-    mock_node_ids, mock_search, mock_unauthorized, mock_updated_search, set_gh_token,
+    BATCH, Pr, days_ago, mock_close, mock_close_refused, mock_fetch, mock_hidden, mock_list,
+    mock_list_page, mock_node_ids, mock_search, mock_unauthorized, mock_updated_search,
+    mock_viewer, set_gh_token,
 };
 use crate::support::ws::{Frame, Ws};
 use crate::support::{TestDaemon, set_daemon_env};
@@ -389,7 +390,7 @@ mod post_v1_prs_sync {
     }
 
     #[tokio::test]
-    async fn should_close_a_pr_github_no_longer_shows_200() {
+    async fn should_mark_a_pr_github_no_longer_shows_unreachable_and_keep_its_task_200() {
         let github = MockServer::start_async().await;
         let mut search = mock_search(&github, TOKEN, &[Pr::open(7)]);
         let daemon = full_daemon(&github, Some(TOKEN)).await;
@@ -397,18 +398,14 @@ mod post_v1_prs_sync {
 
         search.delete();
         mock_search(&github, TOKEN, &[]);
-        github.mock(|when, then| {
-            when.body_includes("pullRequest(");
-            then.status(200).json_body(serde_json::json!({
-                "data": { "p0": null },
-                "errors": [ { "message": "Could not resolve to a Repository" } ]
-            }));
-        });
+        mock_hidden(&github, TOKEN, &Pr::open(7));
         sync(&daemon.client).await;
 
         let task = pr_tasks(&daemon.client).await.remove(0);
-        assert_eq!(task.status, TaskStatus::Done);
-        assert_eq!(task.pr.expect("the task's PR").state, PrState::Closed);
+        assert_eq!(task.status, TaskStatus::Review);
+        let pr = task.pr.expect("the task's PR");
+        assert_eq!(pr.state, PrState::Open);
+        assert!(pr.unreachable);
     }
 
     #[tokio::test]
@@ -1163,6 +1160,202 @@ mod asked_full {
         updated.assert_calls(0);
         assert_eq!(status.progress, None);
         assert_eq!(status.last_error, None);
+    }
+}
+
+mod sign_in_changes {
+    use super::*;
+
+    /// A token that sees every repo.
+    const FULL: &str = "gho_full";
+
+    /// A fine-grained token that sees only `acme/widgets`.
+    const NARROW: &str = "github_pat_narrow";
+
+    /// PR 8, on a repo [`NARROW`] can't see.
+    fn secret() -> Pr {
+        Pr {
+            repo: "acme/secret",
+            ..Pr::open(8)
+        }
+    }
+
+    /// The task of `repo#number`.
+    async fn task_of(client: &Client, repo: &str, number: i64) -> Task {
+        pr_tasks(client)
+            .await
+            .into_iter()
+            .find(|task| {
+                (task.pr.as_ref()).is_some_and(|pr| pr.repo == repo && pr.number == number)
+            })
+            .expect("the PR's task")
+    }
+
+    /// A daemon that synced PR 7 and [`secret`] with [`FULL`], then had PR 8's task moved to
+    /// `doing`, and that GitHub answers for [`NARROW`] with PR 7 alone.
+    async fn narrowed(github: &MockServer) -> TestDaemon {
+        mock_search(github, FULL, &[Pr::open(7), secret()]);
+        mock_search(github, NARROW, &[Pr::open(7)]);
+        mock_hidden(github, NARROW, &secret());
+        let daemon = daemon(github, Some(FULL)).await;
+        sync(&daemon.client).await;
+        let task = task_of(&daemon.client, "acme/secret", 8).await;
+        daemon
+            .client
+            .task_update()
+            .id(task.id)
+            .body(agentdeck_client::types::TaskPatch {
+                status: Some(TaskStatus::Doing),
+                ..Default::default()
+            })
+            .send()
+            .await
+            .expect("move the task to doing");
+        set_gh_token(daemon.root(), Some(NARROW));
+        daemon
+    }
+
+    #[tokio::test]
+    async fn should_mark_the_prs_of_a_repo_the_new_token_cannot_see_unreachable_200() {
+        let github = MockServer::start_async().await;
+        let daemon = narrowed(&github).await;
+
+        let status = sync(&daemon.client).await;
+
+        assert_eq!(status.last_error, None);
+        let task = task_of(&daemon.client, "acme/secret", 8).await;
+        assert_eq!(task.status, TaskStatus::Doing);
+        let pr = task.pr.expect("the task's PR");
+        assert_eq!(pr.state, PrState::Open);
+        assert!(pr.unreachable);
+        let seen = task_of(&daemon.client, "acme/widgets", 7).await;
+        assert!(!seen.pr.expect("the task's PR").unreachable);
+    }
+
+    #[tokio::test]
+    async fn should_bring_back_a_pr_the_token_sees_again_in_review_200() {
+        let github = MockServer::start_async().await;
+        let daemon = narrowed(&github).await;
+        sync(&daemon.client).await;
+
+        set_gh_token(daemon.root(), Some(FULL));
+        sync(&daemon.client).await;
+
+        let task = task_of(&daemon.client, "acme/secret", 8).await;
+        assert_eq!(task.status, TaskStatus::Review);
+        let pr = task.pr.expect("the task's PR");
+        assert_eq!(pr.state, PrState::Open);
+        assert!(!pr.unreachable);
+    }
+
+    #[tokio::test]
+    async fn should_not_close_an_unreachable_pr_200() {
+        let github = MockServer::start_async().await;
+        let daemon = narrowed(&github).await;
+        sync(&daemon.client).await;
+        let lookup = github.mock(|when, then| {
+            when.body_includes("fragment nodeId on PullRequest");
+            then.status(500);
+        });
+        let task = task_of(&daemon.client, "acme/secret", 8).await;
+
+        let results = daemon
+            .client
+            .prs_close()
+            .body(PrClose {
+                task_ids: vec![task.id],
+            })
+            .send()
+            .await
+            .expect("close")
+            .into_inner()
+            .results;
+
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].ok);
+        assert_eq!(results[0].error.as_deref(), Some("Not an open PR"));
+        lookup.assert_calls(0);
+    }
+
+    #[tokio::test]
+    async fn should_run_a_full_sync_with_another_token_200() {
+        let github = MockServer::start_async().await;
+        mock_search(&github, "gho_old", &[]);
+        let new = mock_search(&github, "gho_new", &[Pr::open(7)]);
+        let updated = mock_updated_search(&github, "gho_new", &[Pr::open(7)]);
+        let daemon = daemon(&github, Some("gho_old")).await;
+        sync(&daemon.client).await;
+
+        set_gh_token(daemon.root(), Some("gho_new"));
+        sync(&daemon.client).await;
+
+        new.list.assert_calls(1);
+        updated.assert_calls(0);
+    }
+
+    #[tokio::test]
+    async fn should_run_a_full_sync_after_signing_out_and_in_again_200() {
+        let github = MockServer::start_async().await;
+        let listing = mock_list(&github, TOKEN, &[Pr::open(7)]);
+        let updated = mock_updated_search(&github, TOKEN, &[]);
+        let daemon = daemon(&github, Some(TOKEN)).await;
+        sync(&daemon.client).await;
+        set_gh_token(daemon.root(), None);
+        sync(&daemon.client).await;
+        let (lists, searches) = (listing.list.calls(), updated.calls());
+
+        set_gh_token(daemon.root(), Some(TOKEN));
+        let status = sync(&daemon.client).await;
+
+        assert_eq!(status.last_error, None);
+        assert_eq!(listing.list.calls(), lists + 1);
+        assert_eq!(updated.calls(), searches);
+    }
+
+    #[tokio::test]
+    async fn should_keep_every_pr_and_the_login_they_synced_as_once_signed_out_200() {
+        let github = MockServer::start_async().await;
+        mock_viewer(&github, TOKEN, "octocat", Some("repo"));
+        mock_search(&github, TOKEN, &[Pr::open(7)]);
+        let daemon = daemon(&github, Some(TOKEN)).await;
+        let signed_in = sync(&daemon.client).await;
+
+        set_gh_token(daemon.root(), None);
+        let status = sync(&daemon.client).await;
+
+        assert_eq!(signed_in.synced_as.as_deref(), Some("octocat"));
+        assert_eq!(status.login, GhLogin::LoggedOut);
+        assert_eq!(status.synced_as.as_deref(), Some("octocat"));
+        let task = pr_tasks(&daemon.client).await.remove(0);
+        assert_eq!(task.status, TaskStatus::Review);
+        assert_eq!(task.pr.expect("the task's PR").state, PrState::Open);
+    }
+
+    #[tokio::test]
+    async fn should_report_the_login_prs_synced_as_after_a_restart_200() {
+        let github = MockServer::start_async().await;
+        mock_viewer(&github, TOKEN, "octocat", Some("repo"));
+        mock_search(&github, TOKEN, &[Pr::open(7)]);
+        let daemon = daemon(&github, Some(TOKEN)).await;
+        sync(&daemon.client).await;
+        let (_, dirs) = daemon.terminate();
+        set_gh_token(dirs.path(), None);
+
+        let daemon = TestDaemon::start_with_github(dirs, &github.url("/graphql")).await;
+        let status = sync(&daemon.client).await;
+
+        assert_eq!(status.login, GhLogin::LoggedOut);
+        assert_eq!(status.synced_as.as_deref(), Some("octocat"));
+    }
+
+    #[tokio::test]
+    async fn should_report_no_login_before_any_sync_200() {
+        let github = MockServer::start_async().await;
+        let daemon = daemon(&github, None).await;
+
+        let status = sync(&daemon.client).await;
+
+        assert_eq!(status.synced_as, None);
     }
 }
 

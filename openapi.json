@@ -1229,6 +1229,11 @@
             ],
             "description": "How far the sync running now is; `None` while none runs.",
             "nullable": true
+          },
+          "synced_as": {
+            "description": "The GitHub login the last good sync ran as, kept across sign-outs and restarts; absent until a sync has run as a login GitHub named.",
+            "nullable": true,
+            "type": "string"
           }
         },
         "required": [
@@ -1286,6 +1291,11 @@
           "synced_at": {
             "description": "When PR sync last saw the PR.",
             "type": "string"
+          },
+          "unreachable": {
+            "default": false,
+            "description": "Whether the GitHub sign-in can't see the PR: the last full sync fetched it by number and GitHub didn't show it to the token (not found, or no access). It is shown as it was last synced. Absent from an older daemon, which reads as false.",
+            "type": "boolean"
           },
           "updated_at": {
             "description": "When the PR last changed on GitHub.",

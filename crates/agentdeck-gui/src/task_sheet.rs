@@ -1324,6 +1324,7 @@ mod tests {
             review: None,
             state: PrState::Open,
             synced_at: NOW.into(),
+            unreachable: false,
             updated_at: NOW.into(),
             url: "https://github.com/bRRRITSCOLD/ts-packages/pull/142".into(),
         }

@@ -239,6 +239,29 @@ pub fn mock_fetch<'a>(server: &'a MockServer, prs: &[Pr]) -> Mock<'a> {
     })
 }
 
+/// A fetch by number of `pr` alone with `token`, answered as GitHub answers for a repo the
+/// token can't see: no repository, and a `NOT_FOUND` error on its alias.
+pub fn mock_hidden<'a>(server: &'a MockServer, token: &str, pr: &Pr) -> Mock<'a> {
+    let (owner, name) = pr.repo.split_once('/').expect("owner/name");
+    let message = format!(
+        "Could not resolve to a Repository with the name '{}'.",
+        pr.repo
+    );
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .header("authorization", format!("Bearer {token}"))
+            .body_includes("fragment pr on PullRequest")
+            .json_body_includes(
+                json!({ "variables": { "o0": owner, "r0": name, "n0": pr.number } }).to_string(),
+            );
+        then.status(200).json_body(json!({
+            "data": { "p0": null },
+            "errors": [ { "type": "NOT_FOUND", "path": [ "p0" ], "message": message } ]
+        }));
+    })
+}
+
 /// One batched lookup of node ids before a close, answered with each of `prs`' ids. It
 /// matches the batch that starts with `prs[0]`, the daemon asking for each as `p<i>`.
 pub fn mock_node_ids<'a>(server: &'a MockServer, prs: &[Pr]) -> Mock<'a> {

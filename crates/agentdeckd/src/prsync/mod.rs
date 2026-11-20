@@ -13,7 +13,11 @@
 //! - [`matching`]: which workspace holds a clone of a PR's repo with its branch.
 //! - `db::pull_requests`: storing the PRs and moving their tasks.
 //!
-//! `POST /v1/prs/sync?full=true` (Sync now) is full whatever sync is due.
+//! `POST /v1/prs/sync?full=true` (Sync now) is full whatever sync is due, and so is the first
+//! sync with another token than the last good one ran with, or after one found none.
+//!
+//! A stored PR GitHub doesn't show to the token, fetched by number, is marked unreachable: it
+//! keeps its state and its task its status, and the next full sync fetches it again.
 //!
 //! One sync runs at a time: the timer and `POST /v1/prs/sync` queue behind each other.
 //! Closing PRs (`POST /v1/prs/close`) queues behind them too, so a sync that read a PR as
@@ -22,6 +26,7 @@
 pub mod github;
 pub mod matching;
 
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -103,8 +108,11 @@ struct State {
     last_full: Option<DateTime<Utc>>,
     /// Whether the next sync must be full whenever the last full one was: the age cutoff
     /// widened, so open PRs it now lets in that no incremental search would find are listed,
-    /// or a client asked for a full sync.
+    /// a client asked for a full sync, or the token changed or went.
     full_wanted: bool,
+    /// A hash of the token the last good sync ran with, so a sync with another one is full;
+    /// the token itself is never kept here.
+    synced_with: Option<u64>,
 }
 
 /// What a good sync did.
@@ -113,6 +121,8 @@ struct Synced {
     began: DateTime<Utc>,
     /// Whether it was full.
     full: bool,
+    /// [`token_key`] of the token it ran with.
+    token: u64,
 }
 
 /// Why a sync failed.
@@ -166,10 +176,12 @@ impl PrSync {
                         last_error: None,
                         progress: None,
                         max_age_days,
+                        synced_as: None,
                     },
                     last_good: None,
                     last_full: None,
                     full_wanted: false,
+                    synced_with: None,
                 }),
                 running: tokio::sync::Mutex::new(()),
                 widened: tokio::sync::Notify::new(),
@@ -177,6 +189,15 @@ impl PrSync {
         };
         let timer = sync.clone();
         tokio::spawn(async move {
+            match timer
+                .inner
+                .db
+                .call(|conn| db::pull_requests::synced_as(conn))
+                .await
+            {
+                Ok(login) => timer.state().status.synced_as = login,
+                Err(err) => tracing::warn!("reading the login PRs last synced as: {err}"),
+            }
             let mut interval = tokio::time::interval(INTERVAL);
             interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
             loop {
@@ -187,6 +208,8 @@ impl PrSync {
                             // The credentials are gone: the daemon is stopping.
                             return;
                         }
+                        // A sign-in or sign-out: every PR is checked again with the new token.
+                        timer.state().full_wanted = true;
                     }
                     () = timer.inner.widened.notified() => {}
                 }
@@ -234,8 +257,11 @@ impl PrSync {
         if full {
             self.state().full_wanted = true;
         }
-        let since = self.since(began);
-        let result = self.sync_once(began, since).await;
+        let result = self.sync_once(began).await;
+        let synced_as = match &result {
+            Ok(_) => self.store_synced_as().await,
+            Err(_) => None,
+        };
         {
             let mut state = self.state();
             state.status.progress = None;
@@ -244,20 +270,42 @@ impl PrSync {
                     state.status.last_synced_at = Some(db::now());
                     state.status.last_error = None;
                     state.last_good = Some(synced.began);
+                    state.synced_with = Some(synced.token);
                     if synced.full {
                         state.last_full = Some(synced.began);
+                    }
+                    if synced_as.is_some() {
+                        state.status.synced_as = synced_as;
                     }
                 }
                 Err(err) => {
                     tracing::warn!("PR sync failed: {err}");
                     state.status.last_error = Some(err.to_string());
-                    // A full sync the widened cutoff or a client asked for is still owed.
-                    state.full_wanted |= since.is_none();
                 }
             }
         }
         self.inner.events.changed(Entity::PrSync, STATUS_ID);
         self.status()
+    }
+
+    /// Stores the login GitHub gave for the token as the one PRs last synced as, and returns
+    /// it; `None` when GitHub gave none (it couldn't be asked) or storing it failed.
+    async fn store_synced_as(&self) -> Option<String> {
+        let login = self.inner.auth.info().login?;
+        if self.state().status.synced_as.as_ref() == Some(&login) {
+            return Some(login);
+        }
+        let stored = login.clone();
+        match (self.inner.db)
+            .call(move |conn| db::pull_requests::set_synced_as(conn, &stored))
+            .await
+        {
+            Ok(()) => Some(login),
+            Err(err) => {
+                tracing::warn!("storing the login PRs synced as: {err}");
+                None
+            }
+        }
     }
 
     /// Closes the PRs of `task_ids` on GitHub, after any sync running, and answers one result
@@ -370,28 +418,47 @@ impl PrSync {
         }));
     }
 
-    /// When the sync beginning `now` should reach back to; `None` when it is full. A full sync
-    /// the widened cutoff or a client asked for is this one.
-    fn since(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    /// When the sync beginning `now` with `token` should reach back to; `None` when it is
+    /// full. A full sync the widened cutoff, a client or a change of token asked for is this
+    /// one, and so is the first with another token than the last good sync's.
+    fn since(&self, now: DateTime<Utc>, token: &str) -> Option<DateTime<Utc>> {
         let mut state = self.state();
-        if std::mem::take(&mut state.full_wanted) {
+        let wanted = std::mem::take(&mut state.full_wanted);
+        if wanted || state.synced_with != Some(token_key(token)) {
             return None;
         }
         since(state.last_good, state.last_full, now, self.inner.full_every)
     }
 
-    /// One sync, which began at `began` and reaches back to `since` (`None` for a full one).
-    async fn sync_once(
+    /// One sync, which began at `began`: the sync due with the token there is now. With no
+    /// token, the next sync with one is full; a full one that fails is still owed.
+    async fn sync_once(&self, began: DateTime<Utc>) -> Result<Synced, SyncError> {
+        let auth = &self.inner.auth;
+        let token = auth.current_token().await.inspect_err(|_| {
+            self.state().full_wanted = true;
+        })?;
+        let since = self.since(began, &token);
+        self.sync_with(began, token, since).await.inspect_err(|_| {
+            // A full sync the widened cutoff, a client or a new token asked for is still owed.
+            if since.is_none() {
+                self.state().full_wanted = true;
+            }
+        })
+    }
+
+    /// One sync with `token`, which began at `began` and reaches back to `since` (`None` for a
+    /// full one).
+    async fn sync_with(
         &self,
         began: DateTime<Utc>,
+        token: String,
         since: Option<DateTime<Utc>>,
     ) -> Result<Synced, SyncError> {
         let auth = &self.inner.auth;
-        let token = auth.current_token().await?;
         let workspaces = self.workspace_dirs().await?;
         let clones =
             Arc::new(tokio::task::spawn_blocking(move || Clones::scan(&workspaces)).await?);
-        let read = Read {
+        let mut read = Read {
             since,
             // A cutoff before the earliest time chrono holds is no cutoff.
             cutoff: self
@@ -401,21 +468,35 @@ impl PrSync {
                 .and_then(|max_age| began.checked_sub_signed(max_age)),
             clones,
         };
-        match self.read(&token, &read).await {
+        let token = match self.read(&token, &read).await {
             Err(SyncError::Github(GithubError::Unauthorized)) => {
                 // The token may have been refreshed or revoked: read the sources again, once.
-                let token = auth.reread().await?;
-                self.read(&token, &read).await.inspect_err(|err| {
+                // Another token sees other PRs, so its read is full.
+                let fresh = auth.reread().await.inspect_err(|_| {
+                    self.state().full_wanted = true;
+                })?;
+                if fresh != token {
+                    read.since = None;
+                }
+                self.read(&fresh, &read).await.inspect_err(|err| {
                     if matches!(err, SyncError::Github(GithubError::Unauthorized)) {
                         auth.rejected();
                     }
+                    if read.since.is_none() {
+                        self.state().full_wanted = true;
+                    }
                 })?;
+                fresh
             }
-            result => result?,
-        }
+            result => {
+                result?;
+                token
+            }
+        };
         Ok(Synced {
             began,
-            full: since.is_none(),
+            full: read.since.is_none(),
+            token: token_key(&token),
         })
     }
 
@@ -440,8 +521,9 @@ impl PrSync {
     ///    updated since they were stored, and [`unsettled`] ones.
     ///
     /// Then the PRs stored as open that left the list are fetched by number, so a merge or
-    /// close reaches its task; one GitHub no longer shows is closed. One last updated before
-    /// `cutoff` isn't fetched: it is aged out, its task moving to done once.
+    /// close reaches its task; one GitHub doesn't show to the token is marked unreachable,
+    /// keeping its state and its task's status. One last updated before `cutoff` isn't
+    /// fetched: it is aged out, its task moving to done once.
     async fn read_full(
         &self,
         token: &str,
@@ -525,14 +607,14 @@ impl PrSync {
         let left = missing(&stored, &seen);
         let found = github.prs(token, &left).await?;
         let mut prs = Vec::new();
-        let mut gone = Vec::new();
+        let mut unreachable = Vec::new();
         for (wanted, found) in left.into_iter().zip(found) {
             match found {
                 Some(pr) => prs.push(pr),
-                None => gone.push(wanted),
+                None => unreachable.push(wanted),
             }
         }
-        self.store(prs, gone, clones).await
+        self.store(prs, unreachable, clones).await
     }
 
     /// An incremental read: the PRs updated at or after `since`, in any state, keeping a
@@ -613,15 +695,15 @@ impl PrSync {
         self.store(prs, Vec::new(), clones).await
     }
 
-    /// Matches `prs` to workspaces, stores them, closes the `gone` ones, and tells clients
-    /// which tasks changed.
+    /// Matches `prs` to workspaces, stores them, marks the `unreachable` ones, and tells
+    /// clients which tasks changed.
     async fn store(
         &self,
         prs: Vec<RemotePr>,
-        gone: Vec<(String, i64)>,
+        unreachable: Vec<(String, i64)>,
         clones: &Arc<Clones>,
     ) -> Result<(), SyncError> {
-        if prs.is_empty() && gone.is_empty() {
+        if prs.is_empty() && unreachable.is_empty() {
             return Ok(());
         }
         let clones = Arc::clone(clones);
@@ -637,7 +719,7 @@ impl PrSync {
         let changed = self
             .inner
             .db
-            .call(move |conn| db::pull_requests::store(conn, &matched, &gone))
+            .call(move |conn| db::pull_requests::store(conn, &matched, &unreachable))
             .await?;
         for task in changed {
             self.inner.events.changed(Entity::Task, task);
@@ -692,6 +774,14 @@ struct Read {
     cutoff: Option<DateTime<Utc>>,
     /// The clones in the workspaces, for matching.
     clones: Arc<Clones>,
+}
+
+/// A hash of `token`, to tell whether a sync runs with the same token as the last good one
+/// without keeping the token.
+fn token_key(token: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    token.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Whether stored open PR `pr` may change in a way GitHub doesn't count as an update, so no
