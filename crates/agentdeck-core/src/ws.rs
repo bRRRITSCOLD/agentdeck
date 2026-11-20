@@ -32,6 +32,19 @@ pub fn parse_frame(frame: &[u8]) -> Option<(Channel, &[u8])> {
     Some((Channel::from_be_bytes(*channel), bytes))
 }
 
+/// What the daemon writes into a pane's terminal, and sends on its channels as output, once
+/// the pane's process exits or the agent a shell pane hosts leaves (spec §7): it turns off
+/// the modes a full-screen program turns on and, killed, never turns off, so a client stops
+/// sending the next program mouse reports it never asked for (#322). CAN first ends any
+/// sequence the program was cut off in. Then mouse reporting (9, 1000, 1002, 1003, 1005,
+/// 1006, 1015, 1016) and focus events (1004) off, bracketed paste (2004) off, normal cursor
+/// keys (DECCKM) and keypad (DECKPNM), the main screen again (1049, which restores its
+/// cursor; `alacritty_terminal` swaps screens on no other), the cursor shown (25) and its
+/// default style. The screen, the scrollback and the pen are left as they are.
+pub const RESET_MODES: &[u8] = b"\x18\
+\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\
+\x1b[?1004l\x1b[?2004l\x1b[?1l\x1b>\x1b[?1049l\x1b[?25h\x1b[0 q";
+
 /// A text frame from a client. A new message or field bumps [`crate::API_VERSION`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]

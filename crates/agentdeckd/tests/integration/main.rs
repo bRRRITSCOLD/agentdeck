@@ -14,6 +14,7 @@ mod instructions;
 mod instructions_client;
 mod keyring;
 mod migrations;
+mod modes;
 mod older_daemon;
 mod panes;
 mod panes_client;

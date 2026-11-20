@@ -10,8 +10,8 @@ use alacritty_terminal::Term;
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::term::Config;
 use alacritty_terminal::term::test::TermSize;
+use alacritty_terminal::term::{Config, TermMode};
 use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
@@ -229,6 +229,11 @@ impl Screen {
     /// The live screen's rows.
     pub fn rows(&self) -> Vec<String> {
         screen::rows(&self.term)
+    }
+
+    /// The terminal modes the pane's output left on.
+    pub fn modes(&self) -> TermMode {
+        *self.term.mode()
     }
 
     /// Whether the live screen shows `text`.
