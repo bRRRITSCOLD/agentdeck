@@ -36,6 +36,13 @@ pub const TASK_EDITOR: &str = "TaskEditor";
 /// ([`Submit`]), where Enter inserts a newline.
 pub const COMMENT_COMPOSER: &str = "CommentComposer";
 
+/// The key context a dialog with no text field sets around itself (New agent, Link to task,
+/// the sign-in dialog): Enter while the dialog holds the keyboard runs its primary button
+/// ([`ConfirmDialog`]), as Enter in a text field does in the others (spec §11). core-gpui's
+/// `Dialog` leaves Enter to the form inside, so without this Enter there does nothing. A
+/// focused select still takes Enter first, to open.
+pub const DIALOG: &str = "AgentdeckDialog";
+
 actions!(
     agentdeck,
     [
@@ -67,6 +74,8 @@ actions!(
         Submit,
         /// Drops an edit, leaving the text as it was.
         CancelEdit,
+        /// Runs a dialog's primary button: Enter in a dialog with no text field to take it.
+        ConfirmDialog,
     ]
 );
 
@@ -95,6 +104,9 @@ fn bindings(cx: &App) -> Vec<KeyBinding> {
     let instruction_editor = context(&format!("{INSTRUCTION_EDITOR} > Input"));
     let comment_composer = context(&format!("{COMMENT_COMPOSER} > Input"));
     let task_editor = context(&format!("{TASK_EDITOR} > Input"));
+    // Matches at gpui-base's dialog, as deep as its own `enter` (its `Confirm`, which
+    // core-gpui's `Dialog` ignores), and is loaded after it, so it wins there.
+    let dialog = context(&format!("{DIALOG} > Dialog"));
     let mut table: Vec<(String, Box<dyn Action>, _)> = vec![
         ("secondary-shift-q".into(), Box::new(Quit), None),
         ("ctrl-pagedown".into(), Box::new(NextTab), workspace.clone()),
@@ -162,6 +174,7 @@ fn bindings(cx: &App) -> Vec<KeyBinding> {
             task_editor.clone(),
         ),
         ("escape".into(), Box::new(CancelEdit), task_editor),
+        ("enter".into(), Box::new(ConfirmDialog), dialog),
     ];
     table.extend((1..=9).map(|n| {
         let action: Box<dyn Action> = Box::new(SelectTab(n - 1));

@@ -40,6 +40,7 @@ use gpui::{
     Focusable as _, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
     Styled as _, Subscription, Task, Window, div, relative,
 };
+use gpui_base::actions::Confirm;
 
 use crate::api::{Api, PaneAt, Split, WorkspacePanes};
 use crate::connection::{Connection, DaemonEvent};
@@ -345,7 +346,7 @@ impl WorkspaceView {
         .detach();
     }
 
-    /// Closes the pane the confirmation asks about: what its `Close` button does.
+    /// Closes the pane the confirmation asks about: what its Close pane button and Enter do.
     pub fn confirm_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let pane = self.closing.take();
         self.close_dialog.close(window, cx);
@@ -678,33 +679,39 @@ impl WorkspaceView {
     }
 
     /// Asks before closing a running pane: core-react's `AlertDialog`, opened by
-    /// [`PaneRequest::Close`].
-    fn close_confirmation(&self, cx: &mut Context<Self>) -> AlertDialog {
+    /// [`PaneRequest::Close`]. Enter, and the Close pane button, dispatch the dialog's
+    /// `Confirm`; it is caught on its way down to the dialog, which then closes, so both
+    /// close the pane once. An `on_click` on the button would run for a click only: Enter
+    /// reaches the dialog as `Confirm` alone, and it would close without closing the pane.
+    fn close_confirmation(&self, cx: &mut Context<Self>) -> Div {
         let title = self
             .closing
             .and_then(|at| self.panes.get(&at.pane))
             .map(|pane| pane.read(cx).title());
         let what = title.map_or("What runs there".into(), |title| format!("“{title}”"));
-        AlertDialog::new("close-pane")
-            .handle(self.close_dialog.clone())
-            .content(
-                AlertDialogContent::new()
-                    .header(
-                        AlertDialogHeader::new()
-                            .title(AlertDialogTitle::new("Close this pane?"))
-                            .description(AlertDialogDescription::new(format!(
-                                "{what} is still running. Closing the pane ends it."
-                            ))),
-                    )
-                    .footer(
-                        AlertDialogFooter::new()
-                            .child(AlertDialogCancel::new("close-pane-cancel", "Cancel"))
-                            .child(
-                                AlertDialogAction::new("close-pane-confirm", "Close pane")
-                                    .variant(ButtonVariant::Destructive)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.confirm_close(window, cx);
-                                    })),
+        div()
+            .capture_action(cx.listener(|this, _: &Confirm, window, cx| {
+                this.confirm_close(window, cx);
+            }))
+            .child(
+                AlertDialog::new("close-pane")
+                    .handle(self.close_dialog.clone())
+                    .content(
+                        AlertDialogContent::new()
+                            .header(
+                                AlertDialogHeader::new()
+                                    .title(AlertDialogTitle::new("Close this pane?"))
+                                    .description(AlertDialogDescription::new(format!(
+                                        "{what} is still running. Closing the pane ends it."
+                                    ))),
+                            )
+                            .footer(
+                                AlertDialogFooter::new()
+                                    .child(AlertDialogCancel::new("close-pane-cancel", "Cancel"))
+                                    .child(
+                                        AlertDialogAction::new("close-pane-confirm", "Close pane")
+                                            .variant(ButtonVariant::Destructive),
+                                    ),
                             ),
                     ),
             )
@@ -1903,6 +1910,33 @@ mod tests {
 
                 // What the dialog's Cancel and Escape do.
                 harness.act(|view, window, cx| view.close_dialog.close(window, cx), cx);
+
+                assert_eq!(harness.closed(), []);
+                assert_eq!(harness.closing(cx), None);
+                assert_eq!(harness.shown(cx), [id(7)]);
+            }
+
+            #[gpui::test]
+            fn should_close_a_running_pane_on_enter(cx: &mut TestAppContext) {
+                let (harness, cx) = one_pane(AgentState::Working, cx);
+                harness.request(0, PaneRequest::Close, cx);
+                harness.draw(cx);
+
+                cx.simulate_keystrokes("enter");
+                cx.run_until_parked();
+
+                assert_eq!(harness.closed(), [id(7)]);
+                assert_eq!(harness.closing(cx), None);
+            }
+
+            #[gpui::test]
+            fn should_keep_a_running_pane_on_escape(cx: &mut TestAppContext) {
+                let (harness, cx) = one_pane(AgentState::Working, cx);
+                harness.request(0, PaneRequest::Close, cx);
+                harness.draw(cx);
+
+                cx.simulate_keystrokes("escape");
+                cx.run_until_parked();
 
                 assert_eq!(harness.closed(), []);
                 assert_eq!(harness.closing(cx), None);

@@ -1,6 +1,7 @@
 //! The new agent dialog (spec §6, §11), Penpot "Screens" → "New agent": an agent CLI, the
 //! folder it runs in (the workspace root or a repo inside it) and an optional task to link.
-//! The description under the task says what the launch prompt will carry.
+//! The description under the task says what the launch prompt will carry. Enter starts, as
+//! Start agent does, unless a select has it.
 //!
 //! The top bar's "New agent" button asks the window for it with [`NewAgent`]; the task
 //! sheet's Start agent opens it on the task's workspace with the task picked. Once the
@@ -20,11 +21,12 @@ use brrritscold_core_gpui::{
 };
 use brrritscold_core_gpui_tokens::primitive::space;
 use gpui::{
-    Context, EventEmitter, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
-    Window, actions, div,
+    Context, EventEmitter, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    SharedString, Styled as _, Window, actions, div,
 };
 
 use crate::api::Api;
+use crate::keymap::{self, ConfirmDialog};
 use crate::overview::Snapshot;
 use crate::workspace::failed;
 
@@ -330,7 +332,7 @@ impl Render for NewAgentDialog {
                 this.set_task(value.parse().ok(), cx);
             }));
         let hint = prompt_hint(self.task.is_some(), self.instructions());
-        Dialog::new("new-agent")
+        let dialog = Dialog::new("new-agent")
             .handle(self.handle.clone())
             .content(
                 DialogContent::new()
@@ -370,7 +372,12 @@ impl Render for NewAgentDialog {
                                     ),
                             ),
                     ),
-            )
+            );
+        // Enter, while no select has the keyboard, starts too.
+        div()
+            .key_context(keymap::DIALOG)
+            .on_action(cx.listener(|this, _: &ConfirmDialog, window, cx| this.start(window, cx)))
+            .child(dialog)
     }
 }
 
@@ -399,6 +406,7 @@ mod tests {
     /// 10 (todo) and 11 (done), with an instruction for the workspace.
     fn open(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
         cx.update(brrritscold_core_gpui::init);
+        cx.update(crate::keymap::init);
         let api = Arc::new(FakeApi::default());
         let mut dialog = None;
         let window = cx.add_window(|window, cx| {
@@ -460,6 +468,14 @@ mod tests {
         cx.run_until_parked();
     }
 
+    /// Shows the dialog, so it takes the keyboard, then presses `keys`.
+    fn press(keys: &str, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes(keys);
+        cx.run_until_parked();
+    }
+
     use agentdeck_client::types::Task;
 
     mod dialog {
@@ -481,6 +497,27 @@ mod tests {
                 }]
             );
             assert_eq!(harness.launched.borrow().len(), 1);
+            assert!(!harness.dialog.read_with(cx, |d, _| d.is_open()));
+        }
+
+        #[gpui::test]
+        fn should_start_on_enter(cx: &mut TestAppContext) {
+            let (harness, cx) = open(cx);
+
+            press("enter", cx);
+
+            assert_eq!(harness.api.launched.lock().unwrap().len(), 1);
+            assert_eq!(harness.launched.borrow().len(), 1);
+            assert!(!harness.dialog.read_with(cx, |d, _| d.is_open()));
+        }
+
+        #[gpui::test]
+        fn should_close_without_starting_on_escape(cx: &mut TestAppContext) {
+            let (harness, cx) = open(cx);
+
+            press("escape", cx);
+
+            assert!(harness.api.launched.lock().unwrap().is_empty());
             assert!(!harness.dialog.read_with(cx, |d, _| d.is_open()));
         }
 

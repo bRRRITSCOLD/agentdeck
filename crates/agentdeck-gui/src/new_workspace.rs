@@ -389,6 +389,18 @@ mod tests {
         }
 
         #[gpui::test]
+        fn should_close_without_making_it_on_escape(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(cx);
+
+            cx.simulate_input("tabs-a11y");
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+
+            assert!(harness.made().is_empty());
+            assert!(!harness.is_open(cx));
+        }
+
+        #[gpui::test]
         fn should_stay_open_with_the_name_problem_on_enter_in_a_blank_name(
             cx: &mut TestAppContext,
         ) {
