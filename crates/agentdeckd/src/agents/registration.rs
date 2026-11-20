@@ -235,14 +235,10 @@ impl Environment {
         }
     }
 
-    /// What `claude` runs with: a pane's environment (spec §6), plus `CLAUDE_CONFIG_DIR` when
-    /// the daemon has it, so it writes the config this module reads.
+    /// What `claude` runs with: a pane's environment (spec §6), which carries
+    /// `CLAUDE_CONFIG_DIR` when the daemon has it, so it writes the config this module reads.
     fn claude_env(&self) -> BTreeMap<OsString, OsString> {
-        let mut env = pane_env(self.vars.clone(), &[]);
-        if let Some(dir) = self.vars.get(OsStr::new("CLAUDE_CONFIG_DIR")) {
-            env.insert("CLAUDE_CONFIG_DIR".into(), dir.clone());
-        }
-        env
+        pane_env(self.vars.clone(), &[])
     }
 }
 
