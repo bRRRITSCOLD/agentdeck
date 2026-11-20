@@ -539,7 +539,8 @@ mod get_v1_ws {
     }
 
     /// A shell pane with no `shell.toml` reads `working` only for output that is work (spec
-    /// §7): not its prompt, and not a redraw for a resize.
+    /// §7): what a command prints, not the shell's own prompt or the echo of what is typed at
+    /// it, and not a redraw for a resize.
     mod shell_state {
         use agentdeck_core::PaneId;
 
@@ -549,6 +550,9 @@ mod get_v1_ws {
         /// Output would publish `working` a tick and a settle (500 ms) after it; this is twice
         /// that.
         const SETTLED: Duration = Duration::from_secs(1);
+
+        /// A command at work: in front of the shell, it prints a line every 200 ms for 3 s.
+        const PRINTING: &[u8] = b"sh -c 'for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do echo tick; sleep 0.2; done'\r";
 
         fn is_state(frame: &Frame, pane: PaneId, state: AgentState) -> bool {
             matches!(
@@ -591,14 +595,28 @@ mod get_v1_ws {
             screen.until(ws, |screen| screen.shows("redrawn")).await;
         }
 
+        /// An interactive `sh` pane, attached on channel 1, at its prompt.
+        async fn shell(daemon: &TestDaemon) -> (PaneId, Ws, Screen) {
+            let place = Place::new(daemon).await;
+            let pane = place.spawn(&daemon.client, &["sh"]).await;
+            printed(&daemon.client, pane.id, "$ ").await;
+            let mut ws = Ws::connect(daemon).await;
+            let screen = ws.attach(pane.id, 1).await;
+            (pane.id, ws, screen)
+        }
+
         #[tokio::test]
-        async fn should_not_read_a_new_shell_as_working_for_its_prompt_or_a_resize() {
+        async fn should_not_read_a_new_shell_as_working_for_what_it_prints_at_start_or_a_resize() {
             let daemon = TestDaemon::start().await;
             let place = Place::new(&daemon).await;
+            // With job control on (`-m`), the inner `sh` is in front, as a command an rc file
+            // runs is: what it prints before anything is typed doesn't count.
             let pane = place
                 .spawn(
                     &daemon.client,
-                    &sh("trap 'echo redrawn' WINCH; echo ready; sleep 60 & wait; exec sh"),
+                    &sh("set -m; \
+                         sh -c \"trap 'echo redrawn' WINCH; echo ready; sleep 60 & wait\"; \
+                         exec sh"),
                 )
                 .await;
             let mut ws = Ws::connect(&daemon).await;
@@ -608,28 +626,47 @@ mod get_v1_ws {
             resize(&mut ws, &mut screen).await;
 
             never_working(&mut ws, &mut screen, pane.id, SETTLED).await;
-            ws.type_bytes(1, b"echo hi\r").await;
+            ws.type_bytes(1, PRINTING).await;
             until_state(&mut ws, &mut screen, pane.id, AgentState::Working).await;
         }
 
         #[tokio::test]
         async fn should_not_read_a_redraw_for_a_resize_as_working() {
             let daemon = TestDaemon::start().await;
-            let place = Place::new(&daemon).await;
-            let pane = place.spawn(&daemon.client, &["sh"]).await;
-            let mut ws = Ws::connect(&daemon).await;
-            let mut screen = ws.attach(pane.id, 1).await;
-            // Typing it is output that counts, so wait for that to pass.
-            ws.type_bytes(1, b"trap 'echo redrawn' WINCH; sleep 60 & wait\r")
-                .await;
-            until_state(&mut ws, &mut screen, pane.id, AgentState::Working).await;
-            until_state(&mut ws, &mut screen, pane.id, AgentState::Unknown).await;
+            let (pane, mut ws, mut screen) = shell(&daemon).await;
+            // A command in front that prints once, then redraws on a resize. Its `""` keeps
+            // the echo of this line from showing `redrawn`.
+            ws.type_bytes(
+                1,
+                b"sh -c \"trap 'echo re\\\"\\\"drawn' WINCH; sleep 0.5; echo started; \
+                  sleep 60 & wait; sleep 60\"\r",
+            )
+            .await;
+            until_state(&mut ws, &mut screen, pane, AgentState::Working).await;
+            until_state(&mut ws, &mut screen, pane, AgentState::Unknown).await;
 
             resize(&mut ws, &mut screen).await;
 
-            never_working(&mut ws, &mut screen, pane.id, SETTLED).await;
-            ws.type_bytes(1, b"echo hi\r").await;
-            until_state(&mut ws, &mut screen, pane.id, AgentState::Working).await;
+            never_working(&mut ws, &mut screen, pane, SETTLED).await;
+            // The command is still in front, so the terminal's echo of this is its output.
+            ws.type_bytes(1, b"x").await;
+            until_state(&mut ws, &mut screen, pane, AgentState::Working).await;
+        }
+
+        #[tokio::test]
+        async fn should_not_read_typing_at_the_prompt_as_working() {
+            let daemon = TestDaemon::start().await;
+            let (pane, mut ws, mut screen) = shell(&daemon).await;
+
+            // One key at a time, as the user types: each echo is the shell's own output.
+            for key in b"echo hi\r" {
+                ws.type_bytes(1, &[*key]).await;
+                never_working(&mut ws, &mut screen, pane, Duration::from_millis(150)).await;
+            }
+            never_working(&mut ws, &mut screen, pane, SETTLED).await;
+
+            ws.type_bytes(1, PRINTING).await;
+            until_state(&mut ws, &mut screen, pane, AgentState::Working).await;
         }
     }
 

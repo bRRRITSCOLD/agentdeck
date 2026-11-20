@@ -217,6 +217,31 @@ mod state_rules {
         // Under the shell's rules, a quiet shell is unknown, never idle or done.
         in_state(&daemon.client, pane.id, AgentState::Unknown).await;
     }
+
+    #[tokio::test]
+    async fn should_not_read_the_shell_as_working_once_its_agent_exits() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let pane = shell(&daemon, &place).await;
+        run(&daemon.client, pane.id, "claude").await;
+        in_state(&daemon.client, pane.id, AgentState::Idle).await;
+
+        exit_agent(&daemon.client, pane.id).await;
+        hosting(&daemon.client, pane.id, None).await;
+
+        // The agent's last output and the shell's prompt come either side of the switch;
+        // neither is the shell at work. Long past a tick, a settle and the 2 s of recent output.
+        holds_for(
+            "the shell to stay out of working",
+            Duration::from_millis(2_500),
+            || async { read(&daemon.client, pane.id).await.state != AgentState::Working },
+        )
+        .await;
+        assert_eq!(
+            read(&daemon.client, pane.id).await.state,
+            AgentState::Unknown
+        );
+    }
 }
 
 mod comment_delivery {

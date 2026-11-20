@@ -2,8 +2,8 @@
 //! when it exists, else the rules agentdeck embeds for that agent, else none.
 //!
 //! An agent pane's rules are named for its agent (`claude`, `codex`, `other`). A shell pane's
-//! are named `shell`; agentdeck ships none, so a shell is `working` while it prints and
-//! `unknown` otherwise, unless a `shell.toml` says more.
+//! are named `shell`; agentdeck ships none, so a shell is `working` while a command it runs
+//! prints and `unknown` otherwise, unless a `shell.toml` says more.
 
 use std::path::Path;
 
