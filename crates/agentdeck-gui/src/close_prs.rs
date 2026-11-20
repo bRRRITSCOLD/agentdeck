@@ -155,18 +155,15 @@ impl Selection {
 
     /// Takes in the results of closing the picked PRs and says how it went. When every one
     /// closed, Select mode ends. Otherwise it stays on with the failed ones still picked,
-    /// each with its error, and the rest unpicked.
+    /// each with its error, and the rest unpicked. When none closed, the toast is an error
+    /// with the first one's error, as a close from a row's menu says why.
     pub fn closed(&mut self, results: &[PrCloseResult]) -> Notice {
         let closed = results.iter().filter(|r| r.ok).count();
         if closed == results.len() {
             self.set_active(false);
             return Notice::new(format!("Closed {}", prs(closed)));
         }
-        self.selected = (results.iter())
-            .filter(|r| !r.ok)
-            .map(|r| r.task_id)
-            .collect();
-        self.errors = (results.iter())
+        let failed: Vec<(TaskId, SharedString)> = (results.iter())
             .filter(|r| !r.ok)
             .map(|r| {
                 let error = r
@@ -176,6 +173,15 @@ impl Selection {
                 (r.task_id, error.into())
             })
             .collect();
+        self.selected = failed.iter().map(|(task, _)| *task).collect();
+        self.errors = failed.iter().cloned().collect();
+        if closed == 0 {
+            let (_, first) = &failed[0];
+            return Notice::error(
+                format!("Couldn't close {}", prs(failed.len())),
+                first.clone(),
+            );
+        }
         Notice::new(format!("Closed {closed} of {}", results.len()))
     }
 }
@@ -925,6 +931,8 @@ pub fn selectable(rows: &[Row]) -> Vec<TaskId> {
 
 #[cfg(test)]
 mod tests {
+    use brrritscold_core_gpui::ToastType;
+
     use super::*;
     use crate::overview::fixtures::id;
 
@@ -1117,6 +1125,42 @@ mod tests {
             assert_eq!(
                 selection.error(id(2)).map(SharedString::as_ref),
                 Some("Resource not accessible by personal access token")
+            );
+        }
+
+        #[test]
+        fn should_toast_an_error_with_the_first_reason_when_none_closed() {
+            let mut selection = picking(&[1, 2]);
+
+            let notice = selection.closed(&[
+                result(1, Some("Resource not accessible by personal access token")),
+                result(2, Some("Must have admin rights")),
+            ]);
+
+            assert_eq!(notice.kind, Some(ToastType::Error));
+            assert_eq!(notice.title, "Couldn't close 2 PRs");
+            assert_eq!(
+                notice.description.as_deref(),
+                Some("Resource not accessible by personal access token")
+            );
+            assert!(selection.active());
+            assert_eq!(selection.ids(), [id(1), id(2)]);
+            assert_eq!(
+                selection.error(id(2)).map(SharedString::as_ref),
+                Some("Must have admin rights")
+            );
+        }
+
+        #[test]
+        fn should_name_one_pr_when_the_only_one_did_not_close() {
+            let mut selection = picking(&[1]);
+
+            let notice = selection.closed(&[result(1, Some("Must have admin rights"))]);
+
+            assert_eq!(notice.title, "Couldn't close 1 PR");
+            assert_eq!(
+                notice.description.as_deref(),
+                Some("Must have admin rights")
             );
         }
 

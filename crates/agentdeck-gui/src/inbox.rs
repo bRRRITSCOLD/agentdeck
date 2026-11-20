@@ -1199,6 +1199,75 @@ mod tests {
             ));
         }
 
+        /// How wide core-gpui's `TooltipContent` is when it reads `text`: the text, xs in the
+        /// sans family `Root` sets, with `px-3` either side.
+        fn tooltip_width(text: &str, cx: &mut VisualTestContext) -> gpui::Pixels {
+            use brrritscold_core_gpui_tokens::primitive::font_family;
+
+            cx.update(|window, _| {
+                let run = gpui::TextRun {
+                    len: text.len(),
+                    font: gpui::font(font_family::SANS.family),
+                    color: gpui::Hsla::default(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let size = font_size::XS.to_pixels(window.rem_size());
+                let line =
+                    (window.text_system()).shape_line(text.to_owned().into(), size, &[run], None);
+                line.width + space::S3 * 2.
+            })
+        }
+
+        #[gpui::test]
+        fn should_show_why_a_pr_did_not_close_on_hovering_its_title(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            harness.api.refuse_close(id(4), "Must have admin rights");
+            click("inbox select".into(), cx);
+            click("inbox select all inbox".into(), cx);
+            click("inbox close prs".into(), cx);
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+            // The daemon's `changed` for PR 1, which closed, takes its row out.
+            let mut snapshot = prs();
+            snapshot.tasks[0].status = TaskStatus::Done;
+            if let Some(pr) = &mut snapshot.tasks[0].pr {
+                pr.state = PrState::Closed;
+            }
+            harness
+                .view
+                .update(cx, |view, cx| view.set_snapshot(snapshot, cx));
+            cx.run_until_parked();
+            let title = format!("task title {}", id::<TaskId>(4));
+            assert!(shown_at(title.clone(), cx));
+            let title = cx
+                .debug_bounds(title.leak())
+                .expect("the failed row's title");
+            assert!(cx.debug_bounds("tooltip-content").is_none());
+
+            cx.simulate_mouse_move(title.center(), None, Modifiers::default());
+            cx.run_until_parked();
+
+            let tooltip = cx
+                .debug_bounds("tooltip-content")
+                .expect("a tooltip on hover");
+            assert!(
+                tooltip.bottom() < title.top(),
+                "{tooltip:?} above {title:?}"
+            );
+            let reads = tooltip_width("Must have admin rights", cx);
+            assert!(
+                (tooltip.size.width - reads).abs() < px(1.),
+                "{tooltip:?} is as wide as GitHub's message, {reads:?}"
+            );
+
+            cx.simulate_mouse_move(point(px(1.), px(1.)), None, Modifiers::default());
+            cx.run_until_parked();
+
+            assert!(cx.debug_bounds("tooltip-content").is_none());
+        }
+
         #[gpui::test]
         fn should_say_why_when_the_close_request_fails(cx: &mut TestAppContext) {
             let (harness, cx) = asked_to_close_both(cx);
