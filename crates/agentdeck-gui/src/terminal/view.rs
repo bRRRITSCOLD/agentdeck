@@ -912,6 +912,7 @@ mod tests {
 
     use agentdeck_client::ws::{Event, Outgoing, Remote};
     use agentdeck_core::AgentState;
+    use agentdeck_core::ws::RESET_MODES;
     use alacritty_terminal::index::Side;
     use brrritscold_core_gpui::{Root, StateDot, StateDotState, Theme, ThemePreference};
     use gpui::{
@@ -1900,6 +1901,22 @@ mod tests {
             cx.simulate_mouse_move(same_cell, None, Modifiers::default());
 
             assert_eq!(harness.sent(), [input(b"\x1b[<35;2;2M")]);
+        }
+
+        #[gpui::test]
+        fn should_report_nothing_once_the_daemon_resets_the_modes(cx: &mut TestAppContext) {
+            // A program that was killed with every-move reporting on (#322).
+            let (mut harness, cx) = Harness::live(b"\x1b[?1003h\x1b[?1006h", cx);
+            harness.deliver(Event::Output(1, RESET_MODES.to_vec()), cx);
+            let (at, next) = (
+                harness.at(1, 1, Side::Left, cx),
+                harness.at(2, 3, Side::Left, cx),
+            );
+
+            cx.simulate_mouse_move(at, None, Modifiers::default());
+            cx.simulate_mouse_move(next, None, Modifiers::default());
+
+            assert_eq!(harness.sent(), []);
         }
 
         #[gpui::test]

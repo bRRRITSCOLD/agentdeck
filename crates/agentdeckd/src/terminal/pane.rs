@@ -12,6 +12,9 @@
 //!   answers to terminal queries. A submitted message's Enter is a write of its own, with a
 //!   pause on either side ([`SUBMIT_PAUSE`]).
 //!
+//! When the process exits, or the agent a shell pane hosts leaves the foreground, the pane
+//! turns off the terminal modes a killed program leaves on ([`reset_modes`]).
+//!
 //! Everything a chunk of output touches (the `Term`, the tail, the OSC scanner, the attached
 //! clients' queues) changes under one lock, [`Pane::live`]. An attach snapshots the `Term`
 //! and subscribes under that same lock, so no output falls between the snapshot and the live
@@ -32,7 +35,7 @@ use std::time::{Duration, Instant};
 use agentdeck_core::state::{
     Foreground, LastOutput, Observation, OscScanner, RuleSet, StateTracker, hosted_agent, screen,
 };
-use agentdeck_core::ws::{Channel, ServerMessage};
+use agentdeck_core::ws::{Channel, RESET_MODES, ServerMessage};
 use agentdeck_core::{Agent, AgentState, PaneId, TaskId, WorkspaceId};
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener};
@@ -115,6 +118,9 @@ struct Hosting {
     shell: RuleSet,
     agents: Vec<(Agent, RuleSet)>,
     hosted: Option<Agent>,
+    /// Whether the modes were reset since the hosted agent handed the terminal back to the
+    /// shell, ahead of the observation that it left ([`Pane::agent_left`]).
+    modes_reset: bool,
 }
 
 impl Hosting {
@@ -388,6 +394,7 @@ impl Pane {
                     shell: shell.clone(),
                     agents,
                     hosted: None,
+                    modes_reset: false,
                 };
                 (shell, Some(hosting), LastOutput::shell())
             }
@@ -513,6 +520,9 @@ impl Pane {
     fn output(&self, bytes: &[u8]) {
         let mut guard = self.live();
         let live = &mut *guard;
+        if self.agent_left(live) {
+            reset_modes(live);
+        }
         live.tail.push(bytes);
         live.osc.feed(bytes);
         live.parser.advance(&mut live.term, bytes);
@@ -543,13 +553,14 @@ impl Pane {
         }
     }
 
-    /// The process exited: runs `on_exit` with the last title, then publishes `exited` and
-    /// `exit` and drops queued input. `on_exit` runs outside the lock, since it waits on the
-    /// database.
+    /// The process exited: runs `on_exit` with the last title, then resets the modes it left
+    /// on, publishes `exited` and `exit` and drops queued input. `on_exit` runs outside the
+    /// lock, since it waits on the database.
     fn exit(&self, code: Option<i64>, on_exit: OnExit) {
         let title = self.live().title.clone();
         on_exit(self.id, code, title);
         let mut live = self.live();
+        reset_modes(&mut live);
         live.queued.clear();
         if let Some(hosting) = &mut live.hosting {
             hosting.hosted = None;
@@ -621,12 +632,17 @@ impl Pane {
 
     /// Hosts the agent `foreground` is, if that changed: switches to its rules (or back to
     /// the shell's), which starts the state over, and drops the queued input, so nothing meant
-    /// for the agent is typed into the shell, nor the other way round. Returns the agent hosted
-    /// now when it changed.
+    /// for the agent is typed into the shell, nor the other way round. Once no agent is hosted,
+    /// resets the modes the one that left had on, unless the shell's output already did.
+    /// Returns the agent hosted now when it changed.
     fn rehost(&self, live: &mut Live, foreground: &Foreground) -> Option<Option<Agent>> {
         let (hosted, rules) = live.hosting.as_ref()?.change(foreground)?;
-        if let Some(hosting) = &mut live.hosting {
-            hosting.hosted = hosted;
+        let hosting = live.hosting.as_mut()?;
+        let left = hosting.hosted.is_some() && hosted.is_none() && !hosting.modes_reset;
+        hosting.hosted = hosted;
+        hosting.modes_reset = false;
+        if left {
+            reset_modes(live);
         }
         live.queued.clear();
         if let Some(state) = live.tracker.switch_rules(rules) {
@@ -636,6 +652,23 @@ impl Pane {
             });
         }
         Some(hosted)
+    }
+
+    /// Whether the agent the pane hosts has handed the terminal back to the shell, whose own
+    /// process group is in the foreground again, with the modes not yet reset for it; it
+    /// records that they are about to be. The state timer sees the agent leave up to a tick
+    /// later, after the shell's prompt, which may turn bracketed paste on again; checking each
+    /// chunk of output resets the modes ahead of the prompt instead.
+    fn agent_left(&self, live: &mut Live) -> bool {
+        let Some(hosting) = live.hosting.as_mut() else {
+            return false;
+        };
+        if hosting.hosted.is_none() || hosting.modes_reset {
+            return false;
+        }
+        let back = self.pid.is_some() && self.master().process_group_leader() == self.pid;
+        hosting.modes_reset = back;
+        back
     }
 
     /// Types `bytes` into the PTY, now or once the pane's state accepts `when`: as they are,
@@ -881,6 +914,14 @@ impl Pane {
     pub fn stopped(&self) -> bool {
         self.stopped.load(Ordering::SeqCst)
     }
+}
+
+/// Turns off the modes a killed program may have left on ([`RESET_MODES`]) in the pane's
+/// `Term` and in every attached client's copy, as if the program had written it (spec §7).
+/// It isn't the program's output, so the tail doesn't get it.
+fn reset_modes(live: &mut Live) {
+    live.parser.advance(&mut live.term, RESET_MODES);
+    live.fanout.output(RESET_MODES);
 }
 
 /// Process `leader`, the PTY's foreground process group's leader, from `/proc`: `None` when its
