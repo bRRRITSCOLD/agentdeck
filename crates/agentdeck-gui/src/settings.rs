@@ -46,6 +46,7 @@ use crate::agents_section::AgentsSection;
 use crate::api::Api;
 use crate::connection::{Connection, DaemonEvent};
 use crate::github::GithubSection;
+use crate::rereads::Rereads;
 use crate::scrollbar;
 use crate::workspace::failed;
 
@@ -104,6 +105,10 @@ pub struct SettingsView {
     api: Arc<dyn Api>,
     /// The settings as last read or saved; `None` until the first read lands.
     settings: Option<Settings>,
+    /// The read in flight; replacing it drops the old one.
+    read: Option<Task<()>>,
+    /// Whether a read runs, and whether a change came in meanwhile.
+    rereads: Rereads,
     /// "Sync PRs updated in the last (days)".
     days: Entity<InputState>,
     /// Why the days typed weren't saved, and the text that wasn't, until it is edited.
@@ -161,6 +166,8 @@ impl SettingsView {
         let mut view = SettingsView {
             api,
             settings: None,
+            read: None,
+            rereads: Rereads::default(),
             github,
             agents,
             scroll: ScrollHandle::new(),
@@ -229,17 +236,25 @@ impl SettingsView {
         }
     }
 
-    /// Reads the settings, shows them and applies their theme.
+    /// Reads the settings, shows them and applies their theme, or reads once more after the
+    /// read in flight, so an older read never lands over a newer one.
     pub fn reread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.rereads.ask() {
+            return;
+        }
         let reading = self.api.settings(cx);
-        cx.spawn_in(window, async move |this, cx| {
+        self.read = Some(cx.spawn_in(window, async move |this, cx| {
             let read = reading.await;
-            let _ = this.update_in(cx, |this, window, cx| match read {
-                Ok(settings) => this.show(settings, window, cx),
-                Err(err) => failed("Couldn't read the settings", &err, window, cx),
+            let _ = this.update_in(cx, |this, window, cx| {
+                match read {
+                    Ok(settings) => this.show(settings, window, cx),
+                    Err(err) => failed("Couldn't read the settings", &err, window, cx),
+                }
+                if this.rereads.landed() {
+                    this.reread(window, cx);
+                }
             });
-        })
-        .detach();
+        }));
     }
 
     /// Shows `settings` and applies their theme. A field keeps what is being typed in it.
@@ -1356,6 +1371,29 @@ mod tests {
             );
             assert_eq!(harness.days_shown(cx), "7");
             assert_eq!(harness.opener_shown(cx), "code {path}");
+        }
+
+        #[gpui::test]
+        fn should_show_the_newer_read_when_an_older_one_lands_last(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(default_settings(), cx);
+            let changed = || {
+                ws::Event::Message(ServerMessage::Changed {
+                    entity: Changed::Settings,
+                    id: "settings".into(),
+                })
+            };
+            harness.api.set_settings(with_days(7));
+            let release = harness.api.hold_settings_read();
+            harness.remote.events.try_send(changed()).unwrap();
+            harness.settle(cx);
+            harness.api.set_settings(with_days(14));
+            harness.remote.events.try_send(changed()).unwrap();
+            harness.settle(cx);
+
+            release.send(()).unwrap();
+            harness.settle(cx);
+
+            assert_eq!(harness.days_shown(cx), "14");
         }
 
         #[gpui::test]

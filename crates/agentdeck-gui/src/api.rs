@@ -810,6 +810,8 @@ pub(crate) mod fake {
         settings: Mutex<Option<Settings>>,
         /// How many times the settings were read.
         settings_reads: Mutex<usize>,
+        /// Holds the next settings read's answer until its sender sends or drops.
+        held_settings_read: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
         /// The settings patches sent, in order.
         pub settings_patches: Mutex<Vec<SettingsPatch>>,
         /// Each close asked for: the tasks, in order.
@@ -949,6 +951,14 @@ pub(crate) mod fake {
         pub fn hold_stop(&self) -> tokio::sync::oneshot::Sender<()> {
             let (release, held) = tokio::sync::oneshot::channel();
             *self.held_stop.lock().unwrap() = Some(held);
+            release
+        }
+
+        /// Holds the next settings read's answer, as a slow daemon does, until the sender it
+        /// returns sends or drops. The read answers with the settings held when it was asked.
+        pub fn hold_settings_read(&self) -> tokio::sync::oneshot::Sender<()> {
+            let (release, held) = tokio::sync::oneshot::channel();
+            *self.held_settings_read.lock().unwrap() = Some(held);
             release
         }
 
@@ -1466,9 +1476,16 @@ pub(crate) mod fake {
             Task::ready(Ok(()))
         }
 
-        fn settings(&self, _cx: &App) -> Task<anyhow::Result<Settings>> {
+        fn settings(&self, cx: &App) -> Task<anyhow::Result<Settings>> {
             *self.settings_reads.lock().unwrap() += 1;
-            Task::ready(Ok(self.settings_now()))
+            let settings = self.settings_now();
+            match self.held_settings_read.lock().unwrap().take() {
+                Some(held) => cx.background_executor().spawn(async move {
+                    let _ = held.await;
+                    Ok(settings)
+                }),
+                None => Task::ready(Ok(settings)),
+            }
         }
 
         fn update_settings(
