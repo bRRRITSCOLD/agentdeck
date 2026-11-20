@@ -19,6 +19,8 @@ const NAMES: &[&str] = &[
     "EDITOR",
     // Where Codex keeps its sessions: the daemon reads them from the same place (spec §6).
     "CODEX_HOME",
+    // Where Claude Code keeps its config and sessions, as `agentdeck mcp install` reads it.
+    "CLAUDE_CONFIG_DIR",
 ];
 
 /// Variables passed on by prefix.
@@ -97,6 +99,7 @@ mod tests {
                 ("GH_TOKEN", "t"),
                 ("EDITOR", "vi"),
                 ("CODEX_HOME", "/codex"),
+                ("CLAUDE_CONFIG_DIR", "/claude"),
             ]);
             let env = pane_env(daemon.clone(), &[]);
             for (name, value) in daemon {

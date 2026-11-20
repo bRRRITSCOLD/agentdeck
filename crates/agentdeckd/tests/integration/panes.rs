@@ -215,6 +215,7 @@ mod post_v1_panes {
                 "SSH_AUTH_SOCK",
                 "EDITOR",
                 "CODEX_HOME",
+                "CLAUDE_CONFIG_DIR",
                 "AGENTDECK_PANE",
                 "AGENTDECK_WORKSPACE",
             ]
@@ -227,9 +228,12 @@ mod post_v1_panes {
         #[tokio::test]
         async fn should_pass_on_only_the_allowlist_201() {
             let dirs = tempfile::tempdir().expect("a temp dir");
+            let claude_dir = dirs.path().join("claude");
+            let claude_dir = claude_dir.to_str().expect("a UTF-8 temp dir");
             set_daemon_env(
                 dirs.path(),
                 &[
+                    ("CLAUDE_CONFIG_DIR", claude_dir),
                     ("CLAUDECODE", "1"),
                     ("CLAUDE_CODE_ENTRYPOINT", "cli"),
                     ("AWS_SECRET_ACCESS_KEY", "secret"),
@@ -262,6 +266,7 @@ mod post_v1_panes {
             assert_eq!(env.get("LC_ALL"), Some(&"C"));
             assert_eq!(env.get("GH_HOST"), Some(&"github.com"));
             assert_eq!(env.get("EDITOR"), Some(&"vi"));
+            assert_eq!(env.get("CLAUDE_CONFIG_DIR"), Some(&claude_dir));
             assert_eq!(env.get("TERM"), Some(&"xterm-256color"));
             assert_eq!(env.get("COLORTERM"), Some(&"truecolor"));
             assert_eq!(
