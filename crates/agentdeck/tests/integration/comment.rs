@@ -156,6 +156,72 @@ mod comment_add {
         }
     }
 
+    mod from_a_closed_pane {
+        use super::*;
+
+        /// A pane id the daemon has no pane for, as a closed pane's: what a process that
+        /// outlived its pane, such as codex's background server, still has in its environment.
+        const GONE_PANE: &str = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
+
+        /// Asserts the CLI's error names the stale pane and why its id can be stale.
+        fn assert_stale_pane(stderr: &str, code: &str) {
+            assert!(stderr.contains(GONE_PANE), "{stderr}");
+            assert!(stderr.contains("$AGENTDECK_PANE"), "{stderr}");
+            assert!(stderr.contains("codex --no-daemon"), "{stderr}");
+            assert!(stderr.contains(&format!("({code})")), "{stderr}");
+        }
+
+        #[test]
+        fn should_say_agentdeck_pane_is_stale() {
+            let env = TestEnv::new();
+            let task = env.json(&["task", "add", "Fix the build"]);
+            let caller = OsString::from(GONE_PANE);
+
+            let run = env.run_with(
+                &["comment", "add", "PR opened", "--task", text(&task, "id")],
+                &[("AGENTDECK_PANE", &caller)],
+            );
+
+            assert!(!run.success, "{}", run.stdout);
+            assert_stale_pane(&run.stderr, "unknown_pane");
+        }
+
+        #[test]
+        fn should_say_agentdeck_pane_is_stale_without_a_task() {
+            let env = TestEnv::new();
+            let caller = OsString::from(GONE_PANE);
+
+            let run = env.run_with(
+                &["comment", "add", "PR opened"],
+                &[("AGENTDECK_PANE", &caller)],
+            );
+
+            assert!(!run.success, "{}", run.stdout);
+            assert_stale_pane(&run.stderr, "not_found");
+        }
+
+        #[test]
+        fn should_still_say_an_unknown_task_is_not_found() {
+            let env = TestEnv::new();
+            let caller = OsString::from(GONE_PANE);
+
+            let run = env.run_with(
+                &[
+                    "comment",
+                    "add",
+                    "PR opened",
+                    "--task",
+                    "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5c",
+                ],
+                &[("AGENTDECK_PANE", &caller)],
+            );
+
+            assert!(!run.success, "{}", run.stdout);
+            assert!(run.stderr.contains("(not_found)"), "{}", run.stderr);
+            assert!(!run.stderr.contains("AGENTDECK_PANE"), "{}", run.stderr);
+        }
+    }
+
     #[test]
     fn should_print_the_comments_id_and_task() {
         let env = TestEnv::new();

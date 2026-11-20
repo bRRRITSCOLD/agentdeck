@@ -350,5 +350,49 @@ mod agentdeck_mcp {
 
             assert_eq!(result["isError"], true, "{result}");
         }
+
+        /// A pane id the daemon has no pane for, as a closed pane's: what a codex typed into a
+        /// shell passes on from codex's background server, started in a pane since closed.
+        const GONE_PANE: &str = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
+
+        /// Asserts a tool's error names the stale pane and why its id can be stale.
+        fn assert_stale_pane(tool: &str, result: &serde_json::Value) {
+            assert_eq!(result["isError"], true, "{tool}: {result}");
+            let message = result["content"][0]["text"].as_str().unwrap();
+            assert!(message.contains(GONE_PANE), "{tool}: {message}");
+            assert!(message.contains("$AGENTDECK_PANE"), "{tool}: {message}");
+            assert!(message.contains("codex --no-daemon"), "{tool}: {message}");
+        }
+
+        #[test]
+        fn should_say_agentdeck_pane_is_stale_when_commenting_from_a_closed_pane() {
+            let env = TestEnv::new();
+            let task = env.json(&["task", "add", "Fix the build"]);
+            let mut mcp = McpClient::start(&env, &[("AGENTDECK_PANE", GONE_PANE)]);
+            mcp.initialize();
+
+            let result = mcp.call(
+                "task_comment",
+                json!({ "task": task["id"], "body": "PR opened" }),
+            );
+
+            assert_stale_pane("task_comment", &result);
+        }
+
+        #[test]
+        fn should_say_agentdeck_pane_is_stale_when_defaulting_to_a_closed_panes_task() {
+            let env = TestEnv::new();
+            let mut mcp = McpClient::start(&env, &[("AGENTDECK_PANE", GONE_PANE)]);
+            mcp.initialize();
+
+            for (tool, arguments) in [
+                ("task_get", json!({})),
+                ("task_comment", json!({ "body": "PR opened" })),
+            ] {
+                let result = mcp.call(tool, arguments);
+
+                assert_stale_pane(tool, &result);
+            }
+        }
     }
 }

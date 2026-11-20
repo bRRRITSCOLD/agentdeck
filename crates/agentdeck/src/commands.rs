@@ -356,18 +356,16 @@ async fn comment(client: &Client, command: CommentCommand) -> anyhow::Result<Out
             Output::new(&*comments, render::comments(&comments))
         }
         CommentCommand::Add { body, task } => {
+            let pane = caller_pane();
             let task = optional_task(client, task.as_deref()).await?;
-            let task = task_or_callers(client, task, caller_pane(), "--task").await?;
+            let task = task_or_callers(client, task, pane, "--task").await?;
             let comment = client
                 .comment_create()
                 .id(task)
-                .body(NewComment {
-                    body,
-                    pane: caller_pane(),
-                })
+                .body(NewComment { body, pane })
                 .send()
                 .await
-                .map_err(ApiError::from)?;
+                .map_err(|err| stale_pane(err.into(), pane, "unknown_pane"))?;
             Output::new(&*comment, render::comment_created(&comment))
         }
     }
@@ -459,7 +457,7 @@ pub async fn task_or_callers(
         .id(pane)
         .send()
         .await
-        .map_err(ApiError::from)?;
+        .map_err(|err| stale_pane(err.into(), Some(pane), "not_found"))?;
     pane.task_id
         .ok_or_else(|| anyhow::anyhow!("name a task with {arg}: your pane isn't linked to a task"))
 }
@@ -467,6 +465,21 @@ pub async fn task_or_callers(
 /// `$AGENTDECK_PANE`, when it holds a pane id.
 pub fn caller_pane() -> Option<PaneId> {
     std::env::var(PANE_VAR).ok()?.parse().ok()
+}
+
+/// `err`, from a call that sent the caller's `pane`. When its `error_code` is `code`, the
+/// daemon has no such pane: `$AGENTDECK_PANE` is stale, kept by a process that outlived its
+/// pane. A codex typed into a shell is one: it runs its tools in codex's background server,
+/// with the environment of the codex that started that server, in a pane since closed.
+pub fn stale_pane(err: ApiError, pane: Option<PaneId>, code: &str) -> anyhow::Error {
+    match pane {
+        Some(pane) if err.code.as_deref() == Some(code) => anyhow::anyhow!(
+            "no pane {pane}, which ${PANE_VAR} names: that pane was closed. A codex typed into \
+             a shell runs its tools in codex's background server, which keeps the environment \
+             it started with; run codex --no-daemon in the pane instead ({code})"
+        ),
+        _ => err.into(),
+    }
 }
 
 /// `agent ls`: every pane in the layouts of the tabs of the workspace `ws` names, else of
