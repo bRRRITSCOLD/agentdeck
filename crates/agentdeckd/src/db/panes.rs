@@ -244,6 +244,17 @@ pub fn set_exited(
     Ok(())
 }
 
+/// Records stopped pane `id` as exited, with `title`, as the daemon stops before its process
+/// has (spec §6); an exit already saved, with its code, stays as it is.
+pub fn set_stopped(conn: &Connection, id: PaneId, title: &str) -> Result<(), DbError> {
+    conn.execute(
+        "UPDATE panes SET state = 'exited', title = ?2, hosted_agent = NULL
+         WHERE id = ?1 AND state != 'exited'",
+        params![id.to_string(), title],
+    )?;
+    Ok(())
+}
+
 /// Turns pane `id` into a shell pane running `argv` (spec §3): no agent, no session.
 pub fn become_shell(conn: &Connection, id: PaneId, argv: &[String]) -> Result<Pane, DbError> {
     conn.execute(

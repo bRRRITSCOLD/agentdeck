@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use agentdeck_core::state::HOSTABLE;
 use agentdeck_core::ws::Entity;
-use agentdeck_core::{Agent, PaneId, TaskId};
+use agentdeck_core::{Agent, AgentState, PaneId, TaskId};
 use nix::sys::signal::Signal;
 use tokio::runtime::Handle;
 use tokio::sync::broadcast;
@@ -259,9 +259,26 @@ impl Terminals {
         }
     }
 
-    /// The daemon is stopping: from now on, processes that die aren't recorded as exited.
-    pub fn close(&self) {
+    /// The daemon is stopping: from now on, processes that die aren't recorded as exited, so
+    /// they are resumed (spec §6). An agent pane stopped on purpose whose process hasn't
+    /// exited yet, inside its kill grace, is recorded as exited now instead, so it isn't.
+    pub async fn close(&self) {
         self.shared.closing.store(true, Ordering::SeqCst);
+        let stopped: Vec<(PaneId, String)> = (self.panes().values())
+            .filter(|pane| pane.stopped())
+            .map(|pane| (pane.id(), pane.status()))
+            .filter(|(_, status)| status.state != AgentState::Exited)
+            .map(|(id, status)| (id, status.title))
+            .collect();
+        for (id, title) in stopped {
+            let saved = (self.shared.db)
+                .call(move |c| db::panes::set_stopped(c, id, &title))
+                .await;
+            match saved {
+                Ok(()) => tracing::info!("pane {id} was stopped: saved as exited"),
+                Err(err) => tracing::warn!("saving stopped pane {id} as exited: {err}"),
+            }
+        }
     }
 
     /// Whether the daemon is stopping ([`Terminals::close`]).
