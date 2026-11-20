@@ -390,6 +390,18 @@ mod tests {
         }
 
         #[gpui::test]
+        fn should_close_without_renaming_on_escape(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(cx);
+
+            cx.simulate_input("keyboard");
+            cx.simulate_keystrokes("escape");
+            harness.settle(cx);
+
+            assert!(harness.renames().is_empty());
+            assert!(!harness.is_open(cx));
+        }
+
+        #[gpui::test]
         fn should_show_the_blank_name_problem_and_stay_open_on_enter(cx: &mut TestAppContext) {
             let (harness, cx) = Harness::open(cx);
 

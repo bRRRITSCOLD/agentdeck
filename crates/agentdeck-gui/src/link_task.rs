@@ -4,7 +4,7 @@
 //! A pane header's Link to task asks the window for it, through the workspace view's
 //! [`LinkPane`](crate::workspace::LinkPane). Once linked, the daemon types the task, then its
 //! comments no agent has had yet, into the pane when the agent is idle. A failed link keeps
-//! the dialog open and toasts why.
+//! the dialog open and toasts why. Enter links, as Link does, unless the select has it.
 
 use std::sync::Arc;
 
@@ -14,9 +14,13 @@ use brrritscold_core_gpui::{
     DialogHandle, DialogHeader, DialogTitle, Field, FieldDescription, Label, Select, SelectContent,
     SelectItem, SelectTrigger,
 };
-use gpui::{Context, IntoElement, ParentElement as _, Render, SharedString, Styled as _, Window};
+use gpui::{
+    Context, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    Styled as _, Window, div,
+};
 
 use crate::api::Api;
+use crate::keymap::{self, ConfirmDialog};
 use crate::notice::{self, Notice};
 use crate::overview::Snapshot;
 use crate::task_sheet::agent_name;
@@ -239,7 +243,7 @@ impl Render for LinkTaskDialog {
             .on_value_change(cx.listener(|this, value: &SharedString, _, cx| {
                 this.set_task(value.parse().ok(), cx);
             }));
-        Dialog::new("link-task")
+        let dialog = Dialog::new("link-task")
             .handle(self.handle.clone())
             .content(
                 DialogContent::new()
@@ -270,7 +274,12 @@ impl Render for LinkTaskDialog {
                                     ),
                             ),
                     ),
-            )
+            );
+        // Enter, while the select doesn't have the keyboard, links too.
+        div()
+            .key_context(keymap::DIALOG)
+            .on_action(cx.listener(|this, _: &ConfirmDialog, window, cx| this.link(window, cx)))
+            .child(dialog)
     }
 }
 
@@ -294,6 +303,7 @@ mod tests {
     /// linked to `linked`. Workspace 1's tasks are 10 (todo) and 11 (done); workspace 2's is 12.
     fn open(linked: Option<TaskId>, cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
         cx.update(brrritscold_core_gpui::init);
+        cx.update(crate::keymap::init);
         let api = Arc::new(FakeApi::default());
         let mut dialog = None;
         let window = cx.add_window(|window, cx| {
@@ -353,6 +363,14 @@ mod tests {
         cx.run_until_parked();
     }
 
+    /// Shows the dialog, so it takes the keyboard, then presses `keys`.
+    fn press(keys: &str, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes(keys);
+        cx.run_until_parked();
+    }
+
     fn offered(harness: &Harness, cx: &mut VisualTestContext) -> Vec<TaskId> {
         harness
             .dialog
@@ -395,6 +413,44 @@ mod tests {
             link(&harness, cx);
 
             assert_eq!(*harness.api.linked.lock().unwrap(), [(id(7), Some(id(10)))]);
+            assert!(!harness.dialog.read_with(cx, |d, _| d.is_open()));
+        }
+
+        #[gpui::test]
+        fn should_link_on_enter(cx: &mut TestAppContext) {
+            let (harness, cx) = open(None, cx);
+            harness
+                .dialog
+                .update(cx, |d, cx| d.set_task(Some(id(10)), cx));
+
+            press("enter", cx);
+
+            assert_eq!(*harness.api.linked.lock().unwrap(), [(id(7), Some(id(10)))]);
+            assert!(!harness.dialog.read_with(cx, |d, _| d.is_open()));
+        }
+
+        #[gpui::test]
+        fn should_leave_enter_to_the_select_while_it_has_the_keyboard(cx: &mut TestAppContext) {
+            let (harness, cx) = open(None, cx);
+
+            // Tab to the select, open it, then pick the task under None.
+            press("tab enter down enter", cx);
+
+            assert!(harness.api.linked.lock().unwrap().is_empty());
+            assert!(harness.dialog.read_with(cx, |d, _| d.is_open()));
+            assert_eq!(harness.dialog.read_with(cx, |d, _| d.task()), Some(id(10)));
+        }
+
+        #[gpui::test]
+        fn should_close_without_linking_on_escape(cx: &mut TestAppContext) {
+            let (harness, cx) = open(None, cx);
+            harness
+                .dialog
+                .update(cx, |d, cx| d.set_task(Some(id(10)), cx));
+
+            press("escape", cx);
+
+            assert!(harness.api.linked.lock().unwrap().is_empty());
             assert!(!harness.dialog.read_with(cx, |d, _| d.is_open()));
         }
 

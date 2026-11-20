@@ -1148,6 +1148,18 @@ mod tests {
         }
 
         #[gpui::test]
+        fn should_close_none_on_escape(cx: &mut TestAppContext) {
+            let (harness, cx) = asked_to_close_both(cx);
+
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+
+            assert!(harness.api.closes.lock().unwrap().is_empty());
+            assert!(!asking(&harness, cx));
+            assert!(selecting(&harness, cx));
+        }
+
+        #[gpui::test]
         fn should_close_once_from_the_dialogs_close_button(cx: &mut TestAppContext) {
             let (harness, cx) = asked_to_close_both(cx);
             cx.update(|window, cx| window.draw(cx).clear(cx));

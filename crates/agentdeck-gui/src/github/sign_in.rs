@@ -7,7 +7,8 @@
 //! the GitHub section's `github_auth` events, through [`SignInDialog::ended`]: signed in closes
 //! it and toasts; expired, denied or failed dims the code, puts **Try again** where the copy button
 //! was and the message under it. A refused start shows the daemon's message in place of the
-//! code, with Try again. Cancel, Escape or the corner button cancels the sign-in.
+//! code, with Try again. Enter does what the button under the code does. Cancel, Escape or the
+//! corner button cancels the sign-in.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,6 +30,7 @@ use gpui::{
 
 use super::paste_token::signed_in;
 use crate::api::Api;
+use crate::keymap::{self, ConfirmDialog};
 use crate::notice;
 use crate::terminal::open;
 
@@ -199,6 +201,16 @@ impl SignInDialog {
         cx.notify();
     }
 
+    /// What Enter does: the button the dialog shows, Copy code & open GitHub while a code
+    /// waits, Try again once it ended or was refused; nothing while it starts.
+    pub fn primary(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.stage {
+            Stage::Waiting { .. } => self.copy_and_open(window, cx),
+            Stage::Ended { .. } | Stage::Refused(_) => self.start(window, cx),
+            Stage::Idle | Stage::Starting => {}
+        }
+    }
+
     /// Cancels the sign-in and closes: what Cancel does.
     pub fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.handle.close(window, cx);
@@ -348,7 +360,7 @@ impl Render for SignInDialog {
             self.stop(cx);
         }
         let body = self.body(cx);
-        Dialog::new("sign-in").handle(self.handle.clone()).content(
+        let dialog = Dialog::new("sign-in").handle(self.handle.clone()).content(
             DialogContent::new()
                 .header(
                     DialogHeader::new()
@@ -368,7 +380,11 @@ impl Render for SignInDialog {
                         ),
                     ),
                 ),
-        )
+        );
+        div()
+            .key_context(keymap::DIALOG)
+            .on_action(cx.listener(|this, _: &ConfirmDialog, window, cx| this.primary(window, cx)))
+            .child(dialog)
     }
 }
 

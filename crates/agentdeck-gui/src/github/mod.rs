@@ -629,6 +629,7 @@ mod tests {
             cx: &mut TestAppContext,
         ) -> (Harness, &mut VisualTestContext) {
             cx.update(brrritscold_core_gpui::init);
+            cx.update(crate::keymap::init);
             let api = Arc::new(FakeApi::default());
             api.set_github(auth);
             let connector = Rc::new(FakeConnector::default());
@@ -1034,6 +1035,21 @@ mod tests {
         }
 
         #[gpui::test]
+        fn should_close_without_saving_on_escape(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(signed_out(), cx);
+            harness.click("github paste token", cx);
+            cx.simulate_input("ghp_x");
+            harness.settle(cx);
+
+            cx.simulate_keystrokes("escape");
+            harness.settle(cx);
+
+            let dialog = harness.paste_token(cx);
+            assert!(!dialog.read_with(cx, |dialog, _| dialog.is_open()));
+            assert!(harness.api.saved_tokens.lock().unwrap().is_empty());
+        }
+
+        #[gpui::test]
         fn should_stay_open_on_enter_with_no_token(cx: &mut TestAppContext) {
             let (harness, cx) = Harness::open(signed_out(), cx);
             open_and_type(&harness, "  ", cx);
@@ -1168,6 +1184,36 @@ mod tests {
                 [["xdg-open", "https://github.com/login/device"]]
             );
             assert_eq!(cx.opened_url(), None, "not through GPUI's open_url");
+        }
+
+        #[gpui::test]
+        fn should_copy_the_code_then_open_github_on_enter(cx: &mut TestAppContext) {
+            let (harness, cx) = signing_in(cx);
+            let opener = cx.update(|_, cx| crate::terminal::open::fake::install(cx));
+
+            cx.simulate_keystrokes("enter");
+            harness.settle(cx);
+
+            let copied = cx.read_from_clipboard().and_then(|item| item.text());
+            assert_eq!(copied.as_deref(), Some("WDJB-MJHT"));
+            assert_eq!(
+                *opener.started.lock().unwrap(),
+                [["xdg-open", "https://github.com/login/device"]]
+            );
+            let dialog = harness.sign_in_dialog(cx);
+            assert!(dialog.read_with(cx, |dialog, _| dialog.is_open()));
+        }
+
+        #[gpui::test]
+        fn should_try_again_on_enter_once_the_code_expired(cx: &mut TestAppContext) {
+            let (harness, cx) = signing_in(cx);
+            harness.github_auth(Some(DeviceOutcome::Expired), None, cx);
+
+            cx.simulate_keystrokes("enter");
+            harness.settle(cx);
+
+            assert_eq!(*harness.api.sign_ins.lock().unwrap(), 2);
+            assert!(matches!(harness.stage(cx), Stage::Waiting { .. }));
         }
 
         #[gpui::test]
