@@ -44,12 +44,15 @@ pub const RESIZE_REDRAW: Duration = Duration::from_millis(300);
 /// The last output that counts as recent output (spec §7, "No match"), at times passed in as
 /// a monotonic offset, as [`StateTracker`](super::StateTracker)'s are. Output within
 /// [`RESIZE_REDRAW`] of a resize doesn't count, and neither does what a new shell prints
-/// before anything is typed into it: its prompt, drawn and redrawn.
+/// before anything is typed into it: its prompt, drawn and redrawn. Nor does what a shell
+/// prints while it is itself in the pane's foreground, running no command: its prompt, the
+/// echo of what is typed at it.
 #[derive(Debug, Clone, Default)]
 pub struct LastOutput {
     at: Option<Duration>,
     resized: Option<Duration>,
     awaiting_input: bool,
+    shell_in_front: bool,
 }
 
 impl LastOutput {
@@ -69,7 +72,7 @@ impl LastOutput {
     /// The pane printed at `now`.
     pub fn printed(&mut self, now: Duration) {
         let redraw = (self.resized).is_some_and(|at| now.saturating_sub(at) < RESIZE_REDRAW);
-        if !redraw && !self.awaiting_input {
+        if !redraw && !self.awaiting_input && !self.shell_in_front {
             self.at = Some(now);
         }
     }
@@ -82,6 +85,17 @@ impl LastOutput {
     /// Something was typed into the pane.
     pub fn typed(&mut self) {
         self.awaiting_input = false;
+    }
+
+    /// Whether a shell pane's shell is itself in its foreground, with no command running, as
+    /// last read. While it is, what the pane prints doesn't count. Once it is back in front,
+    /// what a command printed before it doesn't count either: an agent the shell hosted, say,
+    /// whose last output came just before it exited.
+    pub fn shell_in_front(&mut self, in_front: bool) {
+        self.shell_in_front = in_front;
+        if in_front {
+            self.at = None;
+        }
     }
 
     /// Time from the last output that counts to `now`; `None` if none has.
@@ -757,6 +771,101 @@ min_ms = 400
                 output.resized(ms(5_000));
                 output.printed(ms(5_200));
                 assert_eq!(state_at(&output, ms(5_300)), AgentState::Unknown);
+            }
+
+            /// Whether the shell itself or a command it runs is in the pane's foreground, as
+            /// the daemon reads it on each tick (spec §7).
+            mod foreground {
+                use super::*;
+                use crate::state::StateTracker;
+
+                /// A shell that has been typed into, so only the foreground decides.
+                fn typed_into() -> LastOutput {
+                    let mut output = LastOutput::shell();
+                    output.typed();
+                    output
+                }
+
+                #[test]
+                fn should_not_count_what_the_shell_prints_while_it_is_in_front() {
+                    let mut output = typed_into();
+                    output.shell_in_front(true);
+
+                    output.printed(ms(1_000));
+
+                    assert_eq!(state_at(&output, ms(1_100)), AgentState::Unknown);
+                }
+
+                #[test]
+                fn should_count_what_a_command_prints_while_it_is_in_front() {
+                    let mut output = typed_into();
+                    output.shell_in_front(false);
+
+                    output.printed(ms(1_000));
+
+                    assert_eq!(state_at(&output, ms(1_100)), AgentState::Working);
+                }
+
+                #[test]
+                fn should_count_a_commands_output_after_the_shell_was_in_front() {
+                    let mut output = typed_into();
+                    output.shell_in_front(true);
+                    output.printed(ms(1_000));
+
+                    output.shell_in_front(false);
+                    output.printed(ms(2_000));
+
+                    assert_eq!(state_at(&output, ms(2_100)), AgentState::Working);
+                }
+
+                #[test]
+                fn should_drop_what_a_command_printed_once_the_shell_is_back_in_front() {
+                    let mut output = typed_into();
+                    output.shell_in_front(false);
+                    output.printed(ms(1_000));
+
+                    output.shell_in_front(true);
+
+                    assert_eq!(output.since(ms(1_100)), None);
+                }
+
+                /// The states a shell publishes over the 3 s after an agent it hosted exits:
+                /// the agent's last output, then the shell's prompt, reach the pane on either
+                /// side of the tick that sees the shell back in front. Ticks are 100 ms apart,
+                /// as the daemon's are.
+                fn published_after_an_agent_exits(prompt_before_the_tick: bool) -> Vec<AgentState> {
+                    let mut output = typed_into();
+                    let mut tracker = StateTracker::new(no_rules());
+                    output.shell_in_front(false);
+                    output.printed(ms(1_000));
+                    if prompt_before_the_tick {
+                        output.printed(ms(1_050));
+                    }
+                    output.shell_in_front(true);
+                    if !prompt_before_the_tick {
+                        output.printed(ms(1_150));
+                    }
+                    (1..=30)
+                        .filter_map(|tick| {
+                            let now = ms(1_000 + tick * 100);
+                            let observation = Observation {
+                                since_output: output.since(now),
+                                ..titled("zsh")
+                            };
+                            tracker.observe(&observation, now)
+                        })
+                        .collect()
+                }
+
+                #[test]
+                fn should_not_read_working_when_the_prompt_comes_back_after_the_switch() {
+                    assert_eq!(published_after_an_agent_exits(false), []);
+                }
+
+                #[test]
+                fn should_not_read_working_when_the_prompt_comes_back_before_the_switch() {
+                    assert_eq!(published_after_an_agent_exits(true), []);
+                }
             }
         }
     }

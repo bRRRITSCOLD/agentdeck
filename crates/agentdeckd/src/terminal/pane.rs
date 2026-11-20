@@ -570,11 +570,19 @@ impl Pane {
 
     /// Takes one observation of the screen at `now` (the daemon's clock), publishing a new
     /// state when one has settled and delivering queued input if it is idle. A shell pane
-    /// first checks which agent, if any, its foreground process makes it host (spec §7). Returns
-    /// what changed, to persist.
+    /// first checks which agent, if any, its foreground process makes it host, and whether
+    /// the shell itself is in front, whose own output isn't work (spec §7). Returns what
+    /// changed, to persist.
     pub fn observe(&self, now: Duration) -> Observed {
-        let foreground = self.foreground();
+        let leader = self.master().process_group_leader();
+        let foreground = leader.and_then(foreground);
         let mut live = self.live();
+        if live.hosting.is_some()
+            && let Some(leader) = leader
+        {
+            // The shell leads its own process group: it is in front when no command is.
+            live.last_output.shell_in_front(Some(leader) == self.pid);
+        }
         let mut observed = Observed::default();
         if let Some(hosted) = foreground
             .as_ref()
@@ -873,21 +881,21 @@ impl Pane {
     pub fn stopped(&self) -> bool {
         self.stopped.load(Ordering::SeqCst)
     }
+}
 
-    /// The process in the foreground, from `/proc`: `None` when its name can't be read.
-    fn foreground(&self) -> Option<Foreground> {
-        let leader = self.master().process_group_leader()?;
-        let name = std::fs::read_to_string(format!("/proc/{leader}/comm")).ok()?;
-        let cmdline = std::fs::read(format!("/proc/{leader}/cmdline")).unwrap_or_default();
-        let args = (cmdline.split(|byte| *byte == 0))
-            .filter(|arg| !arg.is_empty())
-            .map(|arg| String::from_utf8_lossy(arg).into_owned())
-            .collect();
-        Some(Foreground {
-            name: name.trim_end().to_owned(),
-            args,
-        })
-    }
+/// Process `leader`, the PTY's foreground process group's leader, from `/proc`: `None` when its
+/// name can't be read.
+fn foreground(leader: i32) -> Option<Foreground> {
+    let name = std::fs::read_to_string(format!("/proc/{leader}/comm")).ok()?;
+    let cmdline = std::fs::read(format!("/proc/{leader}/cmdline")).unwrap_or_default();
+    let args = (cmdline.split(|byte| *byte == 0))
+        .filter(|arg| !arg.is_empty())
+        .map(|arg| String::from_utf8_lossy(arg).into_owned())
+        .collect();
+    Some(Foreground {
+        name: name.trim_end().to_owned(),
+        args,
+    })
 }
 
 /// How long the waiter gives the reader to reach the end of the output once the process has
