@@ -144,14 +144,14 @@ impl InboxView {
         task_list::rows(&self.snapshot, &query)
     }
 
-    /// Syncs PRs now: what "Sync now" does. A sync already asked for isn't repeated.
+    /// Syncs PRs now, in full: what "Sync now" does. A sync already asked for isn't repeated.
     pub fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.syncing {
             return;
         }
         self.syncing = true;
         cx.notify();
-        let syncing = self.api.sync_prs(cx);
+        let syncing = self.api.sync_prs(true, cx);
         cx.spawn_in(window, async move |this, cx| {
             let synced = syncing.await;
             let _ = this.update_in(cx, |this, window, cx| {
@@ -658,7 +658,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn should_sync_when_sync_now_is_clicked_and_say_so(cx: &mut TestAppContext) {
+    fn should_run_a_full_sync_when_sync_now_is_clicked_and_say_so(cx: &mut TestAppContext) {
         let (harness, cx) = Harness::open(inbox(), cx);
         harness.draw(cx);
 
@@ -666,7 +666,7 @@ mod tests {
         cx.simulate_click(button.center(), Modifiers::default());
         cx.run_until_parked();
 
-        assert_eq!(*harness.api.syncs.lock().unwrap(), 1);
+        assert_eq!(*harness.api.syncs.lock().unwrap(), [true]);
         assert_eq!(*harness.synced.borrow(), 1);
     }
 

@@ -80,8 +80,9 @@ pub trait Api: Send + Sync {
     /// [`TaskPlace::Inbox`](agentdeck_core::TaskPlace::Inbox) moves it to the inbox.
     fn edit_task(&self, task: TaskId, patch: TaskPatch, cx: &App) -> Task<anyhow::Result<()>>;
 
-    /// Syncs PRs now, returning once the sync is done.
-    fn sync_prs(&self, cx: &App) -> Task<anyhow::Result<()>>;
+    /// Syncs PRs now, returning once the sync is done: a full sync when `full` (Sync now asks
+    /// for one, spec §8), else the sync that is due.
+    fn sync_prs(&self, full: bool, cx: &App) -> Task<anyhow::Result<()>>;
 
     /// Closes the PRs of the PR tasks `tasks` on GitHub (spec §8): one result per task, in
     /// order, each saying whether it closed and why not. Only a request that fails as a whole
@@ -331,10 +332,11 @@ impl Api for Daemon {
         })
     }
 
-    fn sync_prs(&self, cx: &App) -> Task<anyhow::Result<()>> {
+    fn sync_prs(&self, full: bool, cx: &App) -> Task<anyhow::Result<()>> {
         let client = self.client.clone();
         runtime::spawn(cx, async move {
-            client.prs_sync().send().await.map_err(ApiError::from)?;
+            // An older daemon ignores `full` and runs the sync that is due.
+            (client.prs_sync().full(full).send().await).map_err(ApiError::from)?;
             Ok(())
         })
     }
@@ -762,8 +764,8 @@ pub(crate) mod fake {
         pub made_workspaces: Mutex<Vec<Request>>,
         /// The tasks asked for, in order.
         pub made_tasks: Mutex<Vec<new_task::Request>>,
-        /// How many PR syncs were asked for.
-        pub syncs: Mutex<usize>,
+        /// The PR syncs asked for, in order: whether each was full.
+        pub syncs: Mutex<Vec<bool>>,
         /// The task edits sent, with the task each is for, in order.
         pub edited_tasks: Mutex<Vec<(TaskId, TaskPatch)>>,
         /// The instructions added, with the workspace each is for.
@@ -1237,11 +1239,11 @@ pub(crate) mod fake {
             Task::ready(Ok(()))
         }
 
-        fn sync_prs(&self, _cx: &App) -> Task<anyhow::Result<()>> {
+        fn sync_prs(&self, full: bool, _cx: &App) -> Task<anyhow::Result<()>> {
             if let Some(err) = self.failure() {
                 return Task::ready(Err(err));
             }
-            *self.syncs.lock().unwrap() += 1;
+            self.syncs.lock().unwrap().push(full);
             Task::ready(Ok(()))
         }
 

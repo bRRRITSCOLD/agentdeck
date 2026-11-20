@@ -5301,14 +5301,17 @@ impl Client {
     pub fn prs_status(&self) -> builder::PrsStatus<'_> {
         builder::PrsStatus::new(self)
     }
-    ///Syncs PR tasks with GitHub now and answers with the status the sync left. Clients call it
+    ///Syncs PR tasks with GitHub now, after any sync running, and answers with the status the
     ///
-    ///when a task is opened. A sync that fails still answers 200: `last_error` says why, and `login` is `logged_out` when there's no usable `gh` token.
+    ///sync left. Without `full` it is the sync that is due, usually incremental. A sync that fails still answers 200: `last_error` says why, and `login` is `logged_out` when there's no usable `gh` token.
     ///
     ///Sends a `POST` request to `/v1/prs/sync`
     ///
+    ///Arguments:
+    ///- `full`: Run a full sync, as Sync now does, whatever sync is due (spec §8).
     ///```ignore
     ///let response = client.prs_sync()
+    ///    .full(full)
     ///    .send()
     ///    .await;
     ///```
@@ -7252,14 +7255,29 @@ pub mod builder {
     #[derive(Debug, Clone)]
     pub struct PrsSync<'a> {
         client: &'a super::Client,
+        full: Result<Option<bool>, String>,
     }
     impl<'a> PrsSync<'a> {
         pub fn new(client: &'a super::Client) -> Self {
-            Self { client: client }
+            Self {
+                client: client,
+                full: Ok(None),
+            }
+        }
+        pub fn full<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<bool>,
+        {
+            self.full = value
+                .try_into()
+                .map(Some)
+                .map_err(|_| "conversion to `bool` for full failed".to_string());
+            self
         }
         ///Sends a `POST` request to `/v1/prs/sync`
         pub async fn send(self) -> Result<ResponseValue<types::PrSyncStatus>, Error<types::Error>> {
-            let Self { client } = self;
+            let Self { client, full } = self;
+            let full = full.map_err(Error::InvalidRequest)?;
             let url = format!("{}/v1/prs/sync", client.baseurl,);
             let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
             header_map.append(
@@ -7274,6 +7292,7 @@ pub mod builder {
                     ::reqwest::header::ACCEPT,
                     ::reqwest::header::HeaderValue::from_static("application/json"),
                 )
+                .query(&progenitor_client::QueryParam::new("full", &full))
                 .headers(header_map)
                 .build()?;
             let info = OperationInfo {

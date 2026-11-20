@@ -34,11 +34,19 @@ impl Pr {
     }
 }
 
+/// The mocks [`mock_open_prs`] answers a sync with.
+pub struct OpenPrs<'a> {
+    /// The list of open PRs, which a full sync reads.
+    pub list: Mock<'a>,
+    /// The search, which an incremental sync reads.
+    pub search: Mock<'a>,
+}
+
 /// The viewer's open PRs, `prs`, however a sync reads them for `token`: the list (a full
 /// sync), the search (an incremental one) and their details by number.
-pub fn mock_open_prs(server: &MockServer, token: &str, prs: &[Pr]) {
+pub fn mock_open_prs<'a>(server: &'a MockServer, token: &str, prs: &[Pr]) -> OpenPrs<'a> {
     let nodes: Vec<Value> = prs.iter().map(Pr::node).collect();
-    server.mock(|when, then| {
+    let list = server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
             .header("authorization", format!("Bearer {token}"))
@@ -51,7 +59,7 @@ pub fn mock_open_prs(server: &MockServer, token: &str, prs: &[Pr]) {
             } } }
         }));
     });
-    server.mock(|when, then| {
+    let search = server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
             .header("authorization", format!("Bearer {token}"))
@@ -65,6 +73,7 @@ pub fn mock_open_prs(server: &MockServer, token: &str, prs: &[Pr]) {
         }));
     });
     by_number(server, "fragment pr on PullRequest", prs, |pr| pr.node());
+    OpenPrs { list, search }
 }
 
 /// The lookup of `prs`' node ids before a close, in one request.
