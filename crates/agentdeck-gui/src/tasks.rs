@@ -481,6 +481,7 @@ mod tests {
             review: Some(ReviewState::Approved),
             state: PrState::Open,
             synced_at: "2026-11-13T00:00:00Z".into(),
+            unreachable: false,
             updated_at: "2026-11-13T00:00:00Z".into(),
             url: "https://github.com/bRRRITSCOLD/ts-packages/pull/142".into(),
         };

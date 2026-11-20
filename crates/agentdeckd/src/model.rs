@@ -168,6 +168,11 @@ pub struct PullRequest {
     pub updated_at: String,
     /// When PR sync last saw the PR.
     pub synced_at: String,
+    /// Whether the GitHub sign-in can't see the PR: the last full sync fetched it by number
+    /// and GitHub didn't show it to the token (not found, or no access). It is shown as it was
+    /// last synced. Absent from an older daemon, which reads as false.
+    #[serde(default)]
+    pub unreachable: bool,
 }
 
 /// `POST /v1/tasks`.
@@ -316,6 +321,10 @@ pub struct PrSyncStatus {
     /// How many days since GitHub last updated an open PR it may be and still sync: the
     /// setting `pr_sync.max_age_days` as it is now; `0` for no cutoff.
     pub max_age_days: u32,
+    /// The GitHub login the last good sync ran as, kept across sign-outs and restarts; absent
+    /// until a sync has run as a login GitHub named.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synced_as: Option<String>,
 }
 
 /// Where the daemon's GitHub token comes from (spec §8), the first that gives one.

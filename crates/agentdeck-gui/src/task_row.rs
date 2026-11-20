@@ -527,12 +527,24 @@ pub fn status_picker(
         })
 }
 
+/// The tooltip on the title of a row whose PR the GitHub sign-in can't see (spec §11; Penpot
+/// "Screens · Main" → "Inbox · unreachable PR").
+pub const UNREACHABLE: &str =
+    "Your GitHub sign-in can't see this PR. It's shown as it was last synced.";
+
+/// How opaque `row` draws, over all of it: half while the GitHub sign-in can't see its PR,
+/// which shows as it was last synced (Penpot "Inbox · unreachable PR"); else whole.
+pub fn opacity(row: &Row) -> f32 {
+    if row.unreachable { 0.5 } else { 1. }
+}
+
 /// What clicking a row's title does: open the task sheet on it.
 pub type OnOpen = Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static>;
 
 /// A row's title, sm: clicking it runs `on_open`. With an `error`, why its PR didn't close,
 /// the [`close_error`] mark follows it, and hovering either shows the error in a tooltip
-/// (spec §11, Closing PRs). Tests find it as `task title <id>`.
+/// (spec §11, Closing PRs). An unreachable PR's title shows [`UNREACHABLE`] on hover. Tests
+/// find it as `task title <id>`.
 fn title(row: &Row, on_open: OnOpen, error: Option<SharedString>, cx: &App) -> AnyElement {
     let id = row.id;
     let s = cx.theme().semantic();
@@ -546,7 +558,14 @@ fn title(row: &Row, on_open: OnOpen, error: Option<SharedString>, cx: &App) -> A
         .on_click(on_open)
         .child(row.title.clone());
     let Some(error) = error else {
-        return title.into_any_element();
+        if !row.unreachable {
+            return title.into_any_element();
+        }
+        // Penpot "Inbox · unreachable PR": the tooltip above the title.
+        return Tooltip::new(SharedString::from(format!("unreachable-{id}")))
+            .trigger(div().min_w_0().child(title))
+            .content(TooltipContent::new(UNREACHABLE).flex_col())
+            .into_any_element();
     };
     // Penpot "Inbox · partial failure": the mark `space.1-5` after the title, the tooltip
     // over both.
@@ -664,6 +683,7 @@ pub fn wide(
         .gap(space::S3)
         .p(space::S2)
         .rounded(s.radius_md)
+        .opacity(opacity(row))
         .children(select_slot(layout, parts.select))
         .child(cell(Columns::STATUS).child(picker))
         .child(
@@ -753,6 +773,7 @@ pub fn panel(row: &Row, picker: Select, parts: RowParts, on_open: OnOpen, cx: &A
         .gap(space::S1_5)
         .p(space::S2)
         .rounded(s.radius_md)
+        .opacity(opacity(row))
         // Penpot `Top`: select, icon, Text, unseen, agent, menu, `space.2` apart.
         .child(
             div()
@@ -891,6 +912,34 @@ mod tests {
                 let layout = Table::Inbox.fit(px(891.), select);
                 assert!(layout.checks && layout.review, "{layout:?}");
             }
+        }
+    }
+
+    mod opacity {
+        use crate::overview::Snapshot;
+        use crate::overview::fixtures::{pr_task, unreachable_pr_task};
+        use crate::task_list::{Query, Scope, rows};
+
+        use super::*;
+
+        #[test]
+        fn should_dim_only_a_row_whose_pr_the_sign_in_cannot_see_to_half() {
+            let snapshot = Snapshot {
+                tasks: vec![
+                    unreachable_pr_task(1, "acme/secret", None),
+                    pr_task(2, "acme/widgets", PrState::Open, None),
+                ],
+                ..Snapshot::default()
+            };
+            let query = Query {
+                scope: Scope::All,
+                filter: "",
+                show_done: false,
+            };
+
+            let opacities: Vec<f32> = rows(&snapshot, &query).iter().map(opacity).collect();
+
+            assert_eq!(opacities, [0.5, 1.]);
         }
     }
 

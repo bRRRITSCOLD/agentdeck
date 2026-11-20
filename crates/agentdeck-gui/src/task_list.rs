@@ -69,9 +69,12 @@ pub struct Row {
     /// Whether an agent commented on it since the user last opened it: the row's unseen mark.
     pub unseen: bool,
     /// Whether its PR can be closed from here: a PR task whose PR is stored open, aged out or
-    /// not (spec §11, Closing PRs). Only such a row is selectable, and only its menu holds
-    /// Close PR.
+    /// not, and not [`Self::unreachable`] (spec §11, Closing PRs). Only such a row is
+    /// selectable, and only its menu holds Close PR.
     pub closable: bool,
+    /// Whether the GitHub sign-in can't see its PR, which shows as last synced: the row is
+    /// dimmed, with a tooltip on its title (spec §11).
+    pub unreachable: bool,
 }
 
 /// The rows of one status.
@@ -187,7 +190,8 @@ fn row(snapshot: &Snapshot, task: &Task) -> Row {
         pr,
         workspace,
         unseen: task.unseen_agent_comments > 0,
-        closable: task.pr.as_ref().is_some_and(|pr| pr.state == PrState::Open),
+        closable: (task.pr.as_ref()).is_some_and(|pr| pr.state == PrState::Open && !pr.unreachable),
+        unreachable: task.pr.as_ref().is_some_and(|pr| pr.unreachable),
     }
 }
 
@@ -197,7 +201,7 @@ mod tests {
     use agentdeck_core::Agent;
 
     use super::*;
-    use crate::overview::fixtures::{id, pane, task, workspace};
+    use crate::overview::fixtures::{id, pane, pr_task, task, unreachable_pr_task, workspace};
 
     fn all() -> Query<'static> {
         Query {
@@ -224,6 +228,7 @@ mod tests {
             review: Some(ReviewState::ChangesRequested),
             state: PrState::Open,
             synced_at: "2026-11-13T00:00:00Z".into(),
+            unreachable: false,
             updated_at: "2026-11-13T00:00:00Z".into(),
             url: format!("https://github.com/{repo}/pull/{number}"),
         }
@@ -455,6 +460,22 @@ mod tests {
 
             let closable: Vec<bool> = rows(&snapshot, &all()).iter().map(|r| r.closable).collect();
             assert_eq!(closable, [true, false, false, false]);
+        }
+
+        #[test]
+        fn should_mark_a_pr_the_sign_in_cannot_see_unreachable_and_not_closable() {
+            let snapshot = Snapshot {
+                tasks: vec![
+                    unreachable_pr_task(1, "acme/secret", None),
+                    pr_task(2, "acme/widgets", PrState::Open, None),
+                ],
+                ..Snapshot::default()
+            };
+
+            let rows = rows(&snapshot, &all());
+            let marks: Vec<(bool, bool)> =
+                rows.iter().map(|r| (r.unreachable, r.closable)).collect();
+            assert_eq!(marks, [(true, false), (false, true)]);
         }
 
         #[test]

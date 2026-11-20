@@ -840,6 +840,9 @@ pub mod types {
         ///How far the sync running now is; `None` while none runs.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub progress: ::std::option::Option<PrSyncProgress>,
+        ///The GitHub login the last good sync ran as, kept across sign-outs and restarts; absent until a sync has run as a login GitHub named.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub synced_as: ::std::option::Option<::std::string::String>,
     }
     impl PrSyncStatus {
         pub fn builder() -> builder::PrSyncStatus {
@@ -867,6 +870,9 @@ pub mod types {
         pub state: agentdeck_core::PrState,
         ///When PR sync last saw the PR.
         pub synced_at: ::std::string::String,
+        ///Whether the GitHub sign-in can't see the PR: the last full sync fetched it by number and GitHub didn't show it to the token (not found, or no access). It is shown as it was last synced. Absent from an older daemon, which reads as false.
+        #[serde(default)]
+        pub unreachable: bool,
         ///When the PR last changed on GitHub.
         pub updated_at: ::std::string::String,
         ///The PR's web URL.
@@ -3615,6 +3621,10 @@ pub mod types {
                 ::std::option::Option<super::PrSyncProgress>,
                 ::std::string::String,
             >,
+            synced_as: ::std::result::Result<
+                ::std::option::Option<::std::string::String>,
+                ::std::string::String,
+            >,
         }
         impl ::std::default::Default for PrSyncStatus {
             fn default() -> Self {
@@ -3624,6 +3634,7 @@ pub mod types {
                     login: Err("no value supplied for login".to_string()),
                     max_age_days: Err("no value supplied for max_age_days".to_string()),
                     progress: Ok(Default::default()),
+                    synced_as: Ok(Default::default()),
                 }
             }
         }
@@ -3678,6 +3689,16 @@ pub mod types {
                     .map_err(|e| format!("error converting supplied value for progress: {e}"));
                 self
             }
+            pub fn synced_as<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<::std::string::String>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.synced_as = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for synced_as: {e}"));
+                self
+            }
         }
         impl ::std::convert::TryFrom<PrSyncStatus> for super::PrSyncStatus {
             type Error = super::error::ConversionError;
@@ -3690,6 +3711,7 @@ pub mod types {
                     login: value.login?,
                     max_age_days: value.max_age_days?,
                     progress: value.progress?,
+                    synced_as: value.synced_as?,
                 })
             }
         }
@@ -3701,6 +3723,7 @@ pub mod types {
                     login: Ok(value.login),
                     max_age_days: Ok(value.max_age_days),
                     progress: Ok(value.progress),
+                    synced_as: Ok(value.synced_as),
                 }
             }
         }
@@ -3720,6 +3743,7 @@ pub mod types {
             >,
             state: ::std::result::Result<agentdeck_core::PrState, ::std::string::String>,
             synced_at: ::std::result::Result<::std::string::String, ::std::string::String>,
+            unreachable: ::std::result::Result<bool, ::std::string::String>,
             updated_at: ::std::result::Result<::std::string::String, ::std::string::String>,
             url: ::std::result::Result<::std::string::String, ::std::string::String>,
         }
@@ -3734,6 +3758,7 @@ pub mod types {
                     review: Ok(Default::default()),
                     state: Err("no value supplied for state".to_string()),
                     synced_at: Err("no value supplied for synced_at".to_string()),
+                    unreachable: Ok(Default::default()),
                     updated_at: Err("no value supplied for updated_at".to_string()),
                     url: Err("no value supplied for url".to_string()),
                 }
@@ -3820,6 +3845,16 @@ pub mod types {
                     .map_err(|e| format!("error converting supplied value for synced_at: {e}"));
                 self
             }
+            pub fn unreachable<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<bool>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.unreachable = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for unreachable: {e}"));
+                self
+            }
             pub fn updated_at<T>(mut self, value: T) -> Self
             where
                 T: ::std::convert::TryInto<::std::string::String>,
@@ -3855,6 +3890,7 @@ pub mod types {
                     review: value.review?,
                     state: value.state?,
                     synced_at: value.synced_at?,
+                    unreachable: value.unreachable?,
                     updated_at: value.updated_at?,
                     url: value.url?,
                 })
@@ -3871,6 +3907,7 @@ pub mod types {
                     review: Ok(value.review),
                     state: Ok(value.state),
                     synced_at: Ok(value.synced_at),
+                    unreachable: Ok(value.unreachable),
                     updated_at: Ok(value.updated_at),
                     url: Ok(value.url),
                 }

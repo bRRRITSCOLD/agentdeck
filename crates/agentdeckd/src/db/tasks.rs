@@ -11,6 +11,7 @@ use crate::model::{NewTask, PullRequest, Task, TaskFilter, TaskPatch};
 const COLUMNS: &str = "t.id, t.title, t.body, t.status, t.kind, t.workspace_id, t.created_at,
     t.updated_at, t.done_at, p.repo, p.number, p.url, p.state AS pr_state, p.draft, p.head_ref,
     p.checks, p.review, p.updated_at AS pr_updated_at, p.synced_at,
+    p.unreachable_at IS NOT NULL AS unreachable,
     (SELECT COUNT(*) FROM comments c
      WHERE c.task_id = t.id AND c.author = 'agent' AND c.seen_at IS NULL) AS unseen_agent_comments";
 const TABLES: &str = "tasks t LEFT JOIN pull_requests p ON p.task_id = t.id";
@@ -30,6 +31,7 @@ fn pr_from_row(row: &Row<'_>) -> rusqlite::Result<Option<PullRequest>> {
         review: opt_text(row, "review")?,
         updated_at: row.get("pr_updated_at")?,
         synced_at: row.get("synced_at")?,
+        unreachable: row.get("unreachable")?,
     }))
 }
 

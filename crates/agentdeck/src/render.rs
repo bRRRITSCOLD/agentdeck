@@ -106,8 +106,10 @@ pub fn task(task: &Task) -> String {
             .map_or_else(|| "inbox".to_owned(), |id| id.to_string()),
     );
     if let Some(pr) = &task.pr {
+        // A PR the GitHub sign-in can't see is shown as it was last synced (spec §8).
+        let reach = if pr.unreachable { ", unreachable" } else { "" };
         out.push_str(&format!(
-            "  pr:        {} ({}, checks {}, review {})\n",
+            "  pr:        {} ({}{reach}, checks {}, review {})\n",
             pr.url,
             pr.state,
             pr.checks.map_or("none", |checks| checks.as_str()),
@@ -245,6 +247,9 @@ pub fn pr_status(status: &PrSyncStatus) -> String {
         status.login,
         status.last_synced_at.as_deref().unwrap_or("never"),
     );
+    if let Some(login) = &status.synced_as {
+        out.push_str(&format!("synced as: {login}\n"));
+    }
     match &status.progress {
         Some(progress) if progress.stage == PrSyncStage::Details => {
             out.push_str("syncing:   PR details\n");
@@ -607,6 +612,34 @@ mod tests {
 
             assert!(out.ends_with("\nSteps:\n1. look\n"), "{out}");
         }
+
+        #[test]
+        fn should_say_the_sign_in_cannot_see_an_unreachable_pr() {
+            let out = super::task(&Task {
+                pr: Some(PullRequest {
+                    checks: None,
+                    draft: false,
+                    head_ref: "feat".into(),
+                    number: 8,
+                    repo: "acme/secret".into(),
+                    review: None,
+                    state: agentdeck_core::PrState::Open,
+                    synced_at: String::new(),
+                    unreachable: true,
+                    updated_at: String::new(),
+                    url: "https://github.com/acme/secret/pull/8".into(),
+                }),
+                ..a_task("Fix it", "")
+            });
+
+            assert!(
+                out.contains(
+                    "  pr:        https://github.com/acme/secret/pull/8 (open, unreachable, \
+                     checks none, review none)\n"
+                ),
+                "{out}"
+            );
+        }
     }
 
     mod comments {
@@ -693,11 +726,29 @@ mod tests {
                 login: GhLogin::LoggedOut,
                 max_age_days: 90,
                 progress: None,
+                synced_as: None,
             });
 
             assert_eq!(
                 out,
                 "github:    logged_out\nlast sync: never\nlast error: gh is not logged in\n"
+            );
+        }
+
+        #[test]
+        fn should_name_the_login_prs_last_synced_as() {
+            let out = pr_status(&PrSyncStatus {
+                last_error: None,
+                last_synced_at: Some("2026-11-14T10:00:00.000Z".into()),
+                login: GhLogin::LoggedOut,
+                max_age_days: 90,
+                progress: None,
+                synced_as: Some("octocat".into()),
+            });
+
+            assert_eq!(
+                out,
+                "github:    logged_out\nlast sync: 2026-11-14T10:00:00.000Z\nsynced as: octocat\n"
             );
         }
     }
@@ -719,6 +770,7 @@ mod tests {
                     prs: 271,
                     stage: PrSyncStage::Listing,
                 }),
+                synced_as: None,
             });
 
             assert_eq!(
@@ -745,6 +797,7 @@ mod tests {
                     prs: 271,
                     stage: PrSyncStage::Details,
                 }),
+                synced_as: None,
             });
 
             assert!(out.contains("syncing:   PR details\n"), "{out}");
@@ -782,6 +835,7 @@ mod tests {
                 review: None,
                 state: agentdeck_core::PrState::Open,
                 synced_at: String::new(),
+                unreachable: false,
                 updated_at: String::new(),
                 url: String::new(),
             }

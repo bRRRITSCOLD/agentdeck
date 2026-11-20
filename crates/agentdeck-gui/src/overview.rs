@@ -46,7 +46,7 @@ pub struct Snapshot {
 /// A row's counts; a zero hides its count.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Counts {
-    /// PR tasks that aren't done.
+    /// PR tasks that aren't done, but for those whose PR the GitHub sign-in can't see.
     pub prs: usize,
 }
 
@@ -183,6 +183,7 @@ impl Snapshot {
                     task.kind == TaskKind::Pr
                         && task.status != TaskStatus::Done
                         && task.workspace_id == workspace
+                        && !task.pr.as_ref().is_some_and(|pr| pr.unreachable)
                 })
                 .count(),
         };
@@ -304,6 +305,7 @@ pub(crate) mod fixtures {
             login: agentdeck_client::types::GhLogin::LoggedIn,
             max_age_days: 90,
             progress: None,
+            synced_as: None,
         }
     }
 
@@ -354,11 +356,21 @@ pub(crate) mod fixtures {
                 review: None,
                 state,
                 synced_at: CREATED.into(),
+                unreachable: false,
                 updated_at: CREATED.into(),
                 url: format!("https://github.com/{repo}/pull/{n}"),
             }),
             ..task(n, TaskKind::Pr, workspace)
         }
+    }
+
+    /// [`pr_task`] whose open PR the GitHub sign-in can't see.
+    pub fn unreachable_pr_task(n: u32, repo: &str, workspace: Option<WorkspaceId>) -> Task {
+        let mut task = pr_task(n, repo, PrState::Open, workspace);
+        if let Some(pr) = &mut task.pr {
+            pr.unreachable = true;
+        }
+        task
     }
 
     /// The user's comment on `task`, seen and not yet delivered.
@@ -545,6 +557,25 @@ mod tests {
                 };
 
                 assert_eq!(snapshot.overview().inbox, Counts { prs: 1 });
+            }
+
+            #[test]
+            fn should_leave_out_prs_the_sign_in_cannot_see() {
+                let a = workspace(1, "a");
+                let snapshot = Snapshot {
+                    tasks: vec![
+                        task(20, TaskKind::Pr, None),
+                        unreachable_pr_task(21, "acme/secret", None),
+                        task(22, TaskKind::Pr, Some(a.id)),
+                        unreachable_pr_task(23, "acme/secret", Some(a.id)),
+                    ],
+                    workspaces: vec![a],
+                    ..Snapshot::default()
+                };
+                let overview = snapshot.overview();
+
+                assert_eq!(overview.inbox, Counts { prs: 1 });
+                assert_eq!(overview.workspaces[0].counts, Counts { prs: 1 });
             }
         }
 

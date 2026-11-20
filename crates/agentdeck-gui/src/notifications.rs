@@ -554,6 +554,7 @@ mod tests {
                     review,
                     state: PrState::Open,
                     synced_at: "2026-11-14T00:00:00Z".into(),
+                    unreachable: false,
                     updated_at: "2026-11-14T00:00:00Z".into(),
                     url: format!("https://github.com/acme/web/pull/{n}"),
                 }),
