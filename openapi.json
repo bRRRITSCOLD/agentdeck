@@ -2561,8 +2561,19 @@
     },
     "/v1/prs/sync": {
       "post": {
-        "description": "when a task is opened. A sync that fails still answers 200: `last_error` says why, and `login` is `logged_out` when there's no usable `gh` token.",
+        "description": "sync left. Without `full` it is the sync that is due, usually incremental. A sync that fails still answers 200: `last_error` says why, and `login` is `logged_out` when there's no usable `gh` token.",
         "operationId": "prs_sync",
+        "parameters": [
+          {
+            "description": "Run a full sync, as Sync now does, whatever sync is due (spec §8).",
+            "in": "query",
+            "name": "full",
+            "schema": {
+              "nullable": true,
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -2581,7 +2592,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Syncs PR tasks with GitHub now and answers with the status the sync left. Clients call it"
+        "summary": "Syncs PR tasks with GitHub now, after any sync running, and answers with the status the"
       }
     },
     "/v1/settings": {

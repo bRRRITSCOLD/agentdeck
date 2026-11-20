@@ -27,6 +27,26 @@ mod pr_sync {
         assert_eq!(status["login"], "logged_out");
         assert!(status["last_error"].is_string(), "{status}");
     }
+
+    #[test]
+    fn should_run_a_full_sync_though_an_incremental_one_is_due() {
+        use crate::support::github::{Pr, mock_open_prs};
+        let github = httpmock::MockServer::start();
+        let seven = Pr {
+            repo: "acme/widgets",
+            number: 7,
+        };
+        let mocks = mock_open_prs(&github, "gho_test", &[seven]);
+        let env = TestEnv::with_github(&github.url("/graphql"), "gho_test");
+
+        env.json(&["pr", "sync"]);
+        let status = env.json(&["pr", "sync"]);
+
+        assert_eq!(status["last_error"], serde_json::Value::Null, "{status}");
+        // The daemon's first sync at start, then both of ours.
+        mocks.list.assert_calls(3);
+        mocks.search.assert_calls(0);
+    }
 }
 
 mod pr_close {

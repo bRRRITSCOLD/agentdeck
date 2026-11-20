@@ -597,7 +597,8 @@ async fn agent(client: &Client, command: AgentCommand) -> anyhow::Result<Output>
 
 async fn pr(client: &Client, command: PrCommand) -> anyhow::Result<Output> {
     let status = match command {
-        PrCommand::Sync => client.prs_sync().send().await,
+        // A sync someone asks for is full (spec §8).
+        PrCommand::Sync => client.prs_sync().full(true).send().await,
         PrCommand::Status => client.prs_status().send().await,
         PrCommand::Close { ids, yes } => {
             let ids = task_ids(client, &ids).await?;

@@ -13,6 +13,8 @@
 //! - [`matching`]: which workspace holds a clone of a PR's repo with its branch.
 //! - `db::pull_requests`: storing the PRs and moving their tasks.
 //!
+//! `POST /v1/prs/sync?full=true` (Sync now) is full whatever sync is due.
+//!
 //! One sync runs at a time: the timer and `POST /v1/prs/sync` queue behind each other.
 //! Closing PRs (`POST /v1/prs/close`) queues behind them too, so a sync that read a PR as
 //! open before the close never stores it open again after.
@@ -100,7 +102,8 @@ struct State {
     /// When the last good full sync began.
     last_full: Option<DateTime<Utc>>,
     /// Whether the next sync must be full whenever the last full one was: the age cutoff
-    /// widened, so open PRs it now lets in that no incremental search would find are listed.
+    /// widened, so open PRs it now lets in that no incremental search would find are listed,
+    /// or a client asked for a full sync.
     full_wanted: bool,
 }
 
@@ -187,7 +190,7 @@ impl PrSync {
                     }
                     () = timer.inner.widened.notified() => {}
                 }
-                timer.sync().await;
+                timer.sync(false).await;
             }
         });
         sync
@@ -218,8 +221,9 @@ impl PrSync {
         }
     }
 
-    /// Syncs now, after any sync already running, and returns the status it leaves.
-    pub async fn sync(&self) -> PrSyncStatus {
+    /// Syncs now, after any sync already running, and returns the status it leaves. A `full`
+    /// sync is full whatever sync is due (Sync now asks for one); else it is the sync due.
+    pub async fn sync(&self, full: bool) -> PrSyncStatus {
         let _running = self.inner.running.lock().await;
         self.set_progress(Some(PrSyncProgress {
             prs_done: 0,
@@ -227,6 +231,9 @@ impl PrSync {
             stage: PrSyncStage::Listing,
         }));
         let began = Utc::now();
+        if full {
+            self.state().full_wanted = true;
+        }
         let since = self.since(began);
         let result = self.sync_once(began, since).await;
         {
@@ -244,7 +251,7 @@ impl PrSync {
                 Err(err) => {
                     tracing::warn!("PR sync failed: {err}");
                     state.status.last_error = Some(err.to_string());
-                    // A full sync the widened cutoff asked for is still owed.
+                    // A full sync the widened cutoff or a client asked for is still owed.
                     state.full_wanted |= since.is_none();
                 }
             }
@@ -364,7 +371,7 @@ impl PrSync {
     }
 
     /// When the sync beginning `now` should reach back to; `None` when it is full. A full sync
-    /// the widened cutoff asked for is this one.
+    /// the widened cutoff or a client asked for is this one.
     fn since(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
         let mut state = self.state();
         if std::mem::take(&mut state.full_wanted) {

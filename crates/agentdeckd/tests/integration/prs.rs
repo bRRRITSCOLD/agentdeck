@@ -79,6 +79,13 @@ async fn sync(client: &Client) -> PrSyncStatus {
     response.into_inner()
 }
 
+/// A sync asked to be full, as Sync now asks.
+async fn full_sync(client: &Client) -> PrSyncStatus {
+    let response = client.prs_sync().full(true).send().await.expect("sync");
+    assert_eq!(response.status().as_u16(), 200);
+    response.into_inner()
+}
+
 async fn pr_tasks(client: &Client) -> Vec<Task> {
     client
         .task_list()
@@ -1080,6 +1087,82 @@ mod full {
             assert!(Instant::now() < deadline, "no row while its details load");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+}
+
+mod asked_full {
+    use super::*;
+
+    /// PR 7's task's status and its PR's stored state.
+    async fn seven(client: &Client) -> (TaskStatus, PrState) {
+        let task = pr_tasks(client).await.remove(0);
+        (task.status, task.pr.expect("the task's PR").state)
+    }
+
+    #[tokio::test]
+    async fn should_reopen_a_pr_stored_closed_that_no_incremental_search_shows_200() {
+        let github = MockServer::start_async().await;
+        mock_list(&github, TOKEN, &[Pr::open(7)]);
+        let mut updated = mock_updated_search(&github, TOKEN, &[]);
+        let daemon = daemon(&github, Some(TOKEN)).await;
+        sync(&daemon.client).await;
+        updated.delete();
+        let mut closed = mock_updated_search(
+            &github,
+            TOKEN,
+            &[Pr {
+                state: "CLOSED",
+                ..Pr::open(7)
+            }],
+        );
+        sync(&daemon.client).await;
+        closed.delete();
+        mock_updated_search(&github, TOKEN, &[]);
+
+        sync(&daemon.client).await;
+        let incremental = seven(&daemon.client).await;
+        let status = full_sync(&daemon.client).await;
+
+        assert_eq!(incremental, (TaskStatus::Done, PrState::Closed));
+        assert_eq!(status.last_error, None);
+        assert_eq!(
+            seven(&daemon.client).await,
+            (TaskStatus::Review, PrState::Open)
+        );
+    }
+
+    #[tokio::test]
+    async fn should_run_a_full_sync_after_the_one_running_and_answer_once_it_ends_200() {
+        let github = MockServer::start_async().await;
+        let list = mock_list_page(
+            &github,
+            TOKEN,
+            &[Pr::open(7)],
+            None,
+            None,
+            1,
+            Duration::from_millis(800),
+        );
+        mock_fetch(&github, &[Pr::open(7)]);
+        let updated = mock_updated_search(&github, TOKEN, &[]);
+        let daemon = daemon(&github, Some(TOKEN)).await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while (daemon.client.prs_status().send().await)
+            .expect("status")
+            .into_inner()
+            .progress
+            .is_none()
+        {
+            assert!(Instant::now() < deadline, "the first sync never started");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let status = full_sync(&daemon.client).await;
+
+        list.assert_calls(2);
+        updated.assert_calls(0);
+        assert_eq!(status.progress, None);
+        assert_eq!(status.last_error, None);
     }
 }
 

@@ -300,7 +300,7 @@ pub enum AgentCommand {
 /// `agentdeck pr …`.
 #[derive(Debug, Subcommand)]
 pub enum PrCommand {
-    /// Sync PR tasks with GitHub now.
+    /// Sync PR tasks with GitHub now: a full sync, which reads every open PR again.
     Sync,
     /// Whether GitHub takes the token, and the last sync.
     Status,
