@@ -1979,6 +1979,28 @@ mod tests {
         }
 
         #[gpui::test]
+        fn should_mark_a_pr_that_did_not_close_and_say_why_on_hover(cx: &mut TestAppContext) {
+            let (panel, api, cx) = open_with_api(cx);
+            with_prs(&panel, cx);
+            api.refuse_close(id(5), "Must have admin rights");
+            click("panel select", cx);
+            click("panel select all review", cx);
+            click("panel close prs", cx);
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+
+            let task: TaskId = id(5);
+            let mark = cx
+                .debug_bounds(format!("close error mark {task}").leak())
+                .expect("the failed row's mark");
+            cx.simulate_mouse_move(mark.center(), None, Modifiers::default());
+            cx.run_until_parked();
+
+            assert!(cx.debug_bounds("tooltip-content").is_some());
+        }
+
+        #[gpui::test]
         fn should_pin_the_selection_bar_to_the_panels_bottom(cx: &mut TestAppContext) {
             let (panel, cx) = open(cx);
             with_prs(&panel, cx);

@@ -1190,7 +1190,10 @@ mod tests {
             let shown = cx.update(|_, cx| crate::notice::shown(cx));
             let toast = shown.last().expect("a toast");
             assert_eq!(toast.title, "Closed 1 of 2");
-            assert_eq!(toast.description, None);
+            assert_eq!(
+                toast.description.as_deref(),
+                Some("Hover the marked PR to see why.")
+            );
             assert!(selecting(&harness, cx));
             assert_eq!(picked(&harness, cx), [id(4)]);
             assert!(shown_at(
@@ -1220,38 +1223,65 @@ mod tests {
             })
         }
 
-        #[gpui::test]
-        fn should_show_why_a_pr_did_not_close_on_hovering_its_title(cx: &mut TestAppContext) {
+        /// Select mode on, PRs 1 and 4 picked and closed, with GitHub refusing each of
+        /// `refusals`, its task and why; then the daemon's `changed` for the ones that closed.
+        fn closed_with_refusals<'a>(
+            refusals: &[(u32, &str)],
+            cx: &'a mut TestAppContext,
+        ) -> (Harness, &'a mut VisualTestContext) {
             let (harness, cx) = Harness::open(prs(), cx);
-            harness.api.refuse_close(id(4), "Must have admin rights");
+            for (task, why) in refusals {
+                harness.api.refuse_close(id(*task), why);
+            }
             click("inbox select".into(), cx);
             click("inbox select all inbox".into(), cx);
             click("inbox close prs".into(), cx);
             cx.simulate_keystrokes("enter");
             cx.run_until_parked();
-            // The daemon's `changed` for PR 1, which closed, takes its row out.
             let mut snapshot = prs();
-            snapshot.tasks[0].status = TaskStatus::Done;
-            if let Some(pr) = &mut snapshot.tasks[0].pr {
-                pr.state = PrState::Closed;
+            for task in &mut snapshot.tasks {
+                let refused = refusals.iter().any(|(n, _)| id::<TaskId>(*n) == task.id);
+                if let Some(pr) = &mut task.pr
+                    && pr.state == PrState::Open
+                    && !refused
+                {
+                    pr.state = PrState::Closed;
+                    task.status = TaskStatus::Done;
+                }
             }
             harness
                 .view
                 .update(cx, |view, cx| view.set_snapshot(snapshot, cx));
             cx.run_until_parked();
-            let title = format!("task title {}", id::<TaskId>(4));
-            assert!(shown_at(title.clone(), cx));
-            let title = cx
-                .debug_bounds(title.leak())
-                .expect("the failed row's title");
+            (harness, cx)
+        }
+
+        fn bounds(selector: String, cx: &mut VisualTestContext) -> gpui::Bounds<gpui::Pixels> {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.debug_bounds(selector.clone().leak()).expect(&selector)
+        }
+
+        /// The tooltip shown while the pointer is on `at`, then the pointer moves off.
+        fn tooltip_on(
+            at: gpui::Point<gpui::Pixels>,
+            cx: &mut VisualTestContext,
+        ) -> Option<gpui::Bounds<gpui::Pixels>> {
+            cx.simulate_mouse_move(at, None, Modifiers::default());
+            cx.run_until_parked();
+            let tooltip = cx.debug_bounds("tooltip-content");
+            cx.simulate_mouse_move(point(px(1.), px(1.)), None, Modifiers::default());
+            cx.run_until_parked();
+            tooltip
+        }
+
+        #[gpui::test]
+        fn should_show_why_a_pr_did_not_close_on_hovering_its_title(cx: &mut TestAppContext) {
+            let (_harness, cx) = closed_with_refusals(&[(4, "Must have admin rights")], cx);
+            let title = bounds(format!("task title {}", id::<TaskId>(4)), cx);
             assert!(cx.debug_bounds("tooltip-content").is_none());
 
-            cx.simulate_mouse_move(title.center(), None, Modifiers::default());
-            cx.run_until_parked();
+            let tooltip = tooltip_on(title.center(), cx).expect("a tooltip on hover");
 
-            let tooltip = cx
-                .debug_bounds("tooltip-content")
-                .expect("a tooltip on hover");
             assert!(
                 tooltip.bottom() < title.top(),
                 "{tooltip:?} above {title:?}"
@@ -1261,11 +1291,68 @@ mod tests {
                 (tooltip.size.width - reads).abs() < px(1.),
                 "{tooltip:?} is as wide as GitHub's message, {reads:?}"
             );
-
-            cx.simulate_mouse_move(point(px(1.), px(1.)), None, Modifiers::default());
-            cx.run_until_parked();
-
             assert!(cx.debug_bounds("tooltip-content").is_none());
+        }
+
+        #[gpui::test]
+        fn should_mark_only_a_failed_row_just_after_its_title(cx: &mut TestAppContext) {
+            let (_harness, cx) = closed_with_refusals(&[(4, "Must have admin rights")], cx);
+
+            let title = bounds(format!("task title {}", id::<TaskId>(4)), cx);
+            let mark = bounds(format!("close error mark {}", id::<TaskId>(4)), cx);
+
+            assert!(
+                (mark.left() - title.right() - px(6.)).abs() < px(0.5),
+                "{mark:?} 6px after {title:?}"
+            );
+            assert_eq!(mark.size.width, px(14.));
+            for task in [2, 3] {
+                assert!(!shown_at(
+                    format!("close error mark {}", id::<TaskId>(task)),
+                    cx
+                ));
+            }
+        }
+
+        #[gpui::test]
+        fn should_show_why_a_pr_did_not_close_on_hovering_its_mark(cx: &mut TestAppContext) {
+            let (_harness, cx) = closed_with_refusals(&[(4, "Must have admin rights")], cx);
+            let mark = bounds(format!("close error mark {}", id::<TaskId>(4)), cx);
+
+            let tooltip = tooltip_on(mark.center(), cx).expect("a tooltip on hovering the mark");
+
+            assert!(tooltip.bottom() < mark.top(), "{tooltip:?} above {mark:?}");
+            let reads = tooltip_width("Must have admin rights", cx);
+            assert!(
+                (tooltip.size.width - reads).abs() < px(1.),
+                "{tooltip:?} reads GitHub's message, {reads:?}"
+            );
+        }
+
+        #[gpui::test]
+        fn should_wrap_a_long_reason_within_320px(cx: &mut TestAppContext) {
+            let long = "Could not resolve to a Repository with the name \
+                        'bRRRITSCOLD/ts-packages'.";
+            let (_harness, cx) =
+                closed_with_refusals(&[(1, "Must have admin rights"), (4, long)], cx);
+            let short = bounds(format!("task title {}", id::<TaskId>(1)), cx);
+            let short = tooltip_on(short.center(), cx).expect("the short reason's tooltip");
+            let title = bounds(format!("task title {}", id::<TaskId>(4)), cx);
+
+            let tooltip = tooltip_on(title.center(), cx).expect("the long reason's tooltip");
+
+            assert!(
+                tooltip.size.width <= px(320.),
+                "{tooltip:?} no wider than 320px"
+            );
+            assert!(
+                tooltip.size.width > tooltip_width("Could not resolve to a Repository", cx),
+                "{tooltip:?} fills its lines"
+            );
+            assert!(
+                tooltip.size.height > short.size.height + px(10.),
+                "{tooltip:?} wraps onto a second line, taller than one line's {short:?}"
+            );
         }
 
         #[gpui::test]

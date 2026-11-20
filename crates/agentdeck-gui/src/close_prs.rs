@@ -155,8 +155,9 @@ impl Selection {
 
     /// Takes in the results of closing the picked PRs and says how it went. When every one
     /// closed, Select mode ends. Otherwise it stays on with the failed ones still picked,
-    /// each with its error, and the rest unpicked. When none closed, the toast is an error
-    /// with the first one's error, as a close from a row's menu says why.
+    /// each with its error, and the rest unpicked. When some closed, the toast says how many
+    /// and to hover the marked rows; when none closed, it is an error with the first one's
+    /// error, as a close from a row's menu says why.
     pub fn closed(&mut self, results: &[PrCloseResult]) -> Notice {
         let closed = results.iter().filter(|r| r.ok).count();
         if closed == results.len() {
@@ -182,7 +183,13 @@ impl Selection {
                 first.clone(),
             );
         }
+        let marked = if failed.len() == 1 {
+            "the marked PR"
+        } else {
+            "the marked PRs"
+        };
         Notice::new(format!("Closed {closed} of {}", results.len()))
+            .description(format!("Hover {marked} to see why."))
     }
 }
 
@@ -1119,13 +1126,35 @@ mod tests {
             ]);
 
             assert_eq!(notice.title, "Closed 2 of 3");
-            assert_eq!(notice.description, None);
+            assert_eq!(notice.kind, None);
+            assert_eq!(
+                notice.description.as_deref(),
+                Some("Hover the marked PR to see why.")
+            );
             assert!(selection.active());
             assert_eq!(selection.ids(), [id(2)]);
             assert_eq!(
                 selection.error(id(2)).map(SharedString::as_ref),
                 Some("Resource not accessible by personal access token")
             );
+        }
+
+        #[test]
+        fn should_point_at_the_marked_prs_when_more_than_one_did_not_close() {
+            let mut selection = picking(&[1, 2, 3]);
+
+            let notice = selection.closed(&[
+                result(1, None),
+                result(2, Some("Must have admin rights")),
+                result(3, Some("Must have admin rights")),
+            ]);
+
+            assert_eq!(notice.title, "Closed 1 of 3");
+            assert_eq!(
+                notice.description.as_deref(),
+                Some("Hover the marked PRs to see why.")
+            );
+            assert_eq!(selection.ids(), [id(2), id(3)]);
         }
 
         #[test]

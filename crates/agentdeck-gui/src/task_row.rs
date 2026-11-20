@@ -213,7 +213,7 @@ impl SelectCell {
 }
 
 /// What a row shows beyond its task: its `Select` and `Menu` layers, and the error its PR's
-/// close failed with, shown on its title on hover.
+/// close failed with, marked after its title and shown on hover.
 pub struct RowParts {
     /// The `Select` layer.
     pub select: SelectCell,
@@ -531,30 +531,60 @@ pub fn status_picker(
 pub type OnOpen = Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static>;
 
 /// A row's title, sm: clicking it runs `on_open`. With an `error`, why its PR didn't close,
-/// it shows the error in a tooltip on hover. Tests find it as `task title <id>`.
+/// the [`close_error`] mark follows it, and hovering either shows the error in a tooltip
+/// (spec §11, Closing PRs). Tests find it as `task title <id>`.
 fn title(row: &Row, on_open: OnOpen, error: Option<SharedString>, cx: &App) -> AnyElement {
     let id = row.id;
+    let s = cx.theme().semantic();
     let title = div()
         .id(SharedString::from(format!("task-title-{id}")))
         .debug_selector(move || format!("task title {id}"))
         .min_w_0()
         .cursor_pointer()
         .text_size(font_size::SM)
-        .text_color(cx.theme().semantic().foreground)
+        .text_color(s.foreground)
         .on_click(on_open)
         .child(row.title.clone());
-    match error {
-        Some(error) => div()
-            .min_w_0()
-            .debug_selector(move || format!("close error {id}"))
-            .child(
-                Tooltip::new(SharedString::from(format!("close-error-{id}")))
-                    .trigger(title)
-                    .content(TooltipContent::new(error)),
-            )
-            .into_any_element(),
-        None => title.into_any_element(),
-    }
+    let Some(error) = error else {
+        return title.into_any_element();
+    };
+    // Penpot "Inbox · partial failure": the mark `space.1-5` after the title, the tooltip
+    // over both.
+    let marked = div()
+        .flex()
+        .items_center()
+        .gap(space::S1_5)
+        .min_w_0()
+        .child(title)
+        .child(close_error(row, cx));
+    div()
+        .min_w_0()
+        .debug_selector(move || format!("close error {id}"))
+        .child(
+            Tooltip::new(SharedString::from(format!("close-error-{id}")))
+                .trigger(marked)
+                // `TooltipContent` is a row, where GPUI's text can't shrink below its
+                // one-line width, so a reason longer than its `max-w-xs` (320px) ran past
+                // the edge unwrapped. As a column, the text takes the surface's width and
+                // wraps inside it.
+                .content(TooltipContent::new(error).flex_col()),
+        )
+        .into_any_element()
+}
+
+/// The mark on a row whose PR didn't close: a 14px lucide `CircleExclamationPoint` in
+/// `destructive`, the failing checks' red. Tests find it as `close error mark <id>`.
+fn close_error(row: &Row, cx: &App) -> Div {
+    let id = row.id;
+    div()
+        .debug_selector(move || format!("close error mark {id}"))
+        .flex_none()
+        .flex()
+        .child(
+            Icon::new(IconName::CircleExclamationPoint)
+                .size(px(14.))
+                .text_color(cx.theme().semantic().destructive),
+        )
 }
 
 /// Penpot `TaskRow`'s kind icon and its colour (spec §11, PR state): a plain task's
