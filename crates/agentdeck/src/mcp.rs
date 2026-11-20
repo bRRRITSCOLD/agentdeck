@@ -394,7 +394,7 @@ impl Server {
                 .body(new)
                 .send()
                 .await
-                .map_err(ApiError::from)?
+                .map_err(|err| commands::stale_pane(err.into(), self.caller.pane, "unknown_pane"))?
                 .into_inner())
         })
         .await
