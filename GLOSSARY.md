@@ -17,11 +17,11 @@ _Avoid_: PR task, task
 ### Organising
 
 **Workspace**:
-A named place to work: the Repositories linked to it, which may be none, and its Panes. It has no folder of its own.
-_Avoid_: Project, folder
+A long-lived area of work, such as one product: the Repositories linked to it, which may be none, and its Panes. It has no folder of its own.
+_Avoid_: Project, folder, effort
 
 **Pane**:
-A terminal inside a Workspace, running an agent or a shell. A new Pane starts where the focused Pane is, or in your home folder.
+A terminal inside a Workspace, running an agent or a shell, in whatever folder it was started or has moved to.
 _Avoid_: Tab, session
 
 **Link**:
