@@ -18,6 +18,10 @@ _Avoid_: Deleted, gone, missing
 A GitHub pull request you authored, were asked to review, or are assigned. It belongs to exactly one Repository, and GitHub is the only source of its state.
 _Avoid_: PR task, task
 
+**Finished**:
+A Pull request kept for a short while after it was merged or closed, stopped being yours, or went untouched past the age cutoff.
+_Avoid_: Done, stale, archived
+
 ### Organising
 
 **Workspace**:
