@@ -5,17 +5,13 @@
 use std::collections::BTreeSet;
 
 use agentdeck_client::daemon::Daemon;
-use agentdeck_client::instructions;
 use agentdeck_client::panes::{self, pane_if_any};
 use agentdeck_client::types::{
-    Comment, DeviceSignIn, DirtyReport, GithubAuthInfo, GithubClientIdBody, GithubTokenBody,
-    InstructionPatch, NewComment, NewInstruction, NewTask, NewWorkspace, Pane, PaneRun, PrClose,
-    PrCloseResult, Settings, SettingsPatch, Tab, TaskPatch,
+    DeviceSignIn, DirtyReport, GithubAuthInfo, GithubClientIdBody, GithubTokenBody, NewTask,
+    NewWorkspace, Pane, PaneRun, PrClose, PrCloseResult, Settings, SettingsPatch, Tab, TaskPatch,
 };
 use agentdeck_client::{ApiError, Client};
-use agentdeck_core::{
-    InstructionId, PaneId, PrRef, SplitDirection, TabId, TaskId, TaskStatus, WorkspaceId,
-};
+use agentdeck_core::{PaneId, PrRef, SplitDirection, TabId, TaskId, TaskStatus, WorkspaceId};
 use gpui::{App, Task};
 
 use crate::new_agent::{Launch, Launched};
@@ -94,39 +90,7 @@ pub trait Api: Send + Sync {
     /// agent CLI couldn't start, and its message says why.
     fn launch_agent(&self, launch: Launch, cx: &App) -> Task<anyhow::Result<Launched>>;
 
-    /// Types an instruction's `body` into `pane` at once with Enter (spec §9). The
-    /// instruction stays as it is.
-    fn send_instruction(&self, body: String, pane: PaneId, cx: &App) -> Task<anyhow::Result<()>>;
-
-    /// Adds an instruction with `body` to `workspace`.
-    fn new_instruction(
-        &self,
-        workspace: WorkspaceId,
-        body: String,
-        cx: &App,
-    ) -> Task<anyhow::Result<()>>;
-
-    /// Replaces `instruction`'s text with `body`.
-    fn edit_instruction(
-        &self,
-        instruction: InstructionId,
-        body: String,
-        cx: &App,
-    ) -> Task<anyhow::Result<()>>;
-
-    /// Deletes `instruction`.
-    fn delete_instruction(&self, instruction: InstructionId, cx: &App) -> Task<anyhow::Result<()>>;
-
-    /// `task`'s comments, oldest first.
-    fn comments(&self, task: TaskId, cx: &App) -> Task<anyhow::Result<Vec<Comment>>>;
-
-    /// Adds the user's comment with `body` to `task`, for its agent (spec §9).
-    fn new_comment(&self, task: TaskId, body: String, cx: &App) -> Task<anyhow::Result<()>>;
-
-    /// Marks every agent comment on `task` seen, which clears its row's unseen mark.
-    fn mark_comments_seen(&self, task: TaskId, cx: &App) -> Task<anyhow::Result<()>>;
-
-    /// Archives `workspace`, keeping its dir, tasks and instructions. A refusal is an [`ApiError`];
+    /// Archives `workspace`, keeping its dir and tasks. A refusal is an [`ApiError`];
     /// `panes_running` means a pane of it still runs.
     fn archive_workspace(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<()>>;
 
@@ -148,7 +112,7 @@ pub trait Api: Send + Sync {
     /// The git repos under `workspace`'s dir that hold work on no remote.
     fn dirty(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<DirtyReport>>;
 
-    /// Deletes `workspace`, dirty or not: its tasks move to the Inbox, its instructions go, and so
+    /// Deletes `workspace`, dirty or not: its tasks move to the Inbox, and so
     /// does its dir when agentdeck made it. Only call it once the user has seen the dirty
     /// report.
     fn delete_workspace(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<()>>;
@@ -349,95 +313,14 @@ impl Api for Daemon {
             workspace,
             agent,
             cwd,
-            task,
         } = launch;
         runtime::spawn(cx, async move {
-            let pane = panes::launch_agent(&client, workspace, agent, cwd, task).await?;
+            let pane = panes::launch_agent(&client, workspace, agent, cwd).await?;
             Ok(Launched {
                 workspace,
                 tab: pane.tab_id,
                 pane: pane.id,
             })
-        })
-    }
-
-    fn send_instruction(&self, body: String, pane: PaneId, cx: &App) -> Task<anyhow::Result<()>> {
-        let client = self.client.clone();
-        runtime::spawn(cx, async move {
-            Ok(instructions::send_instruction(&client, &body, pane).await?)
-        })
-    }
-
-    fn new_instruction(
-        &self,
-        workspace: WorkspaceId,
-        body: String,
-        cx: &App,
-    ) -> Task<anyhow::Result<()>> {
-        let client = self.client.clone();
-        runtime::spawn(cx, async move {
-            client
-                .instruction_create()
-                .id(workspace)
-                .body(NewInstruction { body })
-                .send()
-                .await
-                .map_err(ApiError::from)?;
-            Ok(())
-        })
-    }
-
-    fn edit_instruction(
-        &self,
-        instruction: InstructionId,
-        body: String,
-        cx: &App,
-    ) -> Task<anyhow::Result<()>> {
-        let client = self.client.clone();
-        runtime::spawn(cx, async move {
-            let patch = InstructionPatch { body: Some(body) };
-            (client
-                .instruction_update()
-                .id(instruction)
-                .body(patch)
-                .send()
-                .await)
-                .map_err(ApiError::from)?;
-            Ok(())
-        })
-    }
-
-    fn delete_instruction(&self, instruction: InstructionId, cx: &App) -> Task<anyhow::Result<()>> {
-        let client = self.client.clone();
-        runtime::spawn(cx, async move {
-            (client.instruction_delete().id(instruction).send().await).map_err(ApiError::from)?;
-            Ok(())
-        })
-    }
-
-    fn comments(&self, task: TaskId, cx: &App) -> Task<anyhow::Result<Vec<Comment>>> {
-        let client = self.client.clone();
-        runtime::spawn(cx, async move {
-            let listed = client.comment_list().id(task).send().await;
-            Ok(listed.map_err(ApiError::from)?.into_inner())
-        })
-    }
-
-    fn new_comment(&self, task: TaskId, body: String, cx: &App) -> Task<anyhow::Result<()>> {
-        let client = self.client.clone();
-        runtime::spawn(cx, async move {
-            let comment = NewComment { body, pane: None };
-            (client.comment_create().id(task).body(comment).send().await)
-                .map_err(ApiError::from)?;
-            Ok(())
-        })
-    }
-
-    fn mark_comments_seen(&self, task: TaskId, cx: &App) -> Task<anyhow::Result<()>> {
-        let client = self.client.clone();
-        runtime::spawn(cx, async move {
-            (client.comment_seen().id(task).send().await).map_err(ApiError::from)?;
-            Ok(())
         })
     }
 
@@ -605,7 +488,7 @@ async fn panes(client: Client, workspace: WorkspaceId) -> anyhow::Result<Workspa
 }
 
 /// Reads a [`Snapshot`]: the workspaces, then each live one's tabs and the panes in their
-/// layouts, then the tasks, every workspace's instructions, PR sync status, the pull requests
+/// layouts, then the tasks, PR sync status, the pull requests
 /// and the Repositories with the Workspaces linking each.
 async fn snapshot(client: Client) -> anyhow::Result<Snapshot> {
     let workspaces = (client.workspace_list().send().await)
@@ -637,19 +520,12 @@ async fn snapshot(client: Client) -> anyhow::Result<Snapshot> {
             }
         }
     }
-    let mut instructions = Vec::new();
-    for workspace in &workspaces {
-        let listed =
-            (client.instruction_list().id(workspace.id).send().await).map_err(ApiError::from)?;
-        instructions.extend(listed.into_inner());
-    }
     Ok(Snapshot {
         workspaces,
         panes,
         tasks: (client.task_list().send().await)
             .map_err(ApiError::from)?
             .into_inner(),
-        instructions,
         pr_sync: Some(
             (client.prs_status().send().await)
                 .map_err(ApiError::from)?
@@ -725,22 +601,6 @@ pub(crate) mod fake {
         pub syncs: Mutex<Vec<bool>>,
         /// The task edits sent, with the task each is for, in order.
         pub edited_tasks: Mutex<Vec<(TaskId, TaskPatch)>>,
-        /// The instructions added, with the workspace each is for.
-        pub instructions_added: Mutex<Vec<(WorkspaceId, String)>>,
-        /// The instructions sent to panes: the text and the pane.
-        pub sent_instructions: Mutex<Vec<(String, PaneId)>>,
-        /// The instructions edited, with the new text, in order.
-        pub edited_instructions: Mutex<Vec<(InstructionId, String)>>,
-        /// The instructions deleted, in order.
-        pub deleted_instructions: Mutex<Vec<InstructionId>>,
-        /// Every task's comments, oldest first.
-        comments: Mutex<Vec<Comment>>,
-        /// How many times a task's comments were read.
-        comment_reads: Mutex<usize>,
-        /// The comments added, with the task each is on, in order.
-        pub comments_added: Mutex<Vec<(TaskId, String)>>,
-        /// The tasks whose comments were marked seen, in order.
-        pub seen: Mutex<Vec<TaskId>>,
         /// The agents started.
         pub launched: Mutex<Vec<Launch>>,
         /// The panes closed, in order.
@@ -864,16 +724,6 @@ pub(crate) mod fake {
         /// Answers later reads of `workspace`'s dirty report with `report`.
         pub fn set_dirty(&self, workspace: WorkspaceId, report: DirtyReport) {
             self.dirty.lock().unwrap().insert(workspace, report);
-        }
-
-        /// Answers later reads with `comments`, every task's.
-        pub fn set_comments(&self, comments: Vec<Comment>) {
-            *self.comments.lock().unwrap() = comments;
-        }
-
-        /// How many times a task's comments were read.
-        pub fn comment_reads(&self) -> usize {
-            *self.comment_reads.lock().unwrap()
         }
 
         /// The settings it holds now.
@@ -1284,100 +1134,6 @@ pub(crate) mod fake {
             }))
         }
 
-        fn send_instruction(
-            &self,
-            body: String,
-            pane: PaneId,
-            _cx: &App,
-        ) -> Task<anyhow::Result<()>> {
-            if let Some(err) = self.failure() {
-                return Task::ready(Err(err));
-            }
-            self.sent_instructions.lock().unwrap().push((body, pane));
-            Task::ready(Ok(()))
-        }
-
-        fn new_instruction(
-            &self,
-            workspace: WorkspaceId,
-            body: String,
-            _cx: &App,
-        ) -> Task<anyhow::Result<()>> {
-            if let Some(err) = self.failure() {
-                return Task::ready(Err(err));
-            }
-            self.instructions_added
-                .lock()
-                .unwrap()
-                .push((workspace, body));
-            Task::ready(Ok(()))
-        }
-
-        fn edit_instruction(
-            &self,
-            instruction: InstructionId,
-            body: String,
-            _cx: &App,
-        ) -> Task<anyhow::Result<()>> {
-            if let Some(err) = self.failure() {
-                return Task::ready(Err(err));
-            }
-            let mut snapshot = self.snapshot.lock().unwrap();
-            if let Some(held) = (snapshot.instructions.iter_mut()).find(|i| i.id == instruction) {
-                held.body = body.clone();
-            }
-            (self.edited_instructions.lock().unwrap()).push((instruction, body));
-            Task::ready(Ok(()))
-        }
-
-        fn delete_instruction(
-            &self,
-            instruction: InstructionId,
-            _cx: &App,
-        ) -> Task<anyhow::Result<()>> {
-            if let Some(err) = self.failure() {
-                return Task::ready(Err(err));
-            }
-            (self.snapshot.lock().unwrap().instructions).retain(|i| i.id != instruction);
-            (self.deleted_instructions.lock().unwrap()).push(instruction);
-            Task::ready(Ok(()))
-        }
-
-        fn comments(&self, task: TaskId, _cx: &App) -> Task<anyhow::Result<Vec<Comment>>> {
-            *self.comment_reads.lock().unwrap() += 1;
-            let comments = (self.comments.lock().unwrap().iter())
-                .filter(|c| c.task_id == task)
-                .cloned()
-                .collect();
-            Task::ready(Ok(comments))
-        }
-
-        fn new_comment(&self, task: TaskId, body: String, _cx: &App) -> Task<anyhow::Result<()>> {
-            if let Some(err) = self.failure() {
-                return Task::ready(Err(err));
-            }
-            let comment = Comment {
-                id: self.make_id(),
-                body: body.clone(),
-                ..crate::overview::fixtures::comment(0, task)
-            };
-            self.comments.lock().unwrap().push(comment);
-            self.comments_added.lock().unwrap().push((task, body));
-            Task::ready(Ok(()))
-        }
-
-        fn mark_comments_seen(&self, task: TaskId, _cx: &App) -> Task<anyhow::Result<()>> {
-            if let Some(err) = self.failure() {
-                return Task::ready(Err(err));
-            }
-            let mut snapshot = self.snapshot.lock().unwrap();
-            if let Some(task) = snapshot.tasks.iter_mut().find(|t| t.id == task) {
-                task.unseen_agent_comments = 0;
-            }
-            self.seen.lock().unwrap().push(task);
-            Task::ready(Ok(()))
-        }
-
         fn archive_workspace(&self, workspace: WorkspaceId, _cx: &App) -> Task<anyhow::Result<()>> {
             if let Some(err) = self.failure() {
                 return Task::ready(Err(err));
@@ -1450,9 +1206,6 @@ pub(crate) mod fake {
                     task.workspace_id = None;
                 }
             }
-            snapshot
-                .instructions
-                .retain(|i| i.workspace_id != workspace);
             self.deleted.lock().unwrap().push(workspace);
             Task::ready(Ok(()))
         }

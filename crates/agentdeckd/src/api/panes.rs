@@ -13,7 +13,7 @@ use dropshot::{
 
 use super::{ApiContext, Authorized, IdPath, client_error};
 use crate::agents::restart::{Respawn, RestartError, Restarter};
-use crate::agents::{self, codex, delivery};
+use crate::agents::{self, codex};
 use crate::db;
 use crate::model::{
     InputAccepted, InputWhen, NewPane, Pane, PaneInput, PanePatch, PaneRespawn, PaneRun, TailQuery,
@@ -27,7 +27,7 @@ use crate::terminal::tail::TAIL_CAPACITY;
 enum Command {
     /// A shell, or an `other` agent: this argv.
     Given(Vec<String>),
-    /// Claude Code or Codex, which agentdeck launches with a session and a launch prompt.
+    /// Claude Code or Codex, which agentdeck launches with a session and no prompt.
     Agent(Agent),
 }
 
@@ -113,12 +113,10 @@ fn with_live_status(context: &ApiContext, mut pane: Pane) -> Pane {
 /// Spawns a pane in a tab and starts its process (spec §6). The caller places the pane in
 /// the tab's layout.
 ///
-/// `claude` and `codex` panes start with a launch prompt: the linked task's title, its
-/// `Task id:` and how to report back on it with the `agentdeck` CLI, and its body; then every
-/// instruction for the pane's workspace and the task's comments no agent has had yet, which
-/// are then marked delivered to the pane. Claude Code
-/// starts on a session id agentdeck chooses; a Codex pane's is found once Codex writes its
-/// session file, and `session_id` is set then.
+/// `claude` and `codex` panes start with no prompt: an agent reads its own CLAUDE.md or
+/// AGENTS.md, and work reaches it by pasting or `input`. Claude Code starts on a session id
+/// agentdeck chooses; a Codex pane's is found once Codex writes its session file, and
+/// `session_id` is set then.
 #[endpoint { method = POST, path = "/v1/panes" }]
 pub(crate) async fn pane_create(
     rqctx: RequestContext<ApiContext>,
@@ -129,27 +127,17 @@ pub(crate) async fn pane_create(
     let new = body.into_inner();
     let command = command(&new)?;
     let cwd = check_cwd(&new.cwd)?;
-    let claims = context.claims.clone();
-    let (pane, workspace, prompted) = context
+    let (pane, workspace) = context
         .db
         .call(move |c| {
-            let (argv, session_id, comments) = match command {
-                Command::Given(argv) => (argv, None, Vec::new()),
+            let (argv, session_id) = match command {
+                Command::Given(argv) => (argv, None),
                 Command::Agent(agent) => {
-                    let workspace = db::panes::workspace_for(c, &new)?;
-                    let task = new.task_id.map(|id| db::tasks::get(c, id)).transpose()?;
-                    let instructions = db::instructions::list(c, workspace)?;
-                    let comments = match new.task_id {
-                        Some(task) => delivery::for_launch_prompt(c, &claims, task)?,
-                        None => Vec::new(),
-                    };
-                    let prompt = agents::launch_prompt(task.as_ref(), &instructions, &comments);
-                    let launch = agents::launch(agent, prompt).expect("claude and codex launch");
-                    (launch.argv, launch.session_id, comments)
+                    let launch = agents::launch(agent).expect("claude and codex launch");
+                    (launch.argv, launch.session_id)
                 }
             };
-            let (pane, workspace) = db::panes::create(c, &new, &argv, session_id.as_deref())?;
-            Ok((pane, workspace, comments))
+            db::panes::create(c, &new, &argv, session_id.as_deref())
         })
         .await?;
 
@@ -162,20 +150,10 @@ pub(crate) async fn pane_create(
     if let Err(err) = spawned {
         let id = pane.id;
         tracing::warn!("pane {id} couldn't start: {}", err.detail());
-        delivery::launch_failed(&context.claims, &prompted);
         context.db.call(move |c| db::panes::delete(c, id)).await?;
         return Err(spawn_error(err));
     }
     context.events.changed(Entity::Pane, pane.id);
-    let delivered = prompted.iter().map(|comment| comment.id).collect();
-    delivery::mark_delivered(
-        &context.db,
-        &context.claims,
-        &context.events,
-        delivered,
-        pane.id,
-    )
-    .await;
     watch_codex(context, pane.id, codex_sessions);
     Ok(HttpResponseCreated(with_live_status(context, pane)))
 }
@@ -225,11 +203,7 @@ pub(crate) async fn pane_get(
 }
 
 /// Links the pane to a task in its workspace that isn't done, or unlinks it (`task_id`
-/// null). Linking a live agent pane to another task first tells its agent the task itself
-/// (its title, id, how to report back on it, and body), then types in the task's comments no
-/// agent has had yet, each once the agent is idle or done, as a new comment would be (spec
-/// §9). Whatever was still waiting to be typed for the task it leaves is dropped from the
-/// pane, and a comment held for it moves on to that task's next live agent pane.
+/// null). Nothing is typed into the pane (spec §9).
 #[endpoint { method = PATCH, path = "/v1/panes/{id}" }]
 pub(crate) async fn pane_update(
     rqctx: RequestContext<ApiContext>,
@@ -244,22 +218,10 @@ pub(crate) async fn pane_update(
         .db
         .call(move |c| db::panes::set_task(c, id, task))
         .await?;
-    context.terminals.link(id, task);
     context.events.changed(Entity::Pane, id);
     if before != task {
         for linked in [before, task].into_iter().flatten() {
             context.events.changed(Entity::Task, linked);
-        }
-        if let Some(task) = task {
-            delivery::deliver_on_link(
-                &context.db,
-                &context.claims,
-                &context.terminals,
-                &context.events,
-                task,
-                id,
-            )
-            .await;
         }
     }
     Ok(HttpResponseOk(with_live_status(context, pane)))
@@ -268,7 +230,7 @@ pub(crate) async fn pane_update(
 /// Starts an exited pane again in place, keeping its id, its place in the tab's layout, its
 /// `cwd` and its task link (spec §4). `run: "agent"`, for an agent pane only
 /// (`unsupported_kind`), runs its agent again: claude and codex resume their session when it
-/// is known, else start fresh with a new launch prompt; an `other` agent runs its argv again.
+/// is known, else start fresh with a new session; an `other` agent runs its argv again.
 /// A resume that exits non-zero within 10 s, as one of a session the agent can no longer
 /// find does, is followed by a fresh start, once. `run: "shell"` turns the pane into a shell
 /// pane running `$SHELL`, with hosting on. The state starts over. `running` (409) while its process hasn't exited; `invalid_dir` when its
@@ -315,7 +277,6 @@ pub(crate) async fn pane_respawn(
     };
     let restarter = Restarter {
         db: context.db.clone(),
-        claims: context.claims.clone(),
         terminals: context.terminals.clone(),
         events: context.events.clone(),
     };
@@ -442,7 +403,6 @@ mod tests {
                 agent,
                 argv: argv.map(|argv| argv.iter().map(|arg| (*arg).to_owned()).collect()),
                 cwd: "/".into(),
-                task_id: None,
             }
         }
 

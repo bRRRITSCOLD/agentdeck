@@ -3,7 +3,7 @@
 //!
 //! - [`daemon`]: `daemon.json`, where clients find the daemon, and [`API_VERSION`].
 //! - [`id`]: one id newtype per entity.
-//! - [`pane`], [`task`], [`pr`], [`comment`]: the text-valued columns of spec §3 as enums.
+//! - [`pane`], [`task`], [`pr`]: the text-valued columns of spec §3 as enums.
 //! - [`repository`] and [`PrRef`]: a Repository's GitHub id and name, and the references that
 //!   name a Repository or a pull request (spec §10).
 //! - [`layout`]: a tab's split tree.
@@ -18,7 +18,6 @@
 mod schema;
 mod text_enum;
 
-pub mod comment;
 pub mod daemon;
 pub mod id;
 pub mod layout;
@@ -30,9 +29,8 @@ pub mod state;
 pub mod task;
 pub mod ws;
 
-pub use comment::CommentAuthor;
 pub use daemon::{API_VERSION, DaemonInfo};
-pub use id::{CommentId, InstructionId, PaneId, TabId, TaskId, WorkspaceId};
+pub use id::{PaneId, TabId, TaskId, WorkspaceId};
 pub use layout::{Layout, LayoutError, Ratio, SplitDirection};
 pub use pane::{Agent, PaneKind};
 pub use pr::{

@@ -46,7 +46,6 @@ use crate::api::Api;
 use crate::notice::Notice;
 use crate::open_pr;
 use crate::scrollbar;
-use crate::send_task::{self, Sending, TaskTarget};
 use crate::task_list::Row;
 use crate::task_row::{RowParts, SelectCell};
 use crate::workspace::failed;
@@ -300,9 +299,6 @@ impl Target<TaskId> {
 pub enum MenuEntry {
     /// **Edit task**, opening the task sheet to edit the task.
     EditTask,
-    /// **Send to agent**, a submenu of the agent panes the task can go to (spec §11, Send to
-    /// agent).
-    SendToAgent(Vec<TaskTarget>),
     /// **Open on GitHub**, opening this URL, the PR's.
     OpenOnGitHub(SharedString),
     /// **Copy task id**, putting this task's id on the clipboard.
@@ -313,13 +309,11 @@ pub enum MenuEntry {
     ClosePr(Target),
 }
 
-/// `row`'s `…` menu, top to bottom: **Edit task** on every row; **Send to agent** over
-/// `send`, the panes [`send_task::targets`] offers, unless the task is done (`None`); **Open
-/// on GitHub** on every PR row the sync has filled in, whatever its PR's state; **Copy task
-/// id** on every row; then, when its PR can close, a separator and **Close PR**.
-pub fn menu_entries(row: &Row, send: Option<Vec<TaskTarget>>) -> Vec<MenuEntry> {
+/// `row`'s `…` menu, top to bottom: **Edit task** on every row; **Open on GitHub** on every
+/// PR row the sync has filled in, whatever its PR's state; **Copy task id** on every row;
+/// then, when its PR can close, a separator and **Close PR**.
+pub fn menu_entries(row: &Row) -> Vec<MenuEntry> {
     let mut entries = vec![MenuEntry::EditTask];
-    entries.extend(send.map(MenuEntry::SendToAgent));
     if let Some(pr) = &row.pr {
         entries.push(MenuEntry::OpenOnGitHub(pr.url.clone()));
     }
@@ -844,70 +838,54 @@ pub fn select_cell<K: Key>(
 
 /// `row`'s `Select` and `Menu` layers and its close error: a checkbox in Select mode, only when
 /// its PR can close, and on every row a `…` menu of its [`menu_entries`]: **Edit task**,
-/// which calls `on_edit`; **Send to agent** over `send` unless the task is done, which sends
-/// it to the pane picked; on a PR row **Open on GitHub**; **Copy task id**; then **Close PR**
+/// which calls `on_edit`; on a PR row **Open on GitHub**; **Copy task id**; then **Close PR**
 /// after a separator when its PR can close. Tests find them as `<id> select <task>` and `<id> menu <task>`.
 pub fn row_parts(
     close: &Entity<ClosePrs>,
     row: &Row,
-    send: Option<Vec<TaskTarget>>,
     on_edit: impl Fn(&mut Window, &mut App) + 'static,
     cx: &App,
 ) -> RowParts {
-    let state = close.read(cx);
-    let sending = Sending {
-        task: row.id,
-        title: row.title.clone(),
-        inbox: row.workspace.is_none(),
-    };
-    let api = state.api.clone();
-    let on_send: send_task::OnPick = Rc::new(move |target, window, cx| {
-        send_task::send(api.clone(), sending.clone(), target, window, cx);
-    });
-    let id = state.id;
+    let id = close.read(cx).id;
     let task = row.id;
     let select = select_cell(close, task, Target::of(row).is_some(), task, cx);
     let state = close.read(cx);
     let error = state.selection.error(task).cloned();
-    let on_edit = std::rc::Rc::new(on_edit);
+    let on_edit = Rc::new(on_edit);
     let menu = {
-        let content = (menu_entries(row, send).into_iter()).fold(
-            DropdownMenuContent::new(),
-            |content, entry| match entry {
-                MenuEntry::EditTask => {
-                    let on_edit = on_edit.clone();
-                    content.item(
-                        DropdownMenuItem::new("Edit task")
-                            .on_click(move |_, window, cx| on_edit(window, cx)),
-                    )
+        let content =
+            (menu_entries(row).into_iter()).fold(DropdownMenuContent::new(), |content, entry| {
+                match entry {
+                    MenuEntry::EditTask => {
+                        let on_edit = on_edit.clone();
+                        content.item(
+                            DropdownMenuItem::new("Edit task")
+                                .on_click(move |_, window, cx| on_edit(window, cx)),
+                        )
+                    }
+                    MenuEntry::OpenOnGitHub(url) => content.item(
+                        DropdownMenuItem::new("Open on GitHub")
+                            .on_click(move |_, window, cx| open_pr::open(&url, window, cx)),
+                    ),
+                    MenuEntry::CopyTaskId(task) => content.item(
+                        DropdownMenuItem::new("Copy task id").on_click(move |_, window, cx| {
+                            crate::notice::copy(task.to_string(), "Copied task id", window, cx);
+                        }),
+                    ),
+                    MenuEntry::Separator => content.separator(DropdownMenuSeparator::new()),
+                    MenuEntry::ClosePr(target) => {
+                        let close = close.clone();
+                        content.item(
+                            DropdownMenuItem::new("Close PR")
+                                .variant(DropdownMenuItemVariant::Destructive)
+                                .on_click(move |_, window, cx| {
+                                    let target = target.clone();
+                                    close.update(cx, |close, cx| close.ask_one(target, window, cx));
+                                }),
+                        )
+                    }
                 }
-                MenuEntry::SendToAgent(targets) => {
-                    let (trigger, sub) = send_task::submenu(targets, on_send.clone());
-                    content.sub(trigger, sub)
-                }
-                MenuEntry::OpenOnGitHub(url) => content.item(
-                    DropdownMenuItem::new("Open on GitHub")
-                        .on_click(move |_, window, cx| open_pr::open(&url, window, cx)),
-                ),
-                MenuEntry::CopyTaskId(task) => content.item(
-                    DropdownMenuItem::new("Copy task id").on_click(move |_, window, cx| {
-                        crate::notice::copy(task.to_string(), "Copied task id", window, cx);
-                    }),
-                ),
-                MenuEntry::Separator => content.separator(DropdownMenuSeparator::new()),
-                MenuEntry::ClosePr(target) => {
-                    let close = close.clone();
-                    content.item(
-                        DropdownMenuItem::new("Close PR")
-                            .variant(DropdownMenuItemVariant::Destructive)
-                            .on_click(move |_, window, cx| {
-                                let target = target.clone();
-                                close.update(cx, |close, cx| close.ask_one(target, window, cx));
-                            }),
-                    )
-                }
-            },
-        );
+            });
         div()
             .debug_selector(move || format!("{id} menu {task}"))
             .child(
@@ -1099,7 +1077,7 @@ mod tests {
                 show_done: true,
             };
             let row = &rows(&snapshot, &query)[0];
-            menu_entries(row, crate::send_task::targets(&snapshot, row.id))
+            menu_entries(row)
         }
 
         fn open_on_github(n: u32) -> MenuEntry {
@@ -1107,12 +1085,11 @@ mod tests {
         }
 
         #[test]
-        fn should_offer_edit_send_open_copy_then_close_on_an_open_pr() {
+        fn should_offer_edit_open_copy_then_close_on_an_open_pr() {
             assert_eq!(
                 menu(pr_task(1, "acme/widgets", PrState::Open, None)),
                 [
                     MenuEntry::EditTask,
-                    MenuEntry::SendToAgent(vec![]),
                     open_on_github(1),
                     MenuEntry::CopyTaskId(id(1)),
                     MenuEntry::Separator,
@@ -1127,12 +1104,11 @@ mod tests {
         }
 
         #[test]
-        fn should_offer_edit_send_open_and_copy_on_a_merged_or_closed_pr() {
+        fn should_offer_edit_open_and_copy_on_a_merged_or_closed_pr() {
             assert_eq!(
                 menu(pr_task(2, "acme/widgets", PrState::Merged, None)),
                 [
                     MenuEntry::EditTask,
-                    MenuEntry::SendToAgent(vec![]),
                     open_on_github(2),
                     MenuEntry::CopyTaskId(id(2))
                 ]
@@ -1141,7 +1117,6 @@ mod tests {
                 menu(pr_task(3, "acme/widgets", PrState::Closed, None)),
                 [
                     MenuEntry::EditTask,
-                    MenuEntry::SendToAgent(vec![]),
                     open_on_github(3),
                     MenuEntry::CopyTaskId(id(3))
                 ]
@@ -1149,35 +1124,14 @@ mod tests {
         }
 
         #[test]
-        fn should_offer_edit_send_and_copy_on_a_plain_task_or_an_unsynced_pr() {
+        fn should_offer_edit_and_copy_on_a_plain_task_or_an_unsynced_pr() {
             assert_eq!(
                 menu(task(4, TaskKind::Plain, None)),
-                [
-                    MenuEntry::EditTask,
-                    MenuEntry::SendToAgent(vec![]),
-                    MenuEntry::CopyTaskId(id(4))
-                ]
+                [MenuEntry::EditTask, MenuEntry::CopyTaskId(id(4))]
             );
             assert_eq!(
                 menu(task(5, TaskKind::Pr, None)),
-                [
-                    MenuEntry::EditTask,
-                    MenuEntry::SendToAgent(vec![]),
-                    MenuEntry::CopyTaskId(id(5))
-                ]
-            );
-        }
-
-        #[test]
-        fn should_leave_send_to_agent_out_of_a_done_tasks_menu() {
-            let done = agentdeck_client::types::Task {
-                status: agentdeck_core::TaskStatus::Done,
-                ..task(6, TaskKind::Plain, None)
-            };
-
-            assert_eq!(
-                menu(done),
-                [MenuEntry::EditTask, MenuEntry::CopyTaskId(id(6))]
+                [MenuEntry::EditTask, MenuEntry::CopyTaskId(id(5))]
             );
         }
     }

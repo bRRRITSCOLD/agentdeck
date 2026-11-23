@@ -3,8 +3,6 @@
 //! Each entity's queries are plain functions over `&Connection` in its own module; handlers
 //! run them on the actor with [`Db::call`].
 
-pub mod comments;
-pub mod instructions;
 pub mod panes;
 pub mod pull_requests;
 pub mod repositories;

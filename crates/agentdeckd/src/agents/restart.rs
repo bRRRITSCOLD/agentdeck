@@ -1,5 +1,5 @@
 //! Starting an exited pane's process again in place (spec §4, §6): its agent's session
-//! resumed, its agent afresh with a new session and launch prompt, or a shell. A Claude Code
+//! resumed, its agent afresh with a new session, or a shell. A Claude Code
 //! or Codex resume, by `POST /v1/panes/{id}/respawn` or after a restart, that exits non-zero
 //! within [`FAILED_RESUME_WITHIN`] is taken for a session the agent can no longer find, and
 //! the agent starts afresh, once (#237).
@@ -12,11 +12,10 @@ use agentdeck_core::ws::{Entity, ServerMessage};
 use agentdeck_core::{Agent, AgentState, PaneId, WorkspaceId};
 use tokio::sync::broadcast::{self, error::RecvError};
 
-use super::delivery::{self, Claims};
-use super::{codex, launch, launch_prompt};
+use super::{codex, launch};
 use crate::db::{self, Db, DbError};
 use crate::events::Events;
-use crate::model::{Comment, Pane};
+use crate::model::Pane;
 use crate::terminal::Terminals;
 use crate::terminal::env::default_shell;
 use crate::terminal::pane::{Launch, SpawnError};
@@ -68,8 +67,6 @@ impl From<DbError> for RestartError {
 pub struct Restarter {
     /// The database actor.
     pub db: Db,
-    /// Which pane each comment on its way to an agent is for.
-    pub claims: Claims,
     /// The live panes.
     pub terminals: Terminals,
     /// The events every WebSocket client gets.
@@ -106,7 +103,7 @@ impl Restarter {
         // `Again` for Claude Code or Codex is always a resume of its session.
         let resumed = agent.filter(|agent| *agent != Agent::Other);
         let feed = self.events.subscribe();
-        self.start(&pane, workspace, agent, argv, cwd.clone(), None)
+        self.start(&pane, workspace, agent, argv, cwd.clone(), false)
             .await?;
         if let Some(agent) = resumed {
             self.fall_back_if_resume_fails(id, agent, cwd, feed);
@@ -114,40 +111,27 @@ impl Restarter {
         Ok(pane)
     }
 
-    /// Starts `agent` afresh in exited pane `id`, as a new pane starts: a new session and a
-    /// new launch prompt, whose comments are then marked delivered to it.
+    /// Starts `agent` afresh in exited pane `id`, as a new pane starts: a new session, with
+    /// no prompt.
     async fn fresh(&self, id: PaneId, agent: Agent, cwd: PathBuf) -> Result<Pane, RestartError> {
-        let claims = self.claims.clone();
         let folder = cwd.to_string_lossy().into_owned();
-        let (pane, workspace, argv, prompted) = self
+        let (pane, workspace, argv) = self
             .db
             .call(move |c| {
                 let workspace = db::panes::workspace_of(c, id)?;
-                let row = db::panes::get(c, id)?;
-                let task = row
-                    .task_id
-                    .map(|task| db::tasks::get(c, task))
-                    .transpose()?;
-                let instructions = db::instructions::list(c, workspace)?;
-                let comments = match row.task_id {
-                    Some(task) => delivery::for_launch_prompt(c, &claims, task)?,
-                    None => Vec::new(),
-                };
-                let prompt = launch_prompt(task.as_ref(), &instructions, &comments);
-                let launch = launch(agent, prompt).expect("claude and codex launch");
+                let launch = launch(agent).expect("claude and codex launch");
                 let started = (launch.argv.as_slice(), launch.session_id.as_deref());
                 db::panes::respawned(c, id, &folder, Some(started))?;
-                Ok((db::panes::get(c, id)?, workspace, launch.argv, comments))
+                Ok((db::panes::get(c, id)?, workspace, launch.argv))
             })
             .await?;
-        self.start(&pane, workspace, Some(agent), argv, cwd, Some(prompted))
+        self.start(&pane, workspace, Some(agent), argv, cwd, true)
             .await?;
         Ok(pane)
     }
 
-    /// Spawns `argv` in `pane`, whose row is written, and tells clients. A fresh launch has
-    /// `fresh`: the comments its launch prompt carries, marked delivered once it runs; a fresh
-    /// Codex has its session found. A program that can't start leaves the pane exited.
+    /// Spawns `argv` in `pane`, whose row is written, and tells clients. A `fresh` Codex has
+    /// its session found. A program that can't start leaves the pane exited.
     async fn start(
         &self,
         pane: &Pane,
@@ -155,11 +139,10 @@ impl Restarter {
         agent: Option<Agent>,
         argv: Vec<String>,
         cwd: PathBuf,
-        fresh: Option<Vec<Comment>>,
+        fresh: bool,
     ) -> Result<(), RestartError> {
         let id = pane.id;
-        let codex_agent = agent.filter(|_| fresh.is_some());
-        let prompted = fresh.unwrap_or_default();
+        let codex_agent = agent.filter(|_| fresh);
         let launch = Launch::pane(id, workspace, pane.task_id, argv, cwd);
         let codex_sessions = codex::sessions_before(codex_agent, &launch);
         let spawned = match agent {
@@ -168,7 +151,6 @@ impl Restarter {
         };
         if let Err(err) = spawned {
             tracing::warn!("pane {id} couldn't start again: {}", err.detail());
-            delivery::launch_failed(&self.claims, &prompted);
             let title = pane.title.clone();
             self.db
                 .call(move |c| db::panes::set_exited(c, id, None, &title))
@@ -178,8 +160,6 @@ impl Restarter {
         }
         tracing::info!("respawned pane {id}");
         self.events.changed(Entity::Pane, id);
-        let delivered = prompted.iter().map(|comment| comment.id).collect();
-        delivery::mark_delivered(&self.db, &self.claims, &self.events, delivered, id).await;
         if let Some((dir, before)) = codex_sessions {
             codex::watch(
                 self.db.clone(),

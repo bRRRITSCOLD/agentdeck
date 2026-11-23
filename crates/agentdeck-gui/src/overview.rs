@@ -6,9 +6,7 @@
 //! a pure function the views render. Live `state` and `exit` messages patch the snapshot's
 //! pane states in place; anything else that changes is read again.
 
-use agentdeck_client::types::{
-    Instruction, PrSyncStatus, PullRequest, RepositoryLinks, Task, Workspace,
-};
+use agentdeck_client::types::{PrSyncStatus, PullRequest, RepositoryLinks, Task, Workspace};
 use agentdeck_core::{
     Agent, AgentState, PaneId, PrState, TaskId, TaskKind, TaskStatus, WorkspaceId,
 };
@@ -42,8 +40,6 @@ pub struct Snapshot {
     pub panes: Vec<PaneState>,
     /// Every task.
     pub tasks: Vec<Task>,
-    /// Every workspace's instructions.
-    pub instructions: Vec<Instruction>,
     /// PR sync's last run and its settings; `None` until read.
     pub pr_sync: Option<PrSyncStatus>,
     /// Every pull request PR sync keeps, by Repository name, then number (spec §4).
@@ -258,12 +254,11 @@ impl Snapshot {
 #[cfg(test)]
 pub(crate) mod fixtures {
     use agentdeck_client::types::{
-        Comment, Instruction, PrSyncStatus, PullRequest, Repository, RepositoryLinks, Task, TaskPr,
-        Workspace,
+        PrSyncStatus, PullRequest, Repository, RepositoryLinks, Task, TaskPr, Workspace,
     };
     use agentdeck_core::{
-        AgentState, CommentAuthor, PaneId, PrRef, PrState, RepositoryId, RepositoryName, TaskId,
-        TaskKind, TaskStatus, WorkspaceId,
+        AgentState, PaneId, PrRef, PrState, RepositoryId, RepositoryName, TaskKind, TaskStatus,
+        WorkspaceId,
     };
 
     use super::{PaneState, Snapshot};
@@ -343,7 +338,6 @@ pub(crate) mod fixtures {
             id: id(n),
             kind,
             pr: None,
-            unseen_agent_comments: 0,
             status: TaskStatus::Todo,
             title: format!("task {n}"),
             updated_at: CREATED.into(),
@@ -429,33 +423,6 @@ pub(crate) mod fixtures {
             unreachable: false,
             url: format!("https://github.com/{repo}"),
             workspaces: workspaces.to_vec(),
-        }
-    }
-
-    /// The user's comment on `task`, seen and not yet delivered.
-    pub fn comment(n: u32, task: TaskId) -> Comment {
-        Comment {
-            author: CommentAuthor::User,
-            author_agent: None,
-            author_pane: None,
-            body: format!("comment {n}"),
-            created_at: CREATED.into(),
-            delivered_at: None,
-            delivered_to_pane: None,
-            id: id(n),
-            seen_at: Some(CREATED.into()),
-            task_id: task,
-        }
-    }
-
-    /// An instruction for `workspace`.
-    pub fn instruction(n: u32, workspace: WorkspaceId) -> Instruction {
-        Instruction {
-            body: "instruction".into(),
-            created_at: CREATED.into(),
-            id: id(n),
-            updated_at: CREATED.into(),
-            workspace_id: workspace,
         }
     }
 }

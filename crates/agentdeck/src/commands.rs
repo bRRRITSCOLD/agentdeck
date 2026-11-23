@@ -6,8 +6,7 @@ use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
 
 use agentdeck_client::types::{
-    InputWhen, InstructionPatch, NewComment, NewInstruction, NewLink, NewTask, NewWorkspace,
-    PaneInput, PrClose, TaskPatch,
+    InputWhen, NewLink, NewTask, NewWorkspace, PaneInput, PrClose, TaskPatch,
 };
 use agentdeck_client::{Client, panes};
 use agentdeck_core::{Layout, PaneId, PrRef, RepositoryName, TaskId, TaskPlace, WorkspaceId};
@@ -17,18 +16,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::cli::{
-    AgentCommand, Command, CommentCommand, ConfigCommand, InstructionCommand, PrCommand,
-    RepoCommand, TaskCommand, WsCommand,
+    AgentCommand, Command, ConfigCommand, PrCommand, RepoCommand, TaskCommand, WsCommand,
 };
 use crate::resolve::IdRef;
 use crate::{launch, render, resolve};
 use agentdeck_client::ApiError;
-
-/// Names the pane an agent runs in; a comment added from it is that pane's agent's.
-pub const PANE_VAR: &str = "AGENTDECK_PANE";
-
-/// Names the workspace an agent runs in; the default workspace for instructions.
-pub const WORKSPACE_VAR: &str = "AGENTDECK_WORKSPACE";
 
 /// What a command prints: `json` with `--json`, else `human`.
 pub struct Output {
@@ -55,8 +47,6 @@ pub async fn run(client: &Client, command: Command) -> anyhow::Result<Output> {
     match command {
         Command::Ws(command) => ws(client, command).await,
         Command::Task(command) => task(client, command).await,
-        Command::Comment(command) => comment(client, command).await,
-        Command::Instruction(command) => instruction(client, command).await,
         Command::Agent(command) => agent(client, command).await,
         Command::Repo(command) => repo(client, command).await,
         Command::Pr(command) => pr(client, command).await,
@@ -337,146 +327,6 @@ async fn task(client: &Client, command: TaskCommand) -> anyhow::Result<Output> {
     }
 }
 
-async fn comment(client: &Client, command: CommentCommand) -> anyhow::Result<Output> {
-    match command {
-        CommentCommand::Ls { task } => {
-            let task = optional_task(client, task.as_deref()).await?;
-            let task = task_or_callers(client, task, caller_pane(), "--task").await?;
-            let comments = client
-                .comment_list()
-                .id(task)
-                .send()
-                .await
-                .map_err(ApiError::from)?;
-            Output::new(&*comments, render::comments(&comments))
-        }
-        CommentCommand::Add { body, task } => {
-            let pane = caller_pane();
-            let task = optional_task(client, task.as_deref()).await?;
-            let task = task_or_callers(client, task, pane, "--task").await?;
-            let comment = client
-                .comment_create()
-                .id(task)
-                .body(NewComment { body, pane })
-                .send()
-                .await
-                .map_err(|err| stale_pane(err.into(), pane, "unknown_pane"))?;
-            Output::new(&*comment, render::comment_created(&comment))
-        }
-    }
-}
-
-/// The workspace `--ws` names, else the caller's (`$AGENTDECK_WORKSPACE`).
-async fn instruction_workspace(
-    client: &Client,
-    reference: Option<String>,
-) -> anyhow::Result<WorkspaceId> {
-    let reference = reference.or_else(caller_workspace).ok_or_else(|| {
-        anyhow::anyhow!("name a workspace with --ws: you aren't in one (no ${WORKSPACE_VAR})")
-    })?;
-    workspace_id(client, &reference).await
-}
-
-async fn instruction(client: &Client, command: InstructionCommand) -> anyhow::Result<Output> {
-    match command {
-        InstructionCommand::Ls { ws } => {
-            let workspace = instruction_workspace(client, ws).await?;
-            let instructions = client
-                .instruction_list()
-                .id(workspace)
-                .send()
-                .await
-                .map_err(ApiError::from)?;
-            Output::new(&*instructions, render::instructions(&instructions))
-        }
-        InstructionCommand::Add { body, ws } => {
-            let workspace = instruction_workspace(client, ws).await?;
-            let instruction = client
-                .instruction_create()
-                .id(workspace)
-                .body(NewInstruction { body })
-                .send()
-                .await
-                .map_err(ApiError::from)?;
-            Output::new(&*instruction, render::instruction_saved(&instruction))
-        }
-        InstructionCommand::Edit { id, body } => {
-            let instruction = client
-                .instruction_update()
-                .id(id)
-                .body(InstructionPatch { body: Some(body) })
-                .send()
-                .await
-                .map_err(ApiError::from)?;
-            Output::new(&*instruction, render::instruction_saved(&instruction))
-        }
-        InstructionCommand::Rm { id } => {
-            client
-                .instruction_delete()
-                .id(id)
-                .send()
-                .await
-                .map_err(ApiError::from)?;
-            Output::new(
-                &json!({ "id": id, "deleted": true }),
-                format!("deleted {id}\n"),
-            )
-        }
-    }
-}
-
-/// `$AGENTDECK_WORKSPACE`, when it is set: an id, slug or name.
-pub fn caller_workspace() -> Option<String> {
-    std::env::var(WORKSPACE_VAR)
-        .ok()
-        .filter(|value| !value.is_empty())
-}
-
-/// `task` when given, else the task the caller's `pane` is linked to now, read from the
-/// daemon: not `$AGENTDECK_TASK`, which keeps the task the pane was spawned on (spec §10).
-/// Without either it is an error that asks for `arg`, the flag naming one.
-pub async fn task_or_callers(
-    client: &Client,
-    task: Option<TaskId>,
-    pane: Option<PaneId>,
-    arg: &str,
-) -> anyhow::Result<TaskId> {
-    if let Some(task) = task {
-        return Ok(task);
-    }
-    let Some(pane) = pane else {
-        anyhow::bail!("name a task with {arg}: you aren't in an agentdeck pane (no ${PANE_VAR})");
-    };
-    let pane = client
-        .pane_get()
-        .id(pane)
-        .send()
-        .await
-        .map_err(|err| stale_pane(err.into(), Some(pane), "not_found"))?;
-    pane.task_id
-        .ok_or_else(|| anyhow::anyhow!("name a task with {arg}: your pane isn't linked to a task"))
-}
-
-/// `$AGENTDECK_PANE`, when it holds a pane id.
-pub fn caller_pane() -> Option<PaneId> {
-    std::env::var(PANE_VAR).ok()?.parse().ok()
-}
-
-/// `err`, from a call that sent the caller's `pane`. When its `error_code` is `code`, the
-/// daemon has no such pane: `$AGENTDECK_PANE` is stale, kept by a process that outlived its
-/// pane. A codex typed into a shell is one: it runs its tools in codex's background server,
-/// with the environment of the codex that started that server, in a pane since closed.
-pub fn stale_pane(err: ApiError, pane: Option<PaneId>, code: &str) -> anyhow::Error {
-    match pane {
-        Some(pane) if err.code.as_deref() == Some(code) => anyhow::anyhow!(
-            "no pane {pane}, which ${PANE_VAR} names: that pane was closed. A codex typed into \
-             a shell runs its tools in codex's background server, which keeps the environment \
-             it started with; run codex --no-daemon in the pane instead ({code})"
-        ),
-        _ => err.into(),
-    }
-}
-
 /// `agent ls`: every pane in the layouts of the tabs of the workspace `ws` names, else of
 /// every workspace, in workspace, tab and layout order; exited panes too, until closed.
 async fn agent_ls(client: &Client, ws: Option<&str>) -> anyhow::Result<Output> {
@@ -530,20 +380,13 @@ async fn agent_ls(client: &Client, ws: Option<&str>) -> anyhow::Result<Output> {
 async fn agent(client: &Client, command: AgentCommand) -> anyhow::Result<Output> {
     match command {
         AgentCommand::Ls { ws } => agent_ls(client, ws.as_deref()).await,
-        AgentCommand::New {
-            ws,
-            agent,
-            cwd,
-            task,
-        } => {
-            let task = optional_task(client, task.as_deref()).await?;
+        AgentCommand::New { ws, agent, cwd } => {
             let pane = launch::agent_new(
                 client,
                 launch::Launch {
                     ws: &ws,
                     agent,
                     cwd: cwd.as_deref(),
-                    task,
                 },
             )
             .await?;

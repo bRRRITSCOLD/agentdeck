@@ -28,10 +28,9 @@ use std::time::{Duration, Instant};
 
 use agentdeck_core::state::HOSTABLE;
 use agentdeck_core::ws::Entity;
-use agentdeck_core::{Agent, AgentState, PaneId, TaskId};
+use agentdeck_core::{Agent, AgentState, PaneId};
 use nix::sys::signal::Signal;
 use tokio::runtime::Handle;
-use tokio::sync::broadcast;
 
 use self::fanout::SubscriberId;
 use self::pane::{Ended, Launch, NothingToStop, Observed, Pane, Rules, SpawnError};
@@ -62,8 +61,6 @@ struct Shared {
     /// can be resumed (spec §6).
     closing: AtomicBool,
     next_subscriber: AtomicU64,
-    /// Each shell pane that just started hosting an agent, once that is saved.
-    hosting: broadcast::Sender<PaneId>,
 }
 
 impl Terminals {
@@ -80,7 +77,6 @@ impl Terminals {
                 runtime: Handle::current(),
                 closing: AtomicBool::new(false),
                 next_subscriber: AtomicU64::new(1),
-                hosting: broadcast::channel(64).0,
             }),
         }
     }
@@ -125,22 +121,6 @@ impl Terminals {
     /// The live pane `id`, exited or not, until it is killed.
     pub fn get(&self, id: PaneId) -> Option<Arc<Pane>> {
         self.panes().get(&id).cloned()
-    }
-
-    /// Tells live pane `id` that it is linked to `task` now (`None`: unlinked), which drops
-    /// what it queued for another task (spec §9).
-    pub fn link(&self, id: PaneId, task: Option<TaskId>) {
-        if let Some(pane) = self.get(id) {
-            pane.link(task);
-        }
-    }
-
-    /// Unlinks every live pane linked to `task`, as deleting it does.
-    pub fn unlink_task(&self, task: TaskId) {
-        let panes: Vec<Arc<Pane>> = self.panes().values().cloned().collect();
-        for pane in panes.iter().filter(|pane| pane.linked() == Some(task)) {
-            pane.link(None);
-        }
     }
 
     /// Kills pane `id` (SIGHUP, then SIGKILL after 3 s) and forgets it. False when no such
@@ -189,11 +169,6 @@ impl Terminals {
             self.kill(id);
         }
         Ok(())
-    }
-
-    /// Tells of each shell pane that starts hosting an agent, once its row says so.
-    pub fn hosting(&self) -> broadcast::Receiver<PaneId> {
-        self.shared.hosting.subscribe()
     }
 
     /// A fresh id for one client attachment.
@@ -253,8 +228,7 @@ impl Terminals {
         }
     }
 
-    /// Saves the agent shell pane `id` hosts now, then tells clients, and the comment delivery
-    /// when it started hosting one (spec §7, §9).
+    /// Saves the agent shell pane `id` hosts now, then tells clients (spec §7).
     async fn hosted(&self, id: PaneId, agent: Option<Agent>) {
         let saved = self
             .shared
@@ -270,10 +244,6 @@ impl Terminals {
             None => tracing::info!("pane {id} hosts no agent"),
         }
         self.shared.events.changed(Entity::Pane, id);
-        if agent.is_some() {
-            // Nobody listening (no delivery yet, at start) is fine: nothing waits on it.
-            let _ = self.shared.hosting.send(id);
-        }
     }
 
     /// The daemon is stopping: from now on, processes that die aren't recorded as exited, so

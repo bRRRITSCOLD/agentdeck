@@ -11,9 +11,7 @@ use crate::model::{NewTask, Task, TaskFilter, TaskPatch, TaskPr};
 const COLUMNS: &str = "t.id, t.title, t.body, t.status, t.kind, t.workspace_id, t.created_at,
     t.updated_at, t.done_at, p.repo, p.number, p.url, p.state AS pr_state, p.draft, p.head_ref,
     p.checks, p.review, p.updated_at AS pr_updated_at, p.synced_at,
-    p.unreachable_at IS NOT NULL AS unreachable,
-    (SELECT COUNT(*) FROM comments c
-     WHERE c.task_id = t.id AND c.author = 'agent' AND c.seen_at IS NULL) AS unseen_agent_comments";
+    p.unreachable_at IS NOT NULL AS unreachable";
 const TABLES: &str = "tasks t LEFT JOIN pull_requests p ON p.task_id = t.id";
 
 fn pr_from_row(row: &Row<'_>) -> rusqlite::Result<Option<TaskPr>> {
@@ -47,7 +45,6 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Task> {
         updated_at: row.get("updated_at")?,
         done_at: row.get("done_at")?,
         pr: pr_from_row(row)?,
-        unseen_agent_comments: row.get("unseen_agent_comments")?,
     })
 }
 
@@ -209,7 +206,7 @@ pub fn edit(conn: &mut Connection, id: TaskId, patch: &TaskPatch) -> Result<Edit
     Ok(Edited { task, unlinked })
 }
 
-/// Deletes a task; its comments and PR row go with it, and its panes are unlinked.
+/// Deletes a task; its PR row goes with it, and its panes are unlinked.
 pub fn delete(conn: &Connection, id: TaskId) -> Result<(), DbError> {
     match conn.execute("DELETE FROM tasks WHERE id = ?1", [id.to_string()])? {
         0 => Err(DbError::NotFound("task")),

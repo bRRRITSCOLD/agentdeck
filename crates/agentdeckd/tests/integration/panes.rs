@@ -481,15 +481,11 @@ mod patch_v1_panes_id {
         let daemon = TestDaemon::start().await;
         let place = Place::new(&daemon).await;
         let task = task(&daemon, Some(place.workspace.id)).await;
-        let mut new = place.new_pane(&sh("sleep 60"));
-        new.task_id = Some(task.id);
-        let pane = daemon
-            .client
-            .pane_create()
-            .body(new)
+        let pane = place.spawn(&daemon.client, &sh("sleep 60")).await;
+        link(&daemon, pane.id, Some(task.id))
             .send()
             .await
-            .expect("spawn");
+            .expect("link");
 
         let unlinked = link(&daemon, pane.id, None).send().await.expect("unlink");
 
@@ -501,10 +497,12 @@ mod patch_v1_panes_id {
         let daemon = TestDaemon::start().await;
         let place = Place::new(&daemon).await;
         let task = task(&daemon, Some(place.workspace.id)).await;
-        let mut new = place.new_pane(&sh("exit 3"));
-        new.task_id = Some(task.id);
-        let pane = (daemon.client.pane_create().body(new).send().await).expect("spawn");
+        let pane = place.spawn(&daemon.client, &sh("exit 3")).await;
         in_state(&daemon.client, pane.id, AgentState::Exited).await;
+        link(&daemon, pane.id, Some(task.id))
+            .send()
+            .await
+            .expect("link");
 
         let unlinked = link(&daemon, pane.id, None).send().await.expect("unlink");
 

@@ -50,8 +50,7 @@ pub async fn pane_if_any(client: &Client, pane: PaneId) -> Result<Option<Pane>, 
     }
 }
 
-/// Links `pane` to `task`, or unlinks it with `None` (spec §4); the pane as it is now. The
-/// task's comments no agent has had yet then go to the pane once it is idle (spec §9).
+/// Links `pane` to `task`, or unlinks it with `None` (spec §4); the pane as it is now.
 pub async fn link_task(
     client: &Client,
     pane: PaneId,
@@ -116,7 +115,7 @@ pub async fn new_shell_tab(
     Ok(tab.id)
 }
 
-/// Launches `agent` in `cwd`, linked to `task`, in `workspace`'s first tab with no panes, or
+/// Launches `agent` in `cwd`, with no prompt, in `workspace`'s first tab with no panes, or
 /// in a new tab titled after the agent, and places it there; the pane (spec §6). A tab made
 /// for it is deleted again if the agent can't start.
 pub async fn launch_agent(
@@ -124,7 +123,6 @@ pub async fn launch_agent(
     workspace: WorkspaceId,
     agent: Agent,
     cwd: String,
-    task: Option<TaskId>,
 ) -> Result<Pane, ApiError> {
     let tabs = client
         .tab_list()
@@ -156,7 +154,6 @@ pub async fn launch_agent(
             cwd,
             kind: PaneKind::Agent,
             tab_id: tab,
-            task_id: task,
         })
         .send()
         .await;
@@ -275,7 +272,6 @@ async fn spawn_shell(client: &Client, tab: TabId, cwd: String) -> Result<Pane, P
             cwd,
             kind: PaneKind::Shell,
             tab_id: tab,
-            task_id: None,
         })
         .send()
         .await

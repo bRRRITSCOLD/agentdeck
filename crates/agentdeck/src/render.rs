@@ -4,10 +4,10 @@ use agentdeck_client::settings;
 use std::collections::BTreeMap;
 
 use agentdeck_client::types::{
-    Comment, DirtyReport, Instruction, Pane, PrCloseResult, PrSyncStage, PrSyncStatus, PullRequest,
-    RepositoryLinks, Settings, Task, Workspace,
+    DirtyReport, Pane, PrCloseResult, PrSyncStage, PrSyncStatus, PullRequest, RepositoryLinks,
+    Settings, Task, Workspace,
 };
-use agentdeck_core::{CommentAuthor, PaneKind, PrState, WorkspaceId};
+use agentdeck_core::{PaneKind, PrState, WorkspaceId};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -40,17 +40,6 @@ fn table<const N: usize>(headers: [&str; N], rows: &[[String; N]], empty: &str) 
         out.push_str(&line(row.each_ref().map(String::as_str)));
     }
     out
-}
-
-/// The first line of `text`, marked with `…` when there is more.
-fn first_line(text: &str) -> String {
-    let mut lines = text.lines();
-    let first = lines.next().unwrap_or_default();
-    if lines.next().is_some() {
-        format!("{first} …")
-    } else {
-        first.to_owned()
-    }
 }
 
 /// `agentdeck ws ls`.
@@ -125,7 +114,7 @@ pub fn task(task: &Task) -> String {
 }
 
 /// A pane after `agent new`: its id, agent and dir, and its session once it has one. The
-/// argv, launch prompt included, is in `--json`.
+/// argv is in `--json`.
 pub fn pane(pane: &Pane) -> String {
     let agent = pane.agent.map_or("shell", |agent| agent.as_str());
     let mut out = format!("{}\n  agent:   {agent}\n  cwd:     {}\n", pane.id, pane.cwd);
@@ -192,53 +181,6 @@ pub fn panes(panes: &[ListedPane]) -> String {
         &rows,
         "no panes",
     )
-}
-
-/// `agentdeck comment ls`: who wrote each, whether one of yours has reached an agent, and
-/// its first line.
-pub fn comments(comments: &[Comment]) -> String {
-    let rows: Vec<[String; 4]> = comments
-        .iter()
-        .map(|comment| {
-            let (from, status) = match comment.author {
-                CommentAuthor::User => {
-                    let status = if comment.delivered_at.is_some() {
-                        "delivered"
-                    } else {
-                        "waiting"
-                    };
-                    ("you", status)
-                }
-                CommentAuthor::Agent => (comment.author_agent.map_or("agent", |a| a.as_str()), ""),
-            };
-            [
-                comment.id.to_string(),
-                from.to_owned(),
-                status.to_owned(),
-                first_line(&comment.body),
-            ]
-        })
-        .collect();
-    table(["ID", "FROM", "STATUS", "BODY"], &rows, "no comments")
-}
-
-/// A comment after `comment add`.
-pub fn comment_created(comment: &Comment) -> String {
-    format!("{}  task {}\n", comment.id, comment.task_id)
-}
-
-/// `agentdeck instruction ls`.
-pub fn instructions(instructions: &[Instruction]) -> String {
-    let rows: Vec<[String; 2]> = instructions
-        .iter()
-        .map(|instruction| [instruction.id.to_string(), first_line(&instruction.body)])
-        .collect();
-    table(["ID", "BODY"], &rows, "no instructions")
-}
-
-/// An instruction after `instruction add` or `edit`.
-pub fn instruction_saved(instruction: &Instruction) -> String {
-    format!("{}  ws {}\n", instruction.id, instruction.workspace_id)
 }
 
 /// `agentdeck pr sync` and `pr status`.
@@ -455,7 +397,6 @@ mod tests {
             id: "0190a1b2-c3d4-7e5f-8a9b-000000000002".parse().unwrap(),
             kind: TaskKind::Plain,
             pr: None,
-            unseen_agent_comments: 0,
             status: TaskStatus::Doing,
             title: title.into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
@@ -606,79 +547,6 @@ mod tests {
                      checks none, review none)\n"
                 ),
                 "{out}"
-            );
-        }
-    }
-
-    mod comments {
-        use super::*;
-
-        fn comment(author: CommentAuthor, agent: Option<Agent>, delivered: bool) -> Comment {
-            Comment {
-                author,
-                author_agent: agent,
-                author_pane: None,
-                body: "first\nsecond".into(),
-                created_at: "2026-01-01T00:00:00Z".into(),
-                delivered_at: delivered.then(|| "2026-01-01T01:00:00Z".into()),
-                delivered_to_pane: None,
-                id: "0190a1b2-c3d4-7e5f-8a9b-000000000003".parse().unwrap(),
-                seen_at: None,
-                task_id: "0190a1b2-c3d4-7e5f-8a9b-000000000001".parse().unwrap(),
-            }
-        }
-
-        #[test]
-        fn should_say_who_wrote_it_and_whether_an_agent_has_it() {
-            let out = comments(&[
-                comment(CommentAuthor::User, None, false),
-                comment(CommentAuthor::User, None, true),
-                comment(CommentAuthor::Agent, Some(Agent::Codex), false),
-                comment(CommentAuthor::Agent, None, false),
-            ]);
-
-            let lines: Vec<&str> = out.lines().collect();
-            assert!(lines[0].starts_with("ID"), "{out}");
-            assert!(lines[1].contains("you    waiting"), "{out}");
-            assert!(lines[2].contains("you    delivered"), "{out}");
-            assert!(lines[3].contains("codex"), "{out}");
-            assert!(!lines[3].contains("waiting"), "{out}");
-            assert!(lines[4].contains("agent"), "{out}");
-        }
-
-        #[test]
-        fn should_show_only_the_first_line_of_a_body() {
-            let out = comments(&[comment(CommentAuthor::User, None, false)]);
-
-            assert!(out.contains("first …"), "{out}");
-            assert!(!out.contains("second"), "{out}");
-        }
-
-        #[test]
-        fn should_say_when_there_are_none() {
-            assert_eq!(comments(&[]), "no comments\n");
-        }
-    }
-
-    mod instructions {
-        use super::*;
-
-        #[test]
-        fn should_list_each_id_and_first_line() {
-            let instruction = Instruction {
-                body: "first\nsecond".into(),
-                created_at: "2026-01-01T00:00:00Z".into(),
-                id: "0190a1b2-c3d4-7e5f-8a9b-000000000003".parse().unwrap(),
-                updated_at: "2026-01-01T00:00:00Z".into(),
-                workspace_id: "0190a1b2-c3d4-7e5f-8a9b-000000000001".parse().unwrap(),
-            };
-
-            let out = instructions(&[instruction]);
-
-            assert_eq!(
-                out,
-                "ID                                    BODY\n\
-                 0190a1b2-c3d4-7e5f-8a9b-000000000003  first …\n"
             );
         }
     }

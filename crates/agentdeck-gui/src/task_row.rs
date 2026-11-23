@@ -662,29 +662,10 @@ fn kind_icon(kind: TaskKind, pr: Option<&PrCell>, cx: &App) -> (IconName, Hsla) 
     }
 }
 
-/// Penpot `TaskRow`'s `Unseen` layer, while an agent's comments on the task are unseen: a
-/// 14px lucide `MessageSquareDot` in `foreground`. A speech bubble, so it can't be read as
-/// a state mark in either mode. Tests find it as `unseen <id>`.
-fn unseen_mark(row: &Row, cx: &App) -> Option<Div> {
-    let id = row.id;
-    row.unseen.then(|| {
-        div()
-            .debug_selector(move || format!("unseen {id}"))
-            .flex_none()
-            .flex()
-            .child(
-                Icon::new(IconName::MessageSquareDot)
-                    .size(px(14.))
-                    .text_color(cx.theme().semantic().foreground),
-            )
-    })
-}
-
 /// Penpot `TaskRow` (`wide`): its `Select` layer in Select mode, picker, kind icon, title,
 /// agent, PR, draft, checks, review, workspace and its `Menu` layer, `space.3` apart, padded
 /// `space.2`; `layout`'s columns only. `picker` is the row's status picker; clicking the
-/// title runs `on_open`. The title cell ends with the [`unseen_mark`] while the task's agent
-/// comments are unseen. Tests find a cell as `<column> <id>`.
+/// title runs `on_open`. Tests find a cell as `<column> <id>`.
 pub fn wide(
     row: &Row,
     picker: Select,
@@ -735,8 +716,7 @@ pub fn wide(
                 .flex()
                 .items_center()
                 .gap(space::S1_5)
-                .child(title(row, on_open, parts.error, cx))
-                .children(unseen_mark(row, cx)),
+                .child(title(row, on_open, parts.error, cx)),
         )
         .when(layout.agent, |r| r.child(agent))
         .child(cell(Columns::PR).when_some(pr, |c, pr| {
@@ -795,8 +775,7 @@ pub fn wide(
 /// Select mode, the kind icon, the title over the PR reference, the agents' `StateDot` and
 /// its `Menu` layer on top; the status picker, then the checks icon and the review badge
 /// below. Padded `space.2`, the two lines `space.1-5` apart. Clicking the title runs
-/// `on_open`. The [`unseen_mark`] sits just before the agents' mark while the task's agent
-/// comments are unseen. Tests find the agents' mark as `panel agent <id>`.
+/// `on_open`. Tests find the agents' mark as `panel agent <id>`.
 pub fn panel(row: &Row, picker: Select, parts: RowParts, on_open: OnOpen, cx: &App) -> AnyElement {
     let s = cx.theme().semantic();
     let (icon, icon_color) = kind_icon(row.kind, row.pr.as_ref(), cx);
@@ -811,7 +790,7 @@ pub fn panel(row: &Row, picker: Select, parts: RowParts, on_open: OnOpen, cx: &A
         .p(space::S2)
         .rounded(s.radius_md)
         .opacity(opacity(row))
-        // Penpot `Top`: select, icon, Text, unseen, agent, menu, `space.2` apart.
+        // Penpot `Top`: select, icon, Text, agent, menu, `space.2` apart.
         .child(
             div()
                 .flex()
@@ -842,9 +821,6 @@ pub fn panel(row: &Row, picker: Select, parts: RowParts, on_open: OnOpen, cx: &A
                             )
                         }),
                 )
-                .when_some(unseen_mark(row, cx), |top, mark| {
-                    top.child(div().flex_none().pt(px(1.5)).child(mark))
-                })
                 .when_some(row.agent.as_ref(), |top, agent| {
                     top.child(
                         div()

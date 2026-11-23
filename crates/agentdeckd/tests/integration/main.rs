@@ -4,14 +4,11 @@
 
 mod agents;
 mod auth;
-mod comments;
 mod daemon;
 mod folders;
 mod github_auth;
 mod health;
 mod hosted;
-mod instructions;
-mod instructions_client;
 mod keyring;
 mod migrations;
 mod modes;

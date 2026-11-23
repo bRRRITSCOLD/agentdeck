@@ -1,4 +1,4 @@
-//! Agents hosted in a shell pane (spec §3, §7, §9): `claude` or `codex` started by hand in an
+//! Agents hosted in a shell pane (spec §3, §7): `claude` or `codex` started by hand in an
 //! interactive `sh` becomes the pane's foreground process, the pane hosts it while it runs,
 //! and is a shell again once it exits. The agents are the stubs in `support::agents`, which
 //! exit on a submitted `/exit`.
@@ -6,14 +6,12 @@
 use std::time::Duration;
 
 use agentdeck_client::Client;
-use agentdeck_client::types::{
-    Comment, InputWhen, NewComment, NewTask, Pane, PaneInput, PanePatch, Task,
-};
+use agentdeck_client::types::{InputWhen, NewTask, Pane, PaneInput, PanePatch, Task};
 use agentdeck_core::ws::{Entity, ServerMessage};
-use agentdeck_core::{Agent, AgentState, CommentAuthor, PaneId, PaneKind, TaskId};
+use agentdeck_core::{Agent, AgentState, PaneId, PaneKind, TaskId};
 
 use crate::support::TestDaemon;
-use crate::support::agents::{launches, task_brief, typed};
+use crate::support::agents::{launches, typed};
 use crate::support::terminal::{Place, eventually, holds_for, in_state, printed};
 use crate::support::ws::{Frame, Ws};
 
@@ -95,29 +93,6 @@ async fn link(client: &Client, pane: PaneId, task: TaskId) {
         .expect("link the pane");
 }
 
-async fn comment(client: &Client, task: TaskId, body: &str, pane: Option<PaneId>) -> Comment {
-    client
-        .comment_create()
-        .id(task)
-        .body(NewComment {
-            body: body.into(),
-            pane,
-        })
-        .send()
-        .await
-        .expect("add a comment")
-        .into_inner()
-}
-
-async fn read_comment(client: &Client, task: TaskId, comment: &Comment) -> Comment {
-    (client.comment_list().id(task).send().await)
-        .expect("list comments")
-        .into_inner()
-        .into_iter()
-        .find(|c| c.id == comment.id)
-        .expect("the comment")
-}
-
 /// Waits until the stub agents in `pane` have submitted exactly `prompts`.
 async fn submitted(daemon: &TestDaemon, pane: PaneId, prompts: &str) {
     eventually(&format!("{prompts:?} to be submitted"), || async {
@@ -192,7 +167,7 @@ mod detection {
         let daemon = TestDaemon::start().await;
         let place = Place::new(&daemon).await;
 
-        let pane = place.launch(&daemon.client, Agent::Claude, None).await;
+        let pane = place.launch(&daemon.client, Agent::Claude).await;
 
         let idle = in_state(&daemon.client, pane.id, AgentState::Idle).await;
         assert_eq!(idle.hosted_agent, None);
@@ -244,237 +219,8 @@ mod state_rules {
     }
 }
 
-mod comment_delivery {
+mod input {
     use super::*;
-
-    #[tokio::test]
-    async fn should_type_the_task_then_its_waiting_comments_into_an_agent_once_it_is_hosted() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let task = task(&daemon.client, &place, "Fix it").await;
-        let pane = shell(&daemon, &place).await;
-        link(&daemon.client, pane.id, task.id).await;
-        let waiting = comment(&daemon.client, task.id, "Also check Firefox", None).await;
-
-        run(&daemon.client, pane.id, "claude").await;
-
-        submitted(
-            &daemon,
-            pane.id,
-            &format!("{}Also check Firefox\n", task_brief(&task)),
-        )
-        .await;
-        let delivered = read_comment(&daemon.client, task.id, &waiting).await;
-        assert_eq!(delivered.delivered_to_pane, Some(pane.id));
-        assert_eq!(
-            launches(&daemon, pane.id),
-            [Vec::<String>::new()],
-            "started by hand, with no launch prompt"
-        );
-    }
-
-    #[tokio::test]
-    async fn should_type_a_new_comment_into_the_hosted_agent() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let task = task(&daemon.client, &place, "Fix it").await;
-        let pane = shell(&daemon, &place).await;
-        link(&daemon.client, pane.id, task.id).await;
-        run(&daemon.client, pane.id, "claude").await;
-        submitted(&daemon, pane.id, &task_brief(&task)).await;
-
-        let new = comment(&daemon.client, task.id, "Then open the PR", None).await;
-
-        submitted(
-            &daemon,
-            pane.id,
-            &format!("{}Then open the PR\n", task_brief(&task)),
-        )
-        .await;
-        let delivered = read_comment(&daemon.client, task.id, &new).await;
-        assert_eq!(delivered.delivered_to_pane, Some(pane.id));
-    }
-
-    #[tokio::test]
-    async fn should_hold_a_comment_while_no_agent_is_hosted_until_one_is_again() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let task = task(&daemon.client, &place, "Fix it").await;
-        let pane = shell(&daemon, &place).await;
-        link(&daemon.client, pane.id, task.id).await;
-        run(&daemon.client, pane.id, "claude").await;
-        submitted(&daemon, pane.id, &task_brief(&task)).await;
-        exit_agent(&daemon.client, pane.id).await;
-        hosting(&daemon.client, pane.id, None).await;
-
-        let held = comment(&daemon.client, task.id, "echo typed-into-the-shell", None).await;
-        // Long past the 400 ms an agent's state takes to settle: a hosted agent would have it.
-        tokio::time::sleep(Duration::from_millis(1_500)).await;
-        let unread = read_comment(&daemon.client, task.id, &held).await;
-        assert_eq!(
-            unread.delivered_at, None,
-            "the link stays, but delivers nothing"
-        );
-        let output = String::from_utf8_lossy(
-            &crate::support::terminal::tail(&daemon.client, pane.id, None).await,
-        )
-        .into_owned();
-        assert!(!output.contains("typed-into-the-shell"), "{output}");
-
-        run(&daemon.client, pane.id, "claude").await;
-
-        // A new agent, so it is told the task again.
-        let brief = task_brief(&task);
-        submitted(
-            &daemon,
-            pane.id,
-            &format!("{brief}{brief}echo typed-into-the-shell\n"),
-        )
-        .await;
-        let delivered = read_comment(&daemon.client, task.id, &held).await;
-        assert_eq!(delivered.delivered_to_pane, Some(pane.id));
-    }
-
-    /// A shell pane hosting claude, linked to `task` and told it.
-    async fn hosting_on_task(daemon: &TestDaemon, place: &Place, task: &Task) -> Pane {
-        let pane = shell(daemon, place).await;
-        run(&daemon.client, pane.id, "claude").await;
-        hosting(&daemon.client, pane.id, Some(Agent::Claude)).await;
-        link(&daemon.client, pane.id, task.id).await;
-        submitted(daemon, pane.id, &task_brief(task)).await;
-        pane
-    }
-
-    /// A launched claude pane, linked to `task` and told it.
-    async fn launched_on_task(daemon: &TestDaemon, place: &Place, task: &Task) -> Pane {
-        let pane = place.launch(&daemon.client, Agent::Claude, None).await;
-        in_state(&daemon.client, pane.id, AgentState::Idle).await;
-        link(&daemon.client, pane.id, task.id).await;
-        submitted(daemon, pane.id, &task_brief(task)).await;
-        pane
-    }
-
-    /// Adds a comment to `task` and checks that only `newest` has it typed in, and that
-    /// `older` keeps only the task's brief.
-    async fn reaches_only(daemon: &TestDaemon, task: &Task, newest: PaneId, older: PaneId) {
-        let new = comment(&daemon.client, task.id, "Then open the PR", None).await;
-
-        submitted(
-            daemon,
-            newest,
-            &format!("{}Then open the PR\n", task_brief(task)),
-        )
-        .await;
-        // Long past the 400 ms an agent's state takes to settle: the older agent would have it.
-        holds_for(
-            "the older agent to have only its task",
-            Duration::from_millis(1_500),
-            || async { typed(daemon, older) == task_brief(task) },
-        )
-        .await;
-        let delivered = read_comment(&daemon.client, task.id, &new).await;
-        assert_eq!(delivered.delivered_to_pane, Some(newest));
-    }
-
-    #[tokio::test]
-    async fn should_type_a_new_comment_only_into_the_newest_of_two_hosted_agents() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let task = task(&daemon.client, &place, "Fix it").await;
-        let older = hosting_on_task(&daemon, &place, &task).await;
-        let newer = hosting_on_task(&daemon, &place, &task).await;
-
-        reaches_only(&daemon, &task, newer.id, older.id).await;
-    }
-
-    #[tokio::test]
-    async fn should_type_a_new_comment_only_into_the_newest_of_two_shells_linked_before_hosting() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let task = task(&daemon.client, &place, "Fix it").await;
-        let older = shell(&daemon, &place).await;
-        let newer = shell(&daemon, &place).await;
-        for pane in [older.id, newer.id] {
-            link(&daemon.client, pane, task.id).await;
-        }
-        // The newer pane's agent starts first: newest goes by the pane, not by its agent.
-        for pane in [newer.id, older.id] {
-            run(&daemon.client, pane, "claude").await;
-            submitted(&daemon, pane, &task_brief(&task)).await;
-        }
-
-        reaches_only(&daemon, &task, newer.id, older.id).await;
-    }
-
-    #[tokio::test]
-    async fn should_hold_a_new_comment_for_the_newest_hosted_agent_while_it_is_blocked() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let task = task(&daemon.client, &place, "Fix it").await;
-        let older = hosting_on_task(&daemon, &place, &task).await;
-        let untrusted = std::path::Path::new(&place.workspace.dir).join("untrusted");
-        std::fs::write(&untrusted, "").expect("marking the folder untrusted");
-        let newer = shell(&daemon, &place).await;
-        link(&daemon.client, newer.id, task.id).await;
-        run(&daemon.client, newer.id, "claude").await;
-        in_state(&daemon.client, newer.id, AgentState::Blocked).await;
-        std::fs::remove_file(&untrusted).expect("trusting the folder");
-
-        let new = comment(&daemon.client, task.id, "Then open the PR", None).await;
-        holds_for(
-            "the older agent to have only its task",
-            Duration::from_millis(1_500),
-            || async { typed(&daemon, older.id) == task_brief(&task) },
-        )
-        .await;
-        input(&daemon.client, newer.id, "\r", false).await;
-
-        submitted(
-            &daemon,
-            newer.id,
-            &format!("{}Then open the PR\n", task_brief(&task)),
-        )
-        .await;
-        let delivered = read_comment(&daemon.client, task.id, &new).await;
-        assert_eq!(delivered.delivered_to_pane, Some(newer.id));
-        assert_eq!(typed(&daemon, older.id), task_brief(&task));
-    }
-
-    #[tokio::test]
-    async fn should_type_a_new_comment_only_into_a_hosted_agent_newer_than_a_launched_one() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let task = task(&daemon.client, &place, "Fix it").await;
-        let older = launched_on_task(&daemon, &place, &task).await;
-        let newer = hosting_on_task(&daemon, &place, &task).await;
-
-        reaches_only(&daemon, &task, newer.id, older.id).await;
-    }
-
-    #[tokio::test]
-    async fn should_type_a_new_comment_only_into_a_launched_agent_newer_than_a_hosted_one() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let task = task(&daemon.client, &place, "Fix it").await;
-        let older = hosting_on_task(&daemon, &place, &task).await;
-        let newer = launched_on_task(&daemon, &place, &task).await;
-
-        reaches_only(&daemon, &task, newer.id, older.id).await;
-    }
-
-    #[tokio::test]
-    async fn should_type_the_task_into_the_hosted_agent_when_the_shell_is_linked() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let task = task(&daemon.client, &place, "Fix it").await;
-        let pane = shell(&daemon, &place).await;
-        run(&daemon.client, pane.id, "claude").await;
-        hosting(&daemon.client, pane.id, Some(Agent::Claude)).await;
-
-        link(&daemon.client, pane.id, task.id).await;
-
-        submitted(&daemon, pane.id, &task_brief(&task)).await;
-    }
 
     #[tokio::test]
     async fn should_submit_input_to_a_hosted_agent_as_one_paste_then_enter() {
@@ -484,7 +230,7 @@ mod comment_delivery {
         run(&daemon.client, pane.id, "claude").await;
         in_state(&daemon.client, pane.id, AgentState::Idle).await;
 
-        // Send to agent types an instruction this way (spec §9); its newline stays in it.
+        // `agent send` types a message this way (spec §4); its newline stays in it.
         input(
             &daemon.client,
             pane.id,
@@ -494,31 +240,6 @@ mod comment_delivery {
         .await;
 
         submitted(&daemon, pane.id, "Use the staging DB\nthen test\n").await;
-    }
-}
-
-mod authorship {
-    use super::*;
-
-    #[tokio::test]
-    async fn should_author_a_comment_from_the_pane_as_the_agent_it_hosts() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let task = task(&daemon.client, &place, "Fix it").await;
-        let pane = shell(&daemon, &place).await;
-        run(&daemon.client, pane.id, "codex").await;
-        hosting(&daemon.client, pane.id, Some(Agent::Codex)).await;
-
-        let hosted = comment(&daemon.client, task.id, "PR opened", Some(pane.id)).await;
-
-        assert_eq!(hosted.author, CommentAuthor::Agent);
-        assert_eq!(hosted.author_agent, Some(Agent::Codex));
-        assert_eq!(hosted.author_pane, Some(pane.id));
-
-        exit_agent(&daemon.client, pane.id).await;
-        hosting(&daemon.client, pane.id, None).await;
-        let shell = comment(&daemon.client, task.id, "from the shell", Some(pane.id)).await;
-        assert_eq!(shell.author_agent, None, "no agent once it left");
     }
 }
 

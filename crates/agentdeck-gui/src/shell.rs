@@ -16,9 +16,8 @@
 //! The Tasks view and the right panel ask for the new task dialog with
 //! [`NewTask`], preset to the Inbox or their workspace. They and the Inbox ask for the task
 //! sheet with [`OpenTask`] when a task's title is clicked, and for it editing the task with
-//! [`EditTask`] from a row's **Edit task**; the sheet's Start agent asks for
-//! the new agent dialog on the task's workspace with [`StartAgentOn`]. Once an agent starts,
-//! the window shows its workspace and tab. A pane header's Link to task reaches it as the
+//! [`EditTask`] from a row's **Edit task**. Once an agent starts, the window shows its
+//! workspace and tab. A pane header's Link to task reaches it as the
 //! workspace view's [`LinkPane`] and opens the Link to task dialog on that pane.
 //!
 //! It shows the sidebar's [`Alerts`] as OS notifications (spec §11), leaving out one while the
@@ -38,7 +37,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use agentdeck_client::ApiError;
-use agentdeck_core::{PaneId, TaskId, WorkspaceId};
+use agentdeck_core::{PaneId, WorkspaceId};
 use agentdeck_notify::Notifier;
 use brrritscold_core_gpui::{
     ActiveTheme as _, Alert, AlertAction, AlertDescription, AlertDialog, AlertDialogAction,
@@ -76,7 +75,7 @@ use crate::right_panel::{self, RightPanel};
 use crate::settings::SettingsView;
 use crate::sidebar::{Alerts, Selection, SidebarEvent, SidebarView};
 use crate::sync_parts::OpenSettings;
-use crate::task_sheet::{EditTask, OpenTask, StartAgentOn, TaskSheet};
+use crate::task_sheet::{EditTask, OpenTask, TaskSheet};
 use crate::tasks::TasksView;
 use crate::title_bar::{Close, Minimize, TitleBar, ToggleMaximize};
 use crate::top_bar::{
@@ -422,12 +421,11 @@ impl Shell {
                     let edit = cx.new(|cx| EditWorkspaceDialog::new(api.clone(), window, cx));
                     let delete = cx.new(|cx| DeleteWorkspaceDialog::new(api.clone(), window, cx));
                     let new_task = cx.new(|cx| NewTaskDialog::new(api.clone(), window, cx));
-                    let panel = cx.new(|cx| RightPanel::new(api.clone(), window, cx));
+                    let panel = cx.new(|cx| RightPanel::new(api.clone(), cx));
                     let tasks = cx.new(|cx| TasksView::new(api.clone(), window, cx));
                     let settings =
                         cx.new(|cx| SettingsView::new(api.clone(), &connection, window, cx));
-                    let task_sheet =
-                        cx.new(|cx| TaskSheet::new(api.clone(), &connection, window, cx));
+                    let task_sheet = cx.new(|_| TaskSheet::new(api.clone()));
                     let sidebar = cx.new(|cx| SidebarView::new(api, &connection, cx));
                     self._selection = Some(cx.subscribe_in(
                         &sidebar,
@@ -474,21 +472,6 @@ impl Shell {
                         cx.observe_in(&task_sheet, window, |shell, _, window, cx| {
                             shell.withdraw_seen(window, cx);
                         }),
-                        cx.subscribe_in(
-                            &task_sheet,
-                            window,
-                            |shell, _, ask: &StartAgentOn, window, cx| {
-                                shell.open_new_agent(ask.workspace, Some(ask.task), window, cx);
-                            },
-                        ),
-                        // New task's Send to: New agent.
-                        cx.subscribe_in(
-                            &new_task,
-                            window,
-                            |shell, _, ask: &StartAgentOn, window, cx| {
-                                shell.open_new_agent(ask.workspace, Some(ask.task), window, cx);
-                            },
-                        ),
                         // The rename also comes back through `changed`; reading now shows it
                         // at once.
                         cx.subscribe(&edit, |shell, _, _: &Renamed, cx| shell.refresh(cx)),
@@ -684,16 +667,15 @@ impl Shell {
     /// Opens the new agent dialog on the workspace shown.
     fn new_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(Selection::Workspace(selected)) = self.selection {
-            self.open_new_agent(selected, None, window, cx);
+            self.open_new_agent(selected, window, cx);
         }
     }
 
     /// Opens the new agent dialog on `workspace`, offering the focused pane's folder while the
-    /// workspace is shown, its root and the repos in it, with `task` picked.
+    /// workspace is shown, its root and the repos in it.
     fn open_new_agent(
         &mut self,
         workspace: WorkspaceId,
-        task: Option<TaskId>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -718,10 +700,8 @@ impl Shell {
         let home = std::env::home_dir();
         let repos = new_agent::repos_in(&row.dir);
         let folders = new_agent::folders(&row.dir, repos, &folder, home.as_deref());
-        let snapshot = sidebar.snapshot().clone();
         dialog.update(cx, |dialog, cx| {
-            dialog.open(target, folders, snapshot, window, cx);
-            dialog.set_task(task, cx);
+            dialog.open(target, folders, window, cx);
         });
     }
 
@@ -929,7 +909,7 @@ impl Shell {
                         }
                     });
                     Notice::new(format!("Archived {name}"))
-                        .description("Its folder, tasks and instructions are kept.")
+                        .description("Its folder and tasks are kept.")
                         .action(undo)
                         .show(window, cx);
                 }
@@ -1432,6 +1412,7 @@ mod tests {
 
                 let dialog = shell.read_with(cx, |shell, _| shell.new_agent.clone().unwrap());
                 assert!(dialog.read_with(cx, |d, _| d.is_open()));
+                assert_eq!(dialog.read_with(cx, |d, _| d.workspace()), Some(id(1)));
             }
 
             #[gpui::test]
@@ -1688,26 +1669,6 @@ mod tests {
                 assert!(dialog.read_with(cx, |d, _| d.is_open()));
                 assert_eq!(dialog.read_with(cx, |d, _| d.workspace()), Some(id(1)));
             }
-
-            #[gpui::test]
-            fn should_open_new_agent_on_the_task_when_the_dialog_asks(cx: &mut TestAppContext) {
-                let connector = Rc::new(FakeConnector::default());
-                let _remote = connector.then_connect_to(workspace_with_a_pane());
-                let shell = open(connector, cx);
-
-                dialog(&shell, cx).update(cx, |_, cx| {
-                    cx.emit(crate::task_sheet::StartAgentOn {
-                        workspace: id(1),
-                        task: id(3),
-                    })
-                });
-                cx.run_until_parked();
-
-                let new_agent = shell.read_with(cx, |shell, _| shell.new_agent.clone().unwrap());
-                assert!(new_agent.read_with(cx, |d, _| d.is_open()));
-                assert_eq!(new_agent.read_with(cx, |d, _| d.workspace()), Some(id(1)));
-                assert_eq!(new_agent.read_with(cx, |d, _| d.task()), Some(id(3)));
-            }
         }
 
         mod task_sheet {
@@ -1746,26 +1707,33 @@ mod tests {
             }
 
             #[gpui::test]
-            fn should_open_the_sheet_when_the_inbox_or_the_right_panel_asks(
-                cx: &mut TestAppContext,
-            ) {
+            fn should_open_the_sheet_when_the_inbox_asks(cx: &mut TestAppContext) {
                 let connector = Rc::new(FakeConnector::default());
-                let api = daemon();
-                let _remote = connector.then_connect_to(api.clone());
+                let _remote = connector.then_connect_to(daemon());
                 let shell = open(connector, cx);
-                let (inbox, panel) = shell.read_with(cx, |shell, _| {
-                    (shell.inbox.clone().unwrap(), shell.panel.clone().unwrap())
-                });
+                let inbox = shell.read_with(cx, |shell, _| shell.inbox.clone().unwrap());
 
                 inbox.update(cx, |_, cx| cx.emit(OpenTask(id(2))));
                 cx.run_until_parked();
+
+                let sheet = sheet(&shell, cx);
+                assert!(sheet.read_with(cx, |s, _| s.is_open()));
+                assert_eq!(sheet.read_with(cx, |s, _| s.task()), Some(id(2)));
+            }
+
+            #[gpui::test]
+            fn should_open_the_sheet_when_the_right_panel_asks(cx: &mut TestAppContext) {
+                let connector = Rc::new(FakeConnector::default());
+                let _remote = connector.then_connect_to(daemon());
+                let shell = open(connector, cx);
+                let panel = shell.read_with(cx, |shell, _| shell.panel.clone().unwrap());
+
                 panel.update(cx, |_, cx| cx.emit(OpenTask(id(2))));
                 cx.run_until_parked();
 
-                assert_eq!(
-                    *api.seen.lock().unwrap(),
-                    [id::<agentdeck_core::TaskId>(2); 2]
-                );
+                let sheet = sheet(&shell, cx);
+                assert!(sheet.read_with(cx, |s, _| s.is_open()));
+                assert_eq!(sheet.read_with(cx, |s, _| s.task()), Some(id(2)));
             }
 
             /// Whether the sheet is open on task 2, editing its title, after `ask`.
@@ -1815,79 +1783,6 @@ mod tests {
                     |cx| panel.update(cx, |_, cx| cx.emit(EditTask(id(2)))),
                     cx
                 ));
-            }
-
-            mod start_agent {
-                use agentdeck_client::ws::Remote;
-
-                use super::*;
-                use crate::task_sheet::StartAgentOn;
-
-                /// Workspace 1 shown, and workspace 2 `other`, holding task 3.
-                fn daemon() -> Arc<FakeApi> {
-                    let api = workspace_with_a_pane();
-                    let mut snapshot = api.snapshot_now();
-                    snapshot.workspaces.push(workspace(2, "other"));
-                    snapshot.tasks = vec![crate::overview::fixtures::task(
-                        3,
-                        agentdeck_core::TaskKind::Plain,
-                        Some(id(2)),
-                    )];
-                    api.set(snapshot);
-                    api
-                }
-
-                /// The shell, once the sheet's Start agent asked for task 3 in workspace 2,
-                /// and the daemon's end, which keeps it connected.
-                fn asked(
-                    cx: &mut TestAppContext,
-                ) -> (Entity<Shell>, Entity<NewAgentDialog>, Remote) {
-                    let connector = Rc::new(FakeConnector::default());
-                    let remote = connector.then_connect_to(daemon());
-                    let shell = open(connector, cx);
-                    let sheet = sheet(&shell, cx);
-                    sheet.update(cx, |_, cx| {
-                        cx.emit(StartAgentOn {
-                            workspace: id(2),
-                            task: id(3),
-                        })
-                    });
-                    cx.run_until_parked();
-                    let dialog = shell.read_with(cx, |shell, _| shell.new_agent.clone().unwrap());
-                    (shell, dialog, remote)
-                }
-
-                #[gpui::test]
-                fn should_open_new_agent_on_the_tasks_workspace_with_the_task_picked(
-                    cx: &mut TestAppContext,
-                ) {
-                    let (shell, dialog, _remote) = asked(cx);
-
-                    assert!(dialog.read_with(cx, |d, _| d.is_open()));
-                    assert_eq!(dialog.read_with(cx, |d, _| d.workspace()), Some(id(2)));
-                    assert_eq!(dialog.read_with(cx, |d, _| d.task()), Some(id(3)));
-                    // The window stays where it was until the agent starts.
-                    assert_eq!(shown_workspace(&shell, cx), Some(id(1)));
-                }
-
-                #[gpui::test]
-                fn should_show_the_tasks_workspace_once_the_agent_starts(cx: &mut TestAppContext) {
-                    let (shell, dialog, _remote) = asked(cx);
-                    let window = cx.windows()[0];
-
-                    window
-                        .update(cx, |_, window, cx| {
-                            dialog.update(cx, |d, cx| d.start(window, cx));
-                        })
-                        .unwrap();
-                    cx.run_until_parked();
-
-                    assert_eq!(shown_workspace(&shell, cx), Some(id(2)));
-                    assert_eq!(
-                        shell.read_with(cx, |shell, _| shell.selection),
-                        Some(Selection::Workspace(id(2)))
-                    );
-                }
             }
         }
 
@@ -2410,7 +2305,7 @@ mod tests {
             assert_eq!(notice.title, "Archived agentdeck");
             assert_eq!(
                 notice.description.as_deref(),
-                Some("Its folder, tasks and instructions are kept.")
+                Some("Its folder and tasks are kept.")
             );
             let undo = notice.action.expect("an Undo");
             assert_eq!(undo.label, "Undo");

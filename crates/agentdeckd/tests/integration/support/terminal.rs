@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use agentdeck_client::Client;
 use agentdeck_client::types::{NewPane, NewTab, NewWorkspace, Pane, Tab, Workspace};
-use agentdeck_core::{Agent, AgentState, PaneId, PaneKind, TaskId};
+use agentdeck_core::{Agent, AgentState, PaneId, PaneKind};
 use futures_util::TryStreamExt;
 
 use super::TestDaemon;
@@ -58,27 +58,25 @@ impl Place {
             agent: None,
             argv: Some(argv.iter().map(|arg| (*arg).to_owned()).collect()),
             cwd: self.workspace.dir.clone(),
-            task_id: None,
         }
     }
 
-    /// An agent pane of `agent` in the workspace's dir, linked to `task`.
-    pub fn new_agent(&self, agent: Agent, task: Option<TaskId>) -> NewPane {
+    /// An agent pane of `agent` in the workspace's dir.
+    pub fn new_agent(&self, agent: Agent) -> NewPane {
         NewPane {
             tab_id: self.tab.id,
             kind: PaneKind::Agent,
             agent: Some(agent),
             argv: None,
             cwd: self.workspace.dir.clone(),
-            task_id: task,
         }
     }
 
-    /// Launches an agent pane of `agent`, linked to `task`.
-    pub async fn launch(&self, client: &Client, agent: Agent, task: Option<TaskId>) -> Pane {
+    /// Launches an agent pane of `agent`.
+    pub async fn launch(&self, client: &Client, agent: Agent) -> Pane {
         client
             .pane_create()
-            .body(self.new_agent(agent, task))
+            .body(self.new_agent(agent))
             .send()
             .await
             .expect("launch an agent")

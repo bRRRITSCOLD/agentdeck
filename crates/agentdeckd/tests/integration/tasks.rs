@@ -533,81 +533,13 @@ mod patch_v1_tasks_id_workspace {
     }
 }
 
-mod unseen_agent_comments {
-    use agentdeck_client::types::NewComment;
-    use agentdeck_core::{PaneId, TaskId};
-
-    use super::*;
-    use crate::support::terminal::{Place, sh};
-
-    async fn comment(daemon: &TestDaemon, task: TaskId, pane: Option<PaneId>) {
-        daemon
-            .client
-            .comment_create()
-            .id(task)
-            .body(NewComment {
-                body: "c".into(),
-                pane,
-            })
-            .send()
-            .await
-            .expect("comment");
-    }
-
-    #[tokio::test]
-    async fn should_count_only_the_agents_comments_the_user_hasnt_seen_200() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let created = task(&daemon.client, "t", None).await;
-        let pane = place.spawn(&daemon.client, &sh("sleep 60")).await;
-        comment(&daemon, created.id, Some(pane.id)).await;
-        comment(&daemon, created.id, Some(pane.id)).await;
-        comment(&daemon, created.id, None).await;
-
-        let got = daemon
-            .client
-            .task_get()
-            .id(created.id)
-            .send()
-            .await
-            .expect("get")
-            .into_inner();
-        let listed = daemon
-            .client
-            .task_list()
-            .send()
-            .await
-            .expect("list")
-            .into_inner();
-
-        assert_eq!(created.unseen_agent_comments, 0);
-        assert_eq!(got.unseen_agent_comments, 2);
-        let row = listed.iter().find(|t| t.id == created.id).expect("listed");
-        assert_eq!(row.unseen_agent_comments, 2);
-    }
-}
-
 mod delete_v1_tasks_id {
-    use agentdeck_client::types::NewComment;
-
     use super::*;
 
     #[tokio::test]
-    async fn should_remove_the_task_and_its_comments_204() {
+    async fn should_remove_the_task_204() {
         let daemon = TestDaemon::start().await;
         let created = task(&daemon.client, "t", None).await;
-        let comment = daemon
-            .client
-            .comment_create()
-            .id(created.id)
-            .body(NewComment {
-                body: "c".into(),
-                pane: None,
-            })
-            .send()
-            .await
-            .expect("comment")
-            .into_inner();
 
         let response = daemon
             .client
@@ -620,8 +552,5 @@ mod delete_v1_tasks_id {
         assert_eq!(response.status().as_u16(), 204);
         let (status, _) = error_response(daemon.client.task_get().id(created.id).send().await);
         assert_eq!(status, 404);
-        let (status, _) =
-            error_response(daemon.client.comment_delete().id(comment.id).send().await);
-        assert_eq!(status, 404, "the comment went with the task");
     }
 }

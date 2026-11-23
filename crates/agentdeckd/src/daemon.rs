@@ -38,7 +38,7 @@ pub fn run() -> anyhow::Result<()> {
 const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 
 /// The largest request body any route takes (spec §4), where dropshot's default is 1 KiB:
-/// room for a pasted log in a comment, a long instruction or prompt, a layout of many splits
+/// room for a pasted log or a long prompt sent with `input`, a layout of many splits
 /// or every PR a user has in one close. The API is loopback-only and authenticated.
 const REQUEST_BODY_MAX_BYTES: usize = 1024 * 1024;
 
@@ -88,18 +88,9 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
         settings.clone(),
     );
     let terminals = Terminals::new(db.clone(), events.clone(), paths.rules_dir());
-    let claims = agents::delivery::Claims::default();
-    tokio::spawn(agents::delivery::deliver_on_hosting(
-        db.clone(),
-        claims.clone(),
-        terminals.clone(),
-        events.clone(),
-        terminals.hosting(),
-    ));
     terminals.run_state_timer();
     let restarter = agents::restart::Restarter {
         db: db.clone(),
-        claims: claims.clone(),
         terminals: terminals.clone(),
         events: events.clone(),
     };
@@ -117,7 +108,6 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
         github_api: github,
         settings,
         terminals: terminals.clone(),
-        claims,
         events,
     };
     let config = ConfigDropshot {

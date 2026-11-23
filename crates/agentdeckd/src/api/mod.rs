@@ -4,10 +4,8 @@
 //! bearer token gets 401 before anything else about it is looked at. An expected domain
 //! failure is its own status with an `error_code`; see [`client_error`].
 
-mod comments;
 mod github;
 mod health;
-mod instructions;
 mod panes;
 mod prs;
 mod repositories;
@@ -61,8 +59,6 @@ pub struct ApiContext {
     pub settings: Config,
     /// The live panes.
     pub terminals: Terminals,
-    /// Which pane each comment on its way to an agent is for.
-    pub claims: crate::agents::delivery::Claims,
     /// The events every WebSocket client gets.
     pub events: Events,
 }
@@ -89,14 +85,6 @@ pub fn api() -> ApiDescription<ApiContext> {
         api.register(tasks::task_get),
         api.register(tasks::task_update),
         api.register(tasks::task_delete),
-        api.register(comments::comment_list),
-        api.register(comments::comment_create),
-        api.register(comments::comment_seen),
-        api.register(comments::comment_delete),
-        api.register(instructions::instruction_list),
-        api.register(instructions::instruction_create),
-        api.register(instructions::instruction_update),
-        api.register(instructions::instruction_delete),
         api.register(prs::pr_list),
         api.register(prs::prs_sync),
         api.register(prs::prs_status),
@@ -256,7 +244,7 @@ mod tests {
         /// `openapi.json`'s fingerprint when [`agentdeck_core::API_VERSION`] was last set,
         /// and that version. Clients tell an older daemon by its API version, so a route or
         /// field added without a bump would go unnoticed: they would call it and get a 404.
-        const FINGERPRINT_AT_API_VERSION: (u64, u32) = (0xd277_34e5_df66_118d, 20);
+        const FINGERPRINT_AT_API_VERSION: (u64, u32) = (0x4b7e_8b2f_7d03_4654, 21);
 
         /// FNV-1a: stable across Rust releases, unlike `DefaultHasher`.
         fn fingerprint(text: &str) -> u64 {

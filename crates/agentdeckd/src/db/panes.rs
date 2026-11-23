@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use agentdeck_core::{Agent, AgentState, PaneId, TaskId, TaskStatus, WorkspaceId};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use super::{DbError, exists, new_id, now, opt_text, text};
+use super::{DbError, new_id, now, opt_text, text};
 use crate::model::{NewPane, Pane};
 
 const COLUMNS: &str = "id, tab_id, kind, agent, hosted_agent, argv, cwd, folder, session_id, \
@@ -37,9 +37,9 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Pane> {
     })
 }
 
-/// The workspace a new pane in `new`'s tab belongs to; `unknown_tab` or `unknown_task` when
-/// the pane refers to an entity that doesn't exist.
-pub fn workspace_for(conn: &Connection, new: &NewPane) -> Result<WorkspaceId, DbError> {
+/// The workspace a new pane in `new`'s tab belongs to; `unknown_tab` when the tab doesn't
+/// exist.
+fn workspace_for(conn: &Connection, new: &NewPane) -> Result<WorkspaceId, DbError> {
     let workspace: Option<WorkspaceId> = conn
         .query_row(
             "SELECT workspace_id FROM tabs WHERE id = ?1",
@@ -47,13 +47,7 @@ pub fn workspace_for(conn: &Connection, new: &NewPane) -> Result<WorkspaceId, Db
             |row| text(row, "workspace_id"),
         )
         .optional()?;
-    let workspace = workspace.ok_or(DbError::UnknownReference("tab"))?;
-    if let Some(task) = new.task_id
-        && !exists(conn, "tasks", task)?
-    {
-        return Err(DbError::UnknownReference("task"));
-    }
-    Ok(workspace)
+    workspace.ok_or(DbError::UnknownReference("tab"))
 }
 
 /// The workspace pane `id`'s tab is in.
@@ -78,8 +72,8 @@ pub fn create(
     let workspace = workspace_for(conn, new)?;
     let id: PaneId = new_id();
     conn.execute(
-        "INSERT INTO panes (id, tab_id, kind, agent, argv, cwd, session_id, task_id, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO panes (id, tab_id, kind, agent, argv, cwd, session_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             id.to_string(),
             new.tab_id.to_string(),
@@ -88,7 +82,6 @@ pub fn create(
             serde_json::to_string(argv).expect("a string list always serializes"),
             new.cwd,
             session_id,
-            new.task_id.map(|task| task.to_string()),
             now(),
         ],
     )?;
@@ -121,19 +114,6 @@ pub fn resumable(conn: &Connection) -> Result<Vec<(Pane, WorkspaceId)>, DbError>
          WHERE p.state <> 'exited' ORDER BY p.created_at, p.id",
     )?;
     let rows = stmt.query_map([], |row| Ok((from_row(row)?, text(row, "workspace_id")?)))?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
-}
-
-/// The agent panes linked to `task` whose process hasn't exited, newest first, shell panes
-/// hosting an agent included (spec §3).
-pub fn agents_on_task(conn: &Connection, task: TaskId) -> Result<Vec<PaneId>, DbError> {
-    let mut stmt = conn.prepare(
-        "SELECT id FROM panes
-         WHERE task_id = ?1 AND state <> 'exited'
-           AND (kind = 'agent' OR hosted_agent IS NOT NULL)
-         ORDER BY created_at DESC, id DESC",
-    )?;
-    let rows = stmt.query_map([task.to_string()], |row| text(row, "id"))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 

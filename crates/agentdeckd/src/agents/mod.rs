@@ -1,26 +1,22 @@
-//! Launching agents (spec §6, §9): the argv each agent CLI starts and resumes with, and the
-//! launch prompt that carries a pane's task, its workspace's instructions and the task's
-//! comments waiting for it.
+//! Launching agents (spec §6): the argv each agent CLI starts and resumes with. agentdeck
+//! gives an agent no prompt: it reads its own CLAUDE.md or AGENTS.md, and work reaches it by
+//! pasting or `agentdeck agent send`.
 //!
 //! - [`codex`]: finding the session id a Codex pane's CLI chose.
-//! - [`delivery`]: typing the user's new task comment into the task's live agent pane.
 //! - [`restart`]: starting an exited pane again, afresh once when its resume fails at once.
 //! - [`resume`]: re-spawning the panes that were alive when the daemon last stopped.
 
 pub mod codex;
-pub mod delivery;
 pub mod restart;
 pub mod resume;
 
 use agentdeck_core::Agent;
 use uuid::Uuid;
 
-use crate::model::{Comment, Instruction, Task};
-
 /// How agentdeck starts an agent CLI.
 #[derive(Debug, PartialEq, Eq)]
 pub struct AgentLaunch {
-    /// The command, prompt included.
+    /// The command.
     pub argv: Vec<String>,
     /// The session agentdeck chose for it, when the CLI takes one.
     pub session_id: Option<String>,
@@ -29,67 +25,10 @@ pub struct AgentLaunch {
 /// The variable a pane linked to a task at launch has its task's id in (spec §6).
 pub const TASK_VAR: &str = "AGENTDECK_TASK";
 
-/// What an agent is told about `task` (spec §6, §9): its title, its id and how to report back
-/// on it, then its body after a blank line when it has one. It opens a launch prompt, and is
-/// typed into an agent whose pane is linked to the task later, or that starts in a shell pane
-/// linked to it.
-pub fn task_brief(task: &Task) -> String {
-    let id = task.id;
-    let header = format!(
-        "Task: {}\nTask id: {id}\n\
-         Report back with the agentdeck CLI: `agentdeck comment add --task {id} <text>` to \
-         comment on this task, `agentdeck task set {id} --status <status>` to set its status.",
-        task.title
-    );
-    match task.body.trim() {
-        "" => header,
-        body => format!("{header}\n\n{body}"),
-    }
-}
-
-/// The launch prompt for an agent pane (spec §6): the linked task's title, id, how to report
-/// back on it and body, then every instruction for the pane's workspace and the task's
-/// comments no agent has had yet, oldest first. `None` when there is none of them. It never
-/// starts with `-`, so the CLI can't read it as a flag.
-pub fn launch_prompt(
-    task: Option<&Task>,
-    instructions: &[Instruction],
-    comments: &[Comment],
-) -> Option<String> {
-    let mut parts = Vec::new();
-    parts.extend(task.map(task_brief));
-    let blocks: Vec<String> = [
-        (
-            "Instructions for this workspace:",
-            bullets(instructions.iter().map(|i| &i.body)),
-        ),
-        (
-            "Comments since your last session:",
-            bullets(comments.iter().map(|c| &c.body)),
-        ),
-    ]
-    .into_iter()
-    .filter(|(_, list)| !list.is_empty())
-    .map(|(heading, list)| format!("{heading}\n{list}"))
-    .collect();
-    if !blocks.is_empty() {
-        parts.push(blocks.join("\n"));
-    }
-    (!parts.is_empty()).then(|| parts.join("\n\n"))
-}
-
-/// One `  - <text>` line per item, continuation lines indented under the text.
-fn bullets<'a>(items: impl Iterator<Item = &'a String>) -> String {
-    items
-        .map(|text| format!("  - {}", text.trim().replace('\n', "\n    ")))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// How a new pane of `agent` starts, with `prompt` as its first prompt. Claude Code starts on
+/// How a new pane of `agent` starts, with no prompt. Claude Code starts on
 /// a session id agentdeck chooses; Codex chooses its own, which [`codex`] finds afterwards.
 /// `other` panes run their argv as given, so they have none here.
-pub fn launch(agent: Agent, prompt: Option<String>) -> Option<AgentLaunch> {
+pub fn launch(agent: Agent) -> Option<AgentLaunch> {
     let mut argv = vec![agent.as_str().to_owned()];
     let session_id = match agent {
         Agent::Claude => {
@@ -100,7 +39,6 @@ pub fn launch(agent: Agent, prompt: Option<String>) -> Option<AgentLaunch> {
         Agent::Codex => None,
         Agent::Other => return None,
     };
-    argv.extend(prompt);
     Some(AgentLaunch { argv, session_id })
 }
 
@@ -124,168 +62,34 @@ pub fn resume_argv(agent: Option<Agent>, session_id: Option<&str>) -> Option<Vec
 
 #[cfg(test)]
 mod tests {
-    use agentdeck_core::{CommentAuthor, TaskKind, TaskStatus};
-
     use super::*;
-
-    fn task(title: &str, body: &str) -> Task {
-        Task {
-            id: uuid::Uuid::now_v7().into(),
-            title: title.into(),
-            body: body.into(),
-            status: TaskStatus::Todo,
-            kind: TaskKind::Plain,
-            workspace_id: None,
-            created_at: String::new(),
-            updated_at: String::new(),
-            done_at: None,
-            pr: None,
-            unseen_agent_comments: 0,
-        }
-    }
-
-    fn instruction(body: &str) -> Instruction {
-        Instruction {
-            id: uuid::Uuid::now_v7().into(),
-            workspace_id: uuid::Uuid::now_v7().into(),
-            body: body.into(),
-            created_at: String::new(),
-            updated_at: String::new(),
-        }
-    }
-
-    fn comment(body: &str) -> Comment {
-        Comment {
-            id: uuid::Uuid::now_v7().into(),
-            task_id: uuid::Uuid::now_v7().into(),
-            body: body.into(),
-            author: CommentAuthor::User,
-            author_agent: None,
-            author_pane: None,
-            created_at: String::new(),
-            delivered_at: None,
-            delivered_to_pane: None,
-            seen_at: None,
-        }
-    }
-
-    mod launch_prompt {
-        use super::*;
-
-        /// The prompt's first lines for `task`, written out in full.
-        fn header(task: &Task) -> String {
-            let id = task.id;
-            format!(
-                "Task: {}\nTask id: {id}\n\
-                 Report back with the agentdeck CLI: `agentdeck comment add --task {id} \
-                 <text>` to comment on this task, `agentdeck task set {id} --status <status>` \
-                 to set its status.",
-                task.title
-            )
-        }
-
-        #[test]
-        fn should_be_none_without_a_task_or_instructions() {
-            assert_eq!(launch_prompt(None, &[], &[]), None);
-        }
-
-        #[test]
-        fn should_carry_the_tasks_title_id_how_to_report_back_and_body() {
-            let task = task("Fix the login bug", "It fails on Safari.\n");
-
-            assert_eq!(
-                launch_prompt(Some(&task), &[], &[]).unwrap(),
-                format!("{}\n\nIt fails on Safari.", header(&task))
-            );
-        }
-
-        #[test]
-        fn should_leave_out_an_empty_body() {
-            let task = task("Fix the login bug", "  ");
-
-            assert_eq!(launch_prompt(Some(&task), &[], &[]).unwrap(), header(&task));
-        }
-
-        #[test]
-        fn should_list_the_instructions_then_the_comments_after_the_task() {
-            let task = task("Fix the login bug", "It fails on Safari.");
-            let instructions = [instruction("Use the staging DB"), instruction("Two\nlines")];
-            let comments = [comment("Repro in issue 7")];
-
-            assert_eq!(
-                launch_prompt(Some(&task), &instructions, &comments).unwrap(),
-                format!(
-                    "{}\n\nIt fails on Safari.\n\n\
-                     Instructions for this workspace:\n  - Use the staging DB\n  - Two\n    lines\n\
-                     Comments since your last session:\n  - Repro in issue 7",
-                    header(&task)
-                )
-            );
-        }
-
-        #[test]
-        fn should_leave_out_an_empty_block() {
-            let task = task("Fix the login bug", "");
-
-            assert_eq!(
-                launch_prompt(Some(&task), &[], &[comment("Also Firefox")]).unwrap(),
-                format!(
-                    "{}\n\nComments since your last session:\n  - Also Firefox",
-                    header(&task)
-                )
-            );
-        }
-
-        #[test]
-        fn should_carry_instructions_alone_when_there_is_no_task() {
-            assert_eq!(
-                launch_prompt(None, &[instruction("hello")], &[]).unwrap(),
-                "Instructions for this workspace:\n  - hello"
-            );
-        }
-
-        #[test]
-        fn should_never_start_with_a_dash() {
-            let task = task("--dangerously-skip-permissions", "");
-
-            assert!(
-                !launch_prompt(Some(&task), &[], &[])
-                    .unwrap()
-                    .starts_with('-')
-            );
-        }
-    }
 
     mod launch {
         use super::*;
 
         #[test]
-        fn should_start_claude_on_a_session_it_chooses_with_the_prompt() {
-            let launch = launch(Agent::Claude, Some("Task: x".into())).unwrap();
+        fn should_start_claude_on_a_session_it_chooses_with_no_prompt() {
+            let launch = launch(Agent::Claude).unwrap();
 
             let session_id = launch.session_id.expect("a session id");
             assert!(Uuid::parse_str(&session_id).is_ok(), "{session_id}");
-            assert_eq!(
-                launch.argv,
-                ["claude", "--session-id", session_id.as_str(), "Task: x"]
-            );
+            assert_eq!(launch.argv, ["claude", "--session-id", session_id.as_str()]);
         }
 
         #[test]
         fn should_choose_a_new_session_each_time() {
-            let first = launch(Agent::Claude, None).unwrap();
-            let second = launch(Agent::Claude, None).unwrap();
+            let first = launch(Agent::Claude).unwrap();
+            let second = launch(Agent::Claude).unwrap();
 
             assert_ne!(first.session_id, second.session_id);
-            assert_eq!(first.argv.len(), 3, "no prompt argument: {:?}", first.argv);
         }
 
         #[test]
-        fn should_start_codex_with_the_prompt() {
+        fn should_start_codex_with_no_prompt() {
             assert_eq!(
-                launch(Agent::Codex, Some("Task: x".into())).unwrap(),
+                launch(Agent::Codex).unwrap(),
                 AgentLaunch {
-                    argv: vec!["codex".to_owned(), "Task: x".to_owned()],
+                    argv: vec!["codex".to_owned()],
                     session_id: None,
                 }
             );
@@ -293,7 +97,7 @@ mod tests {
 
         #[test]
         fn should_leave_other_agents_to_their_own_argv() {
-            assert_eq!(launch(Agent::Other, None), None);
+            assert_eq!(launch(Agent::Other), None);
         }
     }
 

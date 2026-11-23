@@ -2,11 +2,11 @@
 
 use std::path::PathBuf;
 
-use agentdeck_core::{Agent, InstructionId, PrRef, RepositoryName, TaskStatus};
+use agentdeck_core::{Agent, PrRef, RepositoryName, TaskStatus};
 use clap::{ArgGroup, Parser, Subcommand};
 
-/// `agentdeck`: drive agentdeck's workspaces, tasks, comments, instructions and agents from a
-/// shell or an agent.
+/// `agentdeck`: drive agentdeck's workspaces, tasks, agents, Repositories and pull requests
+/// from a shell or an agent.
 #[derive(Debug, Parser)]
 #[command(name = "agentdeck", version, about, propagate_version = true)]
 pub struct Cli {
@@ -27,12 +27,6 @@ pub enum Command {
     /// Tasks.
     #[command(subcommand)]
     Task(TaskCommand),
-    /// Comments on a task: yours reach its agent, an agent's report back.
-    #[command(subcommand)]
-    Comment(CommentCommand),
-    /// Standing instructions for every agent in a workspace.
-    #[command(subcommand)]
-    Instruction(InstructionCommand),
     /// Agent panes.
     #[command(subcommand)]
     Agent(AgentCommand),
@@ -172,58 +166,6 @@ pub enum TaskCommand {
     },
 }
 
-/// `agentdeck comment …`. Run inside a pane (`$AGENTDECK_PANE` set), a comment is that
-/// pane's agent's; otherwise it is yours, and goes to the task's agent. Without `--task`, the
-/// task is the one the pane is linked to now.
-#[derive(Debug, Subcommand)]
-pub enum CommentCommand {
-    /// List a task's comments, oldest first.
-    Ls {
-        /// The task: its id or a short id. Defaults to the one your pane is linked to.
-        #[arg(long, value_name = "T")]
-        task: Option<String>,
-    },
-    /// Add a comment to a task.
-    Add {
-        /// The text.
-        body: String,
-        /// The task: its id or a short id. Defaults to the one your pane is linked to.
-        #[arg(long, value_name = "T")]
-        task: Option<String>,
-    },
-}
-
-/// `agentdeck instruction …`. Without `--ws`, the workspace is `$AGENTDECK_WORKSPACE`.
-#[derive(Debug, Subcommand)]
-pub enum InstructionCommand {
-    /// List a workspace's instructions, oldest first.
-    Ls {
-        /// The workspace.
-        #[arg(long, value_name = "WS")]
-        ws: Option<String>,
-    },
-    /// Add an instruction; every launch prompt in the workspace carries it.
-    Add {
-        /// The text.
-        body: String,
-        /// The workspace.
-        #[arg(long, value_name = "WS")]
-        ws: Option<String>,
-    },
-    /// Replace an instruction's text.
-    Edit {
-        /// The instruction's id.
-        id: InstructionId,
-        /// The new text.
-        body: String,
-    },
-    /// Delete an instruction.
-    Rm {
-        /// The instruction's id.
-        id: InstructionId,
-    },
-}
-
 /// `agentdeck agent …`. A pane or task id may be a short id: 6 or more of its hex digits in a
 /// row, such as its last 8.
 #[derive(Debug, Subcommand)]
@@ -246,12 +188,9 @@ pub enum AgentCommand {
         /// Where it runs; the current folder without it.
         #[arg(long, value_name = "DIR")]
         cwd: Option<PathBuf>,
-        /// A task to link; its title, body and new comments go into the launch prompt.
-        #[arg(long, value_name = "T")]
-        task: Option<String>,
     },
-    /// Link a running pane to a task in its workspace, or unlink it. The pane's agent is
-    /// told the task, then the task's comments no agent has had yet, once it is idle.
+    /// Link a running pane to a task in its workspace, or unlink it. Nothing is typed into
+    /// the pane.
     #[command(group(ArgGroup::new("link").required(true).args(["task", "none"])))]
     Link {
         /// The pane: its id or a short id.
@@ -449,62 +388,6 @@ mod tests {
         #[test]
         fn should_not_move_to_a_workspace_and_the_inbox_at_once() {
             assert!(parse(&["task", "edit", TASK, "--ws", "web", "--inbox"]).is_err());
-        }
-    }
-
-    mod comment {
-        use super::*;
-
-        #[test]
-        fn should_leave_the_task_to_the_callers_pane_when_not_given() {
-            let cli = parse(&["comment", "add", "hello"]).unwrap();
-
-            let Command::Comment(CommentCommand::Add { task, .. }) = cli.command else {
-                panic!("not comment add: {:?}", cli.command);
-            };
-            assert_eq!(task, None);
-            assert!(parse(&["comment", "ls"]).is_ok());
-        }
-
-        #[test]
-        fn should_add_to_a_task() {
-            let cli = parse(&["comment", "add", "hello", "--task", TASK]).unwrap();
-
-            let Command::Comment(CommentCommand::Add { body, task }) = cli.command else {
-                panic!("not comment add: {:?}", cli.command);
-            };
-            assert_eq!(body, "hello");
-            assert_eq!(task.as_deref(), Some(TASK));
-        }
-    }
-
-    mod instruction {
-        use super::*;
-
-        #[test]
-        fn should_take_the_workspace_as_optional_to_add() {
-            let cli = parse(&["instruction", "add", "hello"]).unwrap();
-
-            assert!(matches!(
-                cli.command,
-                Command::Instruction(InstructionCommand::Add { ws: None, .. })
-            ));
-        }
-
-        #[test]
-        fn should_edit_by_id_with_a_new_body() {
-            let cli = parse(&["instruction", "edit", TASK, "new text"]).unwrap();
-
-            let Command::Instruction(InstructionCommand::Edit { id, body }) = cli.command else {
-                panic!("not instruction edit: {:?}", cli.command);
-            };
-            assert_eq!(id, TASK.parse().unwrap());
-            assert_eq!(body, "new text");
-        }
-
-        #[test]
-        fn should_reject_an_id_that_is_not_one() {
-            assert!(parse(&["instruction", "rm", "nope"]).is_err());
         }
     }
 

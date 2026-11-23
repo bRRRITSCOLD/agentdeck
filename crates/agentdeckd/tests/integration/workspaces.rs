@@ -517,7 +517,7 @@ mod get_v1_workspaces_id_dirty {
 }
 
 mod delete_v1_workspaces_id {
-    use agentdeck_client::types::{NewInstruction, NewTask};
+    use agentdeck_client::types::NewTask;
 
     use super::*;
 
@@ -608,7 +608,7 @@ mod delete_v1_workspaces_id {
     }
 
     #[tokio::test]
-    async fn should_move_its_tasks_to_the_inbox_and_drop_its_instructions_204() {
+    async fn should_move_its_tasks_to_the_inbox_204() {
         let daemon = TestDaemon::start().await;
         let workspace = create(&daemon.client, "ws", None).await;
         let task = daemon
@@ -623,15 +623,6 @@ mod delete_v1_workspaces_id {
             .send()
             .await
             .expect("task")
-            .into_inner();
-        let instruction = daemon
-            .client
-            .instruction_create()
-            .id(workspace.id)
-            .body(NewInstruction { body: "i".into() })
-            .send()
-            .await
-            .expect("instruction")
             .into_inner();
 
         daemon
@@ -651,15 +642,6 @@ mod delete_v1_workspaces_id {
             .expect("the task stays")
             .into_inner();
         assert_eq!(task.workspace_id, None);
-        let (status, _) = error_response(
-            daemon
-                .client
-                .instruction_delete()
-                .id(instruction.id)
-                .send()
-                .await,
-        );
-        assert_eq!(status, 404, "the instruction went with the workspace");
     }
 
     #[tokio::test]
