@@ -8,6 +8,7 @@ use dropshot::{
 use agentdeck_core::WorkspaceId;
 use agentdeck_core::ws::Entity;
 
+use super::repositories::linkings;
 use super::{ApiContext, Authorized, IdPath, client_error};
 use crate::db;
 use crate::model::{NewWorkspace, Workspace, WorkspacePatch};
@@ -33,24 +34,30 @@ pub(crate) async fn workspace_list(
     Ok(HttpResponseOk(workspaces))
 }
 
-/// Creates a workspace. It has no folder, so nothing is made on disk.
+/// Creates a workspace. It has no folder, so nothing is made on disk. It links each
+/// Repository in `link` as `POST /v1/workspaces/{id}/links` does: one agentdeck keeps by
+/// that name is linked without asking GitHub, any other is looked up on GitHub first. One
+/// GitHub doesn't show the sign-in is 400 `unknown_repository` and makes no workspace;
+/// `409 not_signed_in` and `502 github_error` as the link route. Sends `changed` for each
+/// Repository linked, then the workspace.
 #[endpoint { method = POST, path = "/v1/workspaces" }]
 pub(crate) async fn workspace_create(
     rqctx: RequestContext<ApiContext>,
     _auth: Authorized,
     body: TypedBody<NewWorkspace>,
 ) -> Result<HttpResponseCreated<Workspace>, HttpError> {
+    let context = rqctx.context();
     let new = body.into_inner();
     check_name(Some(&new.name))?;
-    let workspace = rqctx
-        .context()
+    let links = linkings(context, new.link).await?;
+    let (workspace, relinked) = context
         .db
-        .call(move |c| db::workspaces::create(c, &new.name))
+        .call(move |c| db::workspaces::create_linking(c, &new.name, &links))
         .await?;
-    rqctx
-        .context()
-        .events
-        .changed(Entity::Workspace, workspace.id);
+    for repository in relinked {
+        context.events.changed(Entity::Repository, repository);
+    }
+    context.events.changed(Entity::Workspace, workspace.id);
     Ok(HttpResponseCreated(workspace))
 }
 
@@ -70,7 +77,14 @@ pub(crate) async fn workspace_get(
     Ok(HttpResponseOk(workspace))
 }
 
-/// Renames, mutes or unmutes a workspace.
+/// Renames, mutes or unmutes a workspace, and links and unlinks its Repositories, all in one
+/// request applied together: a request that fails changes nothing. `link` takes Repositories
+/// as `POST /v1/workspaces/{id}/links` does (one GitHub doesn't show the sign-in is 400
+/// `unknown_repository`; `409 not_signed_in` and `502 github_error` as that route), `unlink`
+/// takes their ids as `DELETE /v1/workspaces/{id}/links/{repository}` does, and a Repository
+/// nothing names any more goes. Unlinking one it doesn't link changes nothing; naming one
+/// Repository in both is 400 `invalid_links`. An archived workspace can be changed too.
+/// Sends `changed` for each Repository whose Link changed, then the workspace.
 #[endpoint { method = PATCH, path = "/v1/workspaces/{id}" }]
 pub(crate) async fn workspace_update(
     rqctx: RequestContext<ApiContext>,
@@ -78,18 +92,21 @@ pub(crate) async fn workspace_update(
     path: Path<IdPath<WorkspaceId>>,
     body: TypedBody<WorkspacePatch>,
 ) -> Result<HttpResponseOk<Workspace>, HttpError> {
+    let context = rqctx.context();
     let id = path.into_inner().id;
-    let patch = body.into_inner();
+    let mut patch = body.into_inner();
     check_name(patch.name.as_deref())?;
-    let workspace = rqctx
-        .context()
+    // A workspace that doesn't exist is 404 before GitHub is asked about anything.
+    context.db.call(move |c| db::workspaces::get(c, id)).await?;
+    let links = linkings(context, std::mem::take(&mut patch.link)).await?;
+    let (workspace, relinked) = context
         .db
-        .call(move |c| db::workspaces::update(c, id, &patch))
+        .call(move |c| db::workspaces::update_linking(c, id, &patch, &links))
         .await?;
-    rqctx
-        .context()
-        .events
-        .changed(Entity::Workspace, workspace.id);
+    for repository in relinked {
+        context.events.changed(Entity::Repository, repository);
+    }
+    context.events.changed(Entity::Workspace, workspace.id);
     Ok(HttpResponseOk(workspace))
 }
 

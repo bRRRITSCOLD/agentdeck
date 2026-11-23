@@ -13,7 +13,10 @@ use crate::support::{TestDaemon, error_response};
 async fn create(client: &Client, name: &str) -> Workspace {
     client
         .workspace_create()
-        .body(NewWorkspace { name: name.into() })
+        .body(NewWorkspace {
+            name: name.into(),
+            link: Vec::new(),
+        })
         .send()
         .await
         .expect("create a workspace")
@@ -57,6 +60,7 @@ mod post_v1_workspaces {
             .workspace_create()
             .body(NewWorkspace {
                 name: "Fix the Bug".into(),
+                link: Vec::new(),
             })
             .send()
             .await
@@ -127,7 +131,10 @@ mod post_v1_workspaces {
             daemon
                 .client
                 .workspace_create()
-                .body(NewWorkspace { name: "  ".into() })
+                .body(NewWorkspace {
+                    name: "  ".into(),
+                    link: Vec::new(),
+                })
                 .send()
                 .await,
         );

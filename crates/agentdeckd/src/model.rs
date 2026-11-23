@@ -40,15 +40,27 @@ pub struct Workspace {
 pub struct NewWorkspace {
     /// The display name.
     pub name: String,
+    /// Repositories to link the new Workspace to, each its `owner/name` or GitHub URL, as
+    /// `POST /v1/workspaces/{id}/links` takes one. None when absent.
+    #[serde(default)]
+    pub link: Vec<RepositoryName>,
 }
 
-/// `PATCH /v1/workspaces/{id}`: the fields to change.
+/// `PATCH /v1/workspaces/{id}`: the fields to change, applied together or not at all.
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct WorkspacePatch {
     /// A new display name. The slug stays as it is.
     pub name: Option<String>,
     /// Mute or unmute notifications.
     pub muted: Option<bool>,
+    /// Repositories to link, each its `owner/name` or GitHub URL, as
+    /// `POST /v1/workspaces/{id}/links` takes one.
+    #[serde(default)]
+    pub link: Vec<RepositoryName>,
+    /// Repositories to unlink, by id, as `DELETE /v1/workspaces/{id}/links/{repository}`
+    /// names one. One the Workspace doesn't link is left as it is.
+    #[serde(default)]
+    pub unlink: Vec<RepositoryId>,
 }
 
 /// A tab in a workspace, holding a split tree of panes.

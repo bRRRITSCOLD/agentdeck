@@ -445,6 +445,14 @@
       "NewWorkspace": {
         "description": "`POST /v1/workspaces`.",
         "properties": {
+          "link": {
+            "default": [],
+            "description": "Repositories to link the new Workspace to, each its `owner/name` or GitHub URL, as `POST /v1/workspaces/{id}/links` takes one. None when absent.",
+            "items": {
+              "$ref": "#/components/schemas/RepositoryName"
+            },
+            "type": "array"
+          },
           "name": {
             "description": "The display name.",
             "type": "string"
@@ -1370,8 +1378,16 @@
         "type": "string"
       },
       "WorkspacePatch": {
-        "description": "`PATCH /v1/workspaces/{id}`: the fields to change.",
+        "description": "`PATCH /v1/workspaces/{id}`: the fields to change, applied together or not at all.",
         "properties": {
+          "link": {
+            "default": [],
+            "description": "Repositories to link, each its `owner/name` or GitHub URL, as `POST /v1/workspaces/{id}/links` takes one.",
+            "items": {
+              "$ref": "#/components/schemas/RepositoryName"
+            },
+            "type": "array"
+          },
           "muted": {
             "description": "Mute or unmute notifications.",
             "nullable": true,
@@ -1381,6 +1397,14 @@
             "description": "A new display name. The slug stays as it is.",
             "nullable": true,
             "type": "string"
+          },
+          "unlink": {
+            "default": [],
+            "description": "Repositories to unlink, by id, as `DELETE /v1/workspaces/{id}/links/{repository}` names one. One the Workspace doesn't link is left as it is.",
+            "items": {
+              "$ref": "#/components/schemas/RepositoryId"
+            },
+            "type": "array"
           }
         },
         "type": "object"
@@ -2243,6 +2267,7 @@
         "summary": "Every workspace, archived ones included, oldest first."
       },
       "post": {
+        "description": "Repository in `link` as `POST /v1/workspaces/{id}/links` does: one agentdeck keeps by that name is linked without asking GitHub, any other is looked up on GitHub first. One GitHub doesn't show the sign-in is 400 `unknown_repository` and makes no workspace; `409 not_signed_in` and `502 github_error` as the link route. Sends `changed` for each Repository linked, then the workspace.",
         "operationId": "workspace_create",
         "requestBody": {
           "content": {
@@ -2272,7 +2297,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Creates a workspace. It has no folder, so nothing is made on disk."
+        "summary": "Creates a workspace. It has no folder, so nothing is made on disk. It links each"
       }
     },
     "/v1/workspaces/{id}": {
@@ -2337,6 +2362,7 @@
         "summary": "One workspace."
       },
       "patch": {
+        "description": "request applied together: a request that fails changes nothing. `link` takes Repositories as `POST /v1/workspaces/{id}/links` does (one GitHub doesn't show the sign-in is 400 `unknown_repository`; `409 not_signed_in` and `502 github_error` as that route), `unlink` takes their ids as `DELETE /v1/workspaces/{id}/links/{repository}` does, and a Repository nothing names any more goes. Unlinking one it doesn't link changes nothing; naming one Repository in both is 400 `invalid_links`. An archived workspace can be changed too. Sends `changed` for each Repository whose Link changed, then the workspace.",
         "operationId": "workspace_update",
         "parameters": [
           {
@@ -2377,7 +2403,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Renames, mutes or unmutes a workspace."
+        "summary": "Renames, mutes or unmutes a workspace, and links and unlinks its Repositories, all in one"
       }
     },
     "/v1/workspaces/{id}/archive": {

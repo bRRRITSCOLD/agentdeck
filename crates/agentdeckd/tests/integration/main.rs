@@ -25,5 +25,6 @@ mod support;
 mod tabs;
 mod version;
 mod workspaces;
+mod workspaces_client;
 mod ws;
 mod ws_client;

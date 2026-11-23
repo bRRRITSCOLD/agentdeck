@@ -307,6 +307,9 @@ pub mod types {
     ///`POST /v1/workspaces`.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct NewWorkspace {
+        ///Repositories to link the new Workspace to, each its `owner/name` or GitHub URL, as `POST /v1/workspaces/{id}/links` takes one. None when absent.
+        #[serde(default, skip_serializing_if = "::std::vec::Vec::is_empty")]
+        pub link: ::std::vec::Vec<agentdeck_core::RepositoryName>,
         ///The display name.
         pub name: ::std::string::String,
     }
@@ -973,15 +976,21 @@ pub mod types {
             Default::default()
         }
     }
-    ///`PATCH /v1/workspaces/{id}`: the fields to change.
+    ///`PATCH /v1/workspaces/{id}`: the fields to change, applied together or not at all.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
     pub struct WorkspacePatch {
+        ///Repositories to link, each its `owner/name` or GitHub URL, as `POST /v1/workspaces/{id}/links` takes one.
+        #[serde(default, skip_serializing_if = "::std::vec::Vec::is_empty")]
+        pub link: ::std::vec::Vec<agentdeck_core::RepositoryName>,
         ///Mute or unmute notifications.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub muted: ::std::option::Option<bool>,
         ///A new display name. The slug stays as it is.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub name: ::std::option::Option<::std::string::String>,
+        ///Repositories to unlink, by id, as `DELETE /v1/workspaces/{id}/links/{repository}` names one. One the Workspace doesn't link is left as it is.
+        #[serde(default, skip_serializing_if = "::std::vec::Vec::is_empty")]
+        pub unlink: ::std::vec::Vec<agentdeck_core::RepositoryId>,
     }
     impl WorkspacePatch {
         pub fn builder() -> builder::WorkspacePatch {
@@ -1791,16 +1800,31 @@ pub mod types {
         }
         #[derive(Clone, Debug)]
         pub struct NewWorkspace {
+            link: ::std::result::Result<
+                ::std::vec::Vec<agentdeck_core::RepositoryName>,
+                ::std::string::String,
+            >,
             name: ::std::result::Result<::std::string::String, ::std::string::String>,
         }
         impl ::std::default::Default for NewWorkspace {
             fn default() -> Self {
                 Self {
+                    link: Ok(Default::default()),
                     name: Err("no value supplied for name".to_string()),
                 }
             }
         }
         impl NewWorkspace {
+            pub fn link<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::vec::Vec<agentdeck_core::RepositoryName>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.link = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for link: {e}"));
+                self
+            }
             pub fn name<T>(mut self, value: T) -> Self
             where
                 T: ::std::convert::TryInto<::std::string::String>,
@@ -1817,12 +1841,16 @@ pub mod types {
             fn try_from(
                 value: NewWorkspace,
             ) -> ::std::result::Result<Self, super::error::ConversionError> {
-                Ok(Self { name: value.name? })
+                Ok(Self {
+                    link: value.link?,
+                    name: value.name?,
+                })
             }
         }
         impl ::std::convert::From<super::NewWorkspace> for NewWorkspace {
             fn from(value: super::NewWorkspace) -> Self {
                 Self {
+                    link: Ok(value.link),
                     name: Ok(value.name),
                 }
             }
@@ -3600,21 +3628,41 @@ pub mod types {
         }
         #[derive(Clone, Debug)]
         pub struct WorkspacePatch {
+            link: ::std::result::Result<
+                ::std::vec::Vec<agentdeck_core::RepositoryName>,
+                ::std::string::String,
+            >,
             muted: ::std::result::Result<::std::option::Option<bool>, ::std::string::String>,
             name: ::std::result::Result<
                 ::std::option::Option<::std::string::String>,
+                ::std::string::String,
+            >,
+            unlink: ::std::result::Result<
+                ::std::vec::Vec<agentdeck_core::RepositoryId>,
                 ::std::string::String,
             >,
         }
         impl ::std::default::Default for WorkspacePatch {
             fn default() -> Self {
                 Self {
+                    link: Ok(Default::default()),
                     muted: Ok(Default::default()),
                     name: Ok(Default::default()),
+                    unlink: Ok(Default::default()),
                 }
             }
         }
         impl WorkspacePatch {
+            pub fn link<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::vec::Vec<agentdeck_core::RepositoryName>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.link = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for link: {e}"));
+                self
+            }
             pub fn muted<T>(mut self, value: T) -> Self
             where
                 T: ::std::convert::TryInto<::std::option::Option<bool>>,
@@ -3635,6 +3683,16 @@ pub mod types {
                     .map_err(|e| format!("error converting supplied value for name: {e}"));
                 self
             }
+            pub fn unlink<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::vec::Vec<agentdeck_core::RepositoryId>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.unlink = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for unlink: {e}"));
+                self
+            }
         }
         impl ::std::convert::TryFrom<WorkspacePatch> for super::WorkspacePatch {
             type Error = super::error::ConversionError;
@@ -3642,16 +3700,20 @@ pub mod types {
                 value: WorkspacePatch,
             ) -> ::std::result::Result<Self, super::error::ConversionError> {
                 Ok(Self {
+                    link: value.link?,
                     muted: value.muted?,
                     name: value.name?,
+                    unlink: value.unlink?,
                 })
             }
         }
         impl ::std::convert::From<super::WorkspacePatch> for WorkspacePatch {
             fn from(value: super::WorkspacePatch) -> Self {
                 Self {
+                    link: Ok(value.link),
                     muted: Ok(value.muted),
                     name: Ok(value.name),
+                    unlink: Ok(value.unlink),
                 }
             }
         }
@@ -4147,7 +4209,9 @@ impl Client {
     pub fn workspace_list(&self) -> builder::WorkspaceList<'_> {
         builder::WorkspaceList::new(self)
     }
-    ///Creates a workspace. It has no folder, so nothing is made on disk
+    ///Creates a workspace. It has no folder, so nothing is made on disk. It links each
+    ///
+    ///Repository in `link` as `POST /v1/workspaces/{id}/links` does: one agentdeck keeps by that name is linked without asking GitHub, any other is looked up on GitHub first. One GitHub doesn't show the sign-in is 400 `unknown_repository` and makes no workspace; `409 not_signed_in` and `502 github_error` as the link route. Sends `changed` for each Repository linked, then the workspace.
     ///
     ///Sends a `POST` request to `/v1/workspaces`
     ///
@@ -4192,7 +4256,9 @@ impl Client {
     pub fn workspace_delete(&self) -> builder::WorkspaceDelete<'_> {
         builder::WorkspaceDelete::new(self)
     }
-    ///Renames, mutes or unmutes a workspace
+    ///Renames, mutes or unmutes a workspace, and links and unlinks its Repositories, all in one
+    ///
+    ///request applied together: a request that fails changes nothing. `link` takes Repositories as `POST /v1/workspaces/{id}/links` does (one GitHub doesn't show the sign-in is 400 `unknown_repository`; `409 not_signed_in` and `502 github_error` as that route), `unlink` takes their ids as `DELETE /v1/workspaces/{id}/links/{repository}` does, and a Repository nothing names any more goes. Unlinking one it doesn't link changes nothing; naming one Repository in both is 400 `invalid_links`. An archived workspace can be changed too. Sends `changed` for each Repository whose Link changed, then the workspace.
     ///
     ///Sends a `PATCH` request to `/v1/workspaces/{id}`
     ///

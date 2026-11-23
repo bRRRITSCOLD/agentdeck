@@ -36,7 +36,10 @@ async fn synced(github: &MockServer, prs: &[Pr]) -> TestDaemon {
 async fn workspace(client: &Client, name: &str) -> Workspace {
     client
         .workspace_create()
-        .body(NewWorkspace { name: name.into() })
+        .body(NewWorkspace {
+            name: name.into(),
+            link: Vec::new(),
+        })
         .send()
         .await
         .expect("create a workspace")
@@ -560,6 +563,296 @@ mod delete_v1_workspaces {
             list(&daemon.client).await,
             [listed(RestRepo::new(GADGETS), &[api.id])]
         );
+        let mut changed = vec![
+            next_link_change(&mut ws).await,
+            next_link_change(&mut ws).await,
+        ];
+        changed.sort_by(|a, b| a.1.cmp(&b.1));
+        let mut expected = vec![
+            (Entity::Repository, repository_id(WIDGETS).to_string()),
+            (Entity::Repository, repository_id(GADGETS).to_string()),
+        ];
+        expected.sort_by(|a, b| a.1.cmp(&b.1));
+        assert_eq!(changed, expected);
+        assert_eq!(
+            next_link_change(&mut ws).await,
+            (Entity::Workspace, web.id.to_string())
+        );
+    }
+}
+
+/// `name` and its Repositories as the daemon holds them now: its name, then the names of the
+/// Repositories it links.
+async fn workspace_now(client: &Client, workspace: WorkspaceId) -> (String, Vec<String>) {
+    let read = client.workspace_get().id(workspace).send().await;
+    let name = read.expect("read the workspace").into_inner().name;
+    (name, names(&list_for(client, workspace).await))
+}
+
+fn repository_names(repositories: &[&str]) -> Vec<RepositoryName> {
+    let parsed = repositories
+        .iter()
+        .map(|r| r.parse().expect("a Repository"));
+    parsed.collect()
+}
+
+mod post_v1_workspaces {
+    use super::*;
+
+    fn linking(name: &str, repositories: &[&str]) -> NewWorkspace {
+        NewWorkspace {
+            name: name.into(),
+            link: repository_names(repositories),
+        }
+    }
+
+    #[tokio::test]
+    async fn should_link_the_repositories_asked_for_known_or_looked_up_on_github_201() {
+        let github = MockServer::start_async().await;
+        let daemon = synced(&github, &[Pr::open(7)]).await;
+        let known = mock_rest_repo(&github, TOKEN, WIDGETS, RestRepo::new(WIDGETS));
+        mock_rest_repo(&github, TOKEN, GADGETS, RestRepo::new(GADGETS));
+
+        let created = (daemon.client.workspace_create())
+            .body(linking("web", &[WIDGETS, GADGETS]))
+            .send()
+            .await;
+
+        let created = created.expect("create");
+        assert_eq!(created.status().as_u16(), 201);
+        let web = created.into_inner();
+        assert_eq!(
+            list_for(&daemon.client, web.id).await,
+            [
+                listed(RestRepo::new(GADGETS), &[web.id]),
+                listed(RestRepo::new(WIDGETS), &[web.id]),
+            ]
+        );
+        known.assert_calls(0);
+    }
+
+    #[tokio::test]
+    async fn should_make_nothing_when_github_cannot_see_a_repository_400() {
+        let github = MockServer::start_async().await;
+        mock_rest_repo(&github, TOKEN, WIDGETS, RestRepo::new(WIDGETS));
+        mock_rest_repo_missing(&github, "acme/nope");
+        let daemon = daemon(&github).await;
+
+        let (status, error) = error_response(
+            (daemon.client.workspace_create())
+                .body(linking("web", &[WIDGETS, "acme/nope"]))
+                .send()
+                .await,
+        );
+
+        assert_eq!(status, 400);
+        assert_eq!(error.error_code.as_deref(), Some("unknown_repository"));
+        assert_eq!(
+            error.message,
+            "GitHub can't see acme/nope. Check the name or your token's access."
+        );
+        let workspaces = daemon.client.workspace_list().send().await;
+        assert_eq!(workspaces.expect("list").into_inner(), []);
+        assert_eq!(list(&daemon.client).await, []);
+    }
+}
+
+mod patch_v1_workspaces_id {
+    use super::*;
+
+    /// A daemon whose GitHub shows `acme/widgets` and `acme/gadgets`, and workspace `web`
+    /// linking widgets.
+    async fn web_linking_widgets(github: &MockServer) -> (TestDaemon, Workspace) {
+        mock_rest_repo(github, TOKEN, WIDGETS, RestRepo::new(WIDGETS));
+        mock_rest_repo(github, TOKEN, GADGETS, RestRepo::new(GADGETS));
+        let daemon = daemon(github).await;
+        let web = workspace(&daemon.client, "web").await;
+        link(&daemon.client, web.id, WIDGETS).await;
+        (daemon, web)
+    }
+
+    fn widgets() -> RepositoryId {
+        RepositoryId::from(repository_id(WIDGETS))
+    }
+
+    #[tokio::test]
+    async fn should_rename_link_and_unlink_in_one_request_200() {
+        let github = MockServer::start_async().await;
+        let (daemon, web) = web_linking_widgets(&github).await;
+
+        let updated = daemon
+            .client
+            .workspace_update()
+            .id(web.id)
+            .body_map(|patch| {
+                patch
+                    .name(Some("storefront".to_owned()))
+                    .link(repository_names(&[GADGETS]))
+                    .unlink(vec![widgets()])
+            })
+            .send()
+            .await
+            .expect("update")
+            .into_inner();
+
+        assert_eq!(updated.name, "storefront");
+        assert_eq!(
+            workspace_now(&daemon.client, web.id).await,
+            ("storefront".to_owned(), vec![GADGETS.to_owned()])
+        );
+        // Nothing else names widgets, so it went with its Link.
+        assert_eq!(names(&list(&daemon.client).await), [GADGETS]);
+    }
+
+    #[tokio::test]
+    async fn should_change_nothing_when_github_cannot_see_a_repository_to_link_400() {
+        let github = MockServer::start_async().await;
+        let (daemon, web) = web_linking_widgets(&github).await;
+        mock_rest_repo_missing(&github, "acme/nope");
+
+        let (status, error) = error_response(
+            daemon
+                .client
+                .workspace_update()
+                .id(web.id)
+                .body_map(|patch| {
+                    patch
+                        .name(Some("storefront".to_owned()))
+                        .link(repository_names(&[GADGETS, "acme/nope"]))
+                        .unlink(vec![widgets()])
+                })
+                .send()
+                .await,
+        );
+
+        assert_eq!(status, 400);
+        assert_eq!(error.error_code.as_deref(), Some("unknown_repository"));
+        assert_eq!(
+            workspace_now(&daemon.client, web.id).await,
+            ("web".to_owned(), vec![WIDGETS.to_owned()])
+        );
+        assert_eq!(names(&list(&daemon.client).await), [WIDGETS]);
+    }
+
+    #[tokio::test]
+    async fn should_change_nothing_when_the_name_is_blank_400() {
+        let github = MockServer::start_async().await;
+        let (daemon, web) = web_linking_widgets(&github).await;
+
+        let (status, error) = error_response(
+            daemon
+                .client
+                .workspace_update()
+                .id(web.id)
+                .body_map(|patch| {
+                    patch
+                        .name(Some(" ".to_owned()))
+                        .link(repository_names(&[GADGETS]))
+                        .unlink(vec![widgets()])
+                })
+                .send()
+                .await,
+        );
+
+        assert_eq!(status, 400);
+        assert_eq!(error.error_code.as_deref(), Some("invalid_name"));
+        assert_eq!(
+            workspace_now(&daemon.client, web.id).await,
+            ("web".to_owned(), vec![WIDGETS.to_owned()])
+        );
+    }
+
+    #[tokio::test]
+    async fn should_refuse_to_link_and_unlink_one_repository_at_once_400() {
+        let github = MockServer::start_async().await;
+        let (daemon, web) = web_linking_widgets(&github).await;
+
+        let (status, error) = error_response(
+            daemon
+                .client
+                .workspace_update()
+                .id(web.id)
+                .body_map(|patch| {
+                    patch
+                        .link(repository_names(&["ACME/Widgets"]))
+                        .unlink(vec![widgets()])
+                })
+                .send()
+                .await,
+        );
+
+        assert_eq!(status, 400);
+        assert_eq!(error.error_code.as_deref(), Some("invalid_links"));
+        assert_eq!(
+            error.message,
+            "acme/widgets can't be linked and unlinked at once"
+        );
+        assert_eq!(names(&list_for(&daemon.client, web.id).await), [WIDGETS]);
+    }
+
+    #[tokio::test]
+    async fn should_leave_a_repository_it_does_not_link_as_it_is_200() {
+        let github = MockServer::start_async().await;
+        let (daemon, web) = web_linking_widgets(&github).await;
+        let api = workspace(&daemon.client, "api").await;
+
+        let response = daemon
+            .client
+            .workspace_update()
+            .id(api.id)
+            .body_map(|patch| patch.unlink(vec![widgets()]))
+            .send()
+            .await
+            .expect("update");
+
+        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(
+            list(&daemon.client).await,
+            [listed(RestRepo::new(WIDGETS), &[web.id])]
+        );
+    }
+
+    #[tokio::test]
+    async fn should_link_an_archived_workspace_200() {
+        let github = MockServer::start_async().await;
+        let (daemon, web) = web_linking_widgets(&github).await;
+        let archived = daemon.client.workspace_archive().id(web.id).send().await;
+        archived.expect("archive");
+
+        daemon
+            .client
+            .workspace_update()
+            .id(web.id)
+            .body_map(|patch| patch.link(repository_names(&[GADGETS])))
+            .send()
+            .await
+            .expect("update");
+
+        assert_eq!(
+            names(&list_for(&daemon.client, web.id).await),
+            [GADGETS, WIDGETS]
+        );
+    }
+
+    #[tokio::test]
+    async fn should_tell_websocket_clients_each_repository_then_the_workspace_changed_200() {
+        let github = MockServer::start_async().await;
+        let (daemon, web) = web_linking_widgets(&github).await;
+        let mut ws = Ws::connect(&daemon).await;
+
+        daemon
+            .client
+            .workspace_update()
+            .id(web.id)
+            .body_map(|patch| {
+                patch
+                    .link(repository_names(&[GADGETS]))
+                    .unlink(vec![widgets()])
+            })
+            .send()
+            .await
+            .expect("update");
+
         let mut changed = vec![
             next_link_change(&mut ws).await,
             next_link_change(&mut ws).await,

@@ -5,8 +5,9 @@
 //! sends it. [`daemon::connect`] finds the running daemon, starting it if need be, and
 //! [`ws::open`] opens its WebSocket. [`ApiError`] turns a failed call into what the daemon
 //! said; [`panes`] holds the pane operations that take more than one call, [`prs`] and
-//! [`repositories`] read the pull requests and Repositories as the GUI shows them, and
-//! [`settings`] names settings by dotted key.
+//! [`repositories`] read the pull requests and Repositories as the GUI shows them,
+//! [`workspaces`] makes and edits Workspaces with their Links, and [`settings`] names settings
+//! by dotted key.
 
 pub mod daemon;
 pub mod error;
@@ -14,6 +15,7 @@ pub mod panes;
 pub mod prs;
 pub mod repositories;
 pub mod settings;
+pub mod workspaces;
 pub mod ws;
 
 #[allow(missing_docs, clippy::all, rustdoc::all)]

@@ -5,6 +5,31 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::{DbError, new_id, now, repositories, text};
 use crate::model::{Workspace, WorkspacePatch};
+use crate::prsync::github::RemoteRepository;
+
+/// A Repository a request links (spec §4): one agentdeck keeps, found by its name, or one
+/// GitHub has just shown, stored as the Link is made.
+#[derive(Debug, Clone)]
+pub enum Linking {
+    /// A Repository agentdeck keeps.
+    Known(RepositoryId),
+    /// A Repository GitHub showed, as it showed it.
+    Found(RemoteRepository),
+}
+
+impl Linking {
+    /// The Repository's id, GitHub's.
+    pub fn id(&self) -> RepositoryId {
+        match self {
+            Linking::Known(id) => *id,
+            Linking::Found(repository) => repository.id,
+        }
+    }
+}
+
+/// What a Workspace's Links became: the Repositories a Link was added to or removed from, or
+/// that were stored or deleted, each once.
+pub type Relinked = Vec<RepositoryId>;
 
 const COLUMNS: &str = "id, slug, name, muted, archived_at, created_at";
 
@@ -37,6 +62,84 @@ pub fn get(conn: &Connection, id: WorkspaceId) -> Result<Workspace, DbError> {
     )
     .optional()?
     .ok_or(DbError::NotFound("workspace"))
+}
+
+/// Creates a workspace named `name` linking `links`, in one transaction: a Repository that
+/// can't be linked makes no workspace.
+pub fn create_linking(
+    conn: &mut Connection,
+    name: &str,
+    links: &[Linking],
+) -> Result<(Workspace, Relinked), DbError> {
+    let tx = conn.transaction()?;
+    let workspace = create(&tx, name)?;
+    let relinked = relink(&tx, workspace.id, links, &[])?;
+    tx.commit()?;
+    Ok((workspace, relinked))
+}
+
+/// Applies the fields `patch` sets, then links `links` and unlinks `patch.unlink`, in one
+/// transaction: nothing changes unless everything does. Unlinking a Repository the
+/// workspace doesn't link leaves it as it is; asking to link and unlink one Repository at
+/// once is refused (`invalid_links`).
+pub fn update_linking(
+    conn: &mut Connection,
+    id: WorkspaceId,
+    patch: &WorkspacePatch,
+    links: &[Linking],
+) -> Result<(Workspace, Relinked), DbError> {
+    let tx = conn.transaction()?;
+    update(&tx, id, patch)?;
+    let relinked = relink(&tx, id, links, &patch.unlink)?;
+    let workspace = get(&tx, id)?;
+    tx.commit()?;
+    Ok((workspace, relinked))
+}
+
+/// Unlinks `unlink`, then links `links`, on `conn`'s open transaction.
+fn relink(
+    conn: &Connection,
+    workspace: WorkspaceId,
+    links: &[Linking],
+    unlink: &[RepositoryId],
+) -> Result<Relinked, DbError> {
+    if let Some(both) = links.iter().find(|l| unlink.contains(&l.id())) {
+        let name = match both {
+            Linking::Known(id) => repositories::get(conn, *id)?.name,
+            Linking::Found(repository) => repository.name.clone(),
+        };
+        return Err(DbError::Invalid {
+            code: "invalid_links",
+            message: format!("{name} can't be linked and unlinked at once"),
+        });
+    }
+    let mut relinked = Vec::new();
+    let mut note = |id: RepositoryId| {
+        if !relinked.contains(&id) {
+            relinked.push(id);
+        }
+    };
+    for id in unlink {
+        if repositories::remove_link(conn, workspace, *id)? {
+            repositories::forget_if_unreferenced(conn, *id)?;
+            note(*id);
+        }
+    }
+    for linking in links {
+        let stored = match linking {
+            Linking::Known(id) => {
+                if !repositories::is_known(conn, *id)? {
+                    return Err(DbError::UnknownReference("repository"));
+                }
+                false
+            }
+            Linking::Found(repository) => repositories::store(conn, repository)?,
+        };
+        if repositories::add_link(conn, workspace, linking.id())? || stored {
+            note(linking.id());
+        }
+    }
+    Ok(relinked)
 }
 
 /// Creates a workspace named `name`, slugged from its name and made unique among the

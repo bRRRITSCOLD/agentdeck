@@ -262,6 +262,7 @@ mod agentdeckd {
                 .workspace_create()
                 .body(agentdeck_client::types::NewWorkspace {
                     name: "kept".into(),
+                    link: Vec::new(),
                 })
                 .send()
                 .await
