@@ -391,6 +391,17 @@ pub mod types {
             Default::default()
         }
     }
+    ///`POST /v1/workspaces/{id}/links`: the Repository to link.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct NewLink {
+        ///The Repository's `owner/name` (or its GitHub URL). One agentdeck doesn't know by that name is looked up on GitHub first.
+        pub repository: agentdeck_core::RepositoryName,
+    }
+    impl NewLink {
+        pub fn builder() -> builder::NewLink {
+            Default::default()
+        }
+    }
     ///`POST /v1/panes`.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct NewPane {
@@ -811,6 +822,29 @@ pub mod types {
     }
     impl Repository {
         pub fn builder() -> builder::Repository {
+            Default::default()
+        }
+    }
+    ///A Repository and the Workspaces that link it (spec §3): what GitHub last said of it, and whether the GitHub sign-in can still see it.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct RepositoryLinks {
+        ///Archived on GitHub: read-only.
+        pub archived: bool,
+        ///GitHub's id for it, which a rename or a transfer keeps.
+        pub id: agentdeck_core::RepositoryId,
+        ///`owner/name`, as GitHub calls it now.
+        pub name: agentdeck_core::RepositoryName,
+        ///Only those GitHub lets in can see it.
+        pub private: bool,
+        ///Whether the GitHub sign-in can no longer see it: it shows as last read (spec §8).
+        pub unreachable: bool,
+        ///Its GitHub page.
+        pub url: ::std::string::String,
+        ///The Workspaces that link it, archived ones included, oldest first; empty when none does and it is kept for its pull requests.
+        pub workspaces: ::std::vec::Vec<agentdeck_core::WorkspaceId>,
+    }
+    impl RepositoryLinks {
+        pub fn builder() -> builder::RepositoryLinks {
             Default::default()
         }
     }
@@ -2435,6 +2469,47 @@ pub mod types {
             }
         }
         #[derive(Clone, Debug)]
+        pub struct NewLink {
+            repository:
+                ::std::result::Result<agentdeck_core::RepositoryName, ::std::string::String>,
+        }
+        impl ::std::default::Default for NewLink {
+            fn default() -> Self {
+                Self {
+                    repository: Err("no value supplied for repository".to_string()),
+                }
+            }
+        }
+        impl NewLink {
+            pub fn repository<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<agentdeck_core::RepositoryName>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.repository = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for repository: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<NewLink> for super::NewLink {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: NewLink,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    repository: value.repository?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::NewLink> for NewLink {
+            fn from(value: super::NewLink) -> Self {
+                Self {
+                    repository: Ok(value.repository),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
         pub struct NewPane {
             agent: ::std::result::Result<
                 ::std::option::Option<agentdeck_core::Agent>,
@@ -3901,6 +3976,133 @@ pub mod types {
                     name: Ok(value.name),
                     private: Ok(value.private),
                     url: Ok(value.url),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
+        pub struct RepositoryLinks {
+            archived: ::std::result::Result<bool, ::std::string::String>,
+            id: ::std::result::Result<agentdeck_core::RepositoryId, ::std::string::String>,
+            name: ::std::result::Result<agentdeck_core::RepositoryName, ::std::string::String>,
+            private: ::std::result::Result<bool, ::std::string::String>,
+            unreachable: ::std::result::Result<bool, ::std::string::String>,
+            url: ::std::result::Result<::std::string::String, ::std::string::String>,
+            workspaces: ::std::result::Result<
+                ::std::vec::Vec<agentdeck_core::WorkspaceId>,
+                ::std::string::String,
+            >,
+        }
+        impl ::std::default::Default for RepositoryLinks {
+            fn default() -> Self {
+                Self {
+                    archived: Err("no value supplied for archived".to_string()),
+                    id: Err("no value supplied for id".to_string()),
+                    name: Err("no value supplied for name".to_string()),
+                    private: Err("no value supplied for private".to_string()),
+                    unreachable: Err("no value supplied for unreachable".to_string()),
+                    url: Err("no value supplied for url".to_string()),
+                    workspaces: Err("no value supplied for workspaces".to_string()),
+                }
+            }
+        }
+        impl RepositoryLinks {
+            pub fn archived<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<bool>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.archived = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for archived: {e}"));
+                self
+            }
+            pub fn id<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<agentdeck_core::RepositoryId>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.id = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for id: {e}"));
+                self
+            }
+            pub fn name<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<agentdeck_core::RepositoryName>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.name = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for name: {e}"));
+                self
+            }
+            pub fn private<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<bool>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.private = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for private: {e}"));
+                self
+            }
+            pub fn unreachable<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<bool>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.unreachable = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for unreachable: {e}"));
+                self
+            }
+            pub fn url<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::string::String>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.url = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for url: {e}"));
+                self
+            }
+            pub fn workspaces<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::vec::Vec<agentdeck_core::WorkspaceId>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.workspaces = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for workspaces: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<RepositoryLinks> for super::RepositoryLinks {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: RepositoryLinks,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    archived: value.archived?,
+                    id: value.id?,
+                    name: value.name?,
+                    private: value.private?,
+                    unreachable: value.unreachable?,
+                    url: value.url?,
+                    workspaces: value.workspaces?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::RepositoryLinks> for RepositoryLinks {
+            fn from(value: super::RepositoryLinks) -> Self {
+                Self {
+                    archived: Ok(value.archived),
+                    id: Ok(value.id),
+                    name: Ok(value.name),
+                    private: Ok(value.private),
+                    unreachable: Ok(value.unreachable),
+                    url: Ok(value.url),
+                    workspaces: Ok(value.workspaces),
                 }
             }
         }
@@ -5464,10 +5666,12 @@ impl Client {
     ///Arguments:
     ///- `finished`: Include Finished pull requests; without it they are left out.
     ///- `repository`: Only the pull requests of the Repository GitHub calls this now, `owner/name`, ignoring case.
+    ///- `workspace`: Only the pull requests of the Repositories this Workspace links.
     ///```ignore
     ///let response = client.pr_list()
     ///    .finished(finished)
     ///    .repository(repository)
+    ///    .workspace(workspace)
     ///    .send()
     ///    .await;
     ///```
@@ -5517,6 +5721,40 @@ impl Client {
     ///```
     pub fn prs_sync(&self) -> builder::PrsSync<'_> {
         builder::PrsSync::new(self)
+    }
+    ///Every Repository agentdeck keeps, each with the Workspaces that link it (oldest first
+    ///
+    ///archived ones included) and whether the GitHub sign-in can still see it, by name ignoring case. A Repository is kept while a Workspace links it or one of your kept pull requests belongs to it. With `workspace`, only the Repositories that Workspace links; one that doesn't exist is 400 `unknown_workspace`.
+    ///
+    ///Sends a `GET` request to `/v1/repositories`
+    ///
+    ///Arguments:
+    ///- `workspace`: Only the Repositories this Workspace links.
+    ///```ignore
+    ///let response = client.repository_list()
+    ///    .workspace(workspace)
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn repository_list(&self) -> builder::RepositoryList<'_> {
+        builder::RepositoryList::new(self)
+    }
+    ///Looks a typed Repository up on GitHub (`GET /repos/{owner}/{repo}`) and answers it as
+    ///
+    ///GitHub shows it now. Stores nothing new; a Repository agentdeck keeps takes GitHub's name, URL, private and archived. One GitHub doesn't show the sign-in is 400 `unknown_repository`; no usable token is 409 `not_signed_in`; any other GitHub failure is 502 `github_error`.
+    ///
+    ///Sends a `GET` request to `/v1/repositories/resolve`
+    ///
+    ///Arguments:
+    ///- `repository`: The Repository's `owner/name`, or its GitHub URL.
+    ///```ignore
+    ///let response = client.repository_resolve()
+    ///    .repository(repository)
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn repository_resolve(&self) -> builder::RepositoryResolve<'_> {
+        builder::RepositoryResolve::new(self)
     }
     ///Every setting with the value the daemon uses
     ///
@@ -5753,9 +5991,9 @@ impl Client {
     pub fn workspace_get(&self) -> builder::WorkspaceGet<'_> {
         builder::WorkspaceGet::new(self)
     }
-    ///Deletes a workspace, and its dir when agentdeck created it. Its tasks move to the inbox
+    ///Deletes a workspace, and its dir when agentdeck created it. Its tasks move to the inbox; its
     ///
-    ///Without `force`, a dir holding uncommitted or unpushed work is a 409 `dirty` carrying the dirty report.
+    ///Links go, and with them each Repository nothing else names, with a `repository` change for each Repository it linked. Without `force`, a dir holding uncommitted or unpushed work is a 409 `dirty` carrying the dirty report.
     ///
     ///Sends a `DELETE` request to `/v1/workspaces/{id}`
     ///
@@ -5852,6 +6090,44 @@ impl Client {
     ///```
     pub fn instruction_create(&self) -> builder::InstructionCreate<'_> {
         builder::InstructionCreate::new(self)
+    }
+    ///Links the Workspace to a Repository and answers the Repository with every Workspace that
+    ///
+    ///links it. A Repository agentdeck doesn't know by that name is looked up on GitHub first and stored, as `GET /v1/repositories/resolve` does; one GitHub doesn't show the sign-in is 400 `unknown_repository` and nothing is linked. Linking a pair already linked changes nothing. A Workspace that doesn't exist is 404 `not_found`. Sends `changed` for the Repository, then the Workspace, when the Link is new.
+    ///
+    ///Sends a `POST` request to `/v1/workspaces/{id}/links`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///- `body`
+    ///```ignore
+    ///let response = client.link_create()
+    ///    .id(id)
+    ///    .body(body)
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn link_create(&self) -> builder::LinkCreate<'_> {
+        builder::LinkCreate::new(self)
+    }
+    ///Unlinks the Workspace from a Repository. The Repository goes too when no other Workspace
+    ///
+    ///links it and none of your kept pull requests belongs to it. A Workspace that doesn't exist, or a Repository it doesn't link, is 404 `not_found`. Sends `changed` for the Repository, then the Workspace.
+    ///
+    ///Sends a `DELETE` request to `/v1/workspaces/{id}/links/{repository}`
+    ///
+    ///Arguments:
+    ///- `id`: The Workspace's id.
+    ///- `repository`: The Repository's id, GitHub's.
+    ///```ignore
+    ///let response = client.link_delete()
+    ///    .id(id)
+    ///    .repository(repository)
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn link_delete(&self) -> builder::LinkDelete<'_> {
+        builder::LinkDelete::new(self)
     }
     ///A workspace's tabs, in position order
     ///
@@ -7229,6 +7505,7 @@ pub mod builder {
         client: &'a super::Client,
         finished: Result<Option<bool>, String>,
         repository: Result<Option<agentdeck_core::RepositoryName>, String>,
+        workspace: Result<Option<agentdeck_core::WorkspaceId>, String>,
     }
     impl<'a> PrList<'a> {
         pub fn new(client: &'a super::Client) -> Self {
@@ -7236,6 +7513,7 @@ pub mod builder {
                 client: client,
                 finished: Ok(None),
                 repository: Ok(None),
+                workspace: Ok(None),
             }
         }
         pub fn finished<V>(mut self, value: V) -> Self
@@ -7257,6 +7535,15 @@ pub mod builder {
             });
             self
         }
+        pub fn workspace<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<agentdeck_core::WorkspaceId>,
+        {
+            self.workspace = value.try_into().map(Some).map_err(|_| {
+                "conversion to `agentdeck_core :: WorkspaceId` for workspace failed".to_string()
+            });
+            self
+        }
         ///Sends a `GET` request to `/v1/prs`
         pub async fn send(
             self,
@@ -7266,9 +7553,11 @@ pub mod builder {
                 client,
                 finished,
                 repository,
+                workspace,
             } = self;
             let finished = finished.map_err(Error::InvalidRequest)?;
             let repository = repository.map_err(Error::InvalidRequest)?;
+            let workspace = workspace.map_err(Error::InvalidRequest)?;
             let url = format!("{}/v1/prs", client.baseurl,);
             let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
             header_map.append(
@@ -7288,6 +7577,7 @@ pub mod builder {
                     "repository",
                     &repository,
                 ))
+                .query(&progenitor_client::QueryParam::new("workspace", &workspace))
                 .headers(header_map)
                 .build()?;
             let info = OperationInfo {
@@ -7483,6 +7773,140 @@ pub mod builder {
                 .build()?;
             let info = OperationInfo {
                 operation_id: "prs_sync",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                200u16 => ResponseValue::from_response(response).await,
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::repository_list`]
+    ///
+    ///[`Client::repository_list`]: super::Client::repository_list
+    #[derive(Debug, Clone)]
+    pub struct RepositoryList<'a> {
+        client: &'a super::Client,
+        workspace: Result<Option<agentdeck_core::WorkspaceId>, String>,
+    }
+    impl<'a> RepositoryList<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self {
+                client: client,
+                workspace: Ok(None),
+            }
+        }
+        pub fn workspace<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<agentdeck_core::WorkspaceId>,
+        {
+            self.workspace = value.try_into().map(Some).map_err(|_| {
+                "conversion to `agentdeck_core :: WorkspaceId` for workspace failed".to_string()
+            });
+            self
+        }
+        ///Sends a `GET` request to `/v1/repositories`
+        pub async fn send(
+            self,
+        ) -> Result<ResponseValue<::std::vec::Vec<types::RepositoryLinks>>, Error<types::Error>>
+        {
+            let Self { client, workspace } = self;
+            let workspace = workspace.map_err(Error::InvalidRequest)?;
+            let url = format!("{}/v1/repositories", client.baseurl,);
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .get(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .query(&progenitor_client::QueryParam::new("workspace", &workspace))
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "repository_list",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                200u16 => ResponseValue::from_response(response).await,
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::repository_resolve`]
+    ///
+    ///[`Client::repository_resolve`]: super::Client::repository_resolve
+    #[derive(Debug, Clone)]
+    pub struct RepositoryResolve<'a> {
+        client: &'a super::Client,
+        repository: Result<agentdeck_core::RepositoryName, String>,
+    }
+    impl<'a> RepositoryResolve<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self {
+                client: client,
+                repository: Err("repository was not initialized".to_string()),
+            }
+        }
+        pub fn repository<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<agentdeck_core::RepositoryName>,
+        {
+            self.repository = value.try_into().map_err(|_| {
+                "conversion to `agentdeck_core :: RepositoryName` for repository failed".to_string()
+            });
+            self
+        }
+        ///Sends a `GET` request to `/v1/repositories/resolve`
+        pub async fn send(self) -> Result<ResponseValue<types::Repository>, Error<types::Error>> {
+            let Self { client, repository } = self;
+            let repository = repository.map_err(Error::InvalidRequest)?;
+            let url = format!("{}/v1/repositories/resolve", client.baseurl,);
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .get(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .query(&progenitor_client::QueryParam::new(
+                    "repository",
+                    &repository,
+                ))
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "repository_resolve",
             };
             client.pre(&mut request, &info).await?;
             let result = client.exec(request, &info).await;
@@ -9071,6 +9495,183 @@ pub mod builder {
             let response = result?;
             match response.status().as_u16() {
                 201u16 => ResponseValue::from_response(response).await,
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::link_create`]
+    ///
+    ///[`Client::link_create`]: super::Client::link_create
+    #[derive(Debug, Clone)]
+    pub struct LinkCreate<'a> {
+        client: &'a super::Client,
+        id: Result<agentdeck_core::WorkspaceId, String>,
+        body: Result<types::builder::NewLink, String>,
+    }
+    impl<'a> LinkCreate<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self {
+                client: client,
+                id: Err("id was not initialized".to_string()),
+                body: Ok(::std::default::Default::default()),
+            }
+        }
+        pub fn id<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<agentdeck_core::WorkspaceId>,
+        {
+            self.id = value.try_into().map_err(|_| {
+                "conversion to `agentdeck_core :: WorkspaceId` for id failed".to_string()
+            });
+            self
+        }
+        pub fn body<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<types::NewLink>,
+            <V as std::convert::TryInto<types::NewLink>>::Error: std::fmt::Display,
+        {
+            self.body = value
+                .try_into()
+                .map(From::from)
+                .map_err(|s| format!("conversion to `NewLink` for body failed: {}", s));
+            self
+        }
+        pub fn body_map<F>(mut self, f: F) -> Self
+        where
+            F: std::ops::FnOnce(types::builder::NewLink) -> types::builder::NewLink,
+        {
+            self.body = self.body.map(f);
+            self
+        }
+        ///Sends a `POST` request to `/v1/workspaces/{id}/links`
+        pub async fn send(
+            self,
+        ) -> Result<ResponseValue<types::RepositoryLinks>, Error<types::Error>> {
+            let Self { client, id, body } = self;
+            let id = id.map_err(Error::InvalidRequest)?;
+            let body = body
+                .and_then(|v| types::NewLink::try_from(v).map_err(|e| e.to_string()))
+                .map_err(Error::InvalidRequest)?;
+            let url = format!(
+                "{}/v1/workspaces/{}/links",
+                client.baseurl,
+                encode_path(&id.to_string()),
+            );
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .post(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .json(&body)
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "link_create",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                200u16 => ResponseValue::from_response(response).await,
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::link_delete`]
+    ///
+    ///[`Client::link_delete`]: super::Client::link_delete
+    #[derive(Debug, Clone)]
+    pub struct LinkDelete<'a> {
+        client: &'a super::Client,
+        id: Result<agentdeck_core::WorkspaceId, String>,
+        repository: Result<agentdeck_core::RepositoryId, String>,
+    }
+    impl<'a> LinkDelete<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self {
+                client: client,
+                id: Err("id was not initialized".to_string()),
+                repository: Err("repository was not initialized".to_string()),
+            }
+        }
+        pub fn id<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<agentdeck_core::WorkspaceId>,
+        {
+            self.id = value.try_into().map_err(|_| {
+                "conversion to `agentdeck_core :: WorkspaceId` for id failed".to_string()
+            });
+            self
+        }
+        pub fn repository<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<agentdeck_core::RepositoryId>,
+        {
+            self.repository = value.try_into().map_err(|_| {
+                "conversion to `agentdeck_core :: RepositoryId` for repository failed".to_string()
+            });
+            self
+        }
+        ///Sends a `DELETE` request to `/v1/workspaces/{id}/links/{repository}`
+        pub async fn send(self) -> Result<ResponseValue<()>, Error<types::Error>> {
+            let Self {
+                client,
+                id,
+                repository,
+            } = self;
+            let id = id.map_err(Error::InvalidRequest)?;
+            let repository = repository.map_err(Error::InvalidRequest)?;
+            let url = format!(
+                "{}/v1/workspaces/{}/links/{}",
+                client.baseurl,
+                encode_path(&id.to_string()),
+                encode_path(&repository.to_string()),
+            );
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .delete(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "link_delete",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                204u16 => Ok(ResponseValue::empty(response)),
                 400u16..=499u16 => Err(Error::ErrorResponse(
                     ResponseValue::from_response(response).await?,
                 )),

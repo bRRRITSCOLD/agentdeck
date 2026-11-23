@@ -293,7 +293,8 @@ fn spawn(root: &Path, github_api: &str) -> Child {
 
 /// `agentdeckd` with only `PATH` from the test's environment, behind a stub `gh`, `claude`
 /// and `codex`; `$HOME`
-/// and every `$XDG_*` dir under `root`; GitHub at `github_api`; no PR age cutoff, so the
+/// and every `$XDG_*` dir under `root`; GitHub's GraphQL API at `github_api` and its REST API
+/// on the same server ([`github::rest_api`]); no PR age cutoff, so the
 /// fixtures' fixed dates never age out (a test sets `AGENTDECK_PR_MAX_AGE_DAYS` with
 /// [`set_daemon_env`]); and stderr to a file (a pipe nobody reads would fill and block it).
 fn command(root: &Path, stderr: &Path, github_api: &str) -> Command {
@@ -304,6 +305,7 @@ fn command(root: &Path, stderr: &Path, github_api: &str) -> Command {
         .env_clear()
         .env("PATH", stub_path(root))
         .env("AGENTDECK_GITHUB_API", github_api)
+        .env("AGENTDECK_GITHUB_REST_API", github::rest_api(github_api))
         .env("AGENTDECK_PR_MAX_AGE_DAYS", "0")
         .env("HOME", &home)
         .env("XDG_RUNTIME_DIR", root.join("run"))

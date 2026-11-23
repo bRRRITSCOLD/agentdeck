@@ -8,6 +8,7 @@ mod config;
 mod daemon;
 mod instruction;
 mod pr;
+mod repo;
 mod support;
 mod task;
 mod version;

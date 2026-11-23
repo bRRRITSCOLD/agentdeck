@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use agentdeck_client::Client;
 use agentdeck_client::types::{
-    GhLogin, NewWorkspace, PrClose, PrCloseResult, PrSyncProgress, PrSyncStage, PrSyncStatus,
-    PullRequest, Repository, Task, Workspace,
+    GhLogin, NewLink, NewWorkspace, PrClose, PrCloseResult, PrSyncProgress, PrSyncStage,
+    PrSyncStatus, PullRequest, Repository, Task, Workspace,
 };
 use agentdeck_core::{
     ChecksState, PrRef, PrState, RepositoryId, RepositoryName, ReviewState, TaskKind, TaskStatus,
@@ -1835,6 +1835,51 @@ mod get_v1_prs {
     }
 
     #[tokio::test]
+    async fn should_list_only_the_prs_of_the_repositories_a_workspace_links_200() {
+        let github = MockServer::start_async().await;
+        let gadget = Pr {
+            repo: "acme/gadgets",
+            ..Pr::open(9)
+        };
+        let daemon = synced(&github, &[Pr::open(7), gadget]).await;
+        let web = daemon
+            .client
+            .workspace_create()
+            .body(NewWorkspace {
+                name: "web".into(),
+                dir: None,
+            })
+            .send()
+            .await
+            .expect("create a workspace")
+            .into_inner();
+        daemon
+            .client
+            .link_create()
+            .id(web.id)
+            .body(NewLink {
+                repository: "acme/gadgets".parse().unwrap(),
+            })
+            .send()
+            .await
+            .expect("link");
+
+        let webs = daemon.client.pr_list().workspace(web.id).send().await;
+        let widgets_of_web = daemon
+            .client
+            .pr_list()
+            .workspace(web.id)
+            .repository("acme/widgets".parse::<RepositoryName>().unwrap())
+            .send()
+            .await;
+
+        let webs = webs.expect("list PRs").into_inner();
+        let references: Vec<String> = webs.iter().map(|pr| pr.reference.to_string()).collect();
+        assert_eq!(references, ["acme/gadgets#9"]);
+        assert_eq!(widgets_of_web.expect("list PRs").into_inner(), []);
+    }
+
+    #[tokio::test]
     async fn should_keep_the_repository_and_its_pr_when_github_renames_it_200() {
         let github = MockServer::start_async().await;
         let mut before = mock_search(&github, TOKEN, &[Pr::open(7)]);
@@ -2360,6 +2405,14 @@ mod finished {
             .find(|pr| pr.number == number)
     }
 
+    /// The names of the Repositories agentdeck keeps.
+    async fn repositories(client: &Client) -> Vec<String> {
+        let response = client.repository_list().send().await;
+        (response.expect("list Repositories").into_inner().iter())
+            .map(|repository| repository.name.to_string())
+            .collect()
+    }
+
     /// The numbers `GET /v1/prs` lists without Finished ones.
     async fn unfinished(client: &Client) -> Vec<u32> {
         list(client).await.iter().map(|pr| pr.number).collect()
@@ -2576,6 +2629,42 @@ mod finished {
         // The PR's task goes with it.
         assert!(!(pr_tasks(&daemon.client).await.iter()).any(|task| task.id == gadget_task.id));
         assert_eq!(numbers(&daemon.client).await, [8]);
+        // acme/widgets keeps PR 8, so it stays; acme/gadgets has nothing left, so it goes.
+        assert_eq!(repositories(&daemon.client).await, ["acme/widgets"]);
+    }
+
+    #[tokio::test]
+    async fn should_keep_a_linked_repository_whose_prs_left_200() {
+        let github = MockServer::start_async().await;
+        let mut search = mock_search(&github, TOKEN, &[Pr::open(7)]);
+        let daemon =
+            TestDaemon::start_with_github(dirs_keeping_for("0"), &github.url("/graphql")).await;
+        sync(&daemon.client).await;
+        let web = (daemon.client.workspace_create())
+            .body(NewWorkspace {
+                name: "web".into(),
+                dir: None,
+            })
+            .send()
+            .await
+            .expect("create a workspace")
+            .into_inner();
+        (daemon.client.link_create())
+            .id(web.id)
+            .body(NewLink {
+                repository: "acme/widgets".parse().expect("a Repository"),
+            })
+            .send()
+            .await
+            .expect("link");
+
+        search.delete();
+        mock_search(&github, TOKEN, &[]);
+        mock_fetch(&github, &[merged(Pr::open(7))]);
+        sync(&daemon.client).await;
+
+        assert_eq!(kept(&daemon.client, 7).await, None);
+        assert_eq!(repositories(&daemon.client).await, ["acme/widgets"]);
     }
 
     #[tokio::test]

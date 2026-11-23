@@ -55,8 +55,10 @@ pub fn open(conn: &Connection) -> Result<Vec<OpenPr>, DbError> {
 }
 
 /// The kept PRs whose Repository PR sync has read, by Repository name, ignoring case, then
-/// number; only those of `filter.repository`, by the name GitHub gives it now, when it's set.
-/// Finished PRs are left out unless `filter.finished` asks for them.
+/// number; only those of `filter.repository`, by the name GitHub gives it now, when it's set,
+/// and only those of the Repositories `filter.workspace` links, when that's set. A workspace
+/// that doesn't exist is [`DbError::UnknownReference`]. Finished PRs are left out unless
+/// `filter.finished` asks for them.
 pub fn list(conn: &Connection, filter: &PrFilter) -> Result<Vec<PullRequest>, DbError> {
     let mut sql = String::from(
         "SELECT p.number, p.url, p.state, p.draft, p.head_ref, p.base_ref, p.author, p.checks,
@@ -76,6 +78,16 @@ pub fn list(conn: &Connection, filter: &PrFilter) -> Result<Vec<PullRequest>, Db
         values.push(Value::Text(repository.to_string()));
         sql.push_str(&format!(
             " AND r.full_name = ?{} COLLATE NOCASE",
+            values.len()
+        ));
+    }
+    if let Some(workspace) = filter.workspace {
+        if !super::exists(conn, "workspaces", workspace)? {
+            return Err(DbError::UnknownReference("workspace"));
+        }
+        values.push(Value::Text(workspace.to_string()));
+        sql.push_str(&format!(
+            " AND r.id IN (SELECT repository_id FROM links WHERE workspace_id = ?{})",
             values.len()
         ));
     }

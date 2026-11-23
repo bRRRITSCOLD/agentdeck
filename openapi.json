@@ -621,6 +621,23 @@
         ],
         "type": "object"
       },
+      "NewLink": {
+        "description": "`POST /v1/workspaces/{id}/links`: the Repository to link.",
+        "properties": {
+          "repository": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/RepositoryName"
+              }
+            ],
+            "description": "The Repository's `owner/name` (or its GitHub URL). One agentdeck doesn't know by that name is looked up on GitHub first."
+          }
+        },
+        "required": [
+          "repository"
+        ],
+        "type": "object"
+      },
       "NewPane": {
         "description": "`POST /v1/panes`.",
         "properties": {
@@ -1303,6 +1320,60 @@
         "format": "uint64",
         "minimum": 0,
         "type": "integer"
+      },
+      "RepositoryLinks": {
+        "description": "A Repository and the Workspaces that link it (spec §3): what GitHub last said of it, and whether the GitHub sign-in can still see it.",
+        "properties": {
+          "archived": {
+            "description": "Archived on GitHub: read-only.",
+            "type": "boolean"
+          },
+          "id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/RepositoryId"
+              }
+            ],
+            "description": "GitHub's id for it, which a rename or a transfer keeps."
+          },
+          "name": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/RepositoryName"
+              }
+            ],
+            "description": "`owner/name`, as GitHub calls it now."
+          },
+          "private": {
+            "description": "Only those GitHub lets in can see it.",
+            "type": "boolean"
+          },
+          "unreachable": {
+            "description": "Whether the GitHub sign-in can no longer see it: it shows as last read (spec §8).",
+            "type": "boolean"
+          },
+          "url": {
+            "description": "Its GitHub page.",
+            "type": "string"
+          },
+          "workspaces": {
+            "description": "The Workspaces that link it, archived ones included, oldest first; empty when none does and it is kept for its pull requests.",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceId"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "archived",
+          "id",
+          "name",
+          "private",
+          "unreachable",
+          "url",
+          "workspaces"
+        ],
+        "type": "object"
       },
       "RepositoryName": {
         "description": "A Repository's `owner/name`. Given to the daemon, its GitHub URL also works.",
@@ -2550,6 +2621,14 @@
             "schema": {
               "$ref": "#/components/schemas/RepositoryName"
             }
+          },
+          {
+            "description": "Only the pull requests of the Repositories this Workspace links.",
+            "in": "query",
+            "name": "workspace",
+            "schema": {
+              "$ref": "#/components/schemas/WorkspaceId"
+            }
           }
         ],
         "responses": {
@@ -2670,6 +2749,81 @@
           }
         },
         "summary": "Syncs PR tasks with GitHub now, after any sync running, and answers with the status the"
+      }
+    },
+    "/v1/repositories": {
+      "get": {
+        "description": "archived ones included) and whether the GitHub sign-in can still see it, by name ignoring case. A Repository is kept while a Workspace links it or one of your kept pull requests belongs to it. With `workspace`, only the Repositories that Workspace links; one that doesn't exist is 400 `unknown_workspace`.",
+        "operationId": "repository_list",
+        "parameters": [
+          {
+            "description": "Only the Repositories this Workspace links.",
+            "in": "query",
+            "name": "workspace",
+            "schema": {
+              "$ref": "#/components/schemas/WorkspaceId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RepositoryLinks"
+                  },
+                  "title": "Array_of_RepositoryLinks",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Every Repository agentdeck keeps, each with the Workspaces that link it (oldest first,"
+      }
+    },
+    "/v1/repositories/resolve": {
+      "get": {
+        "description": "GitHub shows it now. Stores nothing new; a Repository agentdeck keeps takes GitHub's name, URL, private and archived. One GitHub doesn't show the sign-in is 400 `unknown_repository`; no usable token is 409 `not_signed_in`; any other GitHub failure is 502 `github_error`.",
+        "operationId": "repository_resolve",
+        "parameters": [
+          {
+            "description": "The Repository's `owner/name`, or its GitHub URL.",
+            "in": "query",
+            "name": "repository",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/RepositoryName"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Repository"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Looks a typed Repository up on GitHub (`GET /repos/{owner}/{repo}`) and answers it as"
       }
     },
     "/v1/settings": {
@@ -3175,7 +3329,7 @@
     },
     "/v1/workspaces/{id}": {
       "delete": {
-        "description": "Without `force`, a dir holding uncommitted or unpushed work is a 409 `dirty` carrying the dirty report.",
+        "description": "Links go, and with them each Repository nothing else names, with a `repository` change for each Repository it linked. Without `force`, a dir holding uncommitted or unpushed work is a 409 `dirty` carrying the dirty report.",
         "operationId": "workspace_delete",
         "parameters": [
           {
@@ -3208,7 +3362,7 @@
             "$ref": "#/components/responses/DeleteWorkspaceError"
           }
         },
-        "summary": "Deletes a workspace, and its dir when agentdeck created it. Its tasks move to the inbox."
+        "summary": "Deletes a workspace, and its dir when agentdeck created it. Its tasks move to the inbox; its"
       },
       "get": {
         "operationId": "workspace_get",
@@ -3438,6 +3592,90 @@
           }
         },
         "summary": "Adds an instruction to a workspace. Every launch prompt there carries it from now on."
+      }
+    },
+    "/v1/workspaces/{id}/links": {
+      "post": {
+        "description": "links it. A Repository agentdeck doesn't know by that name is looked up on GitHub first and stored, as `GET /v1/repositories/resolve` does; one GitHub doesn't show the sign-in is 400 `unknown_repository` and nothing is linked. Linking a pair already linked changes nothing. A Workspace that doesn't exist is 404 `not_found`. Sends `changed` for the Repository, then the Workspace, when the Link is new.",
+        "operationId": "link_create",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/WorkspaceId"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewLink"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositoryLinks"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Links the Workspace to a Repository and answers the Repository with every Workspace that"
+      }
+    },
+    "/v1/workspaces/{id}/links/{repository}": {
+      "delete": {
+        "description": "links it and none of your kept pull requests belongs to it. A Workspace that doesn't exist, or a Repository it doesn't link, is 404 `not_found`. Sends `changed` for the Repository, then the Workspace.",
+        "operationId": "link_delete",
+        "parameters": [
+          {
+            "description": "The Workspace's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/WorkspaceId"
+            }
+          },
+          {
+            "description": "The Repository's id, GitHub's.",
+            "in": "path",
+            "name": "repository",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/RepositoryId"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "successful deletion"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Unlinks the Workspace from a Repository. The Repository goes too when no other Workspace"
       }
     },
     "/v1/workspaces/{id}/tabs": {

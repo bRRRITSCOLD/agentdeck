@@ -147,7 +147,8 @@ impl TestEnv {
     }
 
     /// A fresh world whose `gh` is logged in with `token` and whose daemon calls GitHub's
-    /// GraphQL API at `github_api` (httpmock), with no PR age cutoff.
+    /// GraphQL API at `github_api` (httpmock), and its REST API on the same server, with no PR
+    /// age cutoff.
     pub fn with_github(github_api: &str, token: &str) -> TestEnv {
         let mut env = TestEnv::new();
         env.github_api = Some(github_api.to_owned());
@@ -229,10 +230,8 @@ impl TestEnv {
             .env("XDG_STATE_HOME", root.join("state"))
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env(
-                "AGENTDECK_GITHUB_API",
-                self.github_api.as_deref().unwrap_or(UNREACHABLE),
-            )
+            .env("AGENTDECK_GITHUB_API", self.graphql_api())
+            .env("AGENTDECK_GITHUB_REST_API", self.rest_api())
             .env("AGENTDECK_DAEMON", daemon_binary())
             .current_dir(&home)
             .stdin(Stdio::null());
@@ -240,6 +239,18 @@ impl TestEnv {
             command.env("AGENTDECK_PR_MAX_AGE_DAYS", "0");
         }
         command
+    }
+
+    /// The GraphQL URL the daemon calls: the test's httpmock, else a port nothing listens on.
+    fn graphql_api(&self) -> &str {
+        self.github_api.as_deref().unwrap_or(UNREACHABLE)
+    }
+
+    /// The REST API's base URL the daemon calls: the GraphQL server's, so one httpmock answers
+    /// both.
+    fn rest_api(&self) -> &str {
+        let graphql = self.graphql_api();
+        graphql.strip_suffix("/graphql").unwrap_or(graphql)
     }
 
     /// Runs `agentdeck <args>` with extra `env` and waits for it.

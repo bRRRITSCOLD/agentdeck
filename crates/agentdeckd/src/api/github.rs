@@ -6,7 +6,7 @@ use dropshot::{
     RequestContext, TypedBody, endpoint,
 };
 
-use super::{ApiContext, Authorized, client_error};
+use super::{ApiContext, Authorized, client_error, server_error};
 use crate::github_auth::AuthError;
 use crate::model::{DeviceSignIn, GithubAuthInfo, GithubClientIdBody, GithubTokenBody};
 
@@ -127,16 +127,5 @@ fn http_error(err: AuthError) -> HttpError {
         }
         AuthError::Github(_) => server_error(ErrorStatusCode::BAD_GATEWAY, "github_error", message),
         AuthError::Keyring(_) => HttpError::for_internal_error(message),
-    }
-}
-
-/// A 5xx with a `code` and a message the client shows.
-fn server_error(status: ErrorStatusCode, code: &str, message: String) -> HttpError {
-    HttpError {
-        status_code: status,
-        error_code: Some(code.to_owned()),
-        external_message: message.clone(),
-        internal_message: message,
-        headers: None,
     }
 }

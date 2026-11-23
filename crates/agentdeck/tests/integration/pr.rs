@@ -1,5 +1,5 @@
-//! `agentdeck pr sync | status`, with `gh` logged out, and `pr ls` and `pr close` against
-//! httpmock.
+//! `agentdeck pr sync | status`, with `gh` logged out, and `pr ls` (by Repository and by
+//! workspace) and `pr close` against httpmock.
 
 use crate::support::TestEnv;
 
@@ -127,6 +127,44 @@ mod pr_ls {
         assert_eq!(pr["author"], "octocat");
         assert_eq!(pr["repository"]["name"], "acme/widgets");
         assert!(pr["repository"]["id"].is_u64(), "{pr}");
+    }
+
+    #[test]
+    fn should_list_only_the_pull_requests_of_the_repositories_a_workspace_links() {
+        let github = MockServer::start();
+        let env = synced(&github, &[widgets(7), GADGET]);
+        env.workspace("web");
+        env.workspace("api");
+        env.ok(&["repo", "link", "acme/gadgets", "--ws", "web"]);
+
+        let webs = env.ok(&["pr", "ls", "--ws", "web"]);
+        let apis = env.ok(&["pr", "ls", "--ws", "api"]);
+        let webs_json = env.json(&["pr", "ls", "--ws", "web"]);
+
+        assert_eq!(
+            webs,
+            "PR              STATE  TITLE\nacme/gadgets#9  open   PR 9\n"
+        );
+        assert_eq!(apis, "no pull requests\n");
+        let references: Vec<&Value> = (webs_json.as_array().expect("a list").iter())
+            .map(|pr| &pr["reference"])
+            .collect();
+        assert_eq!(references, [&Value::from("acme/gadgets#9")]);
+    }
+
+    #[test]
+    fn should_list_every_pull_request_whatever_agentdeck_workspace_says() {
+        let github = MockServer::start();
+        let env = synced(&github, &[widgets(7), GADGET]);
+        let web = env.workspace("web");
+        env.ok(&["repo", "link", "acme/gadgets", "--ws", "web"]);
+        let id = std::ffi::OsString::from(crate::support::text(&web, "id"));
+
+        let run = env.run_with(&["pr", "ls"], &[("AGENTDECK_WORKSPACE", &id)]);
+
+        assert!(run.success, "{}", run.stderr);
+        assert!(run.stdout.contains("acme/widgets#7"), "{}", run.stdout);
+        assert!(run.stdout.contains("acme/gadgets#9"), "{}", run.stdout);
     }
 
     #[test]

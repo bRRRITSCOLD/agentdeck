@@ -34,7 +34,8 @@ const MIGRATION_LIST: &[M<'static>] = &[
     M::up(include_str!("migrations/0006_pr_unreachable.sql")),
     M::up(include_str!("migrations/0007_repositories.sql")),
     M::up(include_str!("migrations/0008_pane_folder.sql")),
-    M::up(include_str!("migrations/0009_pr_finished.sql")),
+    M::up(include_str!("migrations/0009_links.sql")),
+    M::up(include_str!("migrations/0010_pr_finished.sql")),
 ];
 const MIGRATIONS: Migrations<'static> = Migrations::from_slice(MIGRATION_LIST);
 

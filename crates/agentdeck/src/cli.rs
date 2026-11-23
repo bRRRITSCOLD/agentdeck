@@ -36,6 +36,9 @@ pub enum Command {
     /// Agent panes.
     #[command(subcommand)]
     Agent(AgentCommand),
+    /// Repositories, and linking them to workspaces.
+    #[command(subcommand)]
+    Repo(RepoCommand),
     /// Your GitHub pull requests, and syncing them.
     #[command(subcommand)]
     Pr(PrCommand),
@@ -278,6 +281,37 @@ pub enum AgentCommand {
     },
 }
 
+/// `agentdeck repo …`. A Repository is `owner/name` or its GitHub URL; a `WS` is a
+/// workspace's id, slug or name. No command reads `$AGENTDECK_WORKSPACE`: pass
+/// `--ws "$AGENTDECK_WORKSPACE"` yourself.
+#[derive(Debug, Subcommand)]
+pub enum RepoCommand {
+    /// List the Repositories agentdeck keeps, with the workspaces linking each.
+    Ls {
+        /// Only the Repositories this workspace links.
+        #[arg(long, value_name = "WS")]
+        ws: Option<String>,
+    },
+    /// Link a Repository to a workspace, so its pull requests show there. One agentdeck
+    /// doesn't know yet is looked up on GitHub first.
+    Link {
+        /// The Repository: `owner/name` or its GitHub URL.
+        repo: RepositoryName,
+        /// The workspace.
+        #[arg(long, value_name = "WS")]
+        ws: String,
+    },
+    /// Unlink a Repository from a workspace. agentdeck forgets the Repository when no other
+    /// workspace links it and none of your pull requests belongs to it.
+    Unlink {
+        /// The Repository: `owner/name` or its GitHub URL.
+        repo: RepositoryName,
+        /// The workspace.
+        #[arg(long, value_name = "WS")]
+        ws: String,
+    },
+}
+
 /// `agentdeck pr …`. A pull request is `owner/name#123` or its GitHub URL; a Repository is
 /// `owner/name` or its GitHub URL.
 #[derive(Debug, Subcommand)]
@@ -287,6 +321,9 @@ pub enum PrCommand {
         /// Only this Repository's: `owner/name` or its GitHub URL.
         #[arg(long, value_name = "REPO")]
         repo: Option<RepositoryName>,
+        /// Only those of the Repositories this workspace links.
+        #[arg(long, value_name = "WS")]
+        ws: Option<String>,
     },
     /// Sync PR tasks with GitHub now: a full sync, which reads every open PR again.
     Sync,
@@ -609,13 +646,54 @@ mod tests {
         fn should_list_one_repository_named_by_its_url() {
             let cli = parse(&["pr", "ls", "--repo", "https://github.com/acme/widgets"]).unwrap();
 
-            let Command::Pr(PrCommand::Ls { repo }) = cli.command else {
+            let Command::Pr(PrCommand::Ls { repo, .. }) = cli.command else {
                 panic!("not pr ls: {cli:?}");
             };
             assert_eq!(
                 repo.map(|repo| repo.to_string()),
                 Some("acme/widgets".into())
             );
+        }
+
+        #[test]
+        fn should_list_one_workspaces_pull_requests() {
+            let cli = parse(&["pr", "ls", "--ws", "web"]).unwrap();
+
+            let Command::Pr(PrCommand::Ls { ws, .. }) = cli.command else {
+                panic!("not pr ls: {cli:?}");
+            };
+            assert_eq!(ws.as_deref(), Some("web"));
+        }
+
+        #[test]
+        fn should_link_a_repository_named_by_its_url_to_a_workspace() {
+            let cli = parse(&[
+                "repo",
+                "link",
+                "https://github.com/acme/widgets",
+                "--ws",
+                "web",
+            ])
+            .unwrap();
+
+            let Command::Repo(RepoCommand::Link { repo, ws }) = cli.command else {
+                panic!("not repo link: {cli:?}");
+            };
+            assert_eq!(repo.to_string(), "acme/widgets");
+            assert_eq!(ws, "web");
+        }
+
+        #[test]
+        fn should_need_a_workspace_to_link_or_unlink() {
+            assert!(parse(&["repo", "link", "acme/widgets"]).is_err());
+            assert!(parse(&["repo", "unlink", "acme/widgets"]).is_err());
+        }
+
+        #[test]
+        fn should_refuse_to_link_what_names_no_repository() {
+            let err = parse(&["repo", "link", "widgets", "--ws", "web"]).unwrap_err();
+
+            assert!(err.to_string().contains("isn't a Repository"), "{err}");
         }
 
         #[test]

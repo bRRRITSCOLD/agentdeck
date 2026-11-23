@@ -168,11 +168,11 @@ mod migration_0002 {
     }
 }
 
-mod migration_0009 {
+mod migration_0010 {
     use super::*;
 
-    /// Every migration up to 0008, in order.
-    const SCHEMA_0008: [&str; 8] = [
+    /// Every migration up to 0009, in order.
+    const SCHEMA_0009: [&str; 9] = [
         SCHEMA_0001,
         include_str!("../../src/db/migrations/0002_comments_and_instructions.sql"),
         include_str!("../../src/db/migrations/0003_pr_aged_out.sql"),
@@ -181,19 +181,20 @@ mod migration_0009 {
         include_str!("../../src/db/migrations/0006_pr_unreachable.sql"),
         include_str!("../../src/db/migrations/0007_repositories.sql"),
         include_str!("../../src/db/migrations/0008_pane_folder.sql"),
+        include_str!("../../src/db/migrations/0009_links.sql"),
     ];
 
-    /// Writes a database at schema 0008 under `root` holding `acme/widgets` with PR 1 open,
+    /// Writes a database at schema 0009 under `root` holding `acme/widgets` with PR 1 open,
     /// PR 2 open but aged out, and PR 3 merged, each with its task.
     fn aged_out_era_db(root: &Path) {
         let dir = root.join("data/agentdeck");
         std::fs::create_dir_all(&dir).expect("creating the data dir");
         let conn = Connection::open(dir.join("agentdeck.db")).expect("opening the database");
-        for schema in SCHEMA_0008 {
+        for schema in SCHEMA_0009 {
             conn.execute_batch(schema).expect("an earlier schema");
         }
-        conn.pragma_update(None, "user_version", 8)
-            .expect("marking it migrated to 0008");
+        conn.pragma_update(None, "user_version", 9)
+            .expect("marking it migrated to 0009");
         conn.execute(
             "INSERT INTO repositories (id, full_name, url, private, archived)
              VALUES (42, 'acme/widgets', 'https://github.com/acme/widgets', 0, 0)",
