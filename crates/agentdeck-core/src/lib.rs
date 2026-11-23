@@ -35,7 +35,7 @@ pub use daemon::{API_VERSION, DaemonInfo};
 pub use id::{CommentId, InstructionId, PaneId, TabId, TaskId, WorkspaceId};
 pub use layout::{Layout, LayoutError, Ratio, SplitDirection};
 pub use pane::{Agent, PaneKind};
-pub use pr::{ChecksState, NotAPr, PrRef, PrState, ReviewState, pr_task_status};
+pub use pr::{ChecksState, NotAPr, PrRef, PrState, ReviewState, pr_details, pr_task_status};
 pub use repository::{NotARepository, RepositoryId, RepositoryName};
 pub use state::AgentState;
 pub use task::{TaskKind, TaskPlace, TaskStatus};

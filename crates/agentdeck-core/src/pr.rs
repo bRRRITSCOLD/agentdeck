@@ -164,6 +164,21 @@ pub fn pr_task_status(before: Option<PrState>, now: PrState) -> Option<TaskStatu
     }
 }
 
+/// What **Copy PR details** puts on the clipboard for one pull request (spec §11): three lines
+/// of plain text that also read as markdown. Its reference and title, its GitHub page, then the
+/// branch it merges from and the one it merges into:
+///
+/// ```text
+/// bRRRITSCOLD/agentdeck#352: Fix pane restore
+/// https://github.com/bRRRITSCOLD/agentdeck/pull/352
+/// fix/pane-restore → main
+/// ```
+///
+/// An agent the text is pasted to fetches the rest from GitHub itself.
+pub fn pr_details(reference: &PrRef, title: &str, url: &str, head: &str, base: &str) -> String {
+    format!("{reference}: {title}\n{url}\n{head} → {base}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,6 +261,30 @@ mod tests {
 
             assert_eq!(json, r#""acme/widgets#7""#);
             assert_eq!(serde_json::from_str::<PrRef>(&json).unwrap(), parsed);
+        }
+    }
+
+    mod pr_details {
+        use super::*;
+
+        #[test]
+        fn should_give_the_reference_and_title_the_url_then_head_into_base() {
+            let pr: PrRef = "bRRRITSCOLD/agentdeck#352".parse().unwrap();
+
+            let details = pr_details(
+                &pr,
+                "Fix pane restore",
+                "https://github.com/bRRRITSCOLD/agentdeck/pull/352",
+                "fix/pane-restore",
+                "main",
+            );
+
+            assert_eq!(
+                details,
+                "bRRRITSCOLD/agentdeck#352: Fix pane restore\n\
+                 https://github.com/bRRRITSCOLD/agentdeck/pull/352\n\
+                 fix/pane-restore → main"
+            );
         }
     }
 

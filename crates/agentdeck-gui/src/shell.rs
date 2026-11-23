@@ -1,6 +1,6 @@
 //! The main window's content: what the daemon connection allows. Until it connects, a
 //! centred status; once it does, the sidebar beside the selected view, under a banner with a
-//! Restart while the daemon predates the app: a workspace's pane,
+//! Restart while the daemon predates the app: a workspace's pane, the Pull requests view,
 //! the Tasks view, the Inbox or Settings, and the new workspace dialog the
 //! sidebar's `+` opens. Settings is made as the window connects, so the saved theme applies
 //! from the start. When the compositor leaves decorations to the app, a title bar and
@@ -62,7 +62,7 @@ use crate::connection::{Connection, Status};
 use crate::delete_workspace::{DeleteEvent, DeleteTarget, DeleteWorkspaceDialog};
 use crate::edit_workspace::{EditTarget, EditWorkspaceDialog, Renamed};
 use crate::frame;
-use crate::inbox::{InboxView, OpenSettings, Synced};
+use crate::inbox::InboxView;
 use crate::keymap::ToggleRightPanel;
 use crate::link_task::{self, LinkTaskDialog};
 use crate::new_agent::{self, Launched, NewAgent, NewAgentDialog, Target};
@@ -70,10 +70,12 @@ use crate::new_task::{NewTask, NewTaskDialog};
 use crate::new_workspace::{Created, NewWorkspaceDialog};
 use crate::notice::{self, Notice, NoticeAction};
 use crate::notifications::{self, Alert as Notification};
+use crate::pull_requests::{PullRequestsView, Synced};
 use crate::quit;
 use crate::right_panel::{self, RightPanel};
 use crate::settings::SettingsView;
 use crate::sidebar::{Alerts, Selection, SidebarEvent, SidebarView};
+use crate::sync_parts::OpenSettings;
 use crate::task_sheet::{EditTask, OpenTask, StartAgentOn, TaskSheet};
 use crate::tasks::TasksView;
 use crate::title_bar::{Close, Minimize, TitleBar, ToggleMaximize};
@@ -120,6 +122,8 @@ pub struct Shell {
     tasks: Option<Entity<TasksView>>,
     /// The Inbox, while connected; shown while the sidebar selects it.
     inbox: Option<Entity<InboxView>>,
+    /// The Pull requests view, while connected; shown while the sidebar selects it.
+    pull_requests: Option<Entity<PullRequestsView>>,
     /// Settings, while connected; shown while the sidebar's gear selects it. It also applies
     /// the saved theme.
     settings: Option<Entity<SettingsView>>,
@@ -193,6 +197,7 @@ impl Shell {
             _workspace: Vec::new(),
             tasks: None,
             inbox: None,
+            pull_requests: None,
             settings: None,
             panel: None,
             panel_open: true,
@@ -411,6 +416,7 @@ impl Shell {
                     let connection = self.connection.clone();
                     let dialog = cx.new(|cx| NewWorkspaceDialog::new(api.clone(), window, cx));
                     let inbox = cx.new(|cx| InboxView::new(api.clone(), cx));
+                    let pull_requests = cx.new(|cx| PullRequestsView::new(api.clone(), cx));
                     let new_agent = cx.new(|_| NewAgentDialog::new(api.clone()));
                     let link_task = cx.new(|_| LinkTaskDialog::new(api.clone()));
                     let edit = cx.new(|cx| EditWorkspaceDialog::new(api.clone(), window, cx));
@@ -448,10 +454,13 @@ impl Shell {
                         ),
                         // A sync that changes no task broadcasts nothing, yet moves when PRs
                         // last synced.
-                        cx.subscribe(&inbox, |shell, _, _: &Synced, cx| {
+                        cx.subscribe(&pull_requests, |shell, _, _: &Synced, cx| {
                             if let Some(sidebar) = &shell.sidebar {
                                 sidebar.update(cx, |sidebar, cx| sidebar.refresh(cx));
                             }
+                        }),
+                        cx.subscribe(&pull_requests, |shell, _, _: &OpenSettings, cx| {
+                            shell.open_settings(cx);
                         }),
                         // Show the agent's workspace and tab, and focus it: it may be asking
                         // about trust.
@@ -503,14 +512,7 @@ impl Shell {
                             shell.open_task(*ask, window, cx);
                         }),
                         cx.subscribe(&inbox, |shell, _, _: &OpenSettings, cx| {
-                            if let Some(sidebar) = &shell.sidebar {
-                                let settings = Selection::Settings;
-                                sidebar.update(cx, |sidebar, cx| sidebar.select(settings, cx));
-                            }
-                            // At its GitHub section, the top.
-                            if let Some(settings) = &shell.settings {
-                                settings.update(cx, |settings, cx| settings.scroll_to_github(cx));
-                            }
+                            shell.open_settings(cx);
                         }),
                         cx.subscribe_in(&panel, window, |shell, _, ask, window, cx| {
                             shell.open_task(*ask, window, cx);
@@ -533,6 +535,7 @@ impl Shell {
                     ];
                     self.new_workspace = Some(dialog);
                     self.inbox = Some(inbox);
+                    self.pull_requests = Some(pull_requests);
                     self.new_agent = Some(new_agent);
                     self.edit_workspace = Some(edit);
                     self.delete_workspace = Some(delete);
@@ -555,6 +558,7 @@ impl Shell {
                 self._workspace.clear();
                 self.tasks = None;
                 self.inbox = None;
+                self.pull_requests = None;
                 self.settings = None;
                 self.panel = None;
                 self.new_agent = None;
@@ -586,6 +590,10 @@ impl Shell {
             let snapshot = snapshot.clone();
             inbox.update(cx, |inbox, cx| inbox.set_snapshot(snapshot, cx));
         }
+        if let Some(view) = &self.pull_requests {
+            let snapshot = snapshot.clone();
+            view.update(cx, |view, cx| view.set_snapshot(snapshot, cx));
+        }
         if let Some(sheet) = &self.task_sheet {
             let snapshot = snapshot.clone();
             sheet.update(cx, |sheet, cx| sheet.set_snapshot(snapshot, cx));
@@ -603,7 +611,9 @@ impl Shell {
         let sidebar = sidebar.read(cx);
         let row = match selection {
             Selection::Workspace(selected) => sidebar.overview().workspace(selected),
-            Selection::Inbox | Selection::Tasks | Selection::Settings => None,
+            Selection::PullRequests | Selection::Inbox | Selection::Tasks | Selection::Settings => {
+                None
+            }
         };
         let Some(row) = row else {
             self.workspace = None;
@@ -850,6 +860,18 @@ impl Shell {
     }
 
     /// The connected session's API.
+    /// Shows Settings at its GitHub section, the top: what the Pull requests view's and the
+    /// Inbox's Open Settings and "Settings" links ask for.
+    fn open_settings(&mut self, cx: &mut Context<Self>) {
+        if let Some(sidebar) = &self.sidebar {
+            let settings = Selection::Settings;
+            sidebar.update(cx, |sidebar, cx| sidebar.select(settings, cx));
+        }
+        if let Some(settings) = &self.settings {
+            settings.update(cx, |settings, cx| settings.scroll_to_github(cx));
+        }
+    }
+
     fn api(&self, cx: &App) -> Option<Arc<dyn Api>> {
         match self.connection.read(cx).status() {
             Status::Connected(session) => Some(session.api.clone()),
@@ -1095,6 +1117,9 @@ impl Shell {
                 }
                 Some(Selection::Tasks) if self.tasks.is_some() => body.children(self.tasks.clone()),
                 Some(Selection::Inbox) if self.inbox.is_some() => body.children(self.inbox.clone()),
+                Some(Selection::PullRequests) if self.pull_requests.is_some() => {
+                    body.children(self.pull_requests.clone())
+                }
                 Some(Selection::Settings) if self.settings.is_some() => {
                     body.children(self.settings.clone())
                 }
@@ -1470,6 +1495,67 @@ mod tests {
                 shell.read_with(cx, |shell, _| {
                     assert_eq!(shell.selection, Some(Selection::Settings));
                 });
+            }
+
+            #[gpui::test]
+            fn should_show_the_pull_requests_view_with_the_prs_the_sidebar_reads(
+                cx: &mut TestAppContext,
+            ) {
+                let connector = Rc::new(FakeConnector::default());
+                let api = workspace_with_a_pane();
+                api.set_prs(vec![crate::overview::fixtures::pull_request(
+                    7,
+                    "acme/widgets",
+                )]);
+                let _remote = connector.then_connect_to(api);
+                let shell = open(connector, cx);
+                let sidebar = shell.read_with(cx, |shell, _| shell.sidebar.clone().unwrap());
+
+                sidebar.update(cx, |sidebar, cx| {
+                    sidebar.select(Selection::PullRequests, cx)
+                });
+                cx.run_until_parked();
+
+                let view = shell.read_with(cx, |shell, _| {
+                    assert_eq!(shell.selection, Some(Selection::PullRequests));
+                    shell.pull_requests.clone().unwrap()
+                });
+                let groups = view.read_with(cx, |view, _| view.groups());
+                assert_eq!(groups.len(), 1);
+                assert_eq!(groups[0].prs[0].number, 7);
+                assert_eq!(shown_workspace(&shell, cx), None);
+            }
+
+            #[gpui::test]
+            fn should_show_settings_when_the_pull_requests_view_asks(cx: &mut TestAppContext) {
+                let connector = Rc::new(FakeConnector::default());
+                let _remote = connector.then_connect_to(workspace_with_a_pane());
+                let shell = open(connector, cx);
+                let view = shell.read_with(cx, |shell, _| shell.pull_requests.clone().unwrap());
+
+                view.update(cx, |_, cx| cx.emit(OpenSettings));
+                cx.run_until_parked();
+
+                shell.read_with(cx, |shell, _| {
+                    assert_eq!(shell.selection, Some(Selection::Settings));
+                });
+            }
+
+            #[gpui::test]
+            fn should_read_again_once_a_sync_from_the_pull_requests_view_ends(
+                cx: &mut TestAppContext,
+            ) {
+                let connector = Rc::new(FakeConnector::default());
+                let api = workspace_with_a_pane();
+                let _remote = connector.then_connect_to(api.clone());
+                let shell = open(connector, cx);
+                let view = shell.read_with(cx, |shell, _| shell.pull_requests.clone().unwrap());
+                let reads = api.reads();
+
+                view.update(cx, |_, cx| cx.emit(Synced));
+                cx.run_until_parked();
+
+                assert_eq!(api.reads(), reads + 1);
             }
 
             #[gpui::test]

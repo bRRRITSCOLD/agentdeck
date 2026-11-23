@@ -5,12 +5,14 @@
 //! sends it. [`daemon::connect`] finds the running daemon, starting it if need be, and
 //! [`ws::open`] opens its WebSocket. [`ApiError`] turns a failed call into what the daemon
 //! said; [`panes`] and [`instructions`] hold the pane and instruction operations that take more
-//! than one call, and [`settings`] names settings by dotted key.
+//! than one call, [`prs`] reads the pull requests as the GUI shows them, and [`settings`] names
+//! settings by dotted key.
 
 pub mod daemon;
 pub mod error;
 pub mod instructions;
 pub mod panes;
+pub mod prs;
 pub mod settings;
 pub mod ws;
 

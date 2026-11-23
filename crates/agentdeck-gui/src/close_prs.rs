@@ -241,8 +241,8 @@ pub fn bar_label(selected: usize, closing: Option<&Closing>) -> String {
 /// A PR the confirm dialog asks about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
-    /// Its task.
-    pub id: TaskId,
+    /// Its task, in a task list; `None` on the Pull requests view, whose rows are PRs.
+    pub id: Option<TaskId>,
     /// Its reference, `owner/name#123`, which closing it sends.
     pub pr: PrRef,
     /// Its repo's name without the owner.
@@ -256,7 +256,7 @@ impl Target {
     pub fn of(row: &Row) -> Option<Target> {
         let pr = row.pr.as_ref().filter(|_| row.closable)?;
         Some(Target {
-            id: row.id,
+            id: Some(row.id),
             pr: pr.full_reference.clone()?,
             repo: pr.repo.clone(),
             reference: pr.reference.clone(),
@@ -473,7 +473,7 @@ impl ClosePrs {
         };
         self.dialog.close(window, cx);
         if let Asking::Selected(targets) = &asking {
-            self.closing = Some(Closing::new(targets.iter().map(|t| t.id).collect()));
+            self.closing = Some(Closing::new(targets.iter().filter_map(|t| t.id).collect()));
         }
         let prs: Vec<PrRef> = asking.targets().iter().map(|t| t.pr.clone()).collect();
         let closing = self.api.close_prs(prs, cx);
@@ -502,8 +502,9 @@ impl ClosePrs {
         match (asking, closed) {
             (Asking::Selected(targets), Ok(results)) => {
                 // One result per reference, in the order asked.
-                let results: Vec<(TaskId, PrCloseResult)> =
-                    targets.iter().map(|t| t.id).zip(results).collect();
+                let results: Vec<(TaskId, PrCloseResult)> = (targets.iter().zip(results))
+                    .filter_map(|(target, result)| Some((target.id?, result)))
+                    .collect();
                 self.selection.closed(&results).show(window, cx);
             }
             (Asking::Selected(_), Err(err)) => failed("Couldn't close PRs", &err, window, cx),
@@ -514,7 +515,9 @@ impl ClosePrs {
                         .show(window, cx);
                 }
                 _ => {
-                    self.selection.set(target.id, false);
+                    if let Some(task) = target.id {
+                        self.selection.set(task, false);
+                    }
                     Notice::new(format!("Closed {}", prs(1))).show(window, cx);
                 }
             },
@@ -1008,7 +1011,7 @@ mod tests {
                     MenuEntry::CopyTaskId(id(1)),
                     MenuEntry::Separator,
                     MenuEntry::ClosePr(Target {
-                        id: id(1),
+                        id: Some(id(1)),
                         pr: "acme/widgets#1".parse().unwrap(),
                         repo: "widgets".into(),
                         reference: "widgets #1".into(),
@@ -1289,7 +1292,7 @@ mod tests {
 
         fn target(task: u32, repo: &'static str) -> Target {
             Target {
-                id: id(task),
+                id: Some(id(task)),
                 pr: format!("acme/{repo}#{task}").parse().unwrap(),
                 repo: repo.into(),
                 reference: format!("{repo} #{task}").into(),
