@@ -850,6 +850,7 @@ mod tests {
                 state: PrState::Open,
                 title: title.into(),
                 unreachable: false,
+                finished: false,
                 updated_at: String::new(),
                 url: format!(
                     "https://github.com/{}/pull/{}",
