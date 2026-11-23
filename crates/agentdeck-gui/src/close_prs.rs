@@ -18,6 +18,8 @@
 //! `agentdeck/CheckboxIndeterminate` and `agentdeck/ClosePrsList`.
 
 use std::collections::HashMap;
+use std::fmt::Display;
+use std::hash::Hash;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -55,6 +57,12 @@ const LIST_ROWS: usize = 6;
 /// A repo line's height in the dialog's list. Raw in Penpot too.
 const LIST_ROW_HEIGHT: f32 = 32.;
 
+/// What a list picks its PRs by: a task in a task list, a pull request on the Pull requests
+/// view.
+pub trait Key: Copy + Eq + Hash + std::fmt::Debug + 'static {}
+
+impl<K: Copy + Eq + Hash + std::fmt::Debug + 'static> Key for K {}
+
 /// `n` PRs, as a count: "1 PR", "2 PRs".
 pub fn prs(n: usize) -> String {
     if n == 1 {
@@ -75,17 +83,28 @@ pub enum Check {
     All,
 }
 
-/// Select mode and the PRs picked in it, as a list keeps them.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Selection {
+/// Select mode and the PRs picked in it, as a list keeps them: by task in a task list, by pull
+/// request on the Pull requests view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Selection<K: Key = TaskId> {
     active: bool,
-    /// The tasks picked, in the order picked.
-    selected: Vec<TaskId>,
+    /// The rows picked, in the order picked.
+    selected: Vec<K>,
     /// Why each PR that failed to close didn't, while it stays selected.
-    errors: HashMap<TaskId, SharedString>,
+    errors: HashMap<K, SharedString>,
 }
 
-impl Selection {
+impl<K: Key> Default for Selection<K> {
+    fn default() -> Self {
+        Selection {
+            active: false,
+            selected: Vec::new(),
+            errors: HashMap::new(),
+        }
+    }
+}
+
+impl<K: Key> Selection<K> {
     /// Whether Select mode is on.
     pub fn active(&self) -> bool {
         self.active
@@ -101,17 +120,17 @@ impl Selection {
     }
 
     /// The tasks picked, in the order picked.
-    pub fn ids(&self) -> &[TaskId] {
+    pub fn ids(&self) -> &[K] {
         &self.selected
     }
 
     /// Whether `task` is picked.
-    pub fn contains(&self, task: TaskId) -> bool {
+    pub fn contains(&self, task: K) -> bool {
         self.selected.contains(&task)
     }
 
     /// Picks `task`, or unpicks it, which forgets why it failed to close.
-    pub fn set(&mut self, task: TaskId, on: bool) {
+    pub fn set(&mut self, task: K, on: bool) {
         if on {
             if !self.contains(task) {
                 self.selected.push(task);
@@ -123,14 +142,14 @@ impl Selection {
     }
 
     /// Picks every one of `tasks`, or unpicks them all.
-    pub fn set_all(&mut self, tasks: &[TaskId], on: bool) {
+    pub fn set_all(&mut self, tasks: &[K], on: bool) {
         for task in tasks {
             self.set(*task, on);
         }
     }
 
     /// How many of `tasks` (a group's selectable rows) are picked.
-    pub fn check(&self, tasks: &[TaskId]) -> Check {
+    pub fn check(&self, tasks: &[K]) -> Check {
         let picked = tasks.iter().filter(|t| self.contains(**t)).count();
         match picked {
             0 => Check::Off,
@@ -141,7 +160,7 @@ impl Selection {
 
     /// Keeps only the picked tasks among `shown`: a row that hides leaves the selection.
     /// Returns whether anything left.
-    pub fn retain(&mut self, shown: &[TaskId]) -> bool {
+    pub fn retain(&mut self, shown: &[K]) -> bool {
         let before = self.selected.len();
         self.selected.retain(|t| shown.contains(t));
         self.errors.retain(|t, _| shown.contains(t));
@@ -149,7 +168,7 @@ impl Selection {
     }
 
     /// Why `task`'s PR didn't close, while it stays picked.
-    pub fn error(&self, task: TaskId) -> Option<&SharedString> {
+    pub fn error(&self, task: K) -> Option<&SharedString> {
         self.errors.get(&task)
     }
 
@@ -158,13 +177,13 @@ impl Selection {
     /// ones still picked, each with its error, and the rest unpicked. When some closed, the
     /// toast says how many and to hover the marked rows; when none closed, it is an error with
     /// the first one's error, as a close from a row's menu says why.
-    pub fn closed(&mut self, results: &[(TaskId, PrCloseResult)]) -> Notice {
+    pub fn closed(&mut self, results: &[(K, PrCloseResult)]) -> Notice {
         let closed = results.iter().filter(|(_, r)| r.ok).count();
         if closed == results.len() {
             self.set_active(false);
             return Notice::new(format!("Closed {}", prs(closed)));
         }
-        let failed: Vec<(TaskId, SharedString)> = (results.iter())
+        let failed: Vec<(K, SharedString)> = (results.iter())
             .filter(|(_, r)| !r.ok)
             .map(|(task, r)| {
                 let error = r
@@ -195,15 +214,15 @@ impl Selection {
 
 /// A close of the picked PRs in flight (spec §11, Closing PRs): the PRs it closes, and those
 /// of them the tasks show closed so far.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Closing {
-    targets: Vec<TaskId>,
-    closed: Vec<TaskId>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Closing<K = TaskId> {
+    targets: Vec<K>,
+    closed: Vec<K>,
 }
 
-impl Closing {
+impl<K: Key> Closing<K> {
     /// Closing `targets`, none closed yet.
-    pub fn new(targets: Vec<TaskId>) -> Self {
+    pub fn new(targets: Vec<K>) -> Self {
         Closing {
             targets,
             closed: Vec::new(),
@@ -215,23 +234,34 @@ impl Closing {
         (self.closed.len(), self.targets.len())
     }
 
-    /// Counts the targets `tasks` show closed, each once: the daemon stores a PR closed as
-    /// GitHub closes it and sends its task's `changed`, which reads the tasks again. A task
-    /// that leaves `tasks` keeps its count. Returns whether the count moved.
-    pub fn saw(&mut self, tasks: &[Task]) -> bool {
+    /// Counts the targets among `closed`, the rows the list now shows closed, each once. A row
+    /// that leaves the list keeps its count. Returns whether the count moved.
+    pub fn saw_closed(&mut self, closed: impl IntoIterator<Item = K>) -> bool {
         let before = self.closed.len();
-        for task in tasks {
-            let closed = (task.pr.as_ref()).is_some_and(|pr| pr.state == PrState::Closed);
-            if closed && self.targets.contains(&task.id) && !self.closed.contains(&task.id) {
-                self.closed.push(task.id);
+        for key in closed {
+            if self.targets.contains(&key) && !self.closed.contains(&key) {
+                self.closed.push(key);
             }
         }
         self.closed.len() != before
     }
 }
 
+impl Closing<TaskId> {
+    /// Counts the targets `tasks` show closed, each once: the daemon stores a PR closed as
+    /// GitHub closes it and sends its task's `changed`, which reads the tasks again. A task
+    /// that leaves `tasks` keeps its count. Returns whether the count moved.
+    pub fn saw(&mut self, tasks: &[Task]) -> bool {
+        self.saw_closed(
+            (tasks.iter())
+                .filter(|task| (task.pr.as_ref()).is_some_and(|pr| pr.state == PrState::Closed))
+                .map(|task| task.id),
+        )
+    }
+}
+
 /// The selection bar's words: "N selected", or "Closing N of M…" while closing.
-pub fn bar_label(selected: usize, closing: Option<&Closing>) -> String {
+pub fn bar_label<K: Key>(selected: usize, closing: Option<&Closing<K>>) -> String {
     match closing.map(Closing::progress) {
         Some((done, of)) => format!("Closing {done} of {of}…"),
         None => format!("{selected} selected"),
@@ -240,9 +270,9 @@ pub fn bar_label(selected: usize, closing: Option<&Closing>) -> String {
 
 /// A PR the confirm dialog asks about.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Target {
-    /// Its task, in a task list; `None` on the Pull requests view, whose rows are PRs.
-    pub id: Option<TaskId>,
+pub struct Target<K = TaskId> {
+    /// Its row: a task in a task list, a pull request on the Pull requests view.
+    pub id: Option<K>,
     /// Its reference, `owner/name#123`, which closing it sends.
     pub pr: PrRef,
     /// Its repo's name without the owner.
@@ -251,7 +281,7 @@ pub struct Target {
     pub reference: SharedString,
 }
 
-impl Target {
+impl Target<TaskId> {
     /// `row`'s PR, if it can close.
     pub fn of(row: &Row) -> Option<Target> {
         let pr = row.pr.as_ref().filter(|_| row.closable)?;
@@ -302,7 +332,7 @@ pub fn menu_entries(row: &Row, send: Option<Vec<TaskTarget>>) -> Vec<MenuEntry> 
 
 /// Each repo among `targets` and how many of them it holds, most first, then in the order
 /// they come.
-pub fn repo_counts(targets: &[Target]) -> Vec<(SharedString, usize)> {
+pub fn repo_counts<K>(targets: &[Target<K>]) -> Vec<(SharedString, usize)> {
     let mut counts: Vec<(SharedString, usize)> = Vec::new();
     for target in targets {
         match counts.iter_mut().find(|(repo, _)| *repo == target.repo) {
@@ -316,15 +346,15 @@ pub fn repo_counts(targets: &[Target]) -> Vec<(SharedString, usize)> {
 
 /// What the open confirm dialog closes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Asking {
+enum Asking<K> {
     /// The PRs picked in Select mode.
-    Selected(Vec<Target>),
+    Selected(Vec<Target<K>>),
     /// One PR, from its row's menu.
-    One(Target),
+    One(Target<K>),
 }
 
-impl Asking {
-    fn targets(&self) -> &[Target] {
+impl<K> Asking<K> {
+    fn targets(&self) -> &[Target<K>] {
         match self {
             Asking::Selected(targets) => targets,
             Asking::One(target) => std::slice::from_ref(target),
@@ -332,21 +362,21 @@ impl Asking {
     }
 }
 
-/// One list's Select mode, selection and confirm dialog. `id` keys its elements, so two lists
-/// on screen never share one.
-pub struct ClosePrs {
+/// One list's Select mode, selection and confirm dialog, its rows picked by `K`. `id` keys its
+/// elements, so two lists on screen never share one.
+pub struct ClosePrs<K: Key = TaskId> {
     api: Arc<dyn Api>,
     id: &'static str,
-    selection: Selection,
+    selection: Selection<K>,
     dialog: DialogHandle,
-    asking: Option<Asking>,
+    asking: Option<Asking<K>>,
     /// The close of the picked PRs in flight, which locks Select mode and the selection.
-    closing: Option<Closing>,
+    closing: Option<Closing<K>>,
     /// Scrolls the dialog's list of repos.
     scroll: ScrollHandle,
 }
 
-impl ClosePrs {
+impl<K: Key> ClosePrs<K> {
     /// Select mode off, closing through `api`; `id` keys its elements.
     pub fn new(api: Arc<dyn Api>, id: &'static str) -> Self {
         ClosePrs {
@@ -362,7 +392,7 @@ impl ClosePrs {
 
     /// Select mode and the selection.
     #[cfg(test)]
-    pub fn selection(&self) -> &Selection {
+    pub fn selection(&self) -> &Selection<K> {
         &self.selection
     }
 
@@ -372,8 +402,14 @@ impl ClosePrs {
     }
 
     /// Why `task`'s PR didn't close, while it stays picked.
-    pub fn error(&self, task: TaskId) -> Option<&SharedString> {
+    pub fn error(&self, task: K) -> Option<&SharedString> {
         self.selection.error(task)
+    }
+
+    /// The selection bar's words: "N selected", or "Closing N of M…" while closing.
+    #[cfg(test)]
+    pub fn bar_label(&self) -> String {
+        bar_label(self.selection.ids().len(), self.closing.as_ref())
     }
 
     /// Whether a close of the picked PRs is in flight. Select mode and the selection stay as
@@ -382,10 +418,10 @@ impl ClosePrs {
         self.closing.is_some()
     }
 
-    /// Counts the PRs being closed that `tasks`, the snapshot's, show closed.
-    pub fn saw(&mut self, tasks: &[Task], cx: &mut Context<Self>) {
+    /// Counts the PRs being closed among `closed`, the rows the list now shows closed.
+    pub fn saw_closed(&mut self, closed: impl IntoIterator<Item = K>, cx: &mut Context<Self>) {
         if let Some(closing) = &mut self.closing
-            && closing.saw(tasks)
+            && closing.saw_closed(closed)
         {
             cx.notify();
         }
@@ -401,8 +437,19 @@ impl ClosePrs {
         cx.notify();
     }
 
+    /// Whether `key` is picked.
+    pub fn picked(&self, key: K) -> bool {
+        self.selection.contains(key)
+    }
+
+    /// Picks `key`, or unpicks it when picked: a click on its row. Not while closing.
+    pub fn toggle(&mut self, key: K, cx: &mut Context<Self>) {
+        let on = !self.selection.contains(key);
+        self.set(key, on, cx);
+    }
+
     /// Picks `task`, or unpicks it. Not while closing.
-    pub fn set(&mut self, task: TaskId, on: bool, cx: &mut Context<Self>) {
+    pub fn set(&mut self, task: K, on: bool, cx: &mut Context<Self>) {
         if self.is_closing() {
             return;
         }
@@ -411,7 +458,7 @@ impl ClosePrs {
     }
 
     /// Picks every one of `tasks`, or unpicks them. Not while closing.
-    pub fn set_all(&mut self, tasks: &[TaskId], on: bool, cx: &mut Context<Self>) {
+    pub fn set_all(&mut self, tasks: &[K], on: bool, cx: &mut Context<Self>) {
         if self.is_closing() {
             return;
         }
@@ -420,7 +467,7 @@ impl ClosePrs {
     }
 
     /// Keeps only the picked tasks among `shown`, the selectable rows the list shows.
-    pub fn retain(&mut self, shown: &[TaskId], cx: &mut Context<Self>) {
+    pub fn retain(&mut self, shown: &[K], cx: &mut Context<Self>) {
         if self.selection.retain(shown) {
             cx.notify();
         }
@@ -430,7 +477,7 @@ impl ClosePrs {
     /// they are closing.
     pub fn ask_selected(
         &mut self,
-        targets: Vec<Target>,
+        targets: Vec<Target<K>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -441,11 +488,11 @@ impl ClosePrs {
     }
 
     /// Opens the confirm dialog for one PR: what a row's Close PR does.
-    pub fn ask_one(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn ask_one(&mut self, target: Target<K>, window: &mut Window, cx: &mut Context<Self>) {
         self.ask(Asking::One(target), window, cx);
     }
 
-    fn ask(&mut self, asking: Asking, window: &mut Window, cx: &mut Context<Self>) {
+    fn ask(&mut self, asking: Asking<K>, window: &mut Window, cx: &mut Context<Self>) {
         self.asking = Some(asking);
         self.dialog.open(window, cx);
         cx.notify();
@@ -494,7 +541,7 @@ impl ClosePrs {
     /// Says how a close went, and updates the selection when it closed the picked PRs.
     fn report(
         &mut self,
-        asking: &Asking,
+        asking: &Asking<K>,
         closed: anyhow::Result<Vec<PrCloseResult>>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -502,7 +549,7 @@ impl ClosePrs {
         match (asking, closed) {
             (Asking::Selected(targets), Ok(results)) => {
                 // One result per reference, in the order asked.
-                let results: Vec<(TaskId, PrCloseResult)> = (targets.iter().zip(results))
+                let results: Vec<(K, PrCloseResult)> = (targets.iter().zip(results))
                     .filter_map(|(target, result)| Some((target.id?, result)))
                     .collect();
                 self.selection.closed(&results).show(window, cx);
@@ -534,7 +581,7 @@ impl ClosePrs {
 
     /// Penpot `agentdeck/ClosePrsList`: a line per repo with how many of its PRs close, in a
     /// `border` box that scrolls past [`LIST_ROWS`] lines.
-    fn repo_list(&self, targets: &[Target], cx: &App) -> AnyElement {
+    fn repo_list(&self, targets: &[Target<K>], cx: &App) -> AnyElement {
         let s = cx.theme().semantic();
         let counts = repo_counts(targets);
         let scrolls = counts.len() > LIST_ROWS;
@@ -583,7 +630,18 @@ impl ClosePrs {
     }
 }
 
-impl Render for ClosePrs {
+impl ClosePrs<TaskId> {
+    /// Counts the PRs being closed that `tasks`, the snapshot's, show closed.
+    pub fn saw(&mut self, tasks: &[Task], cx: &mut Context<Self>) {
+        if let Some(closing) = &mut self.closing
+            && closing.saw(tasks)
+        {
+            cx.notify();
+        }
+    }
+}
+
+impl<K: Key> Render for ClosePrs<K> {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let targets = (self.asking.as_ref()).map_or(&[][..], |asking| asking.targets());
         let n = targets.len();
@@ -648,8 +706,9 @@ impl Render for ClosePrs {
 }
 
 /// The header's **Select**: a ghost (`default`) sm `Toggle`, pressed in Select mode, which
-/// turns it on or off. Tests find it as `<id> select`.
-pub fn select_toggle(close: &Entity<ClosePrs>, cx: &App) -> AnyElement {
+/// turns it on or off; disabled unless `enabled` (the Pull requests view with no PR to show)
+/// and while closing. Tests find it as `<id> select`.
+pub fn select_toggle<K: Key>(close: &Entity<ClosePrs<K>>, enabled: bool, cx: &App) -> AnyElement {
     let (id, active, closing) = {
         let close = close.read(cx);
         (close.id, close.active(), close.is_closing())
@@ -663,7 +722,7 @@ pub fn select_toggle(close: &Entity<ClosePrs>, cx: &App) -> AnyElement {
                 .size(ToggleSize::Sm)
                 .label("Select")
                 .pressed(active)
-                .disabled(closing)
+                .disabled(closing || !enabled)
                 .on_change(move |on, _, cx| close.update(cx, |close, cx| close.set_active(on, cx))),
         )
         .into_any_element()
@@ -708,7 +767,12 @@ fn checkbox_indeterminate(
 /// it: off, all, or indeterminate while only some are picked. It picks them all, or, when all
 /// are picked, unpicks them. With no selectable row, only its space. Tests find it as
 /// `<id> select all <key>`.
-pub fn select_all(close: &Entity<ClosePrs>, key: &str, tasks: Vec<TaskId>, cx: &App) -> SelectCell {
+pub fn select_all<K: Key>(
+    close: &Entity<ClosePrs<K>>,
+    key: &str,
+    tasks: Vec<K>,
+    cx: &App,
+) -> SelectCell {
     let state = close.read(cx);
     if !state.active() {
         return SelectCell::Off;
@@ -742,6 +806,42 @@ pub fn select_all(close: &Entity<ClosePrs>, key: &str, tasks: Vec<TaskId>, cx: &
     )
 }
 
+/// A row's `Select` layer in Select mode: its checkbox, picking `key`, when `selectable`, else
+/// only its space; nothing out of Select mode. `label` names it: tests find it as
+/// `<id> select <label>`.
+pub fn select_cell<K: Key>(
+    close: &Entity<ClosePrs<K>>,
+    key: K,
+    selectable: bool,
+    label: impl Display,
+    cx: &App,
+) -> SelectCell {
+    let state = close.read(cx);
+    if !state.active() {
+        return SelectCell::Off;
+    }
+    if !selectable {
+        return SelectCell::Space;
+    }
+    let id = state.id;
+    let selector = format!("{id} select {label}");
+    let close = close.clone();
+    SelectCell::Checkbox(
+        div()
+            .debug_selector(move || selector.clone())
+            .child(
+                Checkbox::new(SharedString::from(format!("{id}-select-{label}")))
+                    .checked(state.selection.contains(key))
+                    .disabled(state.is_closing())
+                    .accessibility_label("Select")
+                    .on_change(move |on, _, cx| {
+                        close.update(cx, |close, cx| close.set(key, on, cx));
+                    }),
+            )
+            .into_any_element(),
+    )
+}
+
 /// `row`'s `Select` and `Menu` layers and its close error: a checkbox in Select mode, only when
 /// its PR can close, and on every row a `…` menu of its [`menu_entries`]: **Edit task**,
 /// which calls `on_edit`; **Send to agent** over `send` unless the task is done, which sends
@@ -766,28 +866,8 @@ pub fn row_parts(
     });
     let id = state.id;
     let task = row.id;
-    let target = Target::of(row);
-    let select = match (&target, state.active()) {
-        (_, false) => SelectCell::Off,
-        (None, true) => SelectCell::Space,
-        (Some(_), true) => {
-            let close = close.clone();
-            SelectCell::Checkbox(
-                div()
-                    .debug_selector(move || format!("{id} select {task}"))
-                    .child(
-                        Checkbox::new(SharedString::from(format!("{id}-select-{task}")))
-                            .checked(state.selection.contains(task))
-                            .disabled(state.is_closing())
-                            .accessibility_label("Select")
-                            .on_change(move |on, _, cx| {
-                                close.update(cx, |close, cx| close.set(task, on, cx));
-                            }),
-                    )
-                    .into_any_element(),
-            )
-        }
-    };
+    let select = select_cell(close, task, Target::of(row).is_some(), task, cx);
+    let state = close.read(cx);
     let error = state.selection.error(task).cloned();
     let on_edit = std::rc::Rc::new(on_edit);
     let menu = {
@@ -852,13 +932,17 @@ pub fn row_parts(
 }
 
 /// Penpot `agentdeck/SelectionBar`, in Select mode: over a `border` line, "N selected" (sm
-/// medium), an outline sm **Close PRs** in `destructive`, disabled while nothing is picked,
-/// which asks to close `targets` (the picked rows' PRs), and a ghost sm **Cancel**, which
-/// ends Select mode. While the picked PRs close it reads "Closing N of M…" with both buttons
-/// disabled (Penpot "Screens" → "Inbox · closing"). Tests find it as `<id> selection bar`.
-pub fn selection_bar(
-    close: &Entity<ClosePrs>,
-    targets: Vec<Target>,
+/// medium); with `copy` (the picked PRs' details, on the Pull requests view) an outline sm
+/// **Copy PR details**, disabled while nothing is picked, which puts them on the clipboard;
+/// an outline sm **Close PRs** in `destructive`, disabled while nothing is picked, which asks
+/// to close `targets` (the picked rows' PRs); and a ghost sm **Cancel**, which ends Select
+/// mode. While the picked PRs close it reads "Closing N of M…" with Close PRs and Cancel
+/// disabled (Penpot "Screens" → "Inbox · closing"). Tests find it as `<id> selection bar`, its
+/// parts as `<id> selection count`, `<id> copy prs`, `<id> close prs` and `<id> cancel select`.
+pub fn selection_bar<K: Key>(
+    close: &Entity<ClosePrs<K>>,
+    targets: Vec<Target<K>>,
+    copy: Option<String>,
     cx: &App,
 ) -> Option<AnyElement> {
     let state = close.read(cx);
@@ -888,11 +972,33 @@ pub fn selection_bar(
                     .px(space::S2)
                     .child(
                         div()
+                            .debug_selector(move || format!("{id} selection count"))
                             .text_size(font_size::SM)
                             .font_weight(font_weight::MEDIUM)
                             .text_color(s.foreground)
                             .child(label),
                     )
+                    .when_some(copy, |bar, details| {
+                        bar.child(
+                            div()
+                                .debug_selector(move || format!("{id} copy prs"))
+                                .child(
+                                    Button::new(SharedString::from(format!("{id}-copy-prs")))
+                                        .variant(ButtonVariant::Outline)
+                                        .size(ButtonSize::Sm)
+                                        .label("Copy PR details")
+                                        .disabled(n == 0)
+                                        .on_click(move |_, window, cx| {
+                                            crate::notice::copy(
+                                                details.clone(),
+                                                "Copied PR details",
+                                                window,
+                                                cx,
+                                            );
+                                        }),
+                                ),
+                        )
+                    })
                     .child(
                         div()
                             .debug_selector(move || format!("{id} close prs"))
@@ -1278,7 +1384,7 @@ mod tests {
         #[test]
         fn should_read_closing_n_of_m_in_place_of_the_count() {
             let mut closing = Closing::new(vec![id(1), id(2)]);
-            assert_eq!(bar_label(2, None), "2 selected");
+            assert_eq!(bar_label::<TaskId>(2, None), "2 selected");
             assert_eq!(bar_label(2, Some(&closing)), "Closing 0 of 2…");
 
             closing.saw(&tasks(&[2]));

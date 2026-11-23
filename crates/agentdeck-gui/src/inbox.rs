@@ -224,7 +224,7 @@ impl InboxView {
                     ),
             )
             .child(div().flex_1())
-            .child(close_prs::select_toggle(&self.close, cx))
+            .child(close_prs::select_toggle(&self.close, true, cx))
     }
 }
 
@@ -244,6 +244,7 @@ impl Render for InboxView {
         let bar = close_prs::selection_bar(
             &self.close,
             close_prs::picked(&self.close, &self.shown, cx),
+            None,
             cx,
         );
         let rows = div()

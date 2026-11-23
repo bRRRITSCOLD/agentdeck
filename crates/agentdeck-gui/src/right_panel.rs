@@ -565,7 +565,7 @@ impl RightPanel {
             // Then Separator, the Tasks & PRs header with its `+`, and the groups.
             Item::Separator => Separator::new().my(space::S1).into_any_element(),
             Item::TasksHeader => section_header("Tasks & PRs", s)
-                .child(close_prs::select_toggle(&self.close, cx))
+                .child(close_prs::select_toggle(&self.close, true, cx))
                 .child(
                     div().debug_selector(|| "add task".into()).child(
                         Button::new("add-task")
@@ -701,8 +701,12 @@ impl Render for RightPanel {
         let rows: Vec<_> = groups.iter().flat_map(|g| g.rows.clone()).collect();
         let shown = close_prs::selectable(&rows);
         self.close.update(cx, |close, cx| close.retain(&shown, cx));
-        let bar =
-            close_prs::selection_bar(&self.close, close_prs::picked(&self.close, &rows, cx), cx);
+        let bar = close_prs::selection_bar(
+            &self.close,
+            close_prs::picked(&self.close, &rows, cx),
+            None,
+            cx,
+        );
         let items = self.items(&groups, cx);
         if items != self.shown {
             self.relist(items, cx);

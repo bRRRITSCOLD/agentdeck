@@ -228,7 +228,7 @@ pub enum SelectCell {
 impl SelectCell {
     /// The slot, `Columns::SELECT` square; `None` when off. A click in it stays in it, so a
     /// group header's checkbox doesn't fold the group too.
-    fn slot(self) -> Option<Div> {
+    pub fn slot(self) -> Option<Div> {
         let slot = div()
             .flex_none()
             .flex()
@@ -627,8 +627,13 @@ fn title(row: &Row, on_open: OnOpen, error: Option<SharedString>, cx: &App) -> A
 /// `destructive`, the failing checks' red. Tests find it as `close error mark <id>`.
 fn close_error(row: &Row, cx: &App) -> Div {
     let id = row.id;
+    close_error_mark(format!("close error mark {id}"), cx)
+}
+
+/// [`close_error`]'s mark for any row, which tests find as `selector`.
+pub fn close_error_mark(selector: String, cx: &App) -> Div {
     div()
-        .debug_selector(move || format!("close error mark {id}"))
+        .debug_selector(move || selector.clone())
         .flex_none()
         .flex()
         .child(

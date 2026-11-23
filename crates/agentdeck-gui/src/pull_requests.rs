@@ -8,14 +8,22 @@
 //! show finished"): one preference, kept in the GUI's state too. A Finished row shows GitHub's
 //! state with its state icon: merged, closed, or open past the age cutoff.
 //!
-//! A row's reference (`#63`) opens the PR on GitHub; nothing else on the row reacts to a click.
+//! A row's reference (`#63`) opens the PR on GitHub; nothing else on the row reacts to a click,
+//! but in Select mode.
 //! Its `…` menu has **Open on GitHub**, **Copy PR details** (the three lines
 //! [`pr_details`] gives) and, while the PR can close, **Close PR** after a separator, which
 //! asks first ([`ClosePrs`]). A PR the GitHub sign-in can't see is dimmed with its tooltip,
 //! left out of the sidebar's count and never closed here.
 //!
-//! The header ends in Show finished, when PRs last synced and **Sync now**, which runs a full
-//! sync and emits
+//! **Select** mode (Penpot "Pull requests · select") picks PRs by [`PrKey`]: a row can be picked
+//! while its PR is open and the GitHub sign-in can see it, Finished or not. The columns' and
+//! each group's checkbox pick or clear their rows, folded or not, and a click on a row toggles
+//! it. The selection bar copies the picked PRs' details, a blank line apart, or closes them by
+//! reference after asking ([`ClosePrs`]); a PR that didn't close stays picked, marked with why.
+//! Select is disabled while there is no PR to show.
+//!
+//! The header ends in Select, Show finished, when PRs last synced and **Sync now**, which runs
+//! a full sync and emits
 //! [`Synced`] once done, so the window can have the sidebar read again: a sync that changes no
 //! PR broadcasts nothing, yet moves the time it last ran. While no GitHub token works, the
 //! logged-out banner sits over the list, its **Open Settings** asking for Settings with
@@ -29,7 +37,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agentdeck_client::types::{GhLogin, PullRequest};
-use agentdeck_core::{PrState, RepositoryId, pr_details};
+use agentdeck_core::{PrState, RepositoryId, pr_details, prs_details};
 use brrritscold_core_gpui::{
     ActiveTheme as _, Button, ButtonSize, ButtonVariant, DropdownMenu, DropdownMenuAlign,
     DropdownMenuContent, DropdownMenuItem, DropdownMenuItemVariant, DropdownMenuSeparator,
@@ -40,17 +48,17 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, AppContext as _, Context, Entity, EventEmitter,
     InteractiveElement as _, IntoElement, ListOffset, ListState, ParentElement as _, Render,
-    SharedString, Styled as _, Task, Window, div, list, px,
+    SharedString, Styled as _, Subscription, Task, Window, div, list, px,
 };
 
 use crate::api::Api;
-use crate::close_prs::{ClosePrs, Target};
+use crate::close_prs::{self, ClosePrs, Target};
 use crate::gui_state;
 use crate::open_pr;
 use crate::overview::Snapshot;
 use crate::pr_table;
 use crate::sync_parts::{self, OpenSettings, SETTINGS_TAIL, cutoff, logged_out_title};
-use crate::task_row::{self, Header};
+use crate::task_row::{self, Header, RowParts, SelectCell};
 use crate::workspace::failed;
 
 /// How often "Synced N min ago" is redrawn.
@@ -89,6 +97,34 @@ impl PrKey {
             number: pr.number,
         }
     }
+}
+
+/// Whether `pr` can be closed, so picked in Select mode: open on GitHub, as last synced, and
+/// seen by the GitHub sign-in. A Finished PR still open can.
+pub fn closable(pr: &PullRequest) -> bool {
+    pr.state == PrState::Open && !pr.unreachable
+}
+
+/// `pr` as the confirm dialog asks about it.
+fn target(pr: &PullRequest) -> Target<PrKey> {
+    let repo = pr.repository.name.name().to_owned();
+    Target {
+        id: Some(PrKey::of(pr)),
+        pr: pr.reference.clone(),
+        reference: format!("{repo} #{}", pr.number).into(),
+        repo: repo.into(),
+    }
+}
+
+/// `pr`'s Copy PR details text.
+fn details(pr: &PullRequest) -> String {
+    pr_details(
+        &pr.reference,
+        &pr.title,
+        &pr.url,
+        &pr.head_ref,
+        &pr.base_ref,
+    )
 }
 
 /// A sync asked for on the Pull requests view has finished.
@@ -158,6 +194,8 @@ enum Item {
         label: SharedString,
         count: usize,
         collapsed: bool,
+        /// Its PRs Select mode can pick, folded or not.
+        selectable: Vec<PrKey>,
     },
     /// A PR.
     Row(Box<PullRequest>),
@@ -174,6 +212,10 @@ fn items(groups: &[Group], collapsed: &BTreeSet<RepositoryId>) -> Vec<Item> {
             label: group.label.clone(),
             count: group.prs.len(),
             collapsed: folded,
+            selectable: (group.prs.iter())
+                .filter(|pr| closable(pr))
+                .map(PrKey::of)
+                .collect(),
         });
         if !folded {
             items.extend(group.prs.iter().map(|pr| Item::Row(Box::new(pr.clone()))));
@@ -191,8 +233,9 @@ pub struct PullRequestsView {
     /// The items the list draws from, as last rendered.
     shown: Vec<Item>,
     list: ListState,
-    /// Close PR's confirm dialog.
-    close: Entity<ClosePrs>,
+    /// Select mode, the selection and the Close PRs confirm dialog.
+    close: Entity<ClosePrs<PrKey>>,
+    _close: Subscription,
     /// The row a PR alert's click landed on: shown even when Finished with Show finished off,
     /// until the view is left or another alert lands.
     revealed: Option<PrKey>,
@@ -214,6 +257,10 @@ impl PullRequestsView {
     /// snapshot.
     pub fn new(api: Arc<dyn Api>, cx: &mut Context<Self>) -> Self {
         let close = cx.new(|_| ClosePrs::new(api.clone(), "pull-requests"));
+        let _close = cx.observe(&close, |this, _, cx| {
+            this.list.remeasure();
+            cx.notify();
+        });
         let tick = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(SYNCED_TICK).await;
@@ -229,6 +276,7 @@ impl PullRequestsView {
             shown: Vec::new(),
             list: task_row::list_state(),
             close,
+            _close,
             revealed: None,
             reveal_pending: false,
             highlight: None,
@@ -323,6 +371,12 @@ impl PullRequestsView {
 
     /// Shows `snapshot`.
     pub fn set_snapshot(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
+        let closed: Vec<PrKey> = (snapshot.prs.iter())
+            .filter(|pr| pr.state == PrState::Closed)
+            .map(PrKey::of)
+            .collect();
+        self.close
+            .update(cx, |close, cx| close.saw_closed(closed, cx));
         self.snapshot = snapshot;
         cx.notify();
     }
@@ -332,9 +386,9 @@ impl PullRequestsView {
         groups(&self.snapshot.prs, show_finished(cx), self.revealed)
     }
 
-    /// Close PR's confirm dialog.
+    /// Select mode, the selection and the Close PRs confirm dialog.
     #[cfg(test)]
-    pub fn close_prs(&self) -> &Entity<ClosePrs> {
+    pub fn close_prs(&self) -> &Entity<ClosePrs<PrKey>> {
         &self.close
     }
 
@@ -408,24 +462,49 @@ impl PullRequestsView {
                 label,
                 count,
                 collapsed,
+                selectable,
             }) => {
                 let repository = *repository;
+                let select = close_prs::select_all(&self.close, name, selectable.clone(), cx);
                 pr_table::group_header(
                     name.clone(),
                     label.clone(),
                     *count,
                     *collapsed,
+                    select,
                     cx.listener(move |this, _, _, cx| this.toggle(repository, cx)),
                     cx,
                 )
             }
             Some(Item::Row(pr)) => {
                 let url = pr.url.clone();
-                let menu = row_menu(&self.close, pr);
+                let key = PrKey::of(pr);
+                let pickable = closable(pr);
+                let (active, closing, error) = {
+                    let close = self.close.read(cx);
+                    (
+                        close.active(),
+                        close.is_closing(),
+                        close.error(key).cloned(),
+                    )
+                };
+                let parts = RowParts {
+                    select: close_prs::select_cell(&self.close, key, pickable, &pr.reference, cx),
+                    menu: row_menu(&self.close, pr),
+                    error,
+                };
+                let on_toggle: Option<pr_table::OnToggle> =
+                    (active && pickable && !closing).then(|| {
+                        let close = self.close.clone();
+                        Box::new(move |_: &mut Window, cx: &mut App| {
+                            close.update(cx, |close, cx| close.toggle(key, cx));
+                        }) as pr_table::OnToggle
+                    });
                 let row = pr_table::row(
                     pr,
-                    menu,
+                    parts,
                     move |_, window, cx| open_pr::open(&url, window, cx),
+                    on_toggle,
                     cx,
                 );
                 match self.highlight {
@@ -440,8 +519,8 @@ impl PullRequestsView {
         task_row::spaced(item)
     }
 
-    /// Penpot `Header`: heading and description, a spacer, Show finished, when PRs last
-    /// synced, "Sync now", `space.3` apart.
+    /// Penpot `Header`: heading and description, a spacer, Select (disabled with no PR to
+    /// show), Show finished, when PRs last synced, "Sync now", `space.3` apart.
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
         let synced = self.sync_label(chrono::Utc::now());
@@ -486,6 +565,11 @@ impl PullRequestsView {
                     .child(div().flex().flex_col().children(lines)),
             )
             .child(div().flex_1())
+            .child(close_prs::select_toggle(
+                &self.close,
+                !self.shown.is_empty(),
+                cx,
+            ))
             // Penpot `ShowFinished`: a Switch and its Label, `space.2` apart.
             .child(
                 div()
@@ -569,7 +653,7 @@ pub enum MenuEntry {
 /// while it is open and the GitHub sign-in can see it, a separator and **Close PR**.
 pub fn menu_entries(pr: &PullRequest) -> Vec<MenuEntry> {
     let mut entries = vec![MenuEntry::OpenOnGitHub, MenuEntry::CopyPrDetails];
-    if pr.state == PrState::Open && !pr.unreachable {
+    if closable(pr) {
         entries.extend([MenuEntry::Separator, MenuEntry::ClosePr]);
     }
     entries
@@ -577,7 +661,7 @@ pub fn menu_entries(pr: &PullRequest) -> Vec<MenuEntry> {
 
 /// `pr`'s `…` menu of its [`menu_entries`], Close PR in `destructive`. Tests find it as
 /// `pr menu <reference>`.
-fn row_menu(close: &Entity<ClosePrs>, pr: &PullRequest) -> AnyElement {
+fn row_menu(close: &Entity<ClosePrs<PrKey>>, pr: &PullRequest) -> AnyElement {
     let key = pr.reference.to_string();
     let content = (menu_entries(pr).into_iter()).fold(
         DropdownMenuContent::new(),
@@ -590,13 +674,7 @@ fn row_menu(close: &Entity<ClosePrs>, pr: &PullRequest) -> AnyElement {
                 )
             }
             MenuEntry::CopyPrDetails => {
-                let details = pr_details(
-                    &pr.reference,
-                    &pr.title,
-                    &pr.url,
-                    &pr.head_ref,
-                    &pr.base_ref,
-                );
+                let details = details(pr);
                 content.item(DropdownMenuItem::new("Copy PR details").on_click(
                     move |_, window, cx| {
                         crate::notice::copy(details.clone(), "Copied PR details", window, cx);
@@ -605,13 +683,7 @@ fn row_menu(close: &Entity<ClosePrs>, pr: &PullRequest) -> AnyElement {
             }
             MenuEntry::Separator => content.separator(DropdownMenuSeparator::new()),
             MenuEntry::ClosePr => {
-                let repo = pr.repository.name.name().to_owned();
-                let target = Target {
-                    id: None,
-                    pr: pr.reference.clone(),
-                    reference: format!("{repo} #{}", pr.number).into(),
-                    repo: repo.into(),
-                };
+                let target = target(pr);
                 let close = close.clone();
                 content.item(
                     DropdownMenuItem::new("Close PR")
@@ -651,10 +723,35 @@ impl Render for PullRequestsView {
         let collapsed = gui_state::read(cx, |state| state.collapsed.pull_requests.clone());
         let items = items(&groups, &collapsed);
         let relisted = items != self.shown;
+        // Every PR Select mode can pick, folded or not, in the list's order.
+        let pickable: Vec<&PullRequest> = (groups.iter())
+            .flat_map(|group| &group.prs)
+            .filter(|pr| closable(pr))
+            .collect();
+        let keys: Vec<PrKey> = pickable.iter().map(|pr| PrKey::of(pr)).collect();
         if relisted {
             task_row::relist(&self.list, items.len());
             self.shown = items;
+            self.close.update(cx, |close, cx| close.retain(&keys, cx));
         }
+        // With no PR to show, Select is disabled, so Select mode ends.
+        if self.shown.is_empty() && self.close.read(cx).active() {
+            self.close
+                .update(cx, |close, cx| close.set_active(false, cx));
+        }
+        let select = self.close.read(cx).active();
+        let bar = {
+            let picked: Vec<&PullRequest> = {
+                let close = self.close.read(cx);
+                (pickable.iter().copied())
+                    .filter(|pr| close.picked(PrKey::of(pr)))
+                    .collect()
+            };
+            let copy = prs_details(picked.iter().map(|pr| details(pr)));
+            let targets = picked.into_iter().map(target).collect();
+            close_prs::selection_bar(&self.close, targets, Some(copy), cx)
+        };
+        let select_all = close_prs::select_all(&self.close, "all", keys, cx);
         self.scroll_to_revealed(relisted, window);
         let banner = (self.snapshot.pr_sync.as_ref())
             .filter(|status| status.login == GhLogin::LoggedOut)
@@ -701,10 +798,15 @@ impl Render for PullRequestsView {
                         .flex_1()
                         .min_h_0(),
                     );
+                let ghost = if select {
+                    SelectCell::Space
+                } else {
+                    SelectCell::Off
+                };
                 let header = Header {
-                    columns: pr_table::columns(cx),
-                    ghost: pr_table::columns(cx),
-                    min_width: pr_table::min_width(),
+                    columns: pr_table::columns(select_all, cx),
+                    ghost: pr_table::columns(ghost, cx),
+                    min_width: pr_table::min_width(select),
                 };
                 content.child(task_row::table_of(
                     "pull-requests-table",
@@ -716,6 +818,7 @@ impl Render for PullRequestsView {
                     cx,
                 ))
             })
+            .children(bar)
             // The confirm dialog's host: out of the flow, so it takes no gap.
             .child(div().absolute().child(self.close.clone()))
     }
@@ -1570,6 +1673,490 @@ mod tests {
             );
             click("pull-requests settings link".into(), cx);
             assert_eq!(*harness.settings.borrow(), 1);
+        }
+    }
+
+    /// Select mode (spec §11, Pull requests view → Select mode).
+    mod select {
+        use super::*;
+
+        fn key(n: u32, repo: &str) -> PrKey {
+            PrKey {
+                repository: repository_id(repo),
+                number: n,
+            }
+        }
+
+        fn picked(harness: &Harness, cx: &mut VisualTestContext) -> Vec<PrKey> {
+            harness.view.read_with(cx, |view, cx| {
+                view.close_prs().read(cx).selection().ids().to_vec()
+            })
+        }
+
+        fn selecting(harness: &Harness, cx: &mut VisualTestContext) -> bool {
+            harness
+                .view
+                .read_with(cx, |view, cx| view.close_prs().read(cx).active())
+        }
+
+        fn bar_label(harness: &Harness, cx: &mut VisualTestContext) -> String {
+            harness
+                .view
+                .read_with(cx, |view, cx| view.close_prs().read(cx).bar_label())
+        }
+
+        /// [`prs`] with `acme/widgets` #5, open but Finished (past the age cutoff), and
+        /// `acme/widgets` #6, open but out of the GitHub sign-in's sight.
+        fn mixed() -> Snapshot {
+            let mut snapshot = prs();
+            snapshot.prs.extend([
+                PullRequest {
+                    finished: true,
+                    ..pull_request(5, "acme/widgets")
+                },
+                PullRequest {
+                    unreachable: true,
+                    ..pull_request(6, "acme/widgets")
+                },
+            ]);
+            snapshot
+        }
+
+        #[gpui::test]
+        fn should_enter_select_mode_from_the_header_and_leave_it_from_cancel(
+            cx: &mut TestAppContext,
+        ) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            assert!(!shows("pull-requests selection bar".into(), cx));
+            assert!(!shows("pull-requests select acme/widgets#1".into(), cx));
+
+            click("pull-requests select".into(), cx);
+
+            assert!(selecting(&harness, cx));
+            assert!(shows("pull-requests selection bar".into(), cx));
+            assert!(shows("pull-requests select acme/widgets#1".into(), cx));
+
+            click("pull-requests select acme/widgets#1".into(), cx);
+            click("pull-requests cancel select".into(), cx);
+
+            assert!(!selecting(&harness, cx));
+            assert!(picked(&harness, cx).is_empty());
+            assert!(!shows("pull-requests selection bar".into(), cx));
+        }
+
+        #[gpui::test]
+        fn should_put_select_before_show_finished(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open(prs(), cx);
+
+            let select = bounds("pull-requests select".into(), cx);
+            let finished = bounds("show finished".into(), cx);
+
+            assert!(
+                select.right() < finished.left(),
+                "{select:?} before {finished:?}"
+            );
+        }
+
+        #[gpui::test]
+        fn should_leave_select_mode_when_select_is_pressed_again(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            click("pull-requests select".into(), cx);
+            click("pull-requests select acme/widgets#1".into(), cx);
+
+            click("pull-requests select".into(), cx);
+
+            assert!(!selecting(&harness, cx));
+            assert!(picked(&harness, cx).is_empty());
+        }
+
+        #[gpui::test]
+        fn should_toggle_a_row_on_a_click_on_it(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            click("pull-requests select".into(), cx);
+
+            click("pr title acme/widgets#4".into(), cx);
+            assert_eq!(picked(&harness, cx), [key(4, "acme/widgets")]);
+
+            let row = bounds("pr acme/widgets#4".into(), cx);
+            cx.simulate_click(
+                point(row.left() + px(400.), row.center().y),
+                Modifiers::default(),
+            );
+            cx.run_until_parked();
+            assert!(picked(&harness, cx).is_empty());
+        }
+
+        #[gpui::test]
+        fn should_open_the_pr_from_its_reference_without_toggling_it(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            let opener = cx.update(|_, cx| crate::terminal::open::fake::install(cx));
+            click("pull-requests select".into(), cx);
+
+            click("pr link acme/widgets#4".into(), cx);
+
+            assert_eq!(opener.started.lock().unwrap().len(), 1);
+            assert!(picked(&harness, cx).is_empty());
+        }
+
+        #[gpui::test]
+        fn should_not_toggle_a_row_from_its_menu(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            click("pull-requests select".into(), cx);
+
+            click("pr menu acme/widgets#4".into(), cx);
+
+            assert!(picked(&harness, cx).is_empty());
+        }
+
+        #[gpui::test]
+        fn should_not_toggle_a_row_out_of_select_mode(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+
+            click("pr title acme/widgets#4".into(), cx);
+
+            assert!(picked(&harness, cx).is_empty());
+            assert!(!selecting(&harness, cx));
+        }
+
+        #[gpui::test]
+        fn should_offer_open_and_reachable_prs_finished_ones_included(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(mixed(), cx);
+            click("show finished".into(), cx);
+            click("pull-requests select".into(), cx);
+
+            for selectable in ["acme/widgets#1", "acme/widgets#5"] {
+                assert!(
+                    shows(format!("pull-requests select {selectable}"), cx),
+                    "{selectable}"
+                );
+            }
+            for not in ["acme/gizmos#3", "acme/widgets#6"] {
+                assert!(!shows(format!("pull-requests select {not}"), cx), "{not}");
+            }
+            click("pr title acme/widgets#6".into(), cx);
+            click("pr title acme/gizmos#3".into(), cx);
+            click("pr title acme/widgets#5".into(), cx);
+            assert_eq!(picked(&harness, cx), [key(5, "acme/widgets")]);
+        }
+
+        #[gpui::test]
+        fn should_not_offer_a_closed_pr(cx: &mut TestAppContext) {
+            let mut snapshot = prs();
+            snapshot.prs.push(PullRequest {
+                state: PrState::Closed,
+                finished: true,
+                ..pull_request(7, "acme/widgets")
+            });
+            let (_harness, cx) = Harness::open(snapshot, cx);
+            click("show finished".into(), cx);
+            click("pull-requests select".into(), cx);
+
+            assert!(shows("pr acme/widgets#7".into(), cx));
+            assert!(!shows("pull-requests select acme/widgets#7".into(), cx));
+        }
+
+        #[gpui::test]
+        fn should_keep_titles_aligned_on_rows_with_nothing_to_select(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open(mixed(), cx);
+            click("pull-requests select".into(), cx);
+
+            let left =
+                |pr: &str, cx: &mut VisualTestContext| bounds(format!("pr title {pr}"), cx).left();
+            assert_eq!(left("acme/widgets#1", cx), left("acme/widgets#6", cx));
+        }
+
+        #[gpui::test]
+        fn should_pick_a_groups_rows_from_its_checkbox_then_none(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(mixed(), cx);
+            click("pull-requests select".into(), cx);
+
+            click("pull-requests select all acme/widgets".into(), cx);
+            assert_eq!(
+                picked(&harness, cx),
+                [key(1, "acme/widgets"), key(4, "acme/widgets")]
+            );
+
+            click("pull-requests select all acme/widgets".into(), cx);
+            assert!(picked(&harness, cx).is_empty());
+        }
+
+        #[gpui::test]
+        fn should_pick_a_folded_groups_rows_from_its_checkbox(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            click("group acme/widgets".into(), cx);
+            click("pull-requests select".into(), cx);
+
+            click("pull-requests select all acme/widgets".into(), cx);
+
+            assert_eq!(
+                picked(&harness, cx),
+                [key(1, "acme/widgets"), key(4, "acme/widgets")]
+            );
+            assert!(shows("group acme/widgets".into(), cx));
+            assert!(!shows("pr acme/widgets#1".into(), cx));
+        }
+
+        #[gpui::test]
+        fn should_pick_every_row_from_select_all_then_none(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(mixed(), cx);
+            click("pull-requests select".into(), cx);
+            click("pr title acme/widgets#4".into(), cx);
+
+            click("pull-requests select all all".into(), cx);
+            assert_eq!(
+                picked(&harness, cx),
+                [
+                    key(4, "acme/widgets"),
+                    key(2, "acme/gadgets"),
+                    key(1, "acme/widgets")
+                ]
+            );
+
+            click("pull-requests select all all".into(), cx);
+            assert!(picked(&harness, cx).is_empty());
+        }
+
+        #[gpui::test]
+        fn should_count_the_picked_prs_in_the_bar(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            click("pull-requests select".into(), cx);
+            assert_eq!(bar_label(&harness, cx), "0 selected");
+
+            click("pr title acme/widgets#4".into(), cx);
+            click("pr title acme/gadgets#2".into(), cx);
+
+            assert_eq!(bar_label(&harness, cx), "2 selected");
+        }
+
+        #[gpui::test]
+        fn should_read_n_selected_copy_close_then_cancel(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open(prs(), cx);
+            click("pull-requests select".into(), cx);
+
+            let lefts: Vec<_> = [
+                "pull-requests selection count",
+                "pull-requests copy prs",
+                "pull-requests close prs",
+                "pull-requests cancel select",
+            ]
+            .into_iter()
+            .map(|selector| bounds(selector.into(), cx).left())
+            .collect();
+
+            assert!(lefts.is_sorted(), "{lefts:?}");
+            let table = bounds("pull requests table".into(), cx);
+            let bar = bounds("pull-requests selection bar".into(), cx);
+            assert!(bar.top() >= table.bottom(), "{bar:?} under {table:?}");
+        }
+
+        #[gpui::test]
+        fn should_copy_the_picked_prs_details_a_blank_line_apart(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open(prs(), cx);
+            click("pull-requests select".into(), cx);
+            click("pr title acme/widgets#4".into(), cx);
+            click("pr title acme/gadgets#2".into(), cx);
+
+            click("pull-requests copy prs".into(), cx);
+
+            // In the list's order, whatever the order picked.
+            let copied = cx.read_from_clipboard().and_then(|item| item.text());
+            assert_eq!(
+                copied.as_deref(),
+                Some(
+                    "acme/gadgets#2: PR 2\n\
+                     https://github.com/acme/gadgets/pull/2\n\
+                     feat/x → main\n\
+                     \n\
+                     acme/widgets#4: PR 4\n\
+                     https://github.com/acme/widgets/pull/4\n\
+                     feat/x → main"
+                )
+            );
+            assert_eq!(toasts(cx), ["Copied PR details"]);
+        }
+
+        #[gpui::test]
+        fn should_copy_nothing_with_nothing_picked(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open(prs(), cx);
+            click("pull-requests select".into(), cx);
+
+            click("pull-requests copy prs".into(), cx);
+
+            assert!(cx.read_from_clipboard().is_none());
+            assert!(toasts(cx).is_empty());
+        }
+
+        /// Select mode on, `acme/widgets` #1 and #4 picked, and Close PRs pressed.
+        fn asked_to_close_widgets(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            click("pull-requests select".into(), cx);
+            click("pull-requests select all acme/widgets".into(), cx);
+            click("pull-requests close prs".into(), cx);
+            (harness, cx)
+        }
+
+        #[gpui::test]
+        fn should_ask_then_close_the_picked_prs_by_reference(cx: &mut TestAppContext) {
+            let (harness, cx) = asked_to_close_widgets(cx);
+            assert!(harness.asking(cx));
+            assert!(harness.api.closes.lock().unwrap().is_empty());
+
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+
+            assert_eq!(
+                *harness.api.closes.lock().unwrap(),
+                [vec![pr_ref("acme/widgets#1"), pr_ref("acme/widgets#4")]]
+            );
+            assert_eq!(toasts(cx).last().map(String::as_str), Some("Closed 2 PRs"));
+            assert!(!selecting(&harness, cx));
+        }
+
+        #[gpui::test]
+        fn should_close_nothing_when_the_dialog_is_cancelled(cx: &mut TestAppContext) {
+            let (harness, cx) = asked_to_close_widgets(cx);
+
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+
+            assert!(harness.api.closes.lock().unwrap().is_empty());
+            assert!(selecting(&harness, cx));
+            assert_eq!(picked(&harness, cx).len(), 2);
+        }
+
+        #[gpui::test]
+        fn should_keep_a_failed_pr_picked_and_mark_it_with_why(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            (harness.api).refuse_close_pr(&pr_ref("acme/widgets#4"), "Must have admin rights");
+            click("pull-requests select".into(), cx);
+            click("pull-requests select all acme/widgets".into(), cx);
+            click("pull-requests close prs".into(), cx);
+
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+            harness.show(harness.api.snapshot_now(), cx);
+
+            let shown = cx.update(|_, cx| crate::notice::shown(cx));
+            let toast = shown.last().expect("a toast");
+            assert_eq!(toast.title, "Closed 1 of 2");
+            assert_eq!(
+                toast.description.as_deref(),
+                Some("Hover the marked PR to see why.")
+            );
+            assert!(selecting(&harness, cx));
+            assert_eq!(picked(&harness, cx), [key(4, "acme/widgets")]);
+            assert!(shows("pr close error acme/widgets#4".into(), cx));
+            assert_eq!(
+                harness.view.read_with(cx, |view, cx| {
+                    view.close_prs()
+                        .read(cx)
+                        .error(key(4, "acme/widgets"))
+                        .cloned()
+                }),
+                Some("Must have admin rights".into())
+            );
+
+            let title = bounds("pr title acme/widgets#4".into(), cx);
+            cx.simulate_mouse_move(title.center(), None, Modifiers::default());
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("tooltip-content").is_some());
+        }
+
+        #[gpui::test]
+        fn should_show_a_pr_it_closed_as_closed_at_once(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            click("show finished".into(), cx);
+            click("pull-requests select".into(), cx);
+            click("pr title acme/widgets#4".into(), cx);
+            click("pull-requests close prs".into(), cx);
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+
+            // The close's `changed` reads the snapshot again: stored closed, so Finished.
+            harness.show(harness.api.snapshot_now(), cx);
+
+            let groups = harness.view.read_with(cx, |view, cx| view.groups(cx));
+            let closed = (groups.iter().flat_map(|g| &g.prs))
+                .find(|pr| pr.number == 4)
+                .expect("#4, shown under Show finished");
+            assert_eq!(closed.state, PrState::Closed);
+            assert!(closed.finished);
+            click("pull-requests select".into(), cx);
+            assert!(!shows("pull-requests select acme/widgets#4".into(), cx));
+
+            click("show finished".into(), cx);
+            assert!(!shows("pr acme/widgets#4".into(), cx));
+        }
+
+        #[gpui::test]
+        fn should_count_the_picked_prs_closing_from_the_snapshots_it_is_shown(
+            cx: &mut TestAppContext,
+        ) {
+            let (harness, cx) = asked_to_close_widgets(cx);
+            let release = harness.api.hold_close();
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+            let closing = |cx: &mut VisualTestContext| {
+                harness
+                    .view
+                    .read_with(cx, |view, cx| view.close_prs().read(cx).closing())
+            };
+            assert_eq!(closing(cx), Some((0, 2)));
+            assert_eq!(bar_label(&harness, cx), "Closing 0 of 2…");
+
+            harness.show(harness.api.snapshot_now(), cx);
+            assert_eq!(closing(cx), Some((2, 2)));
+
+            release.send(()).unwrap();
+            cx.run_until_parked();
+            assert_eq!(closing(cx), None);
+        }
+
+        #[gpui::test]
+        fn should_disable_select_on_the_empty_view(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(Snapshot::default(), cx);
+            assert!(shows("pull requests empty".into(), cx));
+
+            click("pull-requests select".into(), cx);
+
+            assert!(!selecting(&harness, cx));
+            assert!(!shows("pull-requests selection bar".into(), cx));
+        }
+
+        #[gpui::test]
+        fn should_leave_select_mode_once_the_view_empties(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            click("pull-requests select".into(), cx);
+
+            harness.show(Snapshot::default(), cx);
+
+            assert!(!selecting(&harness, cx));
+        }
+
+        #[gpui::test]
+        fn should_drop_a_picked_row_that_hides(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(mixed(), cx);
+            click("show finished".into(), cx);
+            click("pull-requests select".into(), cx);
+            click("pr title acme/widgets#5".into(), cx);
+            click("pr title acme/widgets#1".into(), cx);
+
+            click("show finished".into(), cx);
+
+            assert_eq!(picked(&harness, cx), [key(1, "acme/widgets")]);
+        }
+
+        #[gpui::test]
+        fn should_draw_select_mode_in_both_themes(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(mixed(), cx);
+            click("pull-requests select".into(), cx);
+            click("pull-requests select all acme/widgets".into(), cx);
+
+            for preference in [ThemePreference::Light, ThemePreference::Dark] {
+                cx.update(|_, cx| Theme::set_preference(preference, cx));
+                cx.run_until_parked();
+                harness.draw(cx);
+            }
         }
     }
 
