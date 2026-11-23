@@ -53,7 +53,6 @@ use alacritty_terminal::vte::ansi::Processor;
 use nix::sys::signal::{Signal, kill, killpg};
 use nix::unistd::Pid;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
-use tokio::sync::oneshot;
 
 use super::env::{daemon_dir, pane_env};
 use super::fanout::{Fanout, Outbox, Outgoing, ResizeDecision, Size, SubscriberId};
@@ -74,8 +73,6 @@ pub struct Launch {
     pub env: BTreeMap<OsString, OsString>,
     /// The PTY's size until a client resizes it.
     pub size: Size,
-    /// The task the pane is linked to as it starts.
-    pub task: Option<TaskId>,
 }
 
 /// A new pane's size until a client resizes it (spec §4).
@@ -103,7 +100,6 @@ impl Launch {
             cwd,
             env: pane_env(std::env::vars_os(), daemon_dir().as_deref(), &extra),
             size: INITIAL_SIZE,
-            task,
         }
     }
 }
@@ -168,9 +164,6 @@ pub enum When {
     Now,
     /// Once the pane's state is idle, done or blocked; at once if it already is.
     Idle,
-    /// Once the agent waits at its prompt: idle or done, never blocked, so the text can't
-    /// answer a dialog such as Claude Code's folder trust dialog (spec §6, §9).
-    Prompt,
 }
 
 impl When {
@@ -182,7 +175,6 @@ impl When {
                 state,
                 AgentState::Idle | AgentState::Done | AgentState::Blocked
             ),
-            When::Prompt => matches!(state, AgentState::Idle | AgentState::Done),
         }
     }
 }
@@ -220,22 +212,12 @@ fn bracketed_paste(term: &Term<Listener>) -> bool {
     term.mode().contains(TermMode::BRACKETED_PASTE)
 }
 
-/// Asked right before queued bytes are typed, under the pane's lock; `false` drops them.
-pub type Claim = Box<dyn FnOnce() -> bool + Send>;
-
 /// Input waiting for its [`When`].
 struct Queued {
     when: When,
     bytes: Vec<u8>,
-    /// The task it is about, for the task brief and comments: dropped once the pane is no
-    /// longer linked to it.
-    task: Option<TaskId>,
     /// Typed as a message ([`message`]) followed by Enter, rather than as is.
     submit: bool,
-    /// Told once the bytes are typed; dropped untold if the process exits first or `claim`
-    /// says no.
-    typed: Option<oneshot::Sender<()>>,
-    claim: Option<Claim>,
 }
 
 /// Why a pane couldn't start.
@@ -362,8 +344,6 @@ struct Live {
     hosting: Option<Hosting>,
     /// `input` waiting for its state, in the order it came.
     queued: Vec<Queued>,
-    /// The task the pane is linked to now.
-    task: Option<TaskId>,
     exit_code: Option<i64>,
     fanout: Fanout,
     /// The last known folder (spec §6).
@@ -451,7 +431,6 @@ impl Pane {
                 tracker: StateTracker::new(rules),
                 hosting,
                 queued: Vec::new(),
-                task: launch.task,
                 exit_code: None,
                 fanout: Fanout::default(),
                 folder: launch.cwd.clone(),
@@ -767,58 +746,8 @@ impl Pane {
         self.enqueue(Queued {
             when,
             bytes: bytes.to_vec(),
-            task: None,
             submit,
-            typed: None,
-            claim: None,
         })
-    }
-
-    /// Submits `text`, about `task`, as a message followed by Enter once the agent waits at
-    /// its prompt ([`When::Prompt`]), if the pane is still linked to `task` then and `claim`,
-    /// asked right before, still says yes. The receiver is told when it is typed; it errs if
-    /// the process exits first, the shell pane's hosted agent leaves first, the pane is linked
-    /// elsewhere first ([`Pane::link`]), or `claim` says no. `None` when the pane can't take
-    /// it: the process has exited, a shell pane hosts no agent, or the pane isn't linked to
-    /// `task`.
-    pub fn deliver(
-        &self,
-        text: &[u8],
-        task: TaskId,
-        claim: Claim,
-    ) -> Option<oneshot::Receiver<()>> {
-        {
-            let live = self.live();
-            let hosts_none = (live.hosting.as_ref()).is_some_and(|h| h.hosted.is_none());
-            if hosts_none || live.task != Some(task) {
-                return None;
-            }
-        }
-        let (typed, delivered) = oneshot::channel();
-        self.enqueue(Queued {
-            when: When::Prompt,
-            bytes: text.to_vec(),
-            task: Some(task),
-            submit: true,
-            typed: Some(typed),
-            claim: Some(claim),
-        })
-        .ok()?;
-        Some(delivered)
-    }
-
-    /// Records that the pane is linked to `task` now (`None`: unlinked), and drops what was
-    /// queued for any other task, untyped (spec §9).
-    pub fn link(&self, task: Option<TaskId>) {
-        let mut live = self.live();
-        live.task = task;
-        live.queued
-            .retain(|queued| queued.task.is_none_or(|about| Some(about) == task));
-    }
-
-    /// The task the pane is linked to now.
-    pub fn linked(&self) -> Option<TaskId> {
-        self.live().task
     }
 
     fn enqueue(&self, queued: Queued) -> Result<bool, Exited> {
@@ -835,14 +764,8 @@ impl Pane {
         Ok(false)
     }
 
-    /// Types `queued`, unless it is about a task other than the one the pane is linked to now.
+    /// Types `queued`.
     fn typed(&self, live: &mut Live, queued: Queued) {
-        if queued.task.is_some_and(|about| Some(about) != live.task) {
-            return;
-        }
-        if queued.claim.is_some_and(|claim| !claim()) {
-            return;
-        }
         live.last_output.typed();
         if queued.submit {
             if !queued.bytes.is_empty() {
@@ -851,9 +774,6 @@ impl Pane {
             self.send(Typing::Enter);
         } else {
             self.write(queued.bytes);
-        }
-        if let Some(typed) = queued.typed {
-            let _ = typed.send(());
         }
     }
 
@@ -1190,11 +1110,6 @@ mod tests {
                 accepted(When::Idle),
                 [AgentState::Blocked, AgentState::Done, AgentState::Idle]
             );
-        }
-
-        #[test]
-        fn should_never_type_prompt_input_into_a_blocked_pane() {
-            assert_eq!(accepted(When::Prompt), [AgentState::Done, AgentState::Idle]);
         }
     }
 }

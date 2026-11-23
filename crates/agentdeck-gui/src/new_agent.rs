@@ -1,11 +1,9 @@
-//! The new agent dialog (spec §6, §11), Penpot "Screens" → "New agent": an agent CLI, the
+//! The new agent dialog (spec §6, §11), Penpot "Screens" → "New agent": an agent CLI and the
 //! folder it runs in (the focused pane's current folder, the workspace root or a repo inside
-//! it) and an optional task to link.
-//! The description under the task says what the launch prompt will carry. Enter starts, as
-//! Start agent does, unless a select has it.
+//! it). The agent starts with no prompt. Enter starts, as Start agent does, unless a select
+//! has it.
 //!
-//! The top bar's "New agent" button asks the window for it with [`NewAgent`]; the task
-//! sheet's Start agent opens it on the task's workspace with the task picked. Once the
+//! The top bar's "New agent" button asks the window for it with [`NewAgent`]. Once the
 //! daemon has started the agent and it has a place in a tab, the dialog closes and emits
 //! [`Launched`], so the window can show that tab and focus the pane: the agent may be asking
 //! about trust (spec §6).
@@ -14,7 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use agentdeck_client::ApiError;
-use agentdeck_core::{Agent, PaneId, TabId, TaskId, TaskStatus, WorkspaceId};
+use agentdeck_core::{Agent, PaneId, TabId, WorkspaceId};
 use brrritscold_core_gpui::{
     Button, ButtonVariant, Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter,
     DialogHandle, DialogHeader, DialogTitle, Field, FieldDescription, Label, Select, SelectContent,
@@ -28,7 +26,6 @@ use gpui::{
 
 use crate::api::Api;
 use crate::keymap::{self, ConfirmDialog};
-use crate::overview::Snapshot;
 use crate::top_bar::shown_dir;
 use crate::workspace::failed;
 
@@ -60,8 +57,6 @@ pub struct Launch {
     pub agent: Agent,
     /// Where it runs: an absolute dir.
     pub cwd: String,
-    /// The task to link.
-    pub task: Option<TaskId>,
 }
 
 /// The agents the dialog offers, with their names.
@@ -119,26 +114,6 @@ pub fn repos_in(root: &str) -> Vec<String> {
         .collect()
 }
 
-/// The task field's description: what the launch prompt carries (spec §6), from whether a
-/// task is picked (its title, body and new comments go in) and the workspace's instructions.
-pub fn prompt_hint(task: bool, instructions: usize) -> String {
-    let instructions = match instructions {
-        0 => None,
-        1 => Some("1 instruction".to_owned()),
-        n => Some(format!("{n} instructions")),
-    };
-    match (task, instructions) {
-        (true, Some(instructions)) => {
-            format!("The launch prompt carries the task, its new comments and {instructions}.")
-        }
-        (true, None) => "The launch prompt carries the task and its new comments.".to_owned(),
-        (false, Some(instructions)) => format!("The launch prompt carries {instructions}."),
-        (false, None) => {
-            "No task and no instructions, so the agent starts without a prompt.".to_owned()
-        }
-    }
-}
-
 /// The workspace the dialog is open on.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Target {
@@ -156,11 +131,9 @@ pub struct NewAgentDialog {
     api: Arc<dyn Api>,
     handle: DialogHandle,
     target: Option<Target>,
-    snapshot: Snapshot,
     folders: Vec<Folder>,
     agent: Agent,
     folder: SharedString,
-    task: Option<TaskId>,
     /// Whether a launch is out; another waits for it.
     launching: bool,
 }
@@ -174,31 +147,25 @@ impl NewAgentDialog {
             api,
             handle: DialogHandle::new(false),
             target: None,
-            snapshot: Snapshot::default(),
             folders: Vec::new(),
             agent: Agent::Claude,
             folder: SharedString::default(),
-            task: None,
             launching: false,
         }
     }
 
-    /// Opens it on `target`, offering `folders` and the workspace's open tasks from
-    /// `snapshot`: Claude Code in the target's folder with no task.
+    /// Opens it on `target`, offering `folders`: Claude Code in the target's folder.
     pub fn open(
         &mut self,
         target: Target,
         folders: Vec<Folder>,
-        snapshot: Snapshot,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.folder = target.folder.clone();
         self.folders = folders;
         self.target = Some(target);
-        self.snapshot = snapshot;
         self.agent = Agent::Claude;
-        self.task = None;
         self.handle.open(window, cx);
         cx.notify();
     }
@@ -213,12 +180,6 @@ impl NewAgentDialog {
     #[cfg(test)]
     pub fn workspace(&self) -> Option<WorkspaceId> {
         self.target.as_ref().map(|target| target.id)
-    }
-
-    /// The task picked.
-    #[cfg(test)]
-    pub fn task(&self) -> Option<TaskId> {
-        self.task
     }
 
     /// The folder picked, and the folders offered.
@@ -239,34 +200,6 @@ impl NewAgentDialog {
         cx.notify();
     }
 
-    /// Picks the task, or none.
-    pub fn set_task(&mut self, task: Option<TaskId>, cx: &mut Context<Self>) {
-        self.task = task;
-        cx.notify();
-    }
-
-    /// The workspace's tasks that aren't done, and the one picked, in the daemon's order.
-    fn tasks(&self) -> Vec<(TaskId, SharedString)> {
-        let Some(target) = &self.target else {
-            return Vec::new();
-        };
-        (self.snapshot.tasks.iter())
-            .filter(|t| t.workspace_id == Some(target.id))
-            .filter(|t| t.status != TaskStatus::Done || Some(t.id) == self.task)
-            .map(|t| (t.id, SharedString::from(t.title.clone())))
-            .collect()
-    }
-
-    /// The workspace's instructions, which every launch prompt there carries.
-    fn instructions(&self) -> usize {
-        let Some(target) = &self.target else {
-            return 0;
-        };
-        (self.snapshot.instructions.iter())
-            .filter(|i| i.workspace_id == target.id)
-            .count()
-    }
-
     /// Starts the agent picked: what "Start agent" does.
     pub fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self.target.clone().filter(|_| !self.launching) else {
@@ -278,7 +211,6 @@ impl NewAgentDialog {
             workspace: target.id,
             agent: self.agent,
             cwd: self.folder.to_string(),
-            task: self.task,
         };
         let launching = self.api.launch_agent(launch, cx);
         cx.spawn_in(window, async move |this, cx| {
@@ -353,17 +285,6 @@ impl Render for NewAgentDialog {
             .on_value_change(cx.listener(|this, value: &SharedString, _, cx| {
                 this.set_folder(value.clone(), cx);
             }));
-        let task_select = Select::new("new-agent-task")
-            .trigger(SelectTrigger::new().w_full())
-            .content(self.tasks().into_iter().fold(
-                SelectContent::new().item(SelectItem::new("none", "None")),
-                |c, (id, title)| c.item(SelectItem::new(id.to_string(), title)),
-            ))
-            .value(Some(self.task.map_or("none".to_owned(), |t| t.to_string())))
-            .on_value_change(cx.listener(|this, value: &SharedString, _, cx| {
-                this.set_task(value.parse().ok(), cx);
-            }));
-        let hint = prompt_hint(self.task.is_some(), self.instructions());
         let dialog = Dialog::new("new-agent")
             .handle(self.handle.clone())
             .content(
@@ -385,8 +306,7 @@ impl Render for NewAgentDialog {
                                 "Folder",
                                 folder_select,
                                 Some(folder_hint(&self.folders).to_owned()),
-                            ))
-                            .child(Self::field("Task (optional)", task_select, Some(hint))),
+                            )),
                     )
                     .footer(
                         DialogFooter::new()
@@ -418,14 +338,13 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use agentdeck_core::TaskKind;
     use brrritscold_core_gpui::Root;
     use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
 
     use super::*;
     use crate::api::fake::FakeApi;
     use crate::notice;
-    use crate::overview::fixtures::{id, instruction, task, workspace};
+    use crate::overview::fixtures::id;
 
     struct Harness {
         api: Arc<FakeApi>,
@@ -434,8 +353,7 @@ mod tests {
         _launched: gpui::Subscription,
     }
 
-    /// A dialog opened on workspace 1 (`/w/tabs`, with repo `ts-packages`), whose tasks are
-    /// 10 (todo) and 11 (done), with an instruction for the workspace.
+    /// A dialog opened on workspace 1 (`/w/tabs`, with repo `ts-packages`).
     fn open(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
         cx.update(brrritscold_core_gpui::init);
         cx.update(crate::keymap::init);
@@ -456,19 +374,6 @@ mod tests {
                 seen.borrow_mut().push(*l)
             })
         });
-        let ws = workspace(1, "tabs");
-        let snapshot = Snapshot {
-            tasks: vec![
-                task(10, TaskKind::Plain, Some(ws.id)),
-                Task {
-                    status: TaskStatus::Done,
-                    ..task(11, TaskKind::Plain, Some(ws.id))
-                },
-            ],
-            instructions: vec![instruction(20, ws.id)],
-            workspaces: vec![ws],
-            ..Snapshot::default()
-        };
         let target = Target {
             id: id(1),
             name: "tabs".into(),
@@ -479,7 +384,6 @@ mod tests {
                 d.open(
                     target,
                     folders("/w/tabs", vec!["ts-packages".into()], "/w/tabs", None),
-                    snapshot,
                     window,
                     cx,
                 );
@@ -508,13 +412,11 @@ mod tests {
         cx.run_until_parked();
     }
 
-    use agentdeck_client::types::Task;
-
     mod dialog {
         use super::*;
 
         #[gpui::test]
-        fn should_start_claude_in_the_workspace_root_with_no_task(cx: &mut TestAppContext) {
+        fn should_start_claude_in_the_workspace_root(cx: &mut TestAppContext) {
             let (harness, cx) = open(cx);
 
             start(&harness, cx);
@@ -525,7 +427,6 @@ mod tests {
                     workspace: id(1),
                     agent: Agent::Claude,
                     cwd: "/w/tabs".into(),
-                    task: None,
                 }]
             );
             assert_eq!(harness.launched.borrow().len(), 1);
@@ -559,7 +460,6 @@ mod tests {
             harness.dialog.update(cx, |d, cx| {
                 d.set_agent(Agent::Codex, cx);
                 d.set_folder("/w/tabs/ts-packages".into(), cx);
-                d.set_task(Some(id(10)), cx);
             });
 
             start(&harness, cx);
@@ -567,39 +467,6 @@ mod tests {
             let launch = harness.api.launched.lock().unwrap()[0].clone();
             assert_eq!(launch.agent, Agent::Codex);
             assert_eq!(launch.cwd, "/w/tabs/ts-packages");
-            assert_eq!(launch.task, Some(id(10)));
-        }
-
-        #[gpui::test]
-        fn should_offer_only_tasks_that_are_not_done(cx: &mut TestAppContext) {
-            let (harness, cx) = open(cx);
-
-            let tasks: Vec<TaskId> = harness
-                .dialog
-                .read_with(cx, |d, _| d.tasks().into_iter().map(|(t, _)| t).collect());
-            assert_eq!(tasks, [id(10)]);
-        }
-
-        #[gpui::test]
-        fn should_offer_a_done_task_once_it_is_picked(cx: &mut TestAppContext) {
-            let (harness, cx) = open(cx);
-
-            harness
-                .dialog
-                .update(cx, |d, cx| d.set_task(Some(id(11)), cx));
-
-            let tasks: Vec<TaskId> = harness
-                .dialog
-                .read_with(cx, |d, _| d.tasks().into_iter().map(|(t, _)| t).collect());
-            assert_eq!(tasks, [id(10), id(11)]);
-        }
-
-        #[gpui::test]
-        fn should_count_the_workspaces_instructions_for_the_prompt(cx: &mut TestAppContext) {
-            let (harness, cx) = open(cx);
-
-            assert_eq!(harness.dialog.read_with(cx, |d, _| d.instructions()), 1);
-            cx.update(|window, cx| window.draw(cx).clear(cx));
         }
 
         #[gpui::test]
@@ -679,34 +546,6 @@ mod tests {
             let offered = folders("/w/tabs", vec!["web".into()], "/w/tabs/web", None);
 
             assert_eq!(paths(&offered), ["/w/tabs", "/w/tabs/web"]);
-        }
-    }
-
-    mod prompt_hint {
-        use super::*;
-
-        #[test]
-        fn should_say_the_task_and_how_many_instructions() {
-            assert_eq!(
-                prompt_hint(true, 2),
-                "The launch prompt carries the task, its new comments and 2 instructions."
-            );
-            assert_eq!(
-                prompt_hint(true, 0),
-                "The launch prompt carries the task and its new comments."
-            );
-            assert_eq!(
-                prompt_hint(false, 1),
-                "The launch prompt carries 1 instruction."
-            );
-        }
-
-        #[test]
-        fn should_say_when_there_is_no_prompt() {
-            assert_eq!(
-                prompt_hint(false, 0),
-                "No task and no instructions, so the agent starts without a prompt."
-            );
         }
     }
 }

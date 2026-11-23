@@ -150,8 +150,7 @@ impl InboxView {
         let edit = move |_: &mut Window, cx: &mut gpui::App| {
             let _ = view.update(cx, |_, cx| cx.emit(EditTask(task)));
         };
-        let send = crate::send_task::targets(&self.snapshot, task);
-        let parts = close_prs::row_parts(&self.close, row, send, edit, cx);
+        let parts = close_prs::row_parts(&self.close, row, edit, cx);
         task_row::spaced(task_row::wide(
             row,
             picker,
@@ -432,25 +431,6 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(*asked.borrow(), [OpenTask(id(1))]);
-    }
-
-    #[gpui::test]
-    fn should_mark_a_row_whose_agent_comments_are_unseen_after_its_title(cx: &mut TestAppContext) {
-        let mut snapshot = inbox();
-        snapshot.tasks[1].unseen_agent_comments = 3;
-        let (harness, cx) = Harness::open(snapshot, cx);
-        harness.draw(cx);
-
-        let mark =
-            (cx.debug_bounds(format!("unseen {}", id::<TaskId>(2)).leak())).expect("task 2's mark");
-        let title = (cx.debug_bounds(format!("task title {}", id::<TaskId>(2)).leak()))
-            .expect("task 2's title");
-        assert_eq!(mark.size, gpui::size(gpui::px(14.), gpui::px(14.)));
-        assert!(mark.left() >= title.right(), "{mark:?} after {title:?}");
-        assert!(
-            cx.debug_bounds(format!("unseen {}", id::<TaskId>(1)).leak())
-                .is_none()
-        );
     }
 
     #[gpui::test]
@@ -1420,7 +1400,7 @@ mod tests {
                 let (_harness, cx) = Harness::open(prs(), cx);
                 let opener = cx.update(|_, cx| crate::terminal::open::fake::install(cx));
 
-                pick(2, 3, cx);
+                pick(2, 2, cx);
 
                 assert_eq!(
                     *opener.started.lock().unwrap(),
@@ -1448,13 +1428,11 @@ mod tests {
             }
 
             #[gpui::test]
-            fn should_open_an_open_prs_page_from_the_item_after_send_to_agent(
-                cx: &mut TestAppContext,
-            ) {
+            fn should_open_an_open_prs_page_from_the_item_after_edit_task(cx: &mut TestAppContext) {
                 let (harness, cx) = Harness::open(prs(), cx);
                 let opener = cx.update(|_, cx| crate::terminal::open::fake::install(cx));
 
-                pick(1, 3, cx);
+                pick(1, 2, cx);
 
                 assert_eq!(
                     *opener.started.lock().unwrap(),
@@ -1470,7 +1448,7 @@ mod tests {
             fn should_copy_the_task_id_from_the_item_after_open_on_github(cx: &mut TestAppContext) {
                 let (harness, cx) = Harness::open(prs(), cx);
 
-                pick(2, 4, cx);
+                pick(2, 3, cx);
 
                 let copied = cx.read_from_clipboard().and_then(|item| item.text());
                 assert_eq!(copied, Some(id::<TaskId>(2).to_string()));
@@ -1486,7 +1464,7 @@ mod tests {
                 let (harness, cx) = Harness::open(prs(), cx);
                 let opener = cx.update(|_, cx| crate::terminal::open::fake::install(cx));
 
-                pick(1, 5, cx);
+                pick(1, 4, cx);
 
                 assert!(asking(&harness, cx));
                 assert!(opener.started.lock().unwrap().is_empty());

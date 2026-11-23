@@ -2,9 +2,9 @@
 //! deleting a workspace loses, a field to type its name into, and Archive instead.
 //!
 //! It reads the workspace's dirty report when it opens and lists each repo holding work on no
-//! remote, then says what else deleting does: the running panes it stops, the tasks it moves
-//! to the Inbox and the instructions it deletes. Delete workspace stays disabled until the name is typed exactly; then it deletes,
-//! dirty or not, since the user has seen the report. It emits [`DeleteEvent`] for the window.
+//! remote, then says what else deleting does: the running panes it stops and the tasks it
+//! moves to the Inbox. Delete workspace stays disabled until the name is typed exactly; then it
+//! deletes, dirty or not, since the user has seen the report. It emits [`DeleteEvent`] for the window.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -59,8 +59,6 @@ pub struct Consequences {
     pub panes: usize,
     /// Its tasks, which move to the Inbox.
     pub tasks: usize,
-    /// Its instructions, which are deleted.
-    pub instructions: usize,
 }
 
 impl Consequences {
@@ -72,9 +70,6 @@ impl Consequences {
                 .count(),
             tasks: (snapshot.tasks.iter())
                 .filter(|t| t.workspace_id == Some(workspace))
-                .count(),
-            instructions: (snapshot.instructions.iter())
-                .filter(|i| i.workspace_id == workspace)
                 .count(),
         }
     }
@@ -327,14 +322,10 @@ pub fn alert_title(repos: usize) -> String {
     }
 }
 
-/// What deleting does to the workspace's running panes, tasks and instructions, panes first;
-/// nothing when it has none of them (Penpot `Consequence`).
+/// What deleting does to the workspace's running panes and tasks, panes first; nothing when it
+/// has neither (Penpot `Consequence`).
 pub fn consequence_line(consequences: Consequences) -> Option<String> {
-    let Consequences {
-        panes,
-        tasks,
-        instructions,
-    } = consequences;
+    let Consequences { panes, tasks } = consequences;
     let panes = match panes {
         0 => None,
         1 => Some("Its 1 running pane will be stopped.".to_owned()),
@@ -345,12 +336,7 @@ pub fn consequence_line(consequences: Consequences) -> Option<String> {
         1 => Some("Its 1 task moves to the Inbox.".to_owned()),
         n => Some(format!("Its {n} tasks move to the Inbox.")),
     };
-    let instructions = match instructions {
-        0 => None,
-        1 => Some("Its 1 instruction is deleted.".to_owned()),
-        n => Some(format!("Its {n} instructions are deleted.")),
-    };
-    let parts: Vec<String> = [panes, tasks, instructions].into_iter().flatten().collect();
+    let parts: Vec<String> = [panes, tasks].into_iter().flatten().collect();
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
@@ -486,7 +472,7 @@ mod tests {
     use super::*;
     use crate::api::fake::FakeApi;
     use crate::notice;
-    use crate::overview::fixtures::{id, instruction, task, workspace};
+    use crate::overview::fixtures::{id, task, workspace};
 
     struct Harness {
         api: Arc<FakeApi>,
@@ -495,7 +481,7 @@ mod tests {
         _events: Subscription,
     }
 
-    /// Workspace 1, `tabs-a11y` in `/w/tabs-a11y`, with two tasks and an instruction.
+    /// Workspace 1, `tabs-a11y` in `/w/tabs-a11y`, with two tasks.
     fn snapshot() -> Snapshot {
         let ws = workspace(1, "tabs-a11y");
         Snapshot {
@@ -504,7 +490,6 @@ mod tests {
                 task(11, TaskKind::Pr, Some(ws.id)),
                 task(12, TaskKind::Plain, None),
             ],
-            instructions: vec![instruction(20, ws.id)],
             workspaces: vec![ws],
             ..Snapshot::default()
         }
@@ -807,69 +792,51 @@ mod tests {
         use super::*;
         use crate::overview::fixtures::pane;
 
-        fn line(panes: usize, tasks: usize, instructions: usize) -> Option<String> {
-            consequence_line(Consequences {
-                panes,
-                tasks,
-                instructions,
-            })
+        fn line(panes: usize, tasks: usize) -> Option<String> {
+            consequence_line(Consequences { panes, tasks })
         }
 
         #[test]
-        fn should_say_where_the_tasks_go_and_that_the_instructions_go() {
+        fn should_say_where_the_tasks_go() {
             assert_eq!(
-                line(0, 4, 2).as_deref(),
-                Some("Its 4 tasks move to the Inbox. Its 2 instructions are deleted.")
+                line(0, 4).as_deref(),
+                Some("Its 4 tasks move to the Inbox.")
             );
         }
 
         #[test]
         fn should_say_first_that_its_running_panes_will_be_stopped() {
             assert_eq!(
-                line(3, 4, 2).as_deref(),
-                Some(
-                    "Its 3 running panes will be stopped. Its 4 tasks move to the Inbox. Its 2 \
-                     instructions are deleted."
-                )
+                line(3, 4).as_deref(),
+                Some("Its 3 running panes will be stopped. Its 4 tasks move to the Inbox.")
             );
             assert_eq!(
-                line(2, 0, 0).as_deref(),
+                line(2, 0).as_deref(),
                 Some("Its 2 running panes will be stopped.")
             );
         }
 
         #[test]
-        fn should_speak_of_one_pane_task_or_instruction_in_the_singular() {
+        fn should_speak_of_one_pane_or_task_in_the_singular() {
             assert_eq!(
-                line(1, 1, 1).as_deref(),
-                Some(
-                    "Its 1 running pane will be stopped. Its 1 task moves to the Inbox. Its 1 \
-                     instruction is deleted."
-                )
+                line(1, 1).as_deref(),
+                Some("Its 1 running pane will be stopped. Its 1 task moves to the Inbox.")
             );
         }
 
         #[test]
         fn should_leave_out_what_it_has_none_of() {
-            assert_eq!(
-                line(0, 3, 0).as_deref(),
-                Some("Its 3 tasks move to the Inbox.")
-            );
-            assert_eq!(
-                line(0, 0, 2).as_deref(),
-                Some("Its 2 instructions are deleted.")
-            );
-            assert_eq!(line(0, 0, 0), None);
+            assert_eq!(line(0, 0), None);
         }
 
         #[gpui::test]
-        fn should_count_the_workspaces_own_tasks_and_instructions(cx: &mut TestAppContext) {
+        fn should_count_the_workspaces_own_tasks(cx: &mut TestAppContext) {
             let (harness, cx) = Harness::new(Arc::new(FakeApi::with(snapshot())), cx);
 
             harness.open(cx);
 
             let counted = harness.dialog.read_with(cx, |d, _| d.consequences);
-            assert_eq!((counted.tasks, counted.instructions), (2, 1));
+            assert_eq!(counted.tasks, 2);
             assert_eq!(counted.panes, 0);
         }
 

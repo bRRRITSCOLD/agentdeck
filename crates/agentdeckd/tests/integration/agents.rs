@@ -1,23 +1,15 @@
-//! Agent panes (spec §6, §9): launching `claude` and `codex` with a session and a launch
-//! prompt, delivering the user's task comments to a live agent, and resuming panes after a
-//! restart. The
-//! agents are the stubs in `support::agents`; no test runs a real agent CLI.
+//! Agent panes (spec §6): launching `claude` and `codex` with a session and no prompt,
+//! restarting them and resuming panes after a restart. The agents are the stubs in
+//! `support::agents`; no test runs a real agent CLI.
 
 use std::time::Duration;
 
 use agentdeck_client::Client;
-use agentdeck_client::types::{
-    Comment, InputWhen, Instruction, NewComment, NewInstruction, NewTask, Pane, PaneInput,
-    PanePatch, Task,
-};
-use agentdeck_core::{Agent, AgentState, CommentId, PaneId, PaneKind, TaskId, WorkspaceId};
+use agentdeck_client::types::{InputWhen, NewTask, Pane, PaneInput, PanePatch, Task};
+use agentdeck_core::{Agent, AgentState, PaneId, PaneKind, TaskId, WorkspaceId};
 
-use crate::support::agents::{
-    args, codex_session, launches, task_brief, task_header, task_var, trust_answer, typed,
-};
-use crate::support::terminal::{
-    Place, daemon_with_shell_rules, eventually, holds_for, in_state, printed, sh,
-};
+use crate::support::agents::{args, codex_session, launches, task_var, typed};
+use crate::support::terminal::{Place, eventually, holds_for, in_state, printed, sh};
 use crate::support::{TestDaemon, error_response};
 
 async fn task(client: &Client, workspace: WorkspaceId, title: &str, body: &str) -> Task {
@@ -35,60 +27,10 @@ async fn task(client: &Client, workspace: WorkspaceId, title: &str, body: &str) 
         .into_inner()
 }
 
-async fn instruction(client: &Client, workspace: WorkspaceId, body: &str) -> Instruction {
-    client
-        .instruction_create()
-        .id(workspace)
-        .body(NewInstruction { body: body.into() })
-        .send()
-        .await
-        .expect("add an instruction")
-        .into_inner()
-}
-
-/// Adds a comment to `task`: the user's, or with `pane` that pane's agent's.
-async fn comment(client: &Client, task: &Task, body: &str, pane: Option<PaneId>) -> Comment {
-    client
-        .comment_create()
-        .id(task.id)
-        .body(NewComment {
-            body: body.into(),
-            pane,
-        })
-        .send()
-        .await
-        .expect("add a comment")
-        .into_inner()
-}
-
-async fn read_comment(client: &Client, task: TaskId, id: CommentId) -> Comment {
-    client
-        .comment_list()
-        .id(task)
-        .send()
-        .await
-        .expect("list comments")
-        .into_inner()
-        .into_iter()
-        .find(|comment| comment.id == id)
-        .expect("the comment")
-}
-
-/// Waits until comment `id` on `task` is delivered to `pane`.
-async fn delivered_to(client: &Client, task: TaskId, id: CommentId, pane: PaneId) -> Comment {
-    eventually(
-        &format!("comment {id} to be delivered to the pane"),
-        || async {
-            let comment = read_comment(client, task, id).await;
-            (comment.delivered_to_pane == Some(pane)).then_some(comment)
-        },
-    )
-    .await
-}
-
-/// Launches an agent of `agent` on `task` and has it exit at its prompt.
+/// Launches an agent of `agent`, links it to `task` and has it exit at its prompt.
 async fn exited_agent(daemon: &TestDaemon, place: &Place, agent: Agent, task: &Task) -> Pane {
-    let pane = place.launch(&daemon.client, agent, Some(task.id)).await;
+    let pane = place.launch(&daemon.client, agent).await;
+    link(&daemon.client, pane.id, Some(task.id)).await;
     // Each stub sets its title once it reads what is typed; the codex stub never idles.
     let title = match agent {
         Agent::Claude => "\u{1b}]0;\u{2733} Claude Code",
@@ -158,9 +100,9 @@ async fn launched_no_more_than(daemon: &TestDaemon, pane: PaneId, n: usize) {
     .await;
 }
 
-/// Asserts `launch` starts claude afresh, on a session other than `old`, with `task`'s launch
-/// prompt; returns its session.
-fn fresh_claude(launch: &[String], old: &str, task: &Task) -> String {
+/// Asserts `launch` starts claude afresh, on a session other than `old`, with no prompt;
+/// returns its session.
+fn fresh_claude(launch: &[String], old: &str) -> String {
     let session = launch
         .iter()
         .skip_while(|arg| *arg != "--session-id")
@@ -169,8 +111,7 @@ fn fresh_claude(launch: &[String], old: &str, task: &Task) -> String {
         .clone();
     assert_ne!(session, old, "a new session");
     assert!(!launch.contains(&"--resume".to_owned()), "{launch:?}");
-    let prompt = launch.last().expect("a launch prompt");
-    assert!(prompt.starts_with(&task_header(task)), "{prompt}");
+    assert_eq!(launch, args(&["--session-id", &session]), "no prompt");
     session
 }
 
@@ -198,7 +139,7 @@ mod post_v1_panes {
             let response = daemon
                 .client
                 .pane_create()
-                .body(place.new_agent(Agent::Claude, None))
+                .body(place.new_agent(Agent::Claude))
                 .send()
                 .await
                 .expect("launch claude");
@@ -217,90 +158,31 @@ mod post_v1_panes {
         }
 
         #[tokio::test]
-        async fn should_carry_the_task_instructions_and_new_comments_in_the_launch_prompt_201() {
+        async fn should_start_with_no_prompt_and_no_task_201() {
             let daemon = TestDaemon::start().await;
             let place = Place::new(&daemon).await;
-            let ws = place.workspace.id;
-            let task = task(
+            task(
                 &daemon.client,
-                ws,
-                "Fix the login bug",
+                place.workspace.id,
+                "Fix it",
                 "It fails on Safari.",
             )
             .await;
-            instruction(&daemon.client, ws, "Use the staging DB").await;
-            instruction(&daemon.client, ws, "Push only after 20 green runs").await;
-            let from_you = comment(&daemon.client, &task, "Repro in issue 7", None).await;
-            let other = Place::new(&daemon).await;
-            instruction(&daemon.client, other.workspace.id, "Not you").await;
 
-            let pane = place
-                .launch(&daemon.client, Agent::Claude, Some(task.id))
-                .await;
+            let pane = place.launch(&daemon.client, Agent::Claude).await;
 
             let session = pane.session_id.clone().expect("a session id");
-            let prompt = format!(
-                "{}\n\nIt fails on Safari.\n\n\
-                 Instructions for this workspace:\n  - Use the staging DB\n  \
-                 - Push only after 20 green runs\n\
-                 Comments since your last session:\n  - Repro in issue 7",
-                task_header(&task)
-            );
-            let args = args(&["--session-id", &session, &prompt]);
-            assert_eq!(pane.argv[1..], args);
-            assert_eq!(launched(&daemon, pane.id, 1).await, [args]);
-            assert_eq!(task_var(&daemon, pane.id), Some(task.id.to_string()));
-            delivered_to(&daemon.client, task.id, from_you.id, pane.id).await;
-        }
-
-        #[tokio::test]
-        async fn should_leave_out_delivered_and_agent_comments_but_keep_instructions_201() {
-            let daemon = TestDaemon::start().await;
-            let place = Place::new(&daemon).await;
-            let ws = place.workspace.id;
-            let task = task(&daemon.client, ws, "Fix it", "").await;
-            instruction(&daemon.client, ws, "Use the staging DB").await;
-            let first = place
-                .launch(&daemon.client, Agent::Claude, Some(task.id))
-                .await;
-            in_state(&daemon.client, first.id, AgentState::Idle).await;
-            let delivered = comment(&daemon.client, &task, "For the first", None).await;
-            delivered_to(&daemon.client, task.id, delivered.id, first.id).await;
-            comment(&daemon.client, &task, "PR opened", Some(first.id)).await;
-
-            let second = place
-                .launch(&daemon.client, Agent::Claude, Some(task.id))
-                .await;
-
-            assert_eq!(
-                second.argv.last().unwrap(),
-                &format!(
-                    "{}\n\nInstructions for this workspace:\n  - Use the staging DB",
-                    task_header(&task)
-                )
-            );
-        }
-
-        #[tokio::test]
-        async fn should_start_without_a_prompt_with_no_task_or_instructions_201() {
-            let daemon = TestDaemon::start().await;
-            let place = Place::new(&daemon).await;
-
-            let pane = place.launch(&daemon.client, Agent::Claude, None).await;
-
-            assert_eq!(
-                pane.argv.last().map(String::as_str),
-                pane.session_id.as_deref(),
-                "no launch prompt: {:?}",
-                pane.argv
-            );
+            assert_eq!(pane.argv, ["claude", "--session-id", session.as_str()]);
+            assert_eq!(pane.task_id, None);
+            in_state(&daemon.client, pane.id, AgentState::Idle).await;
+            assert_eq!(typed(&daemon, pane.id), "", "nothing typed into it");
         }
 
         #[tokio::test]
         async fn should_reject_an_argv_400() {
             let daemon = TestDaemon::start().await;
             let place = Place::new(&daemon).await;
-            let mut new = place.new_agent(Agent::Claude, None);
+            let mut new = place.new_agent(Agent::Claude);
             new.argv = Some(vec!["claude".into(), "--model".into(), "opus".into()]);
 
             let (status, body) = error_response(daemon.client.pane_create().body(new).send().await);
@@ -313,25 +195,13 @@ mod post_v1_panes {
         async fn should_reject_an_agent_pane_that_names_no_agent_400() {
             let daemon = TestDaemon::start().await;
             let place = Place::new(&daemon).await;
-            let mut new = place.new_agent(Agent::Claude, None);
+            let mut new = place.new_agent(Agent::Claude);
             new.agent = None;
 
             let (status, body) = error_response(daemon.client.pane_create().body(new).send().await);
 
             assert_eq!(status, 400);
             assert_eq!(body.error_code.as_deref(), Some("unsupported_kind"));
-        }
-
-        #[tokio::test]
-        async fn should_reject_an_unknown_task_400() {
-            let daemon = TestDaemon::start().await;
-            let place = Place::new(&daemon).await;
-            let new = place.new_agent(Agent::Claude, Some(uuid::Uuid::now_v7().into()));
-
-            let (status, body) = error_response(daemon.client.pane_create().body(new).send().await);
-
-            assert_eq!(status, 400);
-            assert_eq!(body.error_code.as_deref(), Some("unknown_task"));
         }
     }
 
@@ -350,18 +220,12 @@ mod post_v1_panes {
                 "",
             )
             .expect("writing an earlier session");
-            let task = task(&daemon.client, place.workspace.id, "Port the parser", "").await;
 
-            let pane = place
-                .launch(&daemon.client, Agent::Codex, Some(task.id))
-                .await;
+            let pane = place.launch(&daemon.client, Agent::Codex).await;
 
-            let args = args(&[&task_header(&task)]);
-            assert_eq!(pane.argv[0], "codex");
-            assert_eq!(pane.argv[1..], args);
-            assert_eq!(launched(&daemon, pane.id, 1).await, [args]);
-            let task_id = task.id.to_string();
-            assert_eq!(task_var(&daemon, pane.id), Some(task_id));
+            assert_eq!(pane.argv, ["codex"], "no prompt");
+            assert_eq!(launched(&daemon, pane.id, 1).await, [Vec::<String>::new()]);
+            assert_eq!(task_var(&daemon, pane.id).as_deref(), Some("unset"));
             let written = eventually("the stub to write its session", || async {
                 codex_session(&daemon, pane.id)
             })
@@ -375,472 +239,6 @@ mod post_v1_panes {
     }
 }
 
-/// Launches a claude pane, on `task` when given, held at the folder trust dialog, so what is
-/// typed for it waits; then trusts the folder again, so later panes start idle.
-async fn held_agent(daemon: &TestDaemon, place: &Place, task: Option<TaskId>) -> Pane {
-    let untrusted = std::path::Path::new(&place.workspace.dir).join("untrusted");
-    std::fs::write(&untrusted, "").expect("marking the folder untrusted");
-    let pane = place.launch(&daemon.client, Agent::Claude, task).await;
-    in_state(&daemon.client, pane.id, AgentState::Blocked).await;
-    std::fs::remove_file(&untrusted).expect("trusting the folder");
-    pane
-}
-
-/// Submits a marker to `pane` and returns everything typed into it once the marker has
-/// reached its stub. A comment is marked delivered once its bytes are queued for the
-/// pane's writer, before the stub has read them; the writer types in order, so anything
-/// delivered before the marker was typed has arrived ahead of it.
-async fn typed_through_marker(daemon: &TestDaemon, pane: PaneId) -> String {
-    submit_now(&daemon.client, pane, "marker").await;
-    eventually("the marker to be typed", || async {
-        let typed = typed(daemon, pane);
-        typed.ends_with("marker\n").then_some(typed)
-    })
-    .await
-}
-
-/// Answers `pane`'s trust dialog and returns everything typed into it once it is idle.
-/// What was waiting for its prompt is typed as it idles, ahead of the marker.
-async fn typed_once_released(daemon: &TestDaemon, pane: PaneId) -> String {
-    type_now(&daemon.client, pane, "\r").await;
-    in_state(&daemon.client, pane, AgentState::Idle).await;
-    typed_through_marker(daemon, pane).await
-}
-
-mod comment_delivery {
-    use super::*;
-
-    #[tokio::test]
-    async fn should_type_a_waiting_comment_only_into_a_newer_agent_linked_meanwhile() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
-        let older = held_agent(&daemon, &place, Some(task.id)).await;
-        let waiting = comment(&daemon.client, &task, "Also check Firefox", None).await;
-        let newer = place.launch(&daemon.client, Agent::Claude, None).await;
-        in_state(&daemon.client, newer.id, AgentState::Idle).await;
-
-        link(&daemon.client, newer.id, Some(task.id)).await;
-
-        delivered_to(&daemon.client, task.id, waiting.id, newer.id).await;
-        assert_eq!(
-            typed_through_marker(&daemon, newer.id).await,
-            format!("{}Also check Firefox\nmarker\n", task_brief(&task))
-        );
-        assert_eq!(typed_once_released(&daemon, older.id).await, "marker\n");
-        let comment = read_comment(&daemon.client, task.id, waiting.id).await;
-        assert_eq!(comment.delivered_to_pane, Some(newer.id));
-    }
-
-    #[tokio::test]
-    async fn should_keep_a_waiting_comment_for_its_newer_agent_when_an_older_one_is_linked() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
-        let older = place.launch(&daemon.client, Agent::Claude, None).await;
-        in_state(&daemon.client, older.id, AgentState::Idle).await;
-        let newer = held_agent(&daemon, &place, Some(task.id)).await;
-        let waiting = comment(&daemon.client, &task, "Also check Firefox", None).await;
-
-        link(&daemon.client, older.id, Some(task.id)).await;
-
-        // The link types at once into an idle pane, so anything it typed precedes the marker.
-        assert_eq!(
-            typed_through_marker(&daemon, older.id).await,
-            format!("{}marker\n", task_brief(&task))
-        );
-        assert_eq!(
-            typed_once_released(&daemon, newer.id).await,
-            "Also check Firefox\nmarker\n"
-        );
-        delivered_to(&daemon.client, task.id, waiting.id, newer.id).await;
-    }
-
-    #[tokio::test]
-    async fn should_not_type_a_waiting_comment_a_new_agents_launch_prompt_carried() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
-        let older = held_agent(&daemon, &place, Some(task.id)).await;
-        let waiting = comment(&daemon.client, &task, "Also check Firefox", None).await;
-
-        let newer = place
-            .launch(&daemon.client, Agent::Claude, Some(task.id))
-            .await;
-
-        let prompt = launched(&daemon, newer.id, 1).await[0].join(" ");
-        assert!(prompt.contains("Also check Firefox"), "{prompt}");
-        delivered_to(&daemon.client, task.id, waiting.id, newer.id).await;
-        assert_eq!(typed_once_released(&daemon, older.id).await, "marker\n");
-    }
-
-    #[tokio::test]
-    async fn should_type_the_users_comment_into_its_idle_agent_and_mark_it_delivered() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
-        let pane = place
-            .launch(&daemon.client, Agent::Claude, Some(task.id))
-            .await;
-        in_state(&daemon.client, pane.id, AgentState::Idle).await;
-
-        let created = comment(&daemon.client, &task, "Also check Firefox", None).await;
-
-        assert_eq!(created.delivered_at, None);
-        eventually("the comment to be typed", || async {
-            (typed(&daemon, pane.id) == "Also check Firefox\n").then_some(())
-        })
-        .await;
-        let delivered = delivered_to(&daemon.client, task.id, created.id, pane.id).await;
-        assert!(delivered.delivered_at.is_some());
-    }
-
-    #[tokio::test]
-    async fn should_go_to_the_newest_live_agent_on_the_task() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
-        let older = place
-            .launch(&daemon.client, Agent::Claude, Some(task.id))
-            .await;
-        let newer = place
-            .launch(&daemon.client, Agent::Claude, Some(task.id))
-            .await;
-        in_state(&daemon.client, newer.id, AgentState::Idle).await;
-
-        let created = comment(&daemon.client, &task, "Also check Firefox", None).await;
-
-        delivered_to(&daemon.client, task.id, created.id, newer.id).await;
-        // Anything held for the older pane is typed as it idles, ahead of its marker.
-        in_state(&daemon.client, older.id, AgentState::Idle).await;
-        assert_eq!(typed_through_marker(&daemon, older.id).await, "marker\n");
-    }
-
-    #[tokio::test]
-    async fn should_go_only_to_the_newest_of_two_agents_linked_after_they_started() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
-        let older = place.launch(&daemon.client, Agent::Claude, None).await;
-        let newer = place.launch(&daemon.client, Agent::Claude, None).await;
-        for pane in [older.id, newer.id] {
-            in_state(&daemon.client, pane, AgentState::Idle).await;
-            link(&daemon.client, pane, Some(task.id)).await;
-        }
-
-        let created = comment(&daemon.client, &task, "Also check Firefox", None).await;
-
-        delivered_to(&daemon.client, task.id, created.id, newer.id).await;
-        assert_eq!(
-            typed_through_marker(&daemon, newer.id).await,
-            format!("{}Also check Firefox\nmarker\n", task_brief(&task))
-        );
-        assert_eq!(
-            typed_through_marker(&daemon, older.id).await,
-            format!("{}marker\n", task_brief(&task))
-        );
-    }
-
-    #[tokio::test]
-    async fn should_type_the_task_then_its_waiting_comments_into_an_agent_linked_to_it() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let task = task(
-            &daemon.client,
-            place.workspace.id,
-            "Fix it",
-            "It fails on CI",
-        )
-        .await;
-        let first = comment(&daemon.client, &task, "Also check Firefox", None).await;
-        let second = comment(&daemon.client, &task, "And Safari", None).await;
-        let pane = place.launch(&daemon.client, Agent::Claude, None).await;
-        in_state(&daemon.client, pane.id, AgentState::Idle).await;
-
-        link(&daemon.client, pane.id, Some(task.id)).await;
-
-        let expected = format!("{}Also check Firefox\nAnd Safari\n", task_brief(&task));
-        assert!(expected.contains("\n\nIt fails on CI\n"), "{expected}");
-        eventually("the task and its comments to be typed", || async {
-            (typed(&daemon, pane.id) == expected).then_some(())
-        })
-        .await;
-        delivered_to(&daemon.client, task.id, first.id, pane.id).await;
-        delivered_to(&daemon.client, task.id, second.id, pane.id).await;
-    }
-
-    #[tokio::test]
-    async fn should_type_neither_the_task_nor_its_comments_into_a_shell_linked_to_it() {
-        let daemon = daemon_with_shell_rules().await;
-        let place = Place::new(&daemon).await;
-        let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
-        let waiting = comment(&daemon.client, &task, "Also check Firefox", None).await;
-        let pane = place
-            .spawn(
-                &daemon.client,
-                &sh("printf '\\033]0;idle\\007'; cat > typed"),
-            )
-            .await;
-        in_state(&daemon.client, pane.id, AgentState::Idle).await;
-
-        link(&daemon.client, pane.id, Some(task.id)).await;
-        // Long past the 100 ms the shell's state takes to settle: an agent would have had it.
-        tokio::time::sleep(Duration::from_millis(1_000)).await;
-
-        let comment = read_comment(&daemon.client, task.id, waiting.id).await;
-        assert_eq!(comment.delivered_at, None);
-        let typed =
-            std::fs::read_to_string(std::path::Path::new(&place.workspace.dir).join("typed"));
-        assert_eq!(typed.unwrap_or_default(), "");
-    }
-
-    #[tokio::test]
-    async fn should_never_deliver_an_agents_comment() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
-        let pane = place
-            .launch(&daemon.client, Agent::Claude, Some(task.id))
-            .await;
-        in_state(&daemon.client, pane.id, AgentState::Idle).await;
-
-        let created = comment(&daemon.client, &task, "PR opened", Some(pane.id)).await;
-        // Long past the 400 ms a state takes to settle: an idle agent would have had it.
-        tokio::time::sleep(Duration::from_millis(1_500)).await;
-
-        assert_eq!(typed(&daemon, pane.id), "");
-        let comment = read_comment(&daemon.client, task.id, created.id).await;
-        assert_eq!(
-            (comment.delivered_at, comment.delivered_to_pane),
-            (None, None)
-        );
-    }
-
-    #[tokio::test]
-    async fn should_never_answer_the_trust_dialog() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        std::fs::write(
-            std::path::Path::new(&place.workspace.dir).join("untrusted"),
-            "",
-        )
-        .expect("marking the folder untrusted");
-        let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
-        let pane = place
-            .launch(&daemon.client, Agent::Claude, Some(task.id))
-            .await;
-        in_state(&daemon.client, pane.id, AgentState::Blocked).await;
-
-        let created = comment(&daemon.client, &task, "Also check Firefox", None).await;
-        // Long past the 400 ms a state takes to settle: the comment is still held.
-        tokio::time::sleep(Duration::from_millis(1_500)).await;
-
-        assert_eq!(
-            trust_answer(&daemon, pane.id),
-            None,
-            "the dialog was answered"
-        );
-        let held = read_comment(&daemon.client, task.id, created.id).await;
-        assert_eq!(held.delivered_at, None);
-
-        // The user answers it; then the agent idles and the comment goes in.
-        type_now(&daemon.client, pane.id, "\r").await;
-        delivered_to(&daemon.client, task.id, created.id, pane.id).await;
-        assert_eq!(trust_answer(&daemon, pane.id).as_deref(), Some("\n"));
-        assert_eq!(
-            typed_through_marker(&daemon, pane.id).await,
-            "Also check Firefox\nmarker\n"
-        );
-    }
-    #[tokio::test]
-    async fn should_pass_a_held_comment_to_the_next_agent_when_its_pane_is_linked_elsewhere() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let task_a = task(&daemon.client, place.workspace.id, "Fix it", "").await;
-        let task_b = task(&daemon.client, place.workspace.id, "Ship it", "").await;
-        let older = place
-            .launch(&daemon.client, Agent::Claude, Some(task_a.id))
-            .await;
-        in_state(&daemon.client, older.id, AgentState::Idle).await;
-        let newer = held_agent(&daemon, &place, Some(task_a.id)).await;
-        let waiting = comment(&daemon.client, &task_a, "Also check Firefox", None).await;
-
-        link(&daemon.client, newer.id, Some(task_b.id)).await;
-
-        delivered_to(&daemon.client, task_a.id, waiting.id, older.id).await;
-        assert_eq!(
-            typed_once_released(&daemon, newer.id).await,
-            format!("{}marker\n", task_brief(&task_b)),
-            "only the task it is linked to now"
-        );
-    }
-
-    #[tokio::test]
-    async fn should_pass_a_held_comment_to_the_next_agent_when_its_pane_exits() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
-        let older = place
-            .launch(&daemon.client, Agent::Claude, Some(task.id))
-            .await;
-        in_state(&daemon.client, older.id, AgentState::Idle).await;
-        let newer = held_agent(&daemon, &place, Some(task.id)).await;
-        let waiting = comment(&daemon.client, &task, "Also check Firefox", None).await;
-
-        // Ctrl+C at the stand-in trust dialog ends the stub.
-        type_now(&daemon.client, newer.id, "\u{3}").await;
-
-        in_state(&daemon.client, newer.id, AgentState::Exited).await;
-        delivered_to(&daemon.client, task.id, waiting.id, older.id).await;
-    }
-
-    #[tokio::test]
-    async fn should_leave_a_held_comment_waiting_on_the_task_when_no_other_agent_is_live() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
-        let held = held_agent(&daemon, &place, Some(task.id)).await;
-        let waiting = comment(&daemon.client, &task, "Also check Firefox", None).await;
-        type_now(&daemon.client, held.id, "\u{3}").await;
-        in_state(&daemon.client, held.id, AgentState::Exited).await;
-
-        let next = place
-            .launch(&daemon.client, Agent::Claude, Some(task.id))
-            .await;
-
-        let prompt = launched(&daemon, next.id, 1).await[0].join(" ");
-        assert!(prompt.contains("Also check Firefox"), "{prompt}");
-        delivered_to(&daemon.client, task.id, waiting.id, next.id).await;
-    }
-}
-
-mod task_delivery {
-    use super::*;
-
-    #[tokio::test]
-    async fn should_type_the_task_into_an_agent_linked_to_it_once_it_waits_at_its_prompt() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let task = task(
-            &daemon.client,
-            place.workspace.id,
-            "Fix it",
-            "It fails on CI",
-        )
-        .await;
-        let waiting = comment(&daemon.client, &task, "Also check Firefox", None).await;
-        let pane = held_agent(&daemon, &place, None).await;
-
-        link(&daemon.client, pane.id, Some(task.id)).await;
-        // Long past the 400 ms a state takes to settle: the task is still held.
-        tokio::time::sleep(Duration::from_millis(1_500)).await;
-        assert_eq!(
-            trust_answer(&daemon, pane.id),
-            None,
-            "the dialog was answered"
-        );
-        assert_eq!(typed(&daemon, pane.id), "");
-
-        assert_eq!(
-            typed_once_released(&daemon, pane.id).await,
-            format!("{}Also check Firefox\nmarker\n", task_brief(&task))
-        );
-        delivered_to(&daemon.client, task.id, waiting.id, pane.id).await;
-    }
-
-    #[tokio::test]
-    async fn should_not_type_the_task_again_when_linked_to_it_again() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
-        let pane = place.launch(&daemon.client, Agent::Claude, None).await;
-        in_state(&daemon.client, pane.id, AgentState::Idle).await;
-        link(&daemon.client, pane.id, Some(task.id)).await;
-        eventually("the task to be typed", || async {
-            (typed(&daemon, pane.id) == task_brief(&task)).then_some(())
-        })
-        .await;
-
-        link(&daemon.client, pane.id, Some(task.id)).await;
-
-        assert_eq!(
-            typed_through_marker(&daemon, pane.id).await,
-            format!("{}marker\n", task_brief(&task))
-        );
-    }
-
-    #[tokio::test]
-    async fn should_not_type_the_task_its_launch_prompt_carried_when_linked_to_it() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
-        let pane = place
-            .launch(&daemon.client, Agent::Claude, Some(task.id))
-            .await;
-        in_state(&daemon.client, pane.id, AgentState::Idle).await;
-
-        link(&daemon.client, pane.id, Some(task.id)).await;
-
-        assert_eq!(typed_through_marker(&daemon, pane.id).await, "marker\n");
-    }
-
-    #[tokio::test]
-    async fn should_type_nothing_on_unlinking() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
-        let pane = place
-            .launch(&daemon.client, Agent::Claude, Some(task.id))
-            .await;
-        in_state(&daemon.client, pane.id, AgentState::Idle).await;
-
-        link(&daemon.client, pane.id, None).await;
-
-        assert_eq!(typed_through_marker(&daemon, pane.id).await, "marker\n");
-    }
-
-    #[tokio::test]
-    async fn should_type_the_task_an_agent_is_linked_to_instead_of_the_one_it_was_launched_on() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let first = task(&daemon.client, place.workspace.id, "Fix it", "").await;
-        let second = task(&daemon.client, place.workspace.id, "Ship it", "Tag v2").await;
-        let pane = place
-            .launch(&daemon.client, Agent::Claude, Some(first.id))
-            .await;
-        in_state(&daemon.client, pane.id, AgentState::Idle).await;
-
-        link(&daemon.client, pane.id, Some(second.id)).await;
-
-        assert_eq!(
-            typed_through_marker(&daemon, pane.id).await,
-            format!("{}marker\n", task_brief(&second))
-        );
-    }
-    #[tokio::test]
-    async fn should_type_only_the_task_an_agent_is_linked_to_when_relinked_before_its_prompt() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let first = task(&daemon.client, place.workspace.id, "Fix it", "").await;
-        let second = task(&daemon.client, place.workspace.id, "Ship it", "Tag v2").await;
-        let waiting = comment(&daemon.client, &first, "Also check Firefox", None).await;
-        let pane = held_agent(&daemon, &place, None).await;
-        link(&daemon.client, pane.id, Some(first.id)).await;
-
-        link(&daemon.client, pane.id, Some(second.id)).await;
-
-        assert_eq!(
-            typed_once_released(&daemon, pane.id).await,
-            format!("{}marker\n", task_brief(&second))
-        );
-        let comment = read_comment(&daemon.client, first.id, waiting.id).await;
-        assert_eq!(
-            (comment.delivered_at, comment.delivered_to_pane),
-            (None, None)
-        );
-    }
-}
-
 mod resume_after_restart {
     use super::*;
 
@@ -848,8 +246,8 @@ mod resume_after_restart {
     async fn should_resume_claude_and_codex_on_their_sessions() {
         let daemon = TestDaemon::start().await;
         let place = Place::new(&daemon).await;
-        let claude = place.launch(&daemon.client, Agent::Claude, None).await;
-        let codex = place.launch(&daemon.client, Agent::Codex, None).await;
+        let claude = place.launch(&daemon.client, Agent::Claude).await;
+        let codex = place.launch(&daemon.client, Agent::Codex).await;
         let claude_session = claude.session_id.clone().expect("a claude session");
         let codex_session = eventually("the codex session", || async {
             pane(&daemon.client, codex.id).await.session_id
@@ -879,9 +277,8 @@ mod resume_after_restart {
         let daemon = TestDaemon::start().await;
         let place = Place::new(&daemon).await;
         let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
-        let claude = place
-            .launch(&daemon.client, Agent::Claude, Some(task.id))
-            .await;
+        let claude = place.launch(&daemon.client, Agent::Claude).await;
+        link(&daemon.client, claude.id, Some(task.id)).await;
         in_state(&daemon.client, claude.id, AgentState::Idle).await;
         let (_, dirs) = daemon.terminate();
         let first = dirs.path().join(format!("agents/{}/task", claude.id));
@@ -898,9 +295,8 @@ mod resume_after_restart {
         let daemon = TestDaemon::start().await;
         let place = Place::new(&daemon).await;
         let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
-        let claude = place
-            .launch(&daemon.client, Agent::Claude, Some(task.id))
-            .await;
+        let claude = place.launch(&daemon.client, Agent::Claude).await;
+        link(&daemon.client, claude.id, Some(task.id)).await;
         let old = claude.session_id.clone().expect("a claude session");
         in_state(&daemon.client, claude.id, AgentState::Idle).await;
         let (_, dirs) = daemon.terminate();
@@ -914,7 +310,7 @@ mod resume_after_restart {
 
         let launches = launched(&daemon, claude.id, 3).await;
         assert_eq!(launches[1], args(&["--resume", &old]));
-        let session = fresh_claude(&launches[2], &old, &task);
+        let session = fresh_claude(&launches[2], &old);
         let fresh = in_state(&daemon.client, claude.id, AgentState::Idle).await;
         assert_eq!(fresh.session_id, Some(session));
         assert_eq!(fresh.task_id, Some(task.id));
@@ -990,13 +386,13 @@ mod resume_as_a_shell {
                 kind: PaneKind::Agent,
                 agent: Some(Agent::Other),
                 argv: Some(sh("exec sleep 600").map(String::from).to_vec()),
-                task_id: Some(task.id),
                 ..place.new_pane(&[])
             })
             .send()
             .await
             .expect("start an other agent")
             .into_inner();
+        link(&daemon.client, pane.id, Some(task.id)).await;
         let (_, dirs) = daemon.terminate();
 
         let daemon = TestDaemon::start_in(dirs).await;
@@ -1009,13 +405,12 @@ mod resume_as_a_shell {
         assert_eq!(resumed.argv, ["/bin/sh"], "the shell it runs now");
         assert_eq!(resumed.task_id, Some(task.id), "the link stays");
         printed(&daemon.client, pane.id, "$ ").await;
-        let waiting = comment(&daemon.client, &task, "Also check Firefox", None).await;
         type_now(&daemon.client, pane.id, "claude\r").await;
-        delivered_to(&daemon.client, task.id, waiting.id, pane.id).await;
-        assert_eq!(
-            pane_now(&daemon.client, pane.id).await.hosted_agent,
-            Some(Agent::Claude)
-        );
+        eventually("the shell to host claude", || async {
+            (pane_now(&daemon.client, pane.id).await.hosted_agent == Some(Agent::Claude))
+                .then_some(())
+        })
+        .await;
     }
 
     async fn pane_now(client: &Client, id: PaneId) -> Pane {
@@ -1129,7 +524,7 @@ mod post_v1_panes_id_respawn {
 
             let launches = launched(&daemon, pane.id, 3).await;
             assert_eq!(launches[1], args(&["--resume", &old]));
-            let session = fresh_claude(&launches[2], &old, &task);
+            let session = fresh_claude(&launches[2], &old);
             let fresh = in_state(&daemon.client, pane.id, AgentState::Idle).await;
             assert_eq!(
                 (fresh.kind, fresh.agent, fresh.session_id),
@@ -1150,7 +545,7 @@ mod post_v1_panes_id_respawn {
             respawn(&daemon.client, pane.id, PaneRun::Agent).await;
 
             let launches = launched(&daemon, pane.id, 3).await;
-            let session = fresh_claude(&launches[2], &old, &task);
+            let session = fresh_claude(&launches[2], &old);
             let exited = in_state(&daemon.client, pane.id, AgentState::Exited).await;
             assert_eq!(exited.exit_code, Some(1));
             launched_no_more_than(&daemon, pane.id, 3).await;
@@ -1164,9 +559,8 @@ mod post_v1_panes_id_respawn {
             let daemon = TestDaemon::start().await;
             let place = Place::new(&daemon).await;
             let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
-            let pane = place
-                .launch(&daemon.client, Agent::Codex, Some(task.id))
-                .await;
+            let pane = place.launch(&daemon.client, Agent::Codex).await;
+            link(&daemon.client, pane.id, Some(task.id)).await;
             let old = eventually("the codex session", || async {
                 pane_session(&daemon.client, pane.id).await
             })
@@ -1184,9 +578,10 @@ mod post_v1_panes_id_respawn {
 
             let launches = launched(&daemon, pane.id, 3).await;
             assert_eq!(launches[1], args(&["resume", &old]));
-            assert!(!launches[2].contains(&"resume".to_owned()), "{launches:?}");
-            let prompt = launches[2].last().expect("a launch prompt");
-            assert!(prompt.starts_with(&task_header(&task)), "{prompt}");
+            assert!(
+                launches[2].is_empty(),
+                "afresh, with no prompt: {launches:?}"
+            );
             let session = eventually("the new codex session", || async {
                 pane_session(&daemon.client, pane.id)
                     .await
@@ -1237,9 +632,7 @@ mod post_v1_panes_id_respawn {
         respawn(&daemon.client, pane.id, PaneRun::Agent).await;
 
         let again = &launched(&daemon, pane.id, 2).await[1];
-        assert!(!again.contains(&"resume".to_owned()), "{again:?}");
-        let prompt = again.last().expect("a launch prompt");
-        assert!(prompt.starts_with(&task_header(&task)), "{prompt}");
+        assert!(again.is_empty(), "afresh, with no prompt: {again:?}");
         let session = eventually("the new codex session", || async {
             pane_session(&daemon.client, pane.id).await
         })
@@ -1277,7 +670,7 @@ mod post_v1_panes_id_respawn {
     async fn should_refuse_a_pane_whose_process_still_runs_409() {
         let daemon = TestDaemon::start().await;
         let place = Place::new(&daemon).await;
-        let pane = place.launch(&daemon.client, Agent::Claude, None).await;
+        let pane = place.launch(&daemon.client, Agent::Claude).await;
 
         assert_eq!(
             refused(&daemon.client, pane.id, PaneRun::Shell).await,
@@ -1322,7 +715,7 @@ mod post_v1_panes_id_stop {
 
     /// A claude pane at its prompt, launched on its own session.
     async fn idle_claude(daemon: &TestDaemon, place: &Place) -> Pane {
-        let pane = place.launch(&daemon.client, Agent::Claude, None).await;
+        let pane = place.launch(&daemon.client, Agent::Claude).await;
         printed(&daemon.client, pane.id, "\u{1b}]0;\u{2733} Claude Code").await;
         pane
     }
@@ -1354,7 +747,7 @@ mod post_v1_panes_id_stop {
         let pane = (daemon.client.pane_create())
             .body(NewPane {
                 argv: Some(sh(script).iter().map(|arg| (*arg).to_owned()).collect()),
-                ..place.new_agent(Agent::Other, None)
+                ..place.new_agent(Agent::Other)
             })
             .send()
             .await
@@ -1447,7 +840,7 @@ mod post_v1_panes_id_stop {
         let pane = (daemon.client.pane_create())
             .body(NewPane {
                 argv: Some(sh(script).iter().map(|arg| (*arg).to_owned()).collect()),
-                ..place.new_agent(Agent::Other, None)
+                ..place.new_agent(Agent::Other)
             })
             .send()
             .await

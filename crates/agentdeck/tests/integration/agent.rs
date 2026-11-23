@@ -24,7 +24,14 @@ mod agent_ls {
         let env = TestEnv::new();
         env.workspace("web");
         let task = env.json(&["task", "add", "Fix the flaky test", "--ws", "web"]);
-        let agent = env.json(&["agent", "new", "--ws", "web", "--task", text(&task, "id")]);
+        let agent = env.json(&["agent", "new", "--ws", "web"]);
+        env.ok(&[
+            "agent",
+            "link",
+            text(&agent, "id"),
+            "--task",
+            text(&task, "id"),
+        ]);
         let api = env.workspace("api");
         let shell = shell_pane_in(&env, &api, "build", "sleep 60");
 
@@ -77,7 +84,14 @@ mod agent_ls {
         let env = TestEnv::new();
         let ws = env.workspace("web");
         let task = env.json(&["task", "add", "Fix the flaky test", "--ws", "web"]);
-        let agent = env.json(&["agent", "new", "--ws", "web", "--task", text(&task, "id")]);
+        let agent = env.json(&["agent", "new", "--ws", "web"]);
+        env.ok(&[
+            "agent",
+            "link",
+            text(&agent, "id"),
+            "--task",
+            text(&task, "id"),
+        ]);
 
         let list = env.json(&["agent", "ls"]);
 
@@ -157,6 +171,40 @@ mod agent_send {
 
         assert_eq!(sent["queued"], false);
         eventually("the pane to echo the line", || {
+            env.ok(&["tail", &pane]).contains("got:hello").then_some(())
+        });
+    }
+
+    #[test]
+    fn should_wait_until_the_pane_is_idle() {
+        let env = TestEnv::new();
+        // Shell panes whose title is `idle` are idle.
+        let rules = env.root().join("config/agentdeck/rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(
+            rules.join("shell.toml"),
+            "agent = \"shell\"\n\n[[rule]]\nstate = \"idle\"\ntitle_regex = '^idle$'\n\n\
+             [settle]\nmin_ms = 100\n",
+        )
+        .unwrap();
+        let ws = env.workspace("web");
+        let pane = shell_pane(
+            &env,
+            &ws,
+            "until [ -e go ]; do sleep 0.1; done; printf '\\033]0;idle\\007'; \
+             read line; echo \"got:$line\"; sleep 60",
+        );
+
+        let stdout = env.ok(&["agent", "send", &pane, "hello"]);
+
+        assert_eq!(stdout, format!("queued until {pane} is idle\n"));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            !env.ok(&["tail", &pane]).contains("hello"),
+            "typed while busy"
+        );
+        std::fs::write(std::path::Path::new(text(&ws, "dir")).join("go"), "").unwrap();
+        eventually("the pane to echo the line once idle", || {
             env.ok(&["tail", &pane]).contains("got:hello").then_some(())
         });
     }
@@ -414,47 +462,27 @@ mod agent_new {
     }
 
     #[test]
-    fn should_prompt_with_the_task_instructions_and_comments_and_mark_them_delivered() {
+    fn should_start_the_agent_with_no_prompt_or_task() {
         let env = TestEnv::new();
         env.workspace("web");
-        let task = env.json(&["task", "add", "Fix the flaky test", "--ws", "web"]);
-        let task_id = text(&task, "id");
-        env.ok(&[
-            "instruction",
-            "add",
-            "Push only after 20 green runs",
-            "--ws",
-            "web",
-        ]);
-        env.ok(&["comment", "add", "it fails on CI only", "--task", task_id]);
+        env.ok(&["task", "add", "Fix the flaky test", "--ws", "web"]);
 
-        let pane = env.json(&["agent", "new", "--ws", "web", "--task", task_id]);
+        let pane = env.json(&["agent", "new", "--ws", "web"]);
 
-        assert_eq!(pane["task_id"], task["id"]);
-        let prompt = started(&env, text(&pane, "id")).join(" ");
-        assert!(prompt.contains("Fix the flaky test"), "{prompt}");
-        assert!(prompt.contains("Push only after 20 green runs"), "{prompt}");
-        assert!(prompt.contains("it fails on CI only"), "{prompt}");
-        let comments = env.json(&["comment", "ls", "--task", task_id]);
-        assert_eq!(comments[0]["delivered_to_pane"], pane["id"]);
+        assert!(pane.get("task_id").is_none(), "{pane}");
+        let argv = started(&env, text(&pane, "id"));
+        assert_eq!(argv, ["--session-id", text(&pane, "session_id")]);
     }
 
     #[test]
-    fn should_link_a_task_named_by_its_short_id() {
+    fn should_refuse_a_task() {
         let env = TestEnv::new();
         env.workspace("web");
         let task = env.json(&["task", "add", "Fix it", "--ws", "web"]);
 
-        let pane = env.json(&[
-            "agent",
-            "new",
-            "--ws",
-            "web",
-            "--task",
-            short(text(&task, "id")),
-        ]);
+        let stderr = env.fails(&["agent", "new", "--ws", "web", "--task", text(&task, "id")]);
 
-        assert_eq!(pane["task_id"], task["id"]);
+        assert!(stderr.contains("--task"), "{stderr}");
     }
 
     #[test]
@@ -512,17 +540,6 @@ mod agent_new {
 
         assert!(stderr.contains("invalid_dir"), "{stderr}");
         assert!(tabs(&env, &ws).is_empty());
-    }
-
-    #[test]
-    fn should_name_an_unknown_task() {
-        let env = TestEnv::new();
-        env.workspace("web");
-        let task = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
-
-        let stderr = env.fails(&["agent", "new", "--ws", "web", "--task", task]);
-
-        assert!(stderr.contains(&format!("no task {task}")), "{stderr}");
     }
 
     #[test]

@@ -5,13 +5,11 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use agentdeck_client::types::Task;
 use agentdeck_core::PaneId;
 
 use super::TestDaemon;
 
-/// Records its argv and `$AGENTDECK_TASK`; shows a stand-in for the folder trust dialog when its folder holds a file named `untrusted`, and
-/// waits for a line there; then sets the idle title and reads what is typed as
+/// Records its argv and `$AGENTDECK_TASK`; then sets the idle title and reads what is typed as
 /// [`READ_LIKE_A_TUI`] does. It stays in the foreground (no `exec`), so the pane's foreground
 /// process is `claude` and the claude rules apply.
 ///
@@ -28,12 +26,6 @@ for arg in "$@"; do [ "$previous" = --resume ] && session=$arg; previous=$arg; d
 if [ -e broken ] || { [ -n "$session" ] && [ -e lost-session ]; }; then
   printf 'No conversation found with session ID: %s\r\n' "$session"
   exit 1
-fi
-if [ -e untrusted ]; then
-  printf 'Do you trust the files in this folder?\r\n\r\n> 1. Yes, proceed\r\n  2. No, exit\r\n\r\nEnter to confirm \302\267 Esc to cancel\r\n'
-  read -r answer
-  printf '%s\n' "$answer" > "$log/trust"
-  printf '\033[2J\033[H'
 fi
 stty raw -echo
 printf '\033[?2004h\033]0;\342\234\263 Claude Code\007> '
@@ -126,14 +118,9 @@ fn argv_records(text: &str) -> Vec<Vec<String>> {
         .collect()
 }
 
-/// Every prompt the pane's stub agent submitted, each ended by `\n`, after any trust dialog.
+/// Every prompt the pane's stub agent submitted, each ended by `\n`.
 pub fn typed(daemon: &TestDaemon, pane: PaneId) -> String {
     std::fs::read_to_string(log(daemon, pane).join("stdin")).unwrap_or_default()
-}
-
-/// The answer typed into the stub claude's trust dialog, if it was answered.
-pub fn trust_answer(daemon: &TestDaemon, pane: PaneId) -> Option<String> {
-    std::fs::read_to_string(log(daemon, pane).join("trust")).ok()
 }
 
 /// `$AGENTDECK_TASK` as the pane's stub agent last started with it: `unset` when it wasn't
@@ -146,29 +133,6 @@ pub fn task_var(daemon: &TestDaemon, pane: PaneId) -> Option<String> {
 /// An argv as the stub agents record it, program name left out.
 pub fn args(args: &[&str]) -> Vec<String> {
     args.iter().map(|arg| (*arg).to_owned()).collect()
-}
-
-/// What opens a launch prompt on `task`: its title, its id and how to report back on it.
-pub fn task_header(task: &Task) -> String {
-    let id = task.id;
-    format!(
-        "Task: {}\nTask id: {id}\n\
-         Report back with the agentdeck CLI: `agentdeck comment add --task {id} <text>` to \
-         comment on this task, `agentdeck task set {id} --status <status>` to set its status.",
-        task.title
-    )
-}
-
-/// What an agent is told about `task` when its pane is linked to it, or when it starts in a
-/// shell pane linked to it, as the stub records it submitted: [`task_header`], then the body
-/// after a blank line when it has one, then the newline that ends a submitted prompt.
-pub fn task_brief(task: &Task) -> String {
-    let body = task.body.trim();
-    if body.is_empty() {
-        format!("{}\n", task_header(task))
-    } else {
-        format!("{}\n\n{body}\n", task_header(task))
-    }
 }
 
 /// The session id the pane's stub codex wrote a session file for.

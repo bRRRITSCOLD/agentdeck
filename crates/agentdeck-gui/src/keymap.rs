@@ -23,18 +23,10 @@ pub const WORKSPACE: &str = "Workspace";
 /// move focus everywhere but inside it.
 pub const TERMINAL: &str = "Terminal";
 
-/// The key context an instruction being edited sets: Ctrl+Enter in its textarea saves
-/// ([`Submit`]) and Escape cancels ([`CancelEdit`]), where Enter inserts a newline.
-pub const INSTRUCTION_EDITOR: &str = "InstructionEditor";
-
 /// The key context the task sheet sets around a title or description being edited: Ctrl+Enter
 /// saves ([`Submit`]) and Escape cancels ([`CancelEdit`]), instead of closing the sheet. In
 /// the title's input, Enter saves too.
 pub const TASK_EDITOR: &str = "TaskEditor";
-
-/// The key context the task sheet's comment composer sets: Ctrl+Enter in its textarea sends
-/// ([`Submit`]), where Enter inserts a newline.
-pub const COMMENT_COMPOSER: &str = "CommentComposer";
 
 /// The key context a dialog with no text field sets around itself (New agent, Link to task,
 /// the sign-in dialog): Enter while the dialog holds the keyboard runs its primary button
@@ -101,8 +93,6 @@ fn bindings(cx: &App) -> Vec<KeyBinding> {
     let terminal = context(TERMINAL);
     // Bound on the textarea itself and loaded after core-gpui's, so they win over its own
     // `ctrl-enter` (a newline) and `escape`.
-    let instruction_editor = context(&format!("{INSTRUCTION_EDITOR} > Input"));
-    let comment_composer = context(&format!("{COMMENT_COMPOSER} > Input"));
     let task_editor = context(&format!("{TASK_EDITOR} > Input"));
     // Matches at gpui-base's dialog, as deep as its own `enter` (its `Confirm`, which
     // core-gpui's `Dialog` ignores), and is loaded after it, so it wins there.
@@ -161,13 +151,6 @@ fn bindings(cx: &App) -> Vec<KeyBinding> {
         // Unbinds the window root's focus navigation, so the terminal's key handler sends them.
         ("tab".into(), Box::new(NoAction), terminal.clone()),
         ("shift-tab".into(), Box::new(NoAction), terminal),
-        (
-            "secondary-enter".into(),
-            Box::new(Submit),
-            instruction_editor.clone(),
-        ),
-        ("escape".into(), Box::new(CancelEdit), instruction_editor),
-        ("secondary-enter".into(), Box::new(Submit), comment_composer),
         (
             "secondary-enter".into(),
             Box::new(Submit),

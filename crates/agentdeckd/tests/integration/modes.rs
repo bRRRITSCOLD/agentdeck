@@ -33,7 +33,7 @@ async fn agent(daemon: &TestDaemon, place: &Place, script: &str) -> Pane {
     (daemon.client.pane_create())
         .body(NewPane {
             argv: Some(sh(script).iter().map(|arg| (*arg).to_owned()).collect()),
-            ..place.new_agent(Agent::Other, None)
+            ..place.new_agent(Agent::Other)
         })
         .send()
         .await

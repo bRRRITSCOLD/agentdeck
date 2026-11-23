@@ -95,14 +95,13 @@ pub(crate) async fn task_update(
         .call(move |c| db::tasks::edit(c, id, &patch))
         .await?;
     for pane in edited.unlinked {
-        context.terminals.link(pane, None);
         context.events.changed(Entity::Pane, pane);
     }
     context.events.changed(Entity::Task, edited.task.id);
     Ok(HttpResponseOk(edited.task))
 }
 
-/// Deletes a task and its comments.
+/// Deletes a task.
 #[endpoint { method = DELETE, path = "/v1/tasks/{id}" }]
 pub(crate) async fn task_delete(
     rqctx: RequestContext<ApiContext>,
@@ -112,7 +111,6 @@ pub(crate) async fn task_delete(
     let id = path.into_inner().id;
     let context = rqctx.context();
     context.db.call(move |c| db::tasks::delete(c, id)).await?;
-    context.terminals.unlink_task(id);
     context.events.changed(Entity::Task, id);
     Ok(HttpResponseDeleted())
 }

@@ -1,8 +1,5 @@
-//! The new task dialog (spec §11), Penpot "Screens" → "New task" and "New task · send to": a
-//! title, an optional description, the workspace it goes to or the Inbox, and who to send it
-//! to: nobody, a new agent, or a live agent pane. It makes a `todo` task, then asks the window
-//! for New agent on it ([`StartAgentOn`]) or links the pane picked to it, as Send to agent does
-//! ([`send_task`]).
+//! The new task dialog (spec §11), Penpot "Screens" → "New task": a title, an optional
+//! description and the workspace it goes to or the Inbox. It makes a `todo` task.
 //!
 //! The Tasks view's "New task" and the right panel's Tasks & PRs `+` ask the window for it
 //! with [`NewTask`], preset to the Inbox or to that workspace. Create is disabled while the
@@ -11,23 +8,21 @@
 
 use std::sync::Arc;
 
-use agentdeck_core::{PaneId, WorkspaceId};
+use agentdeck_core::WorkspaceId;
 use brrritscold_core_gpui::{
     Button, ButtonVariant, Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter,
     DialogHandle, DialogHeader, DialogTitle, Field, Input, InputState, Label, Select,
-    SelectContent, SelectItem, SelectSeparator, SelectTrigger, Textarea, TextareaState,
+    SelectContent, SelectItem, SelectTrigger, Textarea, TextareaState,
 };
 use brrritscold_core_gpui_tokens::primitive::space;
 use gpui::{
-    App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
+    App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
 };
 use gpui_base::input::InputEvent;
 
 use crate::api::Api;
 use crate::overview::Snapshot;
-use crate::send_task::{self, Sending, TaskTarget};
-use crate::task_sheet::StartAgentOn;
 use crate::workspace::failed;
 
 /// A view asks the window for the dialog, preset to this workspace, or to the Inbox.
@@ -47,34 +42,6 @@ pub struct Request {
 
 /// The Select's value for the Inbox.
 pub(crate) const INBOX: &str = "inbox";
-
-/// Who the Send to field sends the new task to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SendTo {
-    /// Nobody: the task waits.
-    None,
-    /// A new agent: New agent opens on the workspace with the task picked.
-    NewAgent,
-    /// This live agent pane, linked to the task.
-    Pane(PaneId),
-}
-
-impl SendTo {
-    /// Its value in the Send to Select.
-    fn value(self) -> SharedString {
-        match self {
-            SendTo::None => NONE.into(),
-            SendTo::NewAgent => NEW_AGENT.into(),
-            SendTo::Pane(pane) => pane.to_string().into(),
-        }
-    }
-}
-
-/// The Send to Select's value for nobody.
-const NONE: &str = "none";
-
-/// The Send to Select's value for a new agent.
-const NEW_AGENT: &str = "new-agent";
 
 /// Where a task can go besides the Inbox (spec §11): `snapshot`'s unarchived workspaces,
 /// oldest first. New task and the task sheet offer the same list.
@@ -103,10 +70,6 @@ pub struct NewTaskDialog {
     workspaces: Vec<(WorkspaceId, SharedString)>,
     /// The workspace picked; `None` for the Inbox.
     workspace: Option<WorkspaceId>,
-    /// The live agent panes of every workspace, as the dialog opened.
-    agents: Vec<TaskTarget>,
-    /// Who the task goes to once made.
-    send_to: SendTo,
     /// Whether a request is out; another waits for it.
     creating: bool,
     /// Whether the title field takes the keyboard once the dialog shows.
@@ -136,8 +99,6 @@ impl NewTaskDialog {
             body,
             workspaces: Vec::new(),
             workspace: None,
-            agents: Vec::new(),
-            send_to: SendTo::None,
             creating: false,
             focus_title: false,
             _title,
@@ -145,8 +106,7 @@ impl NewTaskDialog {
     }
 
     /// Opens it empty, the title focused, offering `snapshot`'s unarchived workspaces and
-    /// the Inbox, with `preset` picked (an archived or unknown one picks the Inbox), and its
-    /// live agent panes to send to, with None picked.
+    /// the Inbox, with `preset` picked (an archived or unknown one picks the Inbox).
     pub fn open(
         &mut self,
         preset: Option<WorkspaceId>,
@@ -156,8 +116,6 @@ impl NewTaskDialog {
     ) {
         self.workspaces = places(snapshot);
         self.workspace = preset.filter(|p| self.workspaces.iter().any(|(id, _)| id == p));
-        self.agents = send_task::targets_in(snapshot, None);
-        self.send_to = SendTo::None;
         self.title
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.body
@@ -179,55 +137,10 @@ impl NewTaskDialog {
         self.workspace
     }
 
-    /// Picks the workspace, or the Inbox. A Send to pick it no longer offers drops to None.
+    /// Picks the workspace, or the Inbox.
     pub fn set_workspace(&mut self, workspace: Option<WorkspaceId>, cx: &mut Context<Self>) {
         self.workspace = workspace;
-        let offered = self
-            .send_options()
-            .iter()
-            .any(|(value, _)| *value == self.send_to.value());
-        if !offered {
-            self.send_to = SendTo::None;
-        }
         cx.notify();
-    }
-
-    /// The panes Send to offers: the picked workspace's, or every workspace's for the Inbox.
-    fn offered_agents(&self) -> impl Iterator<Item = &TaskTarget> {
-        let workspace = self.workspace;
-        (self.agents.iter()).filter(move |a| workspace.is_none_or(|w| a.workspace == w))
-    }
-
-    /// The Send to Select's options, value and label: None, New agent while a workspace is
-    /// picked, then [`Self::offered_agents`].
-    pub fn send_options(&self) -> Vec<(SharedString, SharedString)> {
-        let mut options = vec![(SharedString::from(NONE), SharedString::from("None"))];
-        if self.workspace.is_some() {
-            options.push((NEW_AGENT.into(), "New agent".into()));
-        }
-        options.extend(
-            self.offered_agents()
-                .map(|a| (SharedString::from(a.pane.to_string()), a.label.clone())),
-        );
-        options
-    }
-
-    /// Picks who to send the task to by its Select value; a pane picks its workspace too.
-    pub fn set_send_to(&mut self, value: &SharedString, cx: &mut Context<Self>) {
-        let pick = match value.as_ref() {
-            NONE => Some(SendTo::None),
-            NEW_AGENT => self.workspace.map(|_| SendTo::NewAgent),
-            pane => (self.agents.iter())
-                .find(|a| a.pane.to_string() == pane)
-                .map(|a| {
-                    self.workspace = Some(a.workspace);
-                    SendTo::Pane(a.pane)
-                }),
-        };
-        if let Some(pick) = pick {
-            self.send_to = pick;
-            cx.notify();
-        }
     }
 
     /// Whether Create task can go ahead: the title isn't blank and no request is out.
@@ -247,35 +160,13 @@ impl NewTaskDialog {
         };
         self.creating = true;
         cx.notify();
-        let (title, inbox) = (
-            SharedString::from(request.title.clone()),
-            request.workspace.is_none(),
-        );
-        let workspace = request.workspace;
-        let send_to = self.send_to;
-        let target = match send_to {
-            SendTo::Pane(pane) => self.agents.iter().find(|a| a.pane == pane).cloned(),
-            SendTo::None | SendTo::NewAgent => None,
-        };
         let creating = self.api.new_task(request, cx);
         cx.spawn_in(window, async move |this, cx| {
             let made = creating.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.creating = false;
                 match made {
-                    Ok(task) => {
-                        this.handle.close(window, cx);
-                        match (send_to, workspace, target) {
-                            (SendTo::NewAgent, Some(workspace), _) => {
-                                cx.emit(StartAgentOn { workspace, task });
-                            }
-                            (SendTo::Pane(_), _, Some(target)) => {
-                                let sending = Sending { task, title, inbox };
-                                send_task::send(this.api.clone(), sending, target, window, cx);
-                            }
-                            _ => {}
-                        }
-                    }
+                    Ok(_) => this.handle.close(window, cx),
                     Err(err) => failed("Couldn't make the task", &err, window, cx),
                 }
                 cx.notify();
@@ -284,7 +175,7 @@ impl NewTaskDialog {
         .detach();
     }
 
-    /// Penpot `agentdeck/NewTaskForm`: four vertical fields, `space.4` apart.
+    /// Penpot `agentdeck/NewTaskForm`: three vertical fields, `space.4` apart.
     fn form(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let workspace = Select::new("new-task-workspace")
             .trigger(SelectTrigger::new().w_full())
@@ -295,26 +186,6 @@ impl NewTaskDialog {
             ))
             .on_value_change(cx.listener(|this, value: &SharedString, _, cx| {
                 this.set_workspace(value.parse().ok(), cx);
-            }));
-        // None and New agent, a separator, then the agent panes.
-        let options = self.send_options();
-        let fixed = options
-            .iter()
-            .take_while(|(v, _)| v == NONE || v == NEW_AGENT)
-            .count();
-        let mut content = SelectContent::new();
-        for (i, (value, label)) in options.into_iter().enumerate() {
-            if i == fixed {
-                content = content.separator(SelectSeparator::new());
-            }
-            content = content.item(SelectItem::new(value, label));
-        }
-        let send_to = Select::new("new-task-send-to")
-            .trigger(SelectTrigger::new().w_full())
-            .content(content)
-            .value(Some(self.send_to.value()))
-            .on_value_change(cx.listener(|this, value: &SharedString, _, cx| {
-                this.set_send_to(value, cx);
             }));
         div()
             .flex()
@@ -335,17 +206,8 @@ impl NewTaskDialog {
                     .child(Label::new().child("Workspace"))
                     .child(workspace),
             )
-            .child(
-                Field::new().child(Label::new().child("Send to")).child(
-                    div()
-                        .debug_selector(|| "new task send to".into())
-                        .child(send_to),
-                ),
-            )
     }
 }
-
-impl EventEmitter<StartAgentOn> for NewTaskDialog {}
 
 impl Render for NewTaskDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -401,28 +263,16 @@ mod tests {
     use super::*;
     use crate::api::fake::FakeApi;
     use crate::notice;
-    use crate::overview::PaneState;
-    use crate::overview::fixtures::{id, pane, workspace};
-    use agentdeck_core::{Agent, AgentState, TaskId};
+    use crate::overview::fixtures::{id, workspace};
 
     struct Harness {
         api: Arc<FakeApi>,
         dialog: Entity<NewTaskDialog>,
     }
 
-    /// Workspaces 1 `tabs-a11y` and 2 `gpui-terminal`, and 3 `old`, archived; Claude Code idle
-    /// in `tabs-a11y`'s `agents` tab (pane 30), Codex in `gpui-terminal`'s `shell` tab (31).
+    /// Workspaces 1 `tabs-a11y` and 2 `gpui-terminal`, and 3 `old`, archived.
     fn snapshot() -> Snapshot {
-        let agent = |n: u32, ws: u32, agent: Agent, tab: &str| PaneState {
-            agent: Some(agent),
-            tab: tab.into(),
-            ..pane(n, id(ws), AgentState::Idle)
-        };
         Snapshot {
-            panes: vec![
-                agent(30, 1, Agent::Claude, "agents"),
-                agent(31, 2, Agent::Codex, "shell"),
-            ],
             workspaces: vec![
                 workspace(1, "tabs-a11y"),
                 workspace(2, "gpui-terminal"),
@@ -670,141 +520,6 @@ mod tests {
                 cx.update(|_, cx| Theme::set_preference(preference, cx));
                 harness.settle(cx);
             }
-        }
-    }
-
-    mod send_to {
-        use std::cell::RefCell;
-        use std::rc::Rc;
-
-        use super::*;
-
-        fn options(harness: &Harness, cx: &mut VisualTestContext) -> Vec<(String, String)> {
-            harness.dialog.read_with(cx, |d, _| {
-                (d.send_options().into_iter())
-                    .map(|(value, label)| (value.to_string(), label.to_string()))
-                    .collect()
-            })
-        }
-
-        fn pick(harness: &Harness, value: &str, cx: &mut VisualTestContext) {
-            harness.dialog.update(cx, |d, cx| {
-                d.set_send_to(&SharedString::from(value.to_owned()), cx)
-            });
-        }
-
-        fn send_to(harness: &Harness, cx: &mut VisualTestContext) -> SendTo {
-            harness.dialog.read_with(cx, |d, _| d.send_to)
-        }
-
-        fn pane_value(n: u32) -> String {
-            id::<PaneId>(n).to_string()
-        }
-
-        #[gpui::test]
-        fn should_offer_none_new_agent_then_the_workspaces_agents(cx: &mut TestAppContext) {
-            let (harness, cx) = Harness::open(Some(id(1)), cx);
-
-            assert_eq!(
-                options(&harness, cx),
-                [
-                    ("none".into(), "None".into()),
-                    ("new-agent".into(), "New agent".into()),
-                    (pane_value(30), "✳ Claude Code · tabs-a11y / agents".into()),
-                ]
-            );
-            assert_eq!(send_to(&harness, cx), SendTo::None);
-        }
-
-        #[gpui::test]
-        fn should_offer_every_workspaces_agents_but_no_new_agent_for_the_inbox(
-            cx: &mut TestAppContext,
-        ) {
-            let (harness, cx) = Harness::open(None, cx);
-
-            assert_eq!(
-                options(&harness, cx),
-                [
-                    ("none".into(), "None".into()),
-                    (pane_value(30), "✳ Claude Code · tabs-a11y / agents".into()),
-                    (pane_value(31), "Codex · gpui-terminal / shell".into()),
-                ]
-            );
-        }
-
-        #[gpui::test]
-        fn should_pick_the_panes_workspace_with_the_pane(cx: &mut TestAppContext) {
-            let (harness, cx) = Harness::open(None, cx);
-
-            pick(&harness, &pane_value(31), cx);
-
-            assert_eq!(harness.picked(cx), Some(id(2)));
-            assert_eq!(send_to(&harness, cx), SendTo::Pane(id(31)));
-        }
-
-        #[gpui::test]
-        fn should_drop_a_pick_the_workspace_no_longer_offers(cx: &mut TestAppContext) {
-            let (harness, cx) = Harness::open(Some(id(1)), cx);
-            pick(&harness, &pane_value(30), cx);
-
-            harness
-                .dialog
-                .update(cx, |d, cx| d.set_workspace(Some(id(2)), cx));
-            assert_eq!(send_to(&harness, cx), SendTo::None);
-
-            pick(&harness, "new-agent", cx);
-            harness.dialog.update(cx, |d, cx| d.set_workspace(None, cx));
-            assert_eq!(send_to(&harness, cx), SendTo::None);
-        }
-
-        #[gpui::test]
-        fn should_make_the_task_then_link_the_pane_picked(cx: &mut TestAppContext) {
-            let (harness, cx) = Harness::open(None, cx);
-            cx.simulate_input("Write the codex state rules");
-            pick(&harness, &pane_value(31), cx);
-
-            harness.create(cx);
-
-            assert_eq!(harness.made()[0].workspace, Some(id(2)));
-            let made: TaskId = id(101);
-            assert_eq!(*harness.api.linked.lock().unwrap(), [(id(31), Some(made))]);
-            assert!(!harness.is_open(cx));
-        }
-
-        #[gpui::test]
-        fn should_make_the_task_then_ask_for_new_agent_on_it(cx: &mut TestAppContext) {
-            let (harness, cx) = Harness::open(Some(id(1)), cx);
-            let asked = Rc::new(RefCell::new(Vec::new()));
-            let seen = asked.clone();
-            let _asks = cx.update(|_, cx| {
-                cx.subscribe(&harness.dialog, move |_, ask: &StartAgentOn, _| {
-                    seen.borrow_mut().push(*ask)
-                })
-            });
-            cx.simulate_input("Fix flaky Tabs play test");
-            pick(&harness, "new-agent", cx);
-
-            harness.create(cx);
-
-            assert_eq!(
-                *asked.borrow(),
-                [StartAgentOn {
-                    workspace: id(1),
-                    task: id(101),
-                }]
-            );
-            assert_eq!(*harness.api.linked.lock().unwrap(), []);
-        }
-
-        #[gpui::test]
-        fn should_send_nothing_with_none(cx: &mut TestAppContext) {
-            let (harness, cx) = Harness::open(Some(id(1)), cx);
-            cx.simulate_input("x");
-
-            harness.create(cx);
-
-            assert_eq!(harness.made().len(), 1);
-            assert_eq!(*harness.api.linked.lock().unwrap(), []);
         }
     }
 }

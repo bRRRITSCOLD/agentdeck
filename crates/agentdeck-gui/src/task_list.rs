@@ -70,8 +70,6 @@ pub struct Row {
     pub pr: Option<PrCell>,
     /// Its workspace's name; `None` in the inbox.
     pub workspace: Option<SharedString>,
-    /// Whether an agent commented on it since the user last opened it: the row's unseen mark.
-    pub unseen: bool,
     /// Whether its PR can be closed from here: a PR task whose PR is stored open, aged out or
     /// not, and not [`Self::unreachable`] (spec §11, Closing PRs), with a
     /// [`PrCell::full_reference`] to close it by. Only such a row is selectable, and only its
@@ -201,7 +199,6 @@ fn row(snapshot: &Snapshot, task: &Task) -> Row {
         agent,
         pr,
         workspace,
-        unseen: task.unseen_agent_comments > 0,
         closable,
         unreachable: task.pr.as_ref().is_some_and(|pr| pr.unreachable),
     }
@@ -378,23 +375,6 @@ mod tests {
 
     mod row {
         use super::*;
-
-        #[test]
-        fn should_flag_a_task_with_agent_comments_unseen() {
-            let snapshot = Snapshot {
-                tasks: vec![
-                    Task {
-                        unseen_agent_comments: 2,
-                        ..task(1, TaskKind::Plain, None)
-                    },
-                    task(2, TaskKind::Plain, None),
-                ],
-                ..Snapshot::default()
-            };
-
-            let unseen: Vec<bool> = rows(&snapshot, &all()).iter().map(|r| r.unseen).collect();
-            assert_eq!(unseen, [true, false]);
-        }
 
         #[test]
         fn should_name_the_pr_by_repository_and_number_and_keep_its_url() {

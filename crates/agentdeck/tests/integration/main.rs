@@ -3,10 +3,8 @@
 //! one also exercises the start path. Never runs a real agent CLI.
 
 mod agent;
-mod comment;
 mod config;
 mod daemon;
-mod instruction;
 mod pr;
 mod repo;
 mod support;

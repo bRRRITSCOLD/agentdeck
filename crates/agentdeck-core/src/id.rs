@@ -71,14 +71,6 @@ id!(
     /// A task's id (`tasks.id`), also a pull request's key.
     TaskId
 );
-id!(
-    /// A task comment's id (`comments.id`).
-    CommentId
-);
-id!(
-    /// A workspace instruction's id (`instructions.id`).
-    InstructionId
-);
 
 #[cfg(test)]
 mod tests {

@@ -287,24 +287,6 @@ impl TestEnv {
             .unwrap_or_else(|err| panic!("agentdeck {args:?} printed no JSON ({err}):\n{stdout}"))
     }
 
-    /// Runs `agentdeck <args> --json` with extra `env`, which must succeed, and parses its
-    /// stdout.
-    pub fn json_with(&self, args: &[&str], env: &[(&str, &OsString)]) -> Value {
-        let args: Vec<&str> = args.iter().copied().chain(["--json"]).collect();
-        let run = self.run_with(&args, env);
-        assert!(
-            run.success,
-            "agentdeck {args:?} failed:\n{}{}",
-            run.stdout, run.stderr
-        );
-        serde_json::from_str(&run.stdout).unwrap_or_else(|err| {
-            panic!(
-                "agentdeck {args:?} printed no JSON ({err}):\n{}",
-                run.stdout
-            )
-        })
-    }
-
     /// Runs `agentdeck <args>`, which must fail, and returns its stderr.
     pub fn fails(&self, args: &[&str]) -> String {
         let run = self.run(args);
@@ -486,7 +468,6 @@ pub fn shell_pane_in(env: &TestEnv, workspace: &Value, tab: &str, script: &str) 
                 cwd: text(workspace, "dir").into(),
                 kind: PaneKind::Shell,
                 tab_id: tab.id,
-                task_id: None,
             })
             .send()
             .await
@@ -503,25 +484,6 @@ pub fn shell_pane_in(env: &TestEnv, workspace: &Value, tab: &str, script: &str) 
             .expect("lay the pane out");
         pane.id.to_string()
     })
-}
-
-/// Spawns a shell pane in `workspace` whose foreground process is the stub `agent` (`claude`
-/// or `codex`), as when the user runs it at a shell's prompt, and waits until the daemon has
-/// the pane hosting it (spec §7). Returns the pane's id.
-pub fn hosting_pane(env: &TestEnv, workspace: &Value, agent: agentdeck_core::Agent) -> String {
-    let pane = shell_pane(env, workspace, &format!("exec {agent}"));
-    let info = env.daemon_info().expect("a running daemon");
-    let client = agentdeck_client::authenticated(&info.base_url(), &info.token).expect("a client");
-    let id: agentdeck_core::PaneId = pane.parse().expect("a pane id");
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("a runtime");
-    eventually(&format!("the shell pane to host {agent}"), || {
-        let read = runtime.block_on(client.pane_get().id(id).send());
-        (read.expect("read the pane").hosted_agent == Some(agent)).then_some(())
-    });
-    pane
 }
 
 /// Polls `check` until it returns `Some`, or panics with `what` after 30 s.

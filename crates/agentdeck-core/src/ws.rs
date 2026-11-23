@@ -198,10 +198,6 @@ pub enum Entity {
     Pane,
     /// `/v1/tasks/{id}`.
     Task,
-    /// A task comment: `/v1/tasks/{task}/comments`.
-    Comment,
-    /// A workspace instruction: `/v1/workspaces/{workspace}/instructions`.
-    Instruction,
     /// `/v1/prs/status`: a PR sync began, read a page or ended, or the age cutoff changed.
     /// Its id is always `status`.
     PrSync,
@@ -352,13 +348,6 @@ mod tests {
                     json!({"t": "changed", "entity": "task", "id": "abc"}),
                 ),
                 (
-                    ServerMessage::Changed {
-                        entity: Entity::Comment,
-                        id: "abc".into(),
-                    },
-                    json!({"t": "changed", "entity": "comment", "id": "abc"}),
-                ),
-                (
                     ServerMessage::GithubAuth {
                         device: None,
                         message: None,
@@ -379,13 +368,6 @@ mod tests {
                     },
                     json!({"t": "github_auth", "device": "failed",
                            "message": "The client_id is not valid."}),
-                ),
-                (
-                    ServerMessage::Changed {
-                        entity: Entity::Instruction,
-                        id: "abc".into(),
-                    },
-                    json!({"t": "changed", "entity": "instruction", "id": "abc"}),
                 ),
                 (
                     ServerMessage::Changed {

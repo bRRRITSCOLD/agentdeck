@@ -322,7 +322,6 @@ mod respawn {
                 agent: None,
                 argv: Some(vec!["true".into()]),
                 cwd: ws.dir.clone(),
-                task_id: None,
             })
             .send()
             .await

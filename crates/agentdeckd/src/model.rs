@@ -2,9 +2,8 @@
 //! tree are `agentdeck-core`'s, so the client shares them.
 
 use agentdeck_core::{
-    Agent, AgentState, ChecksState, CommentAuthor, CommentId, InstructionId, Layout, PaneId,
-    PaneKind, PrRef, PrState, RepositoryId, RepositoryName, ReviewState, TabId, TaskId, TaskKind,
-    TaskPlace, TaskStatus, WorkspaceId,
+    Agent, AgentState, ChecksState, Layout, PaneId, PaneKind, PrRef, PrState, RepositoryId,
+    RepositoryName, ReviewState, TabId, TaskId, TaskKind, TaskPlace, TaskStatus, WorkspaceId,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -142,8 +141,6 @@ pub struct Task {
     pub done_at: Option<String>,
     /// The pull request behind a PR task; `None` for a plain task.
     pub pr: Option<TaskPr>,
-    /// Agents' comments on the task the user hasn't seen yet.
-    pub unseen_agent_comments: u32,
 }
 
 /// A GitHub Repository a pull request belongs to (spec §3): what GitHub says of it, as PR sync
@@ -332,72 +329,6 @@ pub struct TaskFilter {
     pub kind: Option<TaskKind>,
     /// `true`: only tasks with no workspace; `false`: only tasks with one.
     pub inbox: Option<bool>,
-}
-
-/// A comment in a task's thread (spec §9). The user's comments are delivered to the task's
-/// agent; an agent's are a record and never delivered.
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct Comment {
-    /// The comment's id.
-    pub id: CommentId,
-    /// The task it's on.
-    pub task_id: TaskId,
-    /// The text.
-    pub body: String,
-    /// Who wrote it: the user, or an agent from its pane.
-    pub author: CommentAuthor,
-    /// The agent that wrote it, when that is `claude` or `codex`.
-    pub author_agent: Option<Agent>,
-    /// The pane it was written from; `None` for the user's, and once the pane is gone.
-    pub author_pane: Option<PaneId>,
-    /// When it was written.
-    pub created_at: String,
-    /// When it was delivered to an agent; always `None` for an agent's comment.
-    pub delivered_at: Option<String>,
-    /// The pane it was delivered to.
-    pub delivered_to_pane: Option<PaneId>,
-    /// When the user saw it; `None` while an agent's comment is new to the user. The user's
-    /// own comments are seen when written.
-    pub seen_at: Option<String>,
-}
-
-/// `POST /v1/tasks/{id}/comments`.
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct NewComment {
-    /// The text.
-    pub body: String,
-    /// The pane writing it: the comment is then that pane's agent's. Without it, the user's.
-    pub pane: Option<PaneId>,
-}
-
-/// Standing context for every agent in a workspace (spec §9): it goes into every launch
-/// prompt there and stays until deleted.
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct Instruction {
-    /// The instruction's id.
-    pub id: InstructionId,
-    /// The workspace it's for.
-    pub workspace_id: WorkspaceId,
-    /// The text.
-    pub body: String,
-    /// When it was added.
-    pub created_at: String,
-    /// When its text last changed.
-    pub updated_at: String,
-}
-
-/// `POST /v1/workspaces/{id}/instructions`.
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct NewInstruction {
-    /// The text.
-    pub body: String,
-}
-
-/// `PATCH /v1/instructions/{id}`: the fields to change.
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
-pub struct InstructionPatch {
-    /// A new text.
-    pub body: Option<String>,
 }
 
 /// Whether the daemon has a GitHub token GitHub accepts (spec §8).
@@ -611,9 +542,9 @@ pub struct Pane {
     pub agent: Option<Agent>,
     /// The agent a shell pane hosts: `claude` or `codex` while the user's own is its
     /// foreground process, else null. Its kind stays `shell`; it runs that agent's state rules
-    /// and takes the task's comments meanwhile (spec §3, §7).
+    /// meanwhile (spec §3, §7).
     pub hosted_agent: Option<Agent>,
-    /// The command as first launched, launch prompt included. A resumed pane runs its
+    /// The command as first launched. A resumed pane runs its
     /// agent's resume command, or a fresh shell, instead.
     pub argv: Vec<String>,
     /// The working directory it was launched in.
@@ -651,8 +582,6 @@ pub struct NewPane {
     pub argv: Option<Vec<String>>,
     /// The absolute working directory, which must exist.
     pub cwd: String,
-    /// A task to link. A `claude` or `codex` pane's launch prompt carries its title and body.
-    pub task_id: Option<TaskId>,
 }
 
 /// `PATCH /v1/panes/{id}`: the task to link the pane to, or null to unlink it. `task_id` is
@@ -676,8 +605,7 @@ fn nullable_task_id(generator: &mut schemars::r#gen::SchemaGenerator) -> schemar
 #[serde(rename_all = "snake_case")]
 pub enum PaneRun {
     /// The pane's agent again: claude and codex resume their session when it is known, else
-    /// start fresh with a new launch prompt; an `other` agent runs its argv again. Agent panes
-    /// only.
+    /// start fresh on a new session; an `other` agent runs its argv again. Agent panes only.
     Agent,
     /// A shell, which turns the pane into a shell pane.
     Shell,

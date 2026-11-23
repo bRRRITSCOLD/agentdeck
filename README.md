@@ -1,6 +1,6 @@
 # agentdeck
 
-An agent workspace GUI for Linux. Agents run as real CLIs (Claude Code, Codex, any command) in terminals grouped into free-form workspaces. agentdeck adds tasks that survive across sessions, tracking for your GitHub PRs, comment threads on tasks between you and their agents, standing instructions for every agent in a workspace, and (in v1.1) channels between agents.
+An agent workspace GUI for Linux. Agents run as real CLIs (Claude Code, Codex, any command) in terminals grouped into free-form workspaces. agentdeck adds tasks that survive across sessions, tracking for your GitHub PRs, and (in v1.1) channels between agents. It doesn't brief agents: they read their own `CLAUDE.md` or `AGENTS.md`, and you hand them work by pasting or with `agentdeck agent send`.
 
 It is three programs in one Cargo workspace:
 
@@ -43,7 +43,7 @@ Or install them: `for c in agentdeck agentdeckd agentdeck-gui; do cargo install 
 
 ### Agents you start yourself
 
-Every Pane's `PATH` ends with the folder holding `agentdeckd`, so any agent in a Pane, launched by agentdeck or started in a shell, can run `agentdeck` when it is installed beside `agentdeckd`. Nothing tells the agent so; paste this into your `CLAUDE.md` or `AGENTS.md`:
+Every Pane's `PATH` ends with the folder holding `agentdeckd`, so any agent in a Pane, launched by agentdeck or started in a shell, can run `agentdeck` when it is installed beside `agentdeckd`. agentdeck starts an agent with no prompt and never types into it on its own, so nothing tells the agent so; paste this into your `CLAUDE.md` or `AGENTS.md`:
 
 ```markdown
 ## agentdeck
@@ -55,6 +55,8 @@ In an agentdeck Pane, `agentdeck` is on your PATH and `$AGENTDECK_WORKSPACE` nam
 
 Ask GitHub (`gh`) for a pull request's diff, checks and reviews.
 ```
+
+To hand a running agent work, paste it into its Pane, or send it from a shell: `agentdeck agent send <pane> "<text>"` waits until the Pane is idle, then types the text and presses Enter (`--now` types it at once).
 
 agentdeck no longer has an MCP server: if you added one with an older `agentdeck mcp install`, remove it with `claude mcp remove --scope user agentdeck` and by deleting `[mcp_servers.agentdeck]` from `~/.codex/config.toml`.
 

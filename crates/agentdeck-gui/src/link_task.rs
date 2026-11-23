@@ -2,9 +2,8 @@
 //! in a running pane to one of its workspace's tasks that aren't done, or unlinks it.
 //!
 //! A pane header's Link to task asks the window for it, through the workspace view's
-//! [`LinkPane`](crate::workspace::LinkPane). Once linked, the daemon types the task, then its
-//! comments no agent has had yet, into the pane when the agent is idle. A failed link keeps
-//! the dialog open and toasts why. Enter links, as Link does, unless the select has it.
+//! [`LinkPane`](crate::workspace::LinkPane). Linking types nothing into the pane. A failed
+//! link keeps the dialog open and toasts why. Enter links, as Link does, unless the select has it.
 
 use std::sync::Arc;
 
@@ -50,13 +49,8 @@ pub fn description(tab: &str, workspace: &str) -> String {
     format!("The agent in the {tab} tab of {workspace}.")
 }
 
-/// The Task field's description: what linking hands the agent.
-pub fn hint(agent: Agent) -> String {
-    format!(
-        "Comments on it that no agent has had yet are typed in once {} is idle. None unlinks it.",
-        agent_name(agent)
-    )
-}
+/// The Task field's description.
+pub const HINT: &str = "None unlinks it.";
 
 /// The dialog, kept by the window.
 pub struct LinkTaskDialog {
@@ -229,7 +223,7 @@ impl Render for LinkTaskDialog {
             Some(target) => (
                 title(target.agent),
                 description(&target.tab, &target.workspace_name),
-                hint(target.agent),
+                HINT.to_owned(),
             ),
             None => Default::default(),
         };
@@ -622,13 +616,8 @@ mod tests {
         use super::*;
 
         #[test]
-        fn should_name_the_agent_in_the_title_and_hint() {
+        fn should_name_the_agent_in_the_title() {
             assert_eq!(title(Agent::Codex), "Link Codex to a task");
-            assert_eq!(
-                hint(Agent::Claude),
-                "Comments on it that no agent has had yet are typed in once Claude Code is \
-                 idle. None unlinks it."
-            );
         }
 
         #[test]
