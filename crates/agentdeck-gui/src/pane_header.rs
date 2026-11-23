@@ -1,10 +1,8 @@
-//! The Penpot part `agentdeck / PaneHeader`: a pane's state, title and linked task above its
-//! terminal (spec §11). Penpot's page "Screens" board "Pane states" shows each state.
+//! The Penpot part `agentdeck / PaneHeader`: a pane's state and title above its terminal
+//! (spec §11). Penpot's page "Screens" board "Pane states" shows each state.
 
 use agentdeck_core::AgentState;
-use brrritscold_core_gpui::{
-    ActiveTheme as _, Badge, BadgeVariant, DropdownMenu, Icon, IconName, StateDotState,
-};
+use brrritscold_core_gpui::{ActiveTheme as _, Badge, BadgeVariant, DropdownMenu, StateDotState};
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -86,20 +84,18 @@ pub struct PaneHeader {
     state: AgentState,
     exit_code: Option<i64>,
     in_shell: bool,
-    task: Option<SharedString>,
     actions: Vec<AnyElement>,
     menu: Option<DropdownMenu>,
 }
 
 impl PaneHeader {
-    /// An idle pane titled `title`, linked to no task.
+    /// An idle pane titled `title`.
     pub fn new(title: impl Into<SharedString>) -> Self {
         PaneHeader {
             title: title.into(),
             state: AgentState::Idle,
             exit_code: None,
             in_shell: false,
-            task: None,
             actions: Vec::new(),
             menu: None,
         }
@@ -120,12 +116,6 @@ impl PaneHeader {
         self
     }
 
-    /// The linked task's title: the `Task` part, absent without one.
-    pub fn task(mut self, task: Option<SharedString>) -> Self {
-        self.task = task;
-        self
-    }
-
     /// Buttons before the menu: the `Actions` part, `space.2` apart, absent while empty.
     pub fn actions(mut self, actions: Vec<AnyElement>) -> Self {
         self.actions = actions;
@@ -136,6 +126,23 @@ impl PaneHeader {
     pub fn menu(mut self, menu: DropdownMenu) -> Self {
         self.menu = Some(menu);
         self
+    }
+
+    /// The Penpot parts it draws, in order.
+    #[cfg(test)]
+    pub fn parts(&self) -> Vec<&'static str> {
+        let mut parts = vec!["State", "Title"];
+        if self.in_shell {
+            parts.push("Host");
+        }
+        parts.extend(["StateBadge", "Spacer"]);
+        if !self.actions.is_empty() {
+            parts.push("Actions");
+        }
+        if self.menu.is_some() {
+            parts.push("Menu");
+        }
+        parts
     }
 }
 
@@ -185,33 +192,6 @@ impl RenderOnce for PaneHeader {
                     .flex_none()
                     .child(Badge::new().variant(variant).label(label)),
             )
-            // Penpot `Task`: a 14px `ListTodo` and xs muted text, `space.1-5` apart.
-            .when_some(self.task, |header, task| {
-                header.child(
-                    div()
-                        .min_w_0()
-                        .flex()
-                        .items_center()
-                        .gap(space::S1_5)
-                        .text_size(font_size::XS)
-                        .text_color(s.muted_foreground)
-                        // The icon keeps the library icon's `foreground`, as the part does.
-                        .child(
-                            Icon::new(IconName::ListTodo)
-                                .size(space::S3_5)
-                                .flex_none()
-                                .text_color(s.foreground),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .overflow_hidden()
-                                .child(task),
-                        ),
-                )
-            })
             // Penpot `Spacer`, `Actions`, then `Menu`.
             .child(div().flex_1())
             .when(!self.actions.is_empty(), |header| {

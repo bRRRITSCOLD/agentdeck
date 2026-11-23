@@ -28,9 +28,9 @@ use agentdeck_core::{
 use agentdeck_notify::Notification;
 use gpui::SharedString;
 
+use crate::new_agent::agent_name;
 use crate::overview::{PaneState, Snapshot};
 use crate::pull_requests::PrKey;
-use crate::task_sheet::agent_name;
 
 /// More PRs than this changing in one sync make one alert.
 const COALESCE_OVER: usize = 3;
@@ -85,7 +85,7 @@ fn muted(snapshot: &Snapshot, workspace: WorkspaceId) -> bool {
 }
 
 /// The alert for `pane`, now as `snapshot` holds it, having been `before`: "Claude Code is
-/// blocked" over "\<task or tab> · \<workspace>", when an agent pane turned `blocked` or `done`
+/// blocked" over "\<tab title> · \<workspace>", when an agent pane turned `blocked` or `done`
 /// and its workspace isn't muted.
 pub fn pane_alert(before: AgentState, pane: &PaneState, snapshot: &Snapshot) -> Option<Alert> {
     let verb = match pane.state {
@@ -98,14 +98,10 @@ pub fn pane_alert(before: AgentState, pane: &PaneState, snapshot: &Snapshot) -> 
         return None;
     }
     let workspace = (snapshot.workspaces.iter()).find(|w| w.id == pane.workspace)?;
-    let task = pane
-        .task
-        .and_then(|task| snapshot.tasks.iter().find(|t| t.id == task));
-    let what = task.map_or(pane.tab.as_str(), |task| task.title.as_str());
     Some(Alert {
         tag: format!("pane:{}", pane.pane).into(),
         title: format!("{} is {verb}", agent_name(agent)).into(),
-        body: format!("{what} · {}", workspace.name).into(),
+        body: format!("{} · {}", pane.tab, workspace.name).into(),
         target: Target::Pane {
             workspace: pane.workspace,
             pane: pane.pane,
@@ -357,7 +353,7 @@ pub(crate) mod fake {
 #[cfg(test)]
 mod tests {
     use agentdeck_client::types::{PrSyncProgress, PrSyncStage};
-    use agentdeck_core::{Agent, TaskKind};
+    use agentdeck_core::Agent;
 
     use super::*;
     use crate::overview::fixtures::*;
@@ -409,15 +405,14 @@ mod tests {
         }
 
         #[test]
-        fn should_say_done_and_name_the_linked_task() {
+        fn should_say_done_over_its_tab_title_and_workspace() {
             let mut before = web();
-            before.panes[0].task = Some(id(20));
-            before.tasks = vec![task(20, TaskKind::Plain, Some(id(1)))];
+            before.panes[0].tab = "review".into();
 
             let alerts = pane_alerts(&before, &with_state(before.clone(), AgentState::Done));
 
             assert_eq!(alerts[0].title, "Claude Code is done");
-            assert_eq!(alerts[0].body, "task 20 · web");
+            assert_eq!(alerts[0].body, "review · web");
         }
 
         #[test]

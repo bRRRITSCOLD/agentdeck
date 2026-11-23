@@ -1,8 +1,7 @@
 //! The main window's content: what the daemon connection allows. Until it connects, a
 //! centred status; once it does, the sidebar beside the selected view, under a banner with a
-//! Restart while the daemon predates the app: a workspace's pane, the Pull requests view,
-//! the Tasks view, the Inbox or Settings, and the new workspace dialog the
-//! sidebar's `+` opens. Settings is made as the window connects, so the saved theme applies
+//! Restart while the daemon predates the app: a workspace's panes, the Pull requests view or
+//! Settings, and the new workspace dialog the sidebar's `+` opens. Settings is made as the window connects, so the saved theme applies
 //! from the start. When the compositor leaves decorations to the app, a title bar and
 //! resize edges frame it.
 //!
@@ -10,15 +9,10 @@
 //! a failure. It archives and unarchives the selected workspace when the top bar asks, toasting
 //! the outcome; an archive's toast offers Undo. The top bar's Edit workspace opens the edit
 //! dialog on the selected workspace, and the sidebar reads again once it renames. Its Delete
-//! workspace… opens the delete dialog; once a workspace is deleted the selection falls back to the first workspace left,
-//! else the Inbox.
+//! workspace… opens the delete dialog; once a workspace is deleted the selection falls back to
+//! the first workspace left, else Pull requests.
 //!
-//! The Tasks view and the right panel ask for the new task dialog with
-//! [`NewTask`], preset to the Inbox or their workspace. They and the Inbox ask for the task
-//! sheet with [`OpenTask`] when a task's title is clicked, and for it editing the task with
-//! [`EditTask`] from a row's **Edit task**. Once an agent starts, the window shows its
-//! workspace and tab. A pane header's Link to task reaches it as the
-//! workspace view's [`LinkPane`] and opens the Link to task dialog on that pane.
+//! Once an agent starts, the window shows its workspace and tab.
 //!
 //! It shows the sidebar's [`Alerts`] as OS notifications (spec §11), leaving out one while the
 //! user can see what it is about in the focused window: the pane's tab, or, for a PR, the Pull
@@ -52,7 +46,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Decorations, Entity, FocusHandle,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, Window, div, px,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
 use gpui_base::actions::Confirm;
 
@@ -61,28 +55,21 @@ use crate::connection::{Connection, Status};
 use crate::delete_workspace::{DeleteEvent, DeleteTarget, DeleteWorkspaceDialog};
 use crate::edit_workspace::{EditTarget, EditWorkspaceDialog, Renamed};
 use crate::frame;
-use crate::inbox::InboxView;
-use crate::keymap::ToggleRightPanel;
-use crate::link_task::{self, LinkTaskDialog};
 use crate::new_agent::{self, Launched, NewAgent, NewAgentDialog, Target};
-use crate::new_task::{NewTask, NewTaskDialog};
 use crate::new_workspace::{Created, NewWorkspaceDialog};
 use crate::notice::{self, Notice, NoticeAction};
 use crate::notifications::{self, Alert as Notification};
 use crate::pull_requests::{PullRequestsView, Synced};
 use crate::quit;
-use crate::right_panel::{self, RightPanel};
 use crate::settings::SettingsView;
 use crate::sidebar::{Alerts, Selection, SidebarEvent, SidebarView};
 use crate::sync_parts::OpenSettings;
-use crate::task_sheet::{EditTask, OpenTask, TaskSheet};
-use crate::tasks::TasksView;
 use crate::title_bar::{Close, Minimize, TitleBar, ToggleMaximize};
 use crate::top_bar::{
     ArchiveWorkspace, DeleteWorkspace, EditWorkspace, MuteWorkspace, TopBar, UnarchiveWorkspace,
     UnmuteWorkspace,
 };
-use crate::workspace::{LinkPane, WorkspaceView, failed};
+use crate::workspace::{WorkspaceView, failed};
 
 /// Whether `err` is the daemon refusing with `code`.
 fn is_refusal(err: &anyhow::Error, code: &str) -> bool {
@@ -106,30 +93,16 @@ pub struct Shell {
     edit_workspace: Option<Entity<EditWorkspaceDialog>>,
     /// The Delete workspace dialog, while connected.
     delete_workspace: Option<Entity<DeleteWorkspaceDialog>>,
-    /// The new task dialog, while connected.
-    new_task: Option<Entity<NewTaskDialog>>,
-    /// The task sheet, while connected.
-    task_sheet: Option<Entity<TaskSheet>>,
-    /// The Link to task dialog, while connected.
-    link_task: Option<Entity<LinkTaskDialog>>,
     _new_workspace: Vec<Subscription>,
     /// The selected workspace.
     workspace: Option<Entity<WorkspaceView>>,
-    /// Follows the selected workspace's asks to link a pane, and the tab it shows.
+    /// Follows the tab the selected workspace shows.
     _workspace: Vec<Subscription>,
-    /// The Tasks view, while connected; shown while the sidebar selects Tasks.
-    tasks: Option<Entity<TasksView>>,
-    /// The Inbox, while connected; shown while the sidebar selects it.
-    inbox: Option<Entity<InboxView>>,
     /// The Pull requests view, while connected; shown while the sidebar selects it.
     pull_requests: Option<Entity<PullRequestsView>>,
     /// Settings, while connected; shown while the sidebar's gear selects it. It also applies
     /// the saved theme.
     settings: Option<Entity<SettingsView>>,
-    /// The right panel beside a workspace, while connected.
-    panel: Option<Entity<RightPanel>>,
-    /// Whether the right panel shows; the top bar's panel button flips it.
-    panel_open: bool,
     /// What the sidebar selects.
     selection: Option<Selection>,
     /// Held by the shell so the title bar's actions reach its handlers while nothing inside
@@ -188,18 +161,11 @@ impl Shell {
             new_agent: None,
             edit_workspace: None,
             delete_workspace: None,
-            new_task: None,
-            task_sheet: None,
-            link_task: None,
             _new_workspace: Vec::new(),
             workspace: None,
             _workspace: Vec::new(),
-            tasks: None,
-            inbox: None,
             pull_requests: None,
             settings: None,
-            panel: None,
-            panel_open: true,
             selection: None,
             focus,
             notifier,
@@ -414,18 +380,12 @@ impl Shell {
                     let api = session.api.clone();
                     let connection = self.connection.clone();
                     let dialog = cx.new(|cx| NewWorkspaceDialog::new(api.clone(), window, cx));
-                    let inbox = cx.new(|cx| InboxView::new(api.clone(), cx));
                     let pull_requests = cx.new(|cx| PullRequestsView::new(api.clone(), cx));
                     let new_agent = cx.new(|_| NewAgentDialog::new(api.clone()));
-                    let link_task = cx.new(|_| LinkTaskDialog::new(api.clone()));
                     let edit = cx.new(|cx| EditWorkspaceDialog::new(api.clone(), window, cx));
                     let delete = cx.new(|cx| DeleteWorkspaceDialog::new(api.clone(), window, cx));
-                    let new_task = cx.new(|cx| NewTaskDialog::new(api.clone(), window, cx));
-                    let panel = cx.new(|cx| RightPanel::new(api.clone(), cx));
-                    let tasks = cx.new(|cx| TasksView::new(api.clone(), window, cx));
                     let settings =
                         cx.new(|cx| SettingsView::new(api.clone(), &connection, window, cx));
-                    let task_sheet = cx.new(|_| TaskSheet::new(api.clone()));
                     let sidebar = cx.new(|cx| SidebarView::new(api, &connection, cx));
                     self._selection = Some(cx.subscribe_in(
                         &sidebar,
@@ -450,7 +410,7 @@ impl Shell {
                                 shell.notify(&alerts.0, window, cx);
                             },
                         ),
-                        // A sync that changes no task broadcasts nothing, yet moves when PRs
+                        // A sync that changes no PR broadcasts nothing, yet moves when PRs
                         // last synced.
                         cx.subscribe(&pull_requests, |shell, _, _: &Synced, cx| {
                             if let Some(sidebar) = &shell.sidebar {
@@ -469,9 +429,6 @@ impl Shell {
                                 shell.show_launched(*launched, window, cx);
                             },
                         ),
-                        cx.observe_in(&task_sheet, window, |shell, _, window, cx| {
-                            shell.withdraw_seen(window, cx);
-                        }),
                         // The rename also comes back through `changed`; reading now shows it
                         // at once.
                         cx.subscribe(&edit, |shell, _, _: &Renamed, cx| shell.refresh(cx)),
@@ -482,33 +439,6 @@ impl Shell {
                                 DeleteEvent::Deleted(_) => shell.refresh(cx),
                             }
                         }),
-                        cx.subscribe_in(&tasks, window, |shell, _, ask, window, cx| {
-                            shell.new_task(*ask, window, cx);
-                        }),
-                        cx.subscribe_in(&panel, window, |shell, _, ask, window, cx| {
-                            shell.new_task(*ask, window, cx);
-                        }),
-                        cx.subscribe_in(&tasks, window, |shell, _, ask, window, cx| {
-                            shell.open_task(*ask, window, cx);
-                        }),
-                        cx.subscribe_in(&inbox, window, |shell, _, ask, window, cx| {
-                            shell.open_task(*ask, window, cx);
-                        }),
-                        cx.subscribe(&inbox, |shell, _, _: &OpenSettings, cx| {
-                            shell.open_settings(cx);
-                        }),
-                        cx.subscribe_in(&panel, window, |shell, _, ask, window, cx| {
-                            shell.open_task(*ask, window, cx);
-                        }),
-                        cx.subscribe_in(&tasks, window, |shell, _, ask, window, cx| {
-                            shell.edit_task(*ask, window, cx);
-                        }),
-                        cx.subscribe_in(&inbox, window, |shell, _, ask, window, cx| {
-                            shell.edit_task(*ask, window, cx);
-                        }),
-                        cx.subscribe_in(&panel, window, |shell, _, ask, window, cx| {
-                            shell.edit_task(*ask, window, cx);
-                        }),
                         cx.subscribe(&dialog, |shell, _, Created(id), cx| {
                             if let Some(sidebar) = &shell.sidebar {
                                 let selection = Selection::Workspace(*id);
@@ -517,17 +447,11 @@ impl Shell {
                         }),
                     ];
                     self.new_workspace = Some(dialog);
-                    self.inbox = Some(inbox);
                     self.pull_requests = Some(pull_requests);
                     self.new_agent = Some(new_agent);
                     self.edit_workspace = Some(edit);
                     self.delete_workspace = Some(delete);
-                    self.new_task = Some(new_task);
-                    self.task_sheet = Some(task_sheet);
-                    self.link_task = Some(link_task);
-                    self.tasks = Some(tasks);
                     self.settings = Some(settings);
-                    self.panel = Some(panel);
                     self.sidebar = Some(sidebar);
                     self.follow_selection(window, cx);
                 }
@@ -539,17 +463,11 @@ impl Shell {
                 self._new_workspace.clear();
                 self.workspace = None;
                 self._workspace.clear();
-                self.tasks = None;
-                self.inbox = None;
                 self.pull_requests = None;
                 self.settings = None;
-                self.panel = None;
                 self.new_agent = None;
                 self.edit_workspace = None;
                 self.delete_workspace = None;
-                self.new_task = None;
-                self.task_sheet = None;
-                self.link_task = None;
                 self.selection = None;
             }
         }
@@ -565,16 +483,7 @@ impl Shell {
             (sidebar.selection(), sidebar.snapshot().clone())
         };
         self.selection = Some(selection);
-        if let (Some(panel), Selection::Workspace(workspace)) = (&self.panel, selection) {
-            let snapshot = snapshot.clone();
-            panel.update(cx, |panel, cx| panel.show(workspace, snapshot, cx));
-        }
-        if let Some(inbox) = &self.inbox {
-            let snapshot = snapshot.clone();
-            inbox.update(cx, |inbox, cx| inbox.set_snapshot(snapshot, cx));
-        }
         if let Some(view) = &self.pull_requests {
-            let snapshot = snapshot.clone();
             view.update(cx, |view, cx| {
                 view.set_snapshot(snapshot, cx);
                 if selection != Selection::PullRequests {
@@ -582,26 +491,13 @@ impl Shell {
                 }
             });
         }
-        if let Some(sheet) = &self.task_sheet {
-            let snapshot = snapshot.clone();
-            sheet.update(cx, |sheet, cx| sheet.set_snapshot(snapshot, cx));
-        }
-        if let Some(link_task) = &self.link_task {
-            let snapshot = snapshot.clone();
-            link_task.update(cx, |dialog, cx| dialog.set_snapshot(snapshot, cx));
-        }
-        if let Some(tasks) = &self.tasks {
-            tasks.update(cx, |tasks, cx| tasks.set_snapshot(snapshot, cx));
-        }
         let Status::Connected(session) = self.connection.read(cx).status() else {
             return;
         };
         let sidebar = sidebar.read(cx);
         let row = match selection {
             Selection::Workspace(selected) => sidebar.overview().workspace(selected),
-            Selection::PullRequests | Selection::Inbox | Selection::Tasks | Selection::Settings => {
-                None
-            }
+            Selection::PullRequests | Selection::Settings => None,
         };
         let Some(row) = row else {
             self.workspace = None;
@@ -625,9 +521,6 @@ impl Shell {
         let view =
             cx.new(|cx| WorkspaceView::new(selected, top_bar, api, connection, sender, window, cx));
         self._workspace = vec![
-            cx.subscribe_in(&view, window, |shell, _, ask: &LinkPane, window, cx| {
-                shell.open_link_task(ask, window, cx);
-            }),
             // Its tabs read, or another tab shown.
             cx.observe_in(&view, window, |shell, _, window, cx| {
                 shell.withdraw_seen(window, cx);
@@ -635,33 +528,6 @@ impl Shell {
         ];
         self.workspace = Some(view);
         cx.notify();
-    }
-
-    /// Opens the Link to task dialog on the pane `ask` names, in the workspace shown,
-    /// offering that workspace's tasks.
-    fn open_link_task(&mut self, ask: &LinkPane, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(sidebar), Some(dialog), Some(view)) =
-            (&self.sidebar, &self.link_task, &self.workspace)
-        else {
-            return;
-        };
-        let workspace = view.read(cx).workspace();
-        let sidebar = sidebar.read(cx);
-        let Some(row) = sidebar.overview().workspace(workspace) else {
-            return;
-        };
-        let target = link_task::Target {
-            pane: ask.pane,
-            agent: ask.agent,
-            tab: ask.tab.clone(),
-            workspace,
-            workspace_name: row.name.clone(),
-        };
-        let snapshot = sidebar.snapshot().clone();
-        let task = ask.task;
-        dialog.update(cx, |dialog, cx| {
-            dialog.open(target, task, snapshot, window, cx);
-        });
     }
 
     /// Opens the new agent dialog on the workspace shown.
@@ -810,38 +676,6 @@ impl Shell {
         }
     }
 
-    /// Opens the new task dialog as a view asks, offering the workspaces the sidebar holds.
-    fn new_task(&mut self, ask: NewTask, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(sidebar), Some(dialog)) = (&self.sidebar, &self.new_task) else {
-            return;
-        };
-        let snapshot = sidebar.read(cx).snapshot().clone();
-        let NewTask(preset) = ask;
-        dialog.update(cx, |dialog, cx| dialog.open(preset, &snapshot, window, cx));
-    }
-
-    /// Opens the task sheet on the task a view asks for.
-    fn open_task(&mut self, ask: OpenTask, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(sidebar), Some(sheet)) = (&self.sidebar, &self.task_sheet) else {
-            return;
-        };
-        let snapshot = sidebar.read(cx).snapshot().clone();
-        let OpenTask(task) = ask;
-        sheet.update(cx, |sheet, cx| sheet.open(task, snapshot, window, cx));
-    }
-
-    /// Opens the task sheet editing the task a row's Edit task asks for.
-    fn edit_task(&mut self, ask: EditTask, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(sidebar), Some(sheet)) = (&self.sidebar, &self.task_sheet) else {
-            return;
-        };
-        let snapshot = sidebar.read(cx).snapshot().clone();
-        let EditTask(task) = ask;
-        sheet.update(cx, |sheet, cx| {
-            sheet.open_editing(task, snapshot, window, cx)
-        });
-    }
-
     /// The selected workspace's id and name, if a workspace is selected.
     fn selected_workspace(&self, cx: &App) -> Option<(WorkspaceId, SharedString, bool)> {
         let (Some(sidebar), Some(Selection::Workspace(selected))) = (&self.sidebar, self.selection)
@@ -852,9 +686,8 @@ impl Shell {
         Some((row.id, row.name.clone(), row.archived))
     }
 
-    /// The connected session's API.
-    /// Shows Settings at its GitHub section, the top: what the Pull requests view's and the
-    /// Inbox's Open Settings and "Settings" links ask for.
+    /// Shows Settings at its GitHub section, the top: what the Pull requests view's Open
+    /// Settings and "Settings" links ask for.
     fn open_settings(&mut self, cx: &mut Context<Self>) {
         if let Some(sidebar) = &self.sidebar {
             let settings = Selection::Settings;
@@ -865,6 +698,7 @@ impl Shell {
         }
     }
 
+    /// The connected session's API.
     fn api(&self, cx: &App) -> Option<Arc<dyn Api>> {
         match self.connection.read(cx).status() {
             Status::Connected(session) => Some(session.api.clone()),
@@ -909,7 +743,7 @@ impl Shell {
                         }
                     });
                     Notice::new(format!("Archived {name}"))
-                        .description("Its folder and tasks are kept.")
+                        .description("Its folder is kept.")
                         .action(undo)
                         .show(window, cx);
                 }
@@ -998,8 +832,8 @@ impl Shell {
     }
 
     /// The banner over the window while the daemon predates the app (spec §11): Penpot has
-    /// no design for it, so it is the Inbox's gh banner (a default `Alert` with the `Info`
-    /// icon) with the failure alert's outline sm action. Restart is the user's choice, since
+    /// no design for it, so it is the Pull requests view's logged-out banner (a default `Alert`
+    /// with the `Info` icon) with the failure alert's outline sm action. Restart is the user's choice, since
     /// every running agent is re-spawned.
     fn older_daemon_banner(&self) -> impl IntoElement {
         let connection = self.connection.clone();
@@ -1095,21 +929,8 @@ impl Shell {
             .child(Separator::new().orientation(SeparatorOrientation::Vertical))
             .map(|body| match self.selection {
                 Some(Selection::Workspace(_)) if self.workspace.is_some() => {
-                    body.children(self.workspace.clone()).when_some(
-                        self.panel.clone().filter(|_| self.panel_open),
-                        |body, panel| {
-                            // Cached: a frame drawn for a mark turning elsewhere reuses it.
-                            let style = StyleRefinement::default()
-                                .flex_none()
-                                .w(px(right_panel::WIDTH))
-                                .h_full();
-                            body.child(Separator::new().orientation(SeparatorOrientation::Vertical))
-                                .child(panel.cached(style))
-                        },
-                    )
+                    body.children(self.workspace.clone())
                 }
-                Some(Selection::Tasks) if self.tasks.is_some() => body.children(self.tasks.clone()),
-                Some(Selection::Inbox) if self.inbox.is_some() => body.children(self.inbox.clone()),
                 Some(Selection::PullRequests) if self.pull_requests.is_some() => {
                     body.children(self.pull_requests.clone())
                 }
@@ -1122,9 +943,6 @@ impl Shell {
             .children(self.new_agent.clone())
             .children(self.edit_workspace.clone())
             .children(self.delete_workspace.clone())
-            .children(self.new_task.clone())
-            .children(self.task_sheet.clone())
-            .children(self.link_task.clone())
     }
 }
 
@@ -1167,10 +985,6 @@ impl Render for Shell {
                 if let Some((workspace, name, true)) = this.selected_workspace(cx) {
                     this.unarchive(workspace, name, window, cx);
                 }
-            }))
-            .on_action(cx.listener(|this, _: &ToggleRightPanel, _, cx| {
-                this.panel_open = !this.panel_open;
-                cx.notify();
             }))
             // Penpot "Main window": TitleBar / Separator / Body.
             .when(client_tiling.is_some(), |shell| {
@@ -1355,46 +1169,8 @@ mod tests {
             assert_eq!(shown_workspace(&shell, cx), None);
         }
 
-        mod tasks {
+        mod new_agent {
             use super::*;
-
-            #[gpui::test]
-            fn should_show_the_tasks_view_when_the_sidebar_selects_it(cx: &mut TestAppContext) {
-                let connector = Rc::new(FakeConnector::default());
-                let _remote = connector.then_connect_to(workspace_with_a_pane());
-                let shell = open(connector, cx);
-                let sidebar = shell.read_with(cx, |shell, _| shell.sidebar.clone().unwrap());
-
-                sidebar.update(cx, |sidebar, cx| sidebar.select(Selection::Tasks, cx));
-                cx.run_until_parked();
-
-                shell.read_with(cx, |shell, _| {
-                    assert_eq!(shell.selection, Some(Selection::Tasks));
-                    assert!(shell.tasks.is_some());
-                });
-                assert_eq!(shown_workspace(&shell, cx), None);
-            }
-
-            #[gpui::test]
-            fn should_toggle_the_right_panel_from_its_action(cx: &mut TestAppContext) {
-                let connector = Rc::new(FakeConnector::default());
-                let _remote = connector.then_connect_to(workspace_with_a_pane());
-                let shell = open(connector, cx);
-                let window = cx.windows()[0];
-
-                let mut flip = || {
-                    window
-                        .update(cx, |_, window, cx| {
-                            window.dispatch_action(Box::new(ToggleRightPanel), cx);
-                        })
-                        .unwrap();
-                    cx.run_until_parked();
-                    shell.read_with(cx, |shell, _| shell.panel_open)
-                };
-
-                assert!(!flip());
-                assert!(flip());
-            }
 
             #[gpui::test]
             fn should_open_the_new_agent_dialog_on_the_workspace_shown(cx: &mut TestAppContext) {
@@ -1439,19 +1215,20 @@ mod tests {
                 assert_eq!(folder, "/srv/notes");
                 assert_eq!(offered[0].path, "/srv/notes");
             }
+        }
 
-            #[gpui::test]
-            fn should_show_the_inbox_when_there_is_no_workspace(cx: &mut TestAppContext) {
-                let connector = Rc::new(FakeConnector::default());
-                let _remote = connector.then_connect_to(Arc::new(FakeApi::default()));
+        #[gpui::test]
+        fn should_fall_back_to_the_pull_requests_view_with_no_workspace(cx: &mut TestAppContext) {
+            let connector = Rc::new(FakeConnector::default());
+            let _remote = connector.then_connect_to(Arc::new(FakeApi::default()));
 
-                let shell = open(connector, cx);
+            let shell = open(connector, cx);
 
-                shell.read_with(cx, |shell, _| {
-                    assert_eq!(shell.selection, Some(Selection::Inbox));
-                    assert!(shell.inbox.is_some());
-                });
-            }
+            shell.read_with(cx, |shell, _| {
+                assert_eq!(shell.selection, Some(Selection::PullRequests));
+                assert!(shell.pull_requests.is_some());
+            });
+            assert_eq!(shown_workspace(&shell, cx), None);
         }
 
         mod settings {
@@ -1474,21 +1251,6 @@ mod tests {
                     assert!(shell.settings.is_some());
                 });
                 assert_eq!(shown_workspace(&shell, cx), None);
-            }
-
-            #[gpui::test]
-            fn should_show_settings_when_the_inbox_asks(cx: &mut TestAppContext) {
-                let connector = Rc::new(FakeConnector::default());
-                let _remote = connector.then_connect_to(workspace_with_a_pane());
-                let shell = open(connector, cx);
-                let inbox = shell.read_with(cx, |shell, _| shell.inbox.clone().unwrap());
-
-                inbox.update(cx, |_, cx| cx.emit(OpenSettings));
-                cx.run_until_parked();
-
-                shell.read_with(cx, |shell, _| {
-                    assert_eq!(shell.selection, Some(Selection::Settings));
-                });
             }
 
             #[gpui::test]
@@ -1625,234 +1387,6 @@ mod tests {
                 cx.run_until_parked();
 
                 assert_eq!(shown_workspace(&shell, cx), Some(id(101)));
-            }
-        }
-
-        mod new_task {
-            use super::*;
-            use crate::new_task::{NewTask, NewTaskDialog};
-
-            fn dialog(shell: &Entity<Shell>, cx: &TestAppContext) -> Entity<NewTaskDialog> {
-                shell.read_with(cx, |shell, _| shell.new_task.clone().unwrap())
-            }
-
-            #[gpui::test]
-            fn should_open_the_dialog_on_the_inbox_when_the_tasks_view_asks(
-                cx: &mut TestAppContext,
-            ) {
-                let connector = Rc::new(FakeConnector::default());
-                let _remote = connector.then_connect_to(workspace_with_a_pane());
-                let shell = open(connector, cx);
-                let tasks = shell.read_with(cx, |shell, _| shell.tasks.clone().unwrap());
-
-                tasks.update(cx, |_, cx| cx.emit(NewTask(None)));
-                cx.run_until_parked();
-
-                let dialog = dialog(&shell, cx);
-                assert!(dialog.read_with(cx, |d, _| d.is_open()));
-                assert_eq!(dialog.read_with(cx, |d, _| d.workspace()), None);
-            }
-
-            #[gpui::test]
-            fn should_open_the_dialog_on_the_workspace_when_the_right_panel_asks(
-                cx: &mut TestAppContext,
-            ) {
-                let connector = Rc::new(FakeConnector::default());
-                let _remote = connector.then_connect_to(workspace_with_a_pane());
-                let shell = open(connector, cx);
-                let panel = shell.read_with(cx, |shell, _| shell.panel.clone().unwrap());
-
-                panel.update(cx, |_, cx| cx.emit(NewTask(Some(id(1)))));
-                cx.run_until_parked();
-
-                let dialog = dialog(&shell, cx);
-                assert!(dialog.read_with(cx, |d, _| d.is_open()));
-                assert_eq!(dialog.read_with(cx, |d, _| d.workspace()), Some(id(1)));
-            }
-        }
-
-        mod task_sheet {
-            use super::*;
-
-            fn sheet(shell: &Entity<Shell>, cx: &TestAppContext) -> Entity<TaskSheet> {
-                shell.read_with(cx, |shell, _| shell.task_sheet.clone().expect("a sheet"))
-            }
-
-            /// A daemon with workspace 1 and its task 2.
-            fn daemon() -> Arc<FakeApi> {
-                let api = workspace_with_a_pane();
-                let mut snapshot = api.snapshot_now();
-                snapshot.tasks = vec![crate::overview::fixtures::task(
-                    2,
-                    agentdeck_core::TaskKind::Plain,
-                    Some(id(1)),
-                )];
-                api.set(snapshot);
-                api
-            }
-
-            #[gpui::test]
-            fn should_open_the_sheet_on_the_task_the_tasks_view_asks_for(cx: &mut TestAppContext) {
-                let connector = Rc::new(FakeConnector::default());
-                let _remote = connector.then_connect_to(daemon());
-                let shell = open(connector, cx);
-                let tasks = shell.read_with(cx, |shell, _| shell.tasks.clone().unwrap());
-
-                tasks.update(cx, |_, cx| cx.emit(OpenTask(id(2))));
-                cx.run_until_parked();
-
-                let sheet = sheet(&shell, cx);
-                assert!(sheet.read_with(cx, |s, _| s.is_open()));
-                assert_eq!(sheet.read_with(cx, |s, _| s.task()), Some(id(2)));
-            }
-
-            #[gpui::test]
-            fn should_open_the_sheet_when_the_inbox_asks(cx: &mut TestAppContext) {
-                let connector = Rc::new(FakeConnector::default());
-                let _remote = connector.then_connect_to(daemon());
-                let shell = open(connector, cx);
-                let inbox = shell.read_with(cx, |shell, _| shell.inbox.clone().unwrap());
-
-                inbox.update(cx, |_, cx| cx.emit(OpenTask(id(2))));
-                cx.run_until_parked();
-
-                let sheet = sheet(&shell, cx);
-                assert!(sheet.read_with(cx, |s, _| s.is_open()));
-                assert_eq!(sheet.read_with(cx, |s, _| s.task()), Some(id(2)));
-            }
-
-            #[gpui::test]
-            fn should_open_the_sheet_when_the_right_panel_asks(cx: &mut TestAppContext) {
-                let connector = Rc::new(FakeConnector::default());
-                let _remote = connector.then_connect_to(daemon());
-                let shell = open(connector, cx);
-                let panel = shell.read_with(cx, |shell, _| shell.panel.clone().unwrap());
-
-                panel.update(cx, |_, cx| cx.emit(OpenTask(id(2))));
-                cx.run_until_parked();
-
-                let sheet = sheet(&shell, cx);
-                assert!(sheet.read_with(cx, |s, _| s.is_open()));
-                assert_eq!(sheet.read_with(cx, |s, _| s.task()), Some(id(2)));
-            }
-
-            /// Whether the sheet is open on task 2, editing its title, after `ask`.
-            fn editing_after(
-                shell: &Entity<Shell>,
-                ask: impl FnOnce(&mut TestAppContext),
-                cx: &mut TestAppContext,
-            ) -> bool {
-                let sheet = sheet(shell, cx);
-                sheet.update(cx, |sheet, cx| sheet.cancel_edit(cx));
-                ask(cx);
-                cx.run_until_parked();
-                sheet.read_with(cx, |s, _| {
-                    s.is_open()
-                        && s.task() == Some(id(2))
-                        && s.editing() == Some(crate::task_sheet::Editing::Title)
-                })
-            }
-
-            #[gpui::test]
-            fn should_open_the_sheet_editing_the_task_a_rows_edit_task_asks_for(
-                cx: &mut TestAppContext,
-            ) {
-                let connector = Rc::new(FakeConnector::default());
-                let _remote = connector.then_connect_to(daemon());
-                let shell = open(connector, cx);
-                let (tasks, inbox, panel) = shell.read_with(cx, |shell, _| {
-                    (
-                        shell.tasks.clone().unwrap(),
-                        shell.inbox.clone().unwrap(),
-                        shell.panel.clone().unwrap(),
-                    )
-                });
-
-                assert!(editing_after(
-                    &shell,
-                    |cx| tasks.update(cx, |_, cx| cx.emit(EditTask(id(2)))),
-                    cx
-                ));
-                assert!(editing_after(
-                    &shell,
-                    |cx| inbox.update(cx, |_, cx| cx.emit(EditTask(id(2)))),
-                    cx
-                ));
-                assert!(editing_after(
-                    &shell,
-                    |cx| panel.update(cx, |_, cx| cx.emit(EditTask(id(2)))),
-                    cx
-                ));
-            }
-        }
-
-        mod link_task {
-            use agentdeck_core::Agent;
-
-            use super::*;
-
-            #[gpui::test]
-            fn should_open_the_link_dialog_on_the_pane_the_workspace_asks_for(
-                cx: &mut TestAppContext,
-            ) {
-                let connector = Rc::new(FakeConnector::default());
-                let _remote = connector.then_connect_to(workspace_with_a_pane());
-                let shell = open(connector, cx);
-                let view = shell.read_with(cx, |shell, _| shell.workspace.clone().unwrap());
-
-                view.update(cx, |_, cx| {
-                    cx.emit(LinkPane {
-                        pane: id(7),
-                        agent: Agent::Claude,
-                        task: Some(id(30)),
-                        tab: "tab 1".into(),
-                    })
-                });
-                cx.run_until_parked();
-
-                let dialog = shell.read_with(cx, |shell, _| shell.link_task.clone().unwrap());
-                assert!(dialog.read_with(cx, |d, _| d.is_open()));
-                assert_eq!(dialog.read_with(cx, |d, _| d.pane()), Some(id(7)));
-                assert_eq!(dialog.read_with(cx, |d, _| d.task()), Some(id(30)));
-                assert_eq!(
-                    dialog.read_with(cx, |d, _| d.workspace_name()),
-                    Some("agentdeck".into())
-                );
-            }
-
-            #[gpui::test]
-            fn should_follow_the_tasks_the_sidebar_reads_while_open(cx: &mut TestAppContext) {
-                use agentdeck_core::{TaskKind, TaskStatus};
-
-                use crate::overview::fixtures::task;
-
-                let connector = Rc::new(FakeConnector::default());
-                let api = workspace_with_a_pane();
-                let mut snapshot = api.snapshot_now();
-                snapshot.tasks = vec![task(10, TaskKind::Plain, Some(id(1)))];
-                api.set(snapshot.clone());
-                let _remote = connector.then_connect_to(api.clone());
-                let shell = open(connector, cx);
-                let view = shell.read_with(cx, |shell, _| shell.workspace.clone().unwrap());
-                view.update(cx, |_, cx| {
-                    cx.emit(LinkPane {
-                        pane: id(7),
-                        agent: Agent::Claude,
-                        task: None,
-                        tab: "tab 1".into(),
-                    })
-                });
-                cx.run_until_parked();
-
-                snapshot.tasks[0].status = TaskStatus::Done;
-                snapshot.tasks.push(task(13, TaskKind::Plain, Some(id(1))));
-                api.set(snapshot);
-                let sidebar = shell.read_with(cx, |shell, _| shell.sidebar.clone().unwrap());
-                sidebar.update(cx, |sidebar, cx| sidebar.refresh(cx));
-                cx.run_until_parked();
-
-                let dialog = shell.read_with(cx, |shell, _| shell.link_task.clone().unwrap());
-                assert_eq!(dialog.read_with(cx, |d, _| d.offered()), [id(13)]);
             }
         }
 
@@ -2303,10 +1837,7 @@ mod tests {
             harness.archive(cx);
             let notice = harness.last_notice(cx);
             assert_eq!(notice.title, "Archived agentdeck");
-            assert_eq!(
-                notice.description.as_deref(),
-                Some("Its folder and tasks are kept.")
-            );
+            assert_eq!(notice.description.as_deref(), Some("Its folder is kept."));
             let undo = notice.action.expect("an Undo");
             assert_eq!(undo.label, "Undo");
             cx.update(|window, cx| undo.run(window, cx));
@@ -2460,7 +1991,9 @@ mod tests {
             }
 
             #[gpui::test]
-            fn should_select_the_inbox_once_the_last_workspace_is_deleted(cx: &mut TestAppContext) {
+            fn should_select_pull_requests_once_the_last_workspace_is_deleted(
+                cx: &mut TestAppContext,
+            ) {
                 let api = Arc::new(FakeApi::with(Snapshot {
                     workspaces: vec![workspace(1, "agentdeck")],
                     ..Snapshot::default()
@@ -2470,7 +2003,7 @@ mod tests {
                 open_and_delete(&harness, "agentdeck", cx);
 
                 assert_eq!(*harness.api.deleted.lock().unwrap(), [id(1)]);
-                assert_eq!(selection(&harness, cx), Some(Selection::Inbox));
+                assert_eq!(selection(&harness, cx), Some(Selection::PullRequests));
             }
         }
     }
@@ -3186,46 +2719,19 @@ mod tests {
                 cx.observe(view, move |_, _| redraws.set(redraws.get() + 1))
             }
 
-            /// The views that follow the sidebar's selection and snapshot hear of neither
+            /// The view that follows the sidebar's selection and snapshot hears of neither
             /// changing.
             #[gpui::test]
             fn should_leave_the_views_that_follow_it_alone(cx: &mut TestAppContext) {
                 let mut open = Open::new(daemon(), cx);
-                let (panel, inbox, tasks, sheet) = open.shell.read_with(open.cx, |s, _| {
-                    let views = (s.panel.clone(), s.inbox.clone(), s.tasks.clone());
-                    (views.0, views.1, views.2, s.task_sheet.clone())
-                });
-                let (panel, inbox) = (panel.expect("connected"), inbox.expect("connected"));
-                let (tasks, sheet) = (tasks.expect("connected"), sheet.expect("connected"));
+                let view = open
+                    .shell
+                    .read_with(open.cx, |s, _| s.pull_requests.clone());
+                let view = view.expect("connected");
                 let redraws = Rc::new(std::cell::Cell::new(0));
-                let _observing = open.cx.update(|_, cx| {
-                    [
-                        count(&panel, &redraws, cx),
-                        count(&inbox, &redraws, cx),
-                        count(&tasks, &redraws, cx),
-                        count(&sheet, &redraws, cx),
-                    ]
-                });
+                let _observing = open.cx.update(|_, cx| count(&view, &redraws, cx));
                 open.redraw_the_sidebar();
-                assert_eq!(
-                    redraws.get(),
-                    0,
-                    "panel, inbox, tasks and task sheet redraws"
-                );
-            }
-
-            /// The right panel is drawn from its cache.
-            #[gpui::test]
-            fn should_not_render_the_right_panel_again(cx: &mut TestAppContext) {
-                let mut open = Open::new(daemon(), cx);
-                let panel = open.shell.read_with(open.cx, |s, _| s.panel.clone());
-                let panel = panel.expect("connected");
-                let rendered =
-                    |open: &Open| panel.read_with(open.cx, |panel, _| panel.items_rendered.get());
-                let before = rendered(&open);
-                open.redraw_the_sidebar();
-                assert!(before > 0);
-                assert_eq!(rendered(&open), before);
+                assert_eq!(redraws.get(), 0, "Pull requests view redraws");
             }
 
             /// No mark turns: a working agent's, in the sidebar or a pane header, is drawn

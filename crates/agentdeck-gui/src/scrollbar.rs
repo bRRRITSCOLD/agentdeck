@@ -1,10 +1,10 @@
-//! The vertical scrollbar every scrolling list shows (spec §11): Tasks, the Inbox, the right
-//! panel and the sidebar's workspaces. Penpot draws it as shadcn's `ScrollArea` thumb
+//! The vertical scrollbar every scrolling list shows (spec §11): the Pull requests view,
+//! Settings and the sidebar's workspaces. Penpot draws it as shadcn's `ScrollArea` thumb
 //! (`bg-border rounded-full`): a 10px track at the area's right edge holding an 8px thumb.
 //!
-//! It never sits over a row. Tasks and the Inbox put it just right of the list, in the
-//! content's padding (`task_row::table`). The sidebar's workspace list and the right panel
-//! reach their container's right edge and leave a [`GUTTER`] there, past their rows, for the
+//! It never sits over a row. The Pull requests view puts it just right of its table, in the
+//! content's padding ([`table_of`](crate::table::table_of)). The sidebar's workspace list
+//! reaches its container's right edge and leaves a [`GUTTER`] there, past its rows, for the
 //! track to sit in.
 //!
 //! It is `gpui-base`'s [`Scrollbar`], dressed to match. Neither core-react nor core-gpui has a
@@ -22,8 +22,8 @@ const TRACK: Pixels = px(10.);
 const THUMB: Pixels = px(8.);
 
 /// The room a list leaves at its right edge for the scrollbar: the track, flush with the
-/// edge, and `space.0-5` clear of the rows. Penpot pads the right panel and the sidebar's
-/// `Workspaces` with `space.3` on the right for it.
+/// edge, and `space.0-5` clear of the rows. Penpot pads the sidebar's `Workspaces` with
+/// `space.3` on the right for it.
 pub const GUTTER: Pixels = space::S3;
 
 /// A vertical scrollbar over the area `handle` scrolls, shown while the content is taller

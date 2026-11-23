@@ -12,10 +12,10 @@
 //! and each row start with their `Select` layer: a checkbox, or its space where there is
 //! nothing to pick. A click anywhere on a row that can be picked, but on its reference and its
 //! `…` menu, toggles it. A row whose PR failed to close is marked after its title, with why on
-//! hover, as task rows are.
+//! hover.
 //!
-//! The fixed column widths are the task tables' [`Columns`], so the PR table lines up with
-//! them; it has no column to drop, as it fits the narrowest window whole, in Select mode too.
+//! The fixed column widths are [`Columns`]'. The table has no column to drop: the window's
+//! least width is derived from it in Select mode, so it fits whole.
 
 use agentdeck_client::types::PullRequest;
 use agentdeck_core::PrState;
@@ -30,7 +30,7 @@ use gpui::{
     div, px,
 };
 
-use crate::task_row::{self, Columns, RowParts, SelectCell, UNREACHABLE};
+use crate::table::{self, Columns, RowParts, SelectCell, UNREACHABLE};
 
 /// What a click on a row does in Select mode: toggle it.
 pub type OnToggle = Box<dyn Fn(&mut Window, &mut App) + 'static>;
@@ -67,7 +67,7 @@ pub fn columns(select: SelectCell, cx: &App) -> Div {
     let s = cx.theme().semantic();
     let name = |width: Option<Pixels>, text: &'static str| {
         let cell = match width {
-            Some(width) => task_row::cell(width),
+            Some(width) => table::cell(width),
             None => div().flex_1().min_w(Columns::TITLE_MIN),
         };
         cell.debug_selector(move || format!("pr column {text}"))
@@ -88,7 +88,7 @@ pub fn columns(select: SelectCell, cx: &App) -> Div {
         .child(name(Some(Columns::DRAFT), ""))
         .child(name(Some(Columns::CHECKS), "Checks"))
         .child(name(Some(Columns::REVIEW), "Review"))
-        .child(task_row::cell(Columns::MENU))
+        .child(table::cell(Columns::MENU))
 }
 
 /// A Repository group's header: Penpot's `GroupHeader` (its `select` in Select mode, a
@@ -112,7 +112,7 @@ pub fn group_header(
         .flex_none()
         .items_center()
         .gap(space::S2)
-        .child(task_row::group_header(
+        .child(table::group_header(
             key, label, count, collapsed, select, on_toggle, cx,
         ))
         .child(
@@ -125,7 +125,7 @@ pub fn group_header(
         .into_any_element()
 }
 
-/// The PR's state icon and its colour, as task rows show a PR task's (spec §11, PR state):
+/// The PR's state icon and its colour (spec §11, PR state):
 /// open is `GitPullRequest` in `foreground`, or `GitPullRequestDraft` in `muted-foreground`
 /// while a draft; merged is `GitMerge` in `merged`; closed is `GitPullRequestClosed` in
 /// `destructive`.
@@ -142,7 +142,7 @@ fn state_icon(pr: &PullRequest, cx: &App) -> (IconName, Hsla) {
 /// The row's title, sm `foreground`, wrapping. It is no link. A PR the GitHub sign-in can't
 /// see shows [`UNREACHABLE`] above it on hover (Penpot "Pull requests · unreachable PR"). With
 /// an `error`, why its PR didn't close, the close error mark follows it `space.1-5` after, and
-/// hovering either shows the error above them (Penpot "Inbox · partial failure"). Tests find
+/// hovering either shows the error above them (Penpot "Pull requests · partial failure"). Tests find
 /// it as `pr title <reference>`, the mark as `pr close error <reference>`.
 fn title(
     pr: &PullRequest,
@@ -165,10 +165,7 @@ fn title(
             .gap(space::S1_5)
             .min_w_0()
             .child(title)
-            .child(task_row::close_error_mark(
-                format!("pr close error {key}"),
-                cx,
-            ));
+            .child(table::close_error_mark(format!("pr close error {key}"), cx));
         // As a column, the tooltip's text takes the surface's `max-w-xs` and wraps inside it.
         return Tooltip::new(SharedString::from(format!("pr-close-error-{key}")))
             .trigger(div().min_w_0().child(marked))
@@ -255,7 +252,7 @@ pub fn row(
         })
         .children(select.slot())
         .child(
-            task_row::cell(Columns::ICON)
+            table::cell(Columns::ICON)
                 .justify_center()
                 .child(Icon::new(icon).size(px(14.)).text_color(icon_color)),
         )
@@ -268,23 +265,23 @@ pub fn row(
                 .child(title(pr, &key, error, cx)),
         )
         .child(
-            task_row::cell(Columns::PR)
+            table::cell(Columns::PR)
                 .child(kept(div().min_w_0()).child(reference(pr, &key, on_open, cx))),
         )
-        .child(task_row::cell(Columns::DRAFT).when(pr.draft, |c| {
+        .child(table::cell(Columns::DRAFT).when(pr.draft, |c| {
             c.child(Badge::new().variant(BadgeVariant::Outline).label("draft"))
         }))
         .child(
-            task_row::cell(Columns::CHECKS)
+            table::cell(Columns::CHECKS)
                 .debug_selector(move || format!("checks {checks}"))
-                .when_some(pr.checks, |c, state| c.child(task_row::checks(state))),
+                .when_some(pr.checks, |c, state| c.child(table::checks(state))),
         )
         .child(
-            task_row::cell(Columns::REVIEW)
+            table::cell(Columns::REVIEW)
                 .debug_selector(move || format!("review {review}"))
-                .when_some(pr.review, |c, state| c.child(task_row::review(state, cx))),
+                .when_some(pr.review, |c, state| c.child(table::review(state, cx))),
         )
-        .child(kept(task_row::cell(Columns::MENU)).child(menu))
+        .child(kept(table::cell(Columns::MENU)).child(menu))
         .into_any_element()
 }
 

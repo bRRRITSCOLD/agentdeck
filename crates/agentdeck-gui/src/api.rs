@@ -2,30 +2,28 @@
 //! view takes a fake in tests. The real one is the connected [`Daemon`]. A failed call reads
 //! as the daemon's own message, through [`ApiError`].
 
-use std::collections::BTreeSet;
-
 use agentdeck_client::daemon::Daemon;
 use agentdeck_client::panes::{self, pane_if_any};
 use agentdeck_client::types::{
-    DeviceSignIn, DirtyReport, GithubAuthInfo, GithubClientIdBody, GithubTokenBody, NewTask,
-    NewWorkspace, Pane, PaneRun, PrClose, PrCloseResult, Settings, SettingsPatch, Tab, TaskPatch,
+    DeviceSignIn, DirtyReport, GithubAuthInfo, GithubClientIdBody, GithubTokenBody, NewWorkspace,
+    Pane, PaneRun, PrClose, PrCloseResult, Settings, SettingsPatch, Tab,
 };
 use agentdeck_client::{ApiError, Client};
-use agentdeck_core::{PaneId, PrRef, SplitDirection, TabId, TaskId, TaskStatus, WorkspaceId};
+use agentdeck_core::{PaneId, PrRef, SplitDirection, TabId, WorkspaceId};
 use gpui::{App, Task};
 
 use crate::new_agent::{Launch, Launched};
-use crate::new_task;
 use crate::new_workspace::Request;
 use crate::overview::{PaneState, Snapshot};
 use crate::runtime;
 
-/// The daemon's API, as the GUI uses it.
+/// The daemon's API, as the GUI uses it. It calls no task route: the GUI shows no tasks
+/// (spec §11).
 pub trait Api: Send + Sync {
     /// Everything the sidebar shows, read fresh.
     fn snapshot(&self, cx: &App) -> Task<anyhow::Result<Snapshot>>;
 
-    /// `workspace`'s tabs, the panes in their layouts and the tasks those panes link.
+    /// `workspace`'s tabs and the panes in their layouts.
     fn panes(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<WorkspacePanes>>;
 
     /// Adds a tab titled `shell` to `workspace`, running a shell in `dir` as its one pane;
@@ -45,10 +43,6 @@ pub trait Api: Send + Sync {
     /// tab's last pane takes the tab with it: a layout can't be emptied again.
     fn close_pane(&self, pane: PaneAt, cx: &App) -> Task<anyhow::Result<()>>;
 
-    /// Links `pane` to `task`, or unlinks it with `None` (spec §4). A refusal is an
-    /// [`ApiError`]: `unknown_task`, or `invalid_task` for a task in another workspace or done.
-    fn link_task(&self, pane: PaneId, task: Option<TaskId>, cx: &App) -> Task<anyhow::Result<()>>;
-
     /// Starts exited `pane` again in place, running `run`: its agent again, or a shell it
     /// becomes (spec §4). A refusal is an [`ApiError`], such as `running`.
     fn respawn_pane(&self, pane: PaneId, run: PaneRun, cx: &App) -> Task<anyhow::Result<()>>;
@@ -60,21 +54,6 @@ pub trait Api: Send + Sync {
     /// Makes a workspace as `request` says; its id. A refusal is an [`ApiError`] whose code
     /// names the field: `invalid_name` or `invalid_dir`.
     fn new_workspace(&self, request: Request, cx: &App) -> Task<anyhow::Result<WorkspaceId>>;
-
-    /// Makes a `todo` task as `request` says; its id.
-    fn new_task(&self, request: new_task::Request, cx: &App) -> Task<anyhow::Result<TaskId>>;
-
-    /// Moves `task` to `status`.
-    fn set_task_status(
-        &self,
-        task: TaskId,
-        status: TaskStatus,
-        cx: &App,
-    ) -> Task<anyhow::Result<()>>;
-
-    /// Changes what `patch` sets of `task`: its title, body or workspace, where
-    /// [`TaskPlace::Inbox`](agentdeck_core::TaskPlace::Inbox) moves it to the inbox.
-    fn edit_task(&self, task: TaskId, patch: TaskPatch, cx: &App) -> Task<anyhow::Result<()>>;
 
     /// Syncs PRs now, returning once the sync is done: a full sync when `full` (Sync now asks
     /// for one, spec §8), else the sync that is due.
@@ -90,7 +69,7 @@ pub trait Api: Send + Sync {
     /// agent CLI couldn't start, and its message says why.
     fn launch_agent(&self, launch: Launch, cx: &App) -> Task<anyhow::Result<Launched>>;
 
-    /// Archives `workspace`, keeping its dir and tasks. A refusal is an [`ApiError`];
+    /// Archives `workspace`, keeping its dir. A refusal is an [`ApiError`];
     /// `panes_running` means a pane of it still runs.
     fn archive_workspace(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<()>>;
 
@@ -112,9 +91,8 @@ pub trait Api: Send + Sync {
     /// The git repos under `workspace`'s dir that hold work on no remote.
     fn dirty(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<DirtyReport>>;
 
-    /// Deletes `workspace`, dirty or not: its tasks move to the Inbox, and so
-    /// does its dir when agentdeck made it. Only call it once the user has seen the dirty
-    /// report.
+    /// Deletes `workspace`, dirty or not, and its dir when agentdeck made it. Only call it once
+    /// the user has seen the dirty report.
     fn delete_workspace(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<()>>;
 
     /// Every setting in `config.toml`, as the daemon uses it (spec §2).
@@ -169,8 +147,6 @@ pub struct WorkspacePanes {
     pub tabs: Vec<Tab>,
     /// Every pane in the tabs' layouts that still exists.
     pub panes: Vec<Pane>,
-    /// Every task a pane links.
-    pub tasks: Vec<agentdeck_client::types::Task>,
 }
 
 impl Api for Daemon {
@@ -210,14 +186,6 @@ impl Api for Daemon {
         )
     }
 
-    fn link_task(&self, pane: PaneId, task: Option<TaskId>, cx: &App) -> Task<anyhow::Result<()>> {
-        let client = self.client.clone();
-        runtime::spawn(cx, async move {
-            panes::link_task(&client, pane, task).await?;
-            Ok(())
-        })
-    }
-
     fn respawn_pane(&self, pane: PaneId, run: PaneRun, cx: &App) -> Task<anyhow::Result<()>> {
         let client = self.client.clone();
         runtime::spawn(cx, async move {
@@ -242,50 +210,6 @@ impl Api for Daemon {
                 .await
                 .map_err(ApiError::from)?;
             Ok(made.id)
-        })
-    }
-
-    fn new_task(&self, request: new_task::Request, cx: &App) -> Task<anyhow::Result<TaskId>> {
-        let client = self.client.clone();
-        let new_task::Request {
-            title,
-            body,
-            workspace,
-        } = request;
-        runtime::spawn(cx, async move {
-            let task = NewTask {
-                body: (!body.is_empty()).then_some(body),
-                status: Some(TaskStatus::Todo),
-                title,
-                workspace_id: workspace,
-            };
-            let made = (client.task_create().body(task).send().await).map_err(ApiError::from)?;
-            Ok(made.id)
-        })
-    }
-
-    fn set_task_status(
-        &self,
-        task: TaskId,
-        status: TaskStatus,
-        cx: &App,
-    ) -> Task<anyhow::Result<()>> {
-        let client = self.client.clone();
-        runtime::spawn(cx, async move {
-            let patch = TaskPatch {
-                status: Some(status),
-                ..TaskPatch::default()
-            };
-            (client.task_update().id(task).body(patch).send().await).map_err(ApiError::from)?;
-            Ok(())
-        })
-    }
-
-    fn edit_task(&self, task: TaskId, patch: TaskPatch, cx: &App) -> Task<anyhow::Result<()>> {
-        let client = self.client.clone();
-        runtime::spawn(cx, async move {
-            (client.task_update().id(task).body(patch).send().await).map_err(ApiError::from)?;
-            Ok(())
         })
     }
 
@@ -460,8 +384,7 @@ impl Api for Daemon {
     }
 }
 
-/// Reads a [`WorkspacePanes`]: the tabs, then each pane in their layouts, then each task
-/// those panes link.
+/// Reads a [`WorkspacePanes`]: the tabs, then each pane in their layouts.
 async fn panes(client: Client, workspace: WorkspaceId) -> anyhow::Result<WorkspacePanes> {
     let tabs = client
         .tab_list()
@@ -478,18 +401,12 @@ async fn panes(client: Client, workspace: WorkspaceId) -> anyhow::Result<Workspa
     {
         panes.extend(pane_if_any(&client, pane).await?);
     }
-    let linked: BTreeSet<TaskId> = panes.iter().filter_map(|pane| pane.task_id).collect();
-    let mut tasks = Vec::new();
-    for task in linked {
-        let task = client.task_get().id(task).send().await;
-        tasks.push(task.map_err(ApiError::from)?.into_inner());
-    }
-    Ok(WorkspacePanes { tabs, panes, tasks })
+    Ok(WorkspacePanes { tabs, panes })
 }
 
 /// Reads a [`Snapshot`]: the workspaces, then each live one's tabs and the panes in their
-/// layouts, then the tasks, PR sync status, the pull requests
-/// and the Repositories with the Workspaces linking each.
+/// layouts, then PR sync status, the pull requests and the Repositories with the Workspaces
+/// linking each.
 async fn snapshot(client: Client) -> anyhow::Result<Snapshot> {
     let workspaces = (client.workspace_list().send().await)
         .map_err(ApiError::from)?
@@ -514,7 +431,6 @@ async fn snapshot(client: Client) -> anyhow::Result<Snapshot> {
                     workspace: workspace.id,
                     state: pane.state,
                     agent: crate::pane::running_agent(&pane),
-                    task: pane.task_id,
                     tab: tab.title.clone(),
                 });
             }
@@ -523,9 +439,6 @@ async fn snapshot(client: Client) -> anyhow::Result<Snapshot> {
     Ok(Snapshot {
         workspaces,
         panes,
-        tasks: (client.task_list().send().await)
-            .map_err(ApiError::from)?
-            .into_inner(),
         pr_sync: Some(
             (client.prs_status().send().await)
                 .map_err(ApiError::from)?
@@ -588,25 +501,18 @@ pub(crate) mod fake {
         pane_reads: Mutex<usize>,
         tabs: Mutex<HashMap<WorkspaceId, Vec<Tab>>>,
         panes: Mutex<Vec<Pane>>,
-        tasks: Mutex<Vec<agentdeck_client::types::Task>>,
         /// The last id handed to a tab or pane it made.
         made: Mutex<u32>,
         /// Why the next write fails, if it should.
         failure: Mutex<Option<anyhow::Error>>,
         /// The workspaces asked for, in order.
         pub made_workspaces: Mutex<Vec<Request>>,
-        /// The tasks asked for, in order.
-        pub made_tasks: Mutex<Vec<new_task::Request>>,
         /// The PR syncs asked for, in order: whether each was full.
         pub syncs: Mutex<Vec<bool>>,
-        /// The task edits sent, with the task each is for, in order.
-        pub edited_tasks: Mutex<Vec<(TaskId, TaskPatch)>>,
         /// The agents started.
         pub launched: Mutex<Vec<Launch>>,
         /// The panes closed, in order.
         pub closed: Mutex<Vec<PaneId>>,
-        /// The links asked for: the pane and its task, or `None` to unlink it, in order.
-        pub linked: Mutex<Vec<(PaneId, Option<TaskId>)>>,
         /// The respawns asked for: the pane and what it runs, in order.
         pub respawned: Mutex<Vec<(PaneId, PaneRun)>>,
         /// The panes whose agents were stopped, in order.
@@ -635,8 +541,6 @@ pub(crate) mod fake {
         pub settings_patches: Mutex<Vec<SettingsPatch>>,
         /// Each close asked for: the pull requests, in order.
         pub closes: Mutex<Vec<Vec<PrRef>>>,
-        /// The PRs GitHub refuses to close, by their tasks, with its message.
-        refusals: Mutex<HashMap<TaskId, String>>,
         /// The PRs GitHub refuses to close, by their references in lower case, with its
         /// message.
         refused_prs: Mutex<HashMap<String, String>>,
@@ -685,11 +589,6 @@ pub(crate) mod fake {
             *self.panes.lock().unwrap() = panes;
         }
 
-        /// Answers later reads with `tasks`, those a pane links.
-        pub fn set_tasks(&self, tasks: Vec<agentdeck_client::types::Task>) {
-            *self.tasks.lock().unwrap() = tasks;
-        }
-
         /// How many snapshots were read.
         pub fn reads(&self) -> usize {
             *self.reads.lock().unwrap()
@@ -734,14 +633,6 @@ pub(crate) mod fake {
         /// Answers later reads with `settings`, as if another client had changed them.
         pub fn set_settings(&self, settings: Settings) {
             *self.settings.lock().unwrap() = Some(settings);
-        }
-
-        /// Makes GitHub refuse to close `task`'s PR with `message`.
-        pub fn refuse_close(&self, task: TaskId, message: &str) {
-            self.refusals
-                .lock()
-                .unwrap()
-                .insert(task, message.to_owned());
         }
 
         /// Makes GitHub refuse to close pull request `pr` with `message`.
@@ -856,11 +747,7 @@ pub(crate) mod fake {
                 .filter(|pane| shown(&pane.id))
                 .cloned()
                 .collect();
-            let tasks = (self.tasks.lock().unwrap().iter())
-                .filter(|task| panes.iter().any(|pane| pane.task_id == Some(task.id)))
-                .cloned()
-                .collect();
-            Task::ready(Ok(WorkspacePanes { tabs, panes, tasks }))
+            Task::ready(Ok(WorkspacePanes { tabs, panes }))
         }
 
         fn new_shell_tab(
@@ -926,22 +813,6 @@ pub(crate) mod fake {
             Task::ready(Ok(()))
         }
 
-        fn link_task(
-            &self,
-            pane: PaneId,
-            task: Option<TaskId>,
-            _cx: &App,
-        ) -> Task<anyhow::Result<()>> {
-            if let Some(err) = self.failure() {
-                return Task::ready(Err(err));
-            }
-            if let Some(held) = self.panes.lock().unwrap().iter_mut().find(|p| p.id == pane) {
-                held.task_id = task;
-            }
-            self.linked.lock().unwrap().push((pane, task));
-            Task::ready(Ok(()))
-        }
-
         fn respawn_pane(&self, pane: PaneId, run: PaneRun, _cx: &App) -> Task<anyhow::Result<()>> {
             if let Some(err) = self.failure() {
                 return Task::ready(Err(err));
@@ -988,59 +859,6 @@ pub(crate) mod fake {
             Task::ready(Ok(id))
         }
 
-        fn new_task(&self, request: new_task::Request, _cx: &App) -> Task<anyhow::Result<TaskId>> {
-            if let Some(err) = self.failure() {
-                return Task::ready(Err(err));
-            }
-            let id: TaskId = self.make_id();
-            let made = agentdeck_client::types::Task {
-                id,
-                title: request.title.clone(),
-                body: request.body.clone(),
-                workspace_id: request.workspace,
-                ..crate::overview::fixtures::task(0, agentdeck_core::TaskKind::Plain, None)
-            };
-            self.snapshot.lock().unwrap().tasks.push(made);
-            self.made_tasks.lock().unwrap().push(request);
-            Task::ready(Ok(id))
-        }
-
-        fn set_task_status(
-            &self,
-            task: TaskId,
-            status: TaskStatus,
-            _cx: &App,
-        ) -> Task<anyhow::Result<()>> {
-            if let Some(err) = self.failure() {
-                return Task::ready(Err(err));
-            }
-            let mut snapshot = self.snapshot.lock().unwrap();
-            if let Some(task) = snapshot.tasks.iter_mut().find(|t| t.id == task) {
-                task.status = status;
-            }
-            Task::ready(Ok(()))
-        }
-
-        fn edit_task(&self, task: TaskId, patch: TaskPatch, _cx: &App) -> Task<anyhow::Result<()>> {
-            if let Some(err) = self.failure() {
-                return Task::ready(Err(err));
-            }
-            let mut snapshot = self.snapshot.lock().unwrap();
-            if let Some(held) = snapshot.tasks.iter_mut().find(|t| t.id == task) {
-                if let Some(title) = &patch.title {
-                    held.title = title.clone();
-                }
-                if let Some(body) = &patch.body {
-                    held.body = body.clone();
-                }
-                if let Some(place) = patch.workspace_id {
-                    held.workspace_id = place.workspace();
-                }
-            }
-            self.edited_tasks.lock().unwrap().push((task, patch));
-            Task::ready(Ok(()))
-        }
-
         fn sync_prs(&self, full: bool, _cx: &App) -> Task<anyhow::Result<()>> {
             if let Some(err) = self.failure() {
                 return Task::ready(Err(err));
@@ -1054,7 +872,6 @@ pub(crate) mod fake {
                 return Task::ready(Err(err));
             }
             self.closes.lock().unwrap().push(prs.clone());
-            let refusals = self.refusals.lock().unwrap();
             let refused_prs = self.refused_prs.lock().unwrap();
             let mut snapshot = self.snapshot.lock().unwrap();
             let results = (prs.into_iter())
@@ -1070,39 +887,20 @@ pub(crate) mod fake {
                         repo.eq_ignore_ascii_case(&pr.repository().to_string())
                             && number == i64::from(pr.number())
                     };
-                    let Snapshot { tasks, prs, .. } = &mut *snapshot;
-                    let task = tasks.iter_mut().find(|task| {
-                        task.pr.as_ref().is_some_and(|stored| {
-                            named(&stored.repo, stored.number)
-                                && stored.state == agentdeck_core::PrState::Open
-                        })
-                    });
-                    let stored = prs.iter_mut().find(|stored| {
+                    let stored = snapshot.prs.iter_mut().find(|stored| {
                         named(&stored.repository.name.to_string(), stored.number.into())
                             && stored.state == agentdeck_core::PrState::Open
                             && !stored.unreachable
                     });
-                    if task.is_none() && stored.is_none() {
+                    let Some(stored) = stored else {
                         return failed("Not an open PR");
-                    }
-                    let refused = (task.as_ref())
-                        .and_then(|task| refusals.get(&task.id))
-                        .or_else(|| refused_prs.get(&pr.to_string().to_lowercase()));
-                    if let Some(message) = refused {
+                    };
+                    if let Some(message) = refused_prs.get(&pr.to_string().to_lowercase()) {
                         return failed(message);
                     }
-                    // GitHub closed it: the daemon stores it closed and Finished, and its task
-                    // done.
-                    if let Some(task) = task {
-                        task.status = TaskStatus::Done;
-                        if let Some(stored) = &mut task.pr {
-                            stored.state = agentdeck_core::PrState::Closed;
-                        }
-                    }
-                    if let Some(stored) = stored {
-                        stored.state = agentdeck_core::PrState::Closed;
-                        stored.finished = true;
-                    }
+                    // GitHub closed it: the daemon stores it closed and Finished.
+                    stored.state = agentdeck_core::PrState::Closed;
+                    stored.finished = true;
                     PrCloseResult {
                         pr,
                         ok: true,
@@ -1201,11 +999,6 @@ pub(crate) mod fake {
             }
             let mut snapshot = self.snapshot.lock().unwrap();
             snapshot.workspaces.retain(|w| w.id != workspace);
-            for task in &mut snapshot.tasks {
-                if task.workspace_id == Some(workspace) {
-                    task.workspace_id = None;
-                }
-            }
             self.deleted.lock().unwrap().push(workspace);
             Task::ready(Ok(()))
         }
@@ -1329,6 +1122,29 @@ pub(crate) mod fake {
         fn cancel_sign_in(&self, _cx: &App) -> Task<anyhow::Result<()>> {
             *self.cancelled_sign_ins.lock().unwrap() += 1;
             Task::ready(Ok(()))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    mod daemon {
+        /// This file: the only one in the GUI that calls the daemon's client.
+        const SOURCE: &str = include_str!("api.rs");
+
+        #[test]
+        fn should_call_no_task_route() {
+            // Built from parts, so this test's own text doesn't match.
+            let calls = ["list", "get", "create", "update", "delete"]
+                .map(|op| format!(".{}_{op}()", "task"))
+                .into_iter()
+                .chain([
+                    format!("panes::link_{}", "task"),
+                    format!(".pane_{}()", "update"),
+                ]);
+            for call in calls {
+                assert!(!SOURCE.contains(&call), "the GUI calls {call}");
+            }
         }
     }
 }

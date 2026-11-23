@@ -634,9 +634,9 @@ impl Render for SettingsView {
             .child(self.github.clone())
             .child(self.days_field());
         let header = self.header(cx);
-        // Penpot `Content`: Header / Sections, padded `space.6`, as the Inbox's. The heading
-        // stays put and the sections scroll, the scrollbar 2px in from the right edge and 8px
-        // up from the bottom, as Penpot's `Scrollbar` sits.
+        // Penpot `Content`: Header / Sections, padded `space.6`, as the Pull requests view's.
+        // The heading stays put and the sections scroll, the scrollbar 2px in from the right
+        // edge and 8px up from the bottom, as Penpot's `Scrollbar` sits.
         div()
             .debug_selector(|| "settings view".into())
             .size_full()

@@ -3,8 +3,7 @@
 //!
 //! Its New agent button opens the new agent dialog, its `…` menu opens the Edit workspace
 //! dialog, mutes or unmutes the workspace's notifications, archives it or opens the Delete
-//! workspace dialog, and its panel button toggles the right panel, all as actions the window
-//! handles. An archived workspace's bar has Unarchive in place of New agent, and its menu only
+//! workspace dialog, all as actions the window handles. An archived workspace's bar has Unarchive in place of New agent, and its menu only
 //! Edit and Delete.
 
 use std::path::Path;
@@ -21,7 +20,6 @@ use gpui::{
     SharedString, Styled as _, Window, actions, div, px,
 };
 
-use crate::keymap::ToggleRightPanel;
 use crate::new_agent::NewAgent;
 
 actions!(
@@ -148,24 +146,13 @@ impl RenderOnce for TopBar {
                     ),
             )
             // Penpot `Spacer`, `NewAgent` (outline, sm) or, archived, `Unarchive` (outline,
-            // sm), `WorkspaceMenu`, then `TogglePanel`: ghost, icon-sm, `PanelRight`.
+            // sm), then `WorkspaceMenu`.
             .child(div().flex_1())
             .map(|bar| match self.archived {
                 false => bar.child(outline("new agent", "New agent", NewAgent)),
                 true => bar.child(outline("unarchive", "Unarchive", UnarchiveWorkspace)),
             })
             .child(menu(self.archived, self.muted))
-            .child(
-                div().debug_selector(|| "toggle panel".into()).child(
-                    Button::new("toggle-panel")
-                        .variant(ButtonVariant::Ghost)
-                        .size(ButtonSize::IconSm)
-                        .icon(IconName::PanelRight)
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(ToggleRightPanel), cx);
-                        }),
-                ),
-            )
     }
 }
 

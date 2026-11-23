@@ -23,13 +23,8 @@ pub const WORKSPACE: &str = "Workspace";
 /// move focus everywhere but inside it.
 pub const TERMINAL: &str = "Terminal";
 
-/// The key context the task sheet sets around a title or description being edited: Ctrl+Enter
-/// saves ([`Submit`]) and Escape cancels ([`CancelEdit`]), instead of closing the sheet. In
-/// the title's input, Enter saves too.
-pub const TASK_EDITOR: &str = "TaskEditor";
-
-/// The key context a dialog with no text field sets around itself (New agent, Link to task,
-/// the sign-in dialog): Enter while the dialog holds the keyboard runs its primary button
+/// The key context a dialog with no text field sets around itself (New agent, the sign-in
+/// dialog): Enter while the dialog holds the keyboard runs its primary button
 /// ([`ConfirmDialog`]), as Enter in a text field does in the others (spec §11). core-gpui's
 /// `Dialog` leaves Enter to the form inside, so without this Enter there does nothing. A
 /// focused select still takes Enter first, to open.
@@ -56,16 +51,10 @@ actions!(
         SplitDown,
         /// Closes the focused pane, asking first while it runs.
         ClosePane,
-        /// Shows or hides the right panel beside a workspace.
-        ToggleRightPanel,
         /// Copies the terminal's selection to the clipboard.
         Copy,
         /// Pastes the clipboard into the terminal.
         Paste,
-        /// Saves or sends what a textarea holds: Ctrl+Enter where Enter is a newline.
-        Submit,
-        /// Drops an edit, leaving the text as it was.
-        CancelEdit,
         /// Runs a dialog's primary button: Enter in a dialog with no text field to take it.
         ConfirmDialog,
     ]
@@ -91,9 +80,6 @@ fn bindings(cx: &App) -> Vec<KeyBinding> {
     };
     let workspace = context(WORKSPACE);
     let terminal = context(TERMINAL);
-    // Bound on the textarea itself and loaded after core-gpui's, so they win over its own
-    // `ctrl-enter` (a newline) and `escape`.
-    let task_editor = context(&format!("{TASK_EDITOR} > Input"));
     // Matches at gpui-base's dialog, as deep as its own `enter` (its `Confirm`, which
     // core-gpui's `Dialog` ignores), and is loaded after it, so it wins there.
     let dialog = context(&format!("{DIALOG} > Dialog"));
@@ -151,12 +137,6 @@ fn bindings(cx: &App) -> Vec<KeyBinding> {
         // Unbinds the window root's focus navigation, so the terminal's key handler sends them.
         ("tab".into(), Box::new(NoAction), terminal.clone()),
         ("shift-tab".into(), Box::new(NoAction), terminal),
-        (
-            "secondary-enter".into(),
-            Box::new(Submit),
-            task_editor.clone(),
-        ),
-        ("escape".into(), Box::new(CancelEdit), task_editor),
         ("enter".into(), Box::new(ConfirmDialog), dialog),
     ];
     table.extend((1..=9).map(|n| {
