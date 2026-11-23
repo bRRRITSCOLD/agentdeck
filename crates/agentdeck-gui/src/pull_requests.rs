@@ -29,6 +29,11 @@
 //! reference after asking ([`ClosePrs`]); a PR that didn't close stays picked, marked with why.
 //! Select is disabled while there is no PR to show.
 //!
+//! A group's `…` menu ([`group_menu`]) opens it on GitHub and links its Repository to a
+//! Workspace, or, on a Workspace's Pull requests, unlinks it, each at once with an Undo; its
+//! New workspace asks the window for New workspace with the Repository picked
+//! ([`NewWorkspaceLinking`]).
+//!
 //! A Workspace's Pull requests has no sync controls: its header ends in Select, Show finished
 //! and **Edit workspace**. With no Repository linked it says so, with **Link repository**,
 //! which opens Edit workspace with its "Link a repository…" picker focused.
@@ -65,6 +70,7 @@ use gpui::{
 
 use crate::api::Api;
 use crate::close_prs::{self, ClosePrs, Target};
+use crate::group_menu::{self, NewWorkspaceLinking};
 use crate::gui_state;
 use crate::open_pr;
 use crate::overview::Snapshot;
@@ -348,6 +354,7 @@ pub struct PullRequestsView {
 impl EventEmitter<Synced> for PullRequestsView {}
 impl EventEmitter<OpenSettings> for PullRequestsView {}
 impl EventEmitter<OpenWorkspace> for PullRequestsView {}
+impl EventEmitter<NewWorkspaceLinking> for PullRequestsView {}
 
 impl PullRequestsView {
     /// A view of the PRs in `scope` that syncs and closes PRs through `api`; it shows nothing
@@ -616,6 +623,7 @@ impl PullRequestsView {
                 let on_workspace: pr_table::OnWorkspace = Rc::new(move |workspace, _, cx| {
                     let _ = this.update(cx, |_, cx| cx.emit(OpenWorkspace(workspace)));
                 });
+                let menu = self.group_menu(repository, cx);
                 pr_table::group_header(
                     name.clone(),
                     label.clone(),
@@ -625,6 +633,7 @@ impl PullRequestsView {
                     workspaces,
                     cx.listener(move |this, _, _, cx| this.toggle(repository, cx)),
                     on_workspace,
+                    menu,
                     cx,
                 )
             }
@@ -683,6 +692,36 @@ impl PullRequestsView {
             None => return div().into_any_element(),
         };
         table::spaced(item)
+    }
+
+    /// `repository`'s group `…` menu ([`group_menu`]), over the Repository as last read.
+    fn group_menu(&self, repository: RepositoryId, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let held = group_menu::held(&self.snapshot, repository)?;
+        let workspace = match self.scope {
+            Scope::All => None,
+            Scope::Workspace(id) => Some(Linker {
+                id,
+                name: self.workspace_name().unwrap_or_default(),
+            }),
+        };
+        let elsewhere = (self.snapshot.linking(repository).iter())
+            .any(|w| workspace.as_ref().is_none_or(|ws| ws.id != w.id));
+        let target = group_menu::Target {
+            repository: held,
+            workspace,
+            open: group_menu::open_prs(&self.snapshot, repository),
+            elsewhere,
+        };
+        let this = cx.entity().downgrade();
+        let on_new_workspace: group_menu::OnNewWorkspace = Rc::new(move |repository, _, cx| {
+            let _ = this.update(cx, |_, cx| cx.emit(NewWorkspaceLinking(repository)));
+        });
+        Some(group_menu::menu(
+            group_menu::entries(&self.snapshot, self.scope, repository),
+            target,
+            self.api.clone(),
+            on_new_workspace,
+        ))
     }
 
     /// Penpot `Header`: heading and description, a spacer, Select (disabled with no PR to
@@ -1251,6 +1290,311 @@ mod tests {
             cx.on_action(move |_: &EditWorkspace, _| *seen.borrow_mut() += 1);
         });
         asked
+    }
+
+    /// A Repository group's `…` menu (spec §11): what it offers, and the Links it makes and
+    /// takes away at once, each with a toast and Undo.
+    mod group_menu {
+        use super::*;
+        use crate::group_menu::NewWorkspaceLinking;
+
+        /// Opens `repository`'s group `…` menu and presses `keys`.
+        fn press(repository: &str, keys: &str, cx: &mut VisualTestContext) {
+            click(format!("group menu {repository}"), cx);
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.simulate_keystrokes(keys);
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+
+        /// The menu's 4px padding, then a 32px row per item before it and half of its own;
+        /// a separator before it adds its 9px.
+        fn row_y(n: usize, separated: bool) -> gpui::Pixels {
+            let separator = if separated { 9. } else { 0. };
+            px(4. + 32. * (n - 1) as f32 + separator + 16.)
+        }
+
+        /// Opens `repository`'s Link to a workspace submenu by hovering its trigger, the
+        /// menu's second item, and clicks the submenu's `n`th item, after the separator when
+        /// `separated`.
+        fn pick_in_submenu(
+            repository: &str,
+            n: usize,
+            separated: bool,
+            cx: &mut VisualTestContext,
+        ) {
+            click(format!("group menu {repository}"), cx);
+            let menu = bounds("dropdown-menu-content".into(), cx);
+            let trigger = point(menu.center().x, menu.top() + row_y(2, false));
+            cx.simulate_mouse_move(trigger, None, Modifiers::default());
+            let submenu = bounds("dropdown-menu-sub-content".into(), cx);
+            let item = point(submenu.center().x, submenu.top() + row_y(n, separated));
+            cx.simulate_click(item, Modifiers::default());
+            cx.run_until_parked();
+        }
+
+        fn last_notice(cx: &mut VisualTestContext) -> crate::notice::Notice {
+            cx.update(|_, cx| crate::notice::shown(cx).last().cloned().expect("a toast"))
+        }
+
+        fn undo(cx: &mut VisualTestContext) {
+            let undo = last_notice(cx).action.expect("an Undo");
+            assert_eq!(undo.label, "Undo");
+            cx.update(|window, cx| undo.run(window, cx));
+            cx.run_until_parked();
+        }
+
+        /// The Workspaces linking `repo` in the fake daemon now.
+        fn linking(harness: &Harness, repo: &str) -> Option<Vec<WorkspaceId>> {
+            let snapshot = harness.api.snapshot_now();
+            (snapshot.repositories.iter())
+                .find(|r| r.id == repository_id(repo))
+                .map(|r| r.workspaces.clone())
+        }
+
+        /// Whether the window was asked for New workspace, and with which Repository.
+        fn asked_new_workspace(
+            harness: &Harness,
+            cx: &mut VisualTestContext,
+        ) -> Rc<RefCell<Vec<String>>> {
+            let asked = Rc::new(RefCell::new(Vec::new()));
+            let seen = asked.clone();
+            let subscription = cx.update(|_, cx| {
+                cx.subscribe(&harness.view, move |_, NewWorkspaceLinking(r), _| {
+                    seen.borrow_mut().push(r.name.to_string());
+                })
+            });
+            std::mem::forget(subscription);
+            asked
+        }
+
+        #[gpui::test]
+        fn should_show_a_menu_on_every_group_of_both_views(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open(linked(), cx);
+            for repository in ["acme/widgets", "acme/apples", "acme/gadgets", "acme/zebra"] {
+                assert!(
+                    shows(format!("group menu {repository}"), cx),
+                    "{repository}"
+                );
+            }
+            let row = bounds("pr menu acme/widgets#3".into(), cx);
+            let group = bounds("group menu acme/widgets".into(), cx);
+            assert_eq!(group.right(), row.right(), "in the rows' Menu column");
+        }
+
+        #[gpui::test]
+        fn should_show_a_menu_on_a_workspaces_groups_those_with_no_prs_included(
+            cx: &mut TestAppContext,
+        ) {
+            let (_harness, cx) = Harness::open_in(a(), linked(), cx);
+
+            assert!(shows("group menu acme/widgets".into(), cx));
+            assert!(shows("group menu acme/tools".into(), cx));
+        }
+
+        #[gpui::test]
+        fn should_open_the_repository_on_github_from_its_first_item(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open(linked(), cx);
+            let opener = cx.update(|_, cx| crate::terminal::open::fake::install(cx));
+
+            press("acme/gadgets", "down enter", cx);
+
+            assert_eq!(
+                *opener.started.lock().unwrap(),
+                [[
+                    "xdg-open".to_owned(),
+                    "https://github.com/acme/gadgets".to_owned()
+                ]]
+            );
+        }
+
+        mod link_to_a_workspace {
+            use super::*;
+
+            #[gpui::test]
+            fn should_link_the_workspace_picked_at_once_with_a_toast(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open(linked(), cx);
+
+                // gadgets: old links it, but is archived, so a then b are offered.
+                pick_in_submenu("acme/gadgets", 2, false, cx);
+
+                let links = harness.api.links.lock().unwrap().clone();
+                assert_eq!(links.len(), 1);
+                assert_eq!(links[0].0, id(2));
+                assert_eq!(links[0].1.id, repository_id("acme/gadgets"));
+                let notice = last_notice(cx);
+                assert_eq!(notice.title, "Linked acme/gadgets to b");
+                assert_eq!(notice.description, None);
+            }
+
+            #[gpui::test]
+            fn should_unlink_it_again_on_undo(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open(linked(), cx);
+                pick_in_submenu("acme/gadgets", 1, false, cx);
+                assert_eq!(linking(&harness, "acme/gadgets"), Some(vec![id(3), id(1)]));
+
+                undo(cx);
+
+                assert_eq!(
+                    *harness.api.unlinks.lock().unwrap(),
+                    [(id(1), repository_id("acme/gadgets"))]
+                );
+                assert_eq!(linking(&harness, "acme/gadgets"), Some(vec![id(3)]));
+            }
+
+            #[gpui::test]
+            fn should_offer_the_workspaces_that_do_not_link_it_then_new_workspace(
+                cx: &mut TestAppContext,
+            ) {
+                let (harness, cx) = Harness::open(linked(), cx);
+                let asked = asked_new_workspace(&harness, cx);
+
+                // apples: linked by none, so a and b, a separator, then New workspace.
+                pick_in_submenu("acme/apples", 3, true, cx);
+
+                assert_eq!(*asked.borrow(), ["acme/apples"]);
+                assert!(harness.api.links.lock().unwrap().is_empty());
+            }
+
+            #[gpui::test]
+            fn should_offer_only_new_workspace_when_every_workspace_links_it(
+                cx: &mut TestAppContext,
+            ) {
+                let (harness, cx) = Harness::open(linked(), cx);
+                let asked = asked_new_workspace(&harness, cx);
+
+                // widgets: a and b link it, and old is archived.
+                pick_in_submenu("acme/widgets", 1, false, cx);
+
+                assert_eq!(*asked.borrow(), ["acme/widgets"]);
+                assert!(harness.api.links.lock().unwrap().is_empty());
+            }
+
+            #[gpui::test]
+            fn should_toast_why_a_link_failed(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open(linked(), cx);
+                harness.api.fail_next("the daemon went away");
+
+                pick_in_submenu("acme/gadgets", 1, false, cx);
+
+                let notice = last_notice(cx);
+                assert_eq!(notice.title, "Couldn't link acme/gadgets to a");
+                assert!(notice.action.is_none());
+            }
+        }
+
+        mod unlink_from_this_workspace {
+            use super::*;
+
+            /// `linked()` with one open PR in tools, which only `a` links.
+            fn tools_with_a_pr() -> Snapshot {
+                let mut snapshot = linked();
+                snapshot.prs.push(pull_request(5, "acme/tools"));
+                snapshot
+            }
+
+            /// Unlinks `repository` from `a` with the menu's last item.
+            fn unlink(repository: &str, cx: &mut VisualTestContext) {
+                press(repository, "down down down enter", cx);
+            }
+
+            #[gpui::test]
+            fn should_unlink_at_once_saying_its_prs_no_longer_show_here(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open_in(a(), linked(), cx);
+
+                unlink("acme/widgets", cx);
+
+                assert_eq!(
+                    *harness.api.unlinks.lock().unwrap(),
+                    [(id(1), repository_id("acme/widgets"))]
+                );
+                assert_eq!(linking(&harness, "acme/widgets"), Some(vec![id(2)]));
+                let notice = last_notice(cx);
+                assert_eq!(notice.title, "Unlinked acme/widgets from a");
+                assert_eq!(
+                    notice.description.as_deref(),
+                    Some("Its 1 open PR no longer shows here.")
+                );
+            }
+
+            #[gpui::test]
+            fn should_say_where_its_prs_are_when_no_other_workspace_links_it(
+                cx: &mut TestAppContext,
+            ) {
+                let (_harness, cx) = Harness::open_in(a(), tools_with_a_pr(), cx);
+
+                unlink("acme/tools", cx);
+
+                let notice = last_notice(cx);
+                assert_eq!(notice.title, "Unlinked acme/tools from a");
+                assert_eq!(
+                    notice.description.as_deref(),
+                    Some(
+                        "Its 1 open PR no longer shows here. It's in the Pull requests view, \
+                         under Not in a workspace."
+                    )
+                );
+            }
+
+            #[gpui::test]
+            fn should_link_it_again_on_undo(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open_in(a(), linked(), cx);
+                unlink("acme/widgets", cx);
+
+                undo(cx);
+
+                assert_eq!(linking(&harness, "acme/widgets"), Some(vec![id(2), id(1)]));
+            }
+
+            #[gpui::test]
+            fn should_link_it_again_on_undo_once_the_unlink_deleted_the_repository(
+                cx: &mut TestAppContext,
+            ) {
+                let (harness, cx) = Harness::open_in(a(), linked(), cx);
+                // tools: only a links it and it has no PRs, so the unlink deletes it.
+                unlink("acme/tools", cx);
+                assert_eq!(linking(&harness, "acme/tools"), None);
+                assert_eq!(last_notice(cx).description, None, "no open PRs to speak of");
+
+                undo(cx);
+
+                let links = harness.api.links.lock().unwrap().clone();
+                assert_eq!(links.len(), 1);
+                let (workspace, held) = &links[0];
+                assert_eq!(*workspace, id(1));
+                assert_eq!(
+                    (held.id, held.name.to_string(), held.url.as_str()),
+                    (
+                        repository_id("acme/tools"),
+                        "acme/tools".to_owned(),
+                        "https://github.com/acme/tools"
+                    )
+                );
+                assert_eq!(linking(&harness, "acme/tools"), Some(vec![id(1)]));
+            }
+
+            #[gpui::test]
+            fn should_toast_why_an_unlink_failed(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open_in(a(), linked(), cx);
+                harness.api.fail_next("the daemon went away");
+
+                unlink("acme/widgets", cx);
+
+                let notice = last_notice(cx);
+                assert_eq!(notice.title, "Couldn't unlink acme/widgets from a");
+                assert_eq!(linking(&harness, "acme/widgets"), Some(vec![id(1), id(2)]));
+            }
+
+            #[gpui::test]
+            fn should_not_be_offered_on_the_pull_requests_view(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open(linked(), cx);
+
+                // Its last item there is Link to a workspace, which only opens its submenu.
+                press("acme/widgets", "down down down enter", cx);
+
+                assert!(harness.api.unlinks.lock().unwrap().is_empty());
+            }
+        }
     }
 
     mod linked {

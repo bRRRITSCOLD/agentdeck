@@ -35,6 +35,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use agentdeck_client::ApiError;
+use agentdeck_client::types::Repository;
 use agentdeck_core::{PaneId, WorkspaceId};
 use agentdeck_notify::Notifier;
 use brrritscold_core_gpui::{
@@ -59,9 +60,10 @@ use crate::connection::{Connection, Status};
 use crate::delete_workspace::{DeleteEvent, DeleteTarget, DeleteWorkspaceDialog};
 use crate::edit_workspace::{EditTarget, EditWorkspaceDialog, Saved};
 use crate::frame;
+use crate::group_menu::NewWorkspaceLinking;
 use crate::gui_state::{self, Side};
 use crate::keymap::ToggleSide;
-use crate::link_picker::Offer;
+use crate::link_picker::{Choice, Offer};
 use crate::new_agent::{self, Launched, NewAgent, NewAgentDialog, Target, home_folder};
 use crate::new_workspace::{Created, NewWorkspaceDialog};
 use crate::notice::{self, Notice, NoticeAction};
@@ -436,6 +438,13 @@ impl Shell {
                                 shell.open_workspace_prs(*id, window, cx);
                             },
                         ),
+                        cx.subscribe_in(
+                            &pull_requests,
+                            window,
+                            |shell, _, NewWorkspaceLinking(repository), window, cx| {
+                                shell.new_workspace_linking(repository, window, cx);
+                            },
+                        ),
                         // Show the agent's workspace and tab, and focus it: it may be asking
                         // about trust.
                         cx.subscribe_in(
@@ -555,6 +564,13 @@ impl Shell {
                 window,
                 |shell, _, OpenWorkspace(id): &OpenWorkspace, window, cx| {
                     shell.open_workspace_prs(*id, window, cx);
+                },
+            ),
+            cx.subscribe_in(
+                &view,
+                window,
+                |shell, _, NewWorkspaceLinking(repository), window, cx| {
+                    shell.new_workspace_linking(repository, window, cx);
                 },
             ),
             cx.subscribe(&view, |shell, _, _: &OpenSettings, cx| {
@@ -852,6 +868,28 @@ impl Shell {
         let offer = Offer::read(sidebar.read(cx).snapshot(), Some(id));
         dialog.update(cx, |dialog, cx| {
             dialog.open(target, offer, link, window, cx)
+        });
+    }
+
+    /// Opens New workspace with `repository` already picked to link: a group's New workspace.
+    fn new_workspace_linking(
+        &mut self,
+        repository: &Repository,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(sidebar), Some(dialog)) = (&self.sidebar, &self.new_workspace) else {
+            return;
+        };
+        let offer = Offer::read(sidebar.read(cx).snapshot(), None);
+        let picked = Choice {
+            id: repository.id,
+            name: repository.name.clone(),
+            private: repository.private,
+            unreachable: false,
+        };
+        dialog.update(cx, |dialog, cx| {
+            dialog.open_linking(offer, picked, window, cx)
         });
     }
 
@@ -1933,6 +1971,42 @@ mod tests {
             assert!(picker.read_with(cx, |p, _| p.is_open()));
             // docs links nothing, so the Repository of your PRs is offered.
             assert!(shows("pick acme/widgets", cx));
+        }
+
+        #[gpui::test]
+        fn should_open_new_workspace_with_the_repository_picked_from_a_groups_menu(
+            cx: &mut TestAppContext,
+        ) {
+            use crate::link_picker::Staged;
+
+            let (harness, cx) = open(cx);
+            cx.update(|window, _| window.activate_window());
+            click_side(&harness, Side::PullRequests, cx);
+            click(&harness, "group menu acme/widgets", cx);
+            let menu = cx.debug_bounds("dropdown-menu-content").expect("it opens");
+            // The menu's 4px padding, then its second 32px row: Link to a workspace.
+            let trigger = gpui::point(menu.center().x, menu.top() + gpui::px(4. + 32. + 16.));
+            cx.simulate_mouse_move(trigger, None, gpui::Modifiers::default());
+            harness.settle(cx);
+            let submenu = cx
+                .debug_bounds("dropdown-menu-sub-content")
+                .expect("it opens");
+
+            // docs, the separator, then New workspace.
+            let y = submenu.top() + gpui::px(4. + 32. + 9. + 16.);
+            harness.click(gpui::point(submenu.center().x, y), cx);
+
+            let dialog = harness
+                .shell
+                .read_with(cx, |shell, _| shell.new_workspace.clone().unwrap());
+            assert!(dialog.read_with(cx, |d, _| d.is_open()));
+            let picker = dialog.read_with(cx, |d, _| d.picker().clone());
+            let rows: Vec<(String, Staged)> = picker.read_with(cx, |p, _| {
+                (p.rows().iter())
+                    .map(|r| (r.repository.name.to_string(), r.staged))
+                    .collect()
+            });
+            assert_eq!(rows, [("acme/widgets".to_owned(), Staged::Linking)]);
         }
 
         #[gpui::test]

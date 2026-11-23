@@ -111,8 +111,9 @@ pub type OnWorkspace = Rc<dyn Fn(WorkspaceId, &mut Window, &mut App) + 'static>;
 /// its checkbox, then, `space.2` after it in sm `muted-foreground`, who links the Repository:
 /// each Workspace in `workspaces` by name, `·` apart, a link to its Pull requests that runs
 /// `on_workspace` (underlined on hover, as a PR's reference), or [`NOT_IN_A_WORKSPACE`] with
-/// none. `key` names it: tests find it as `group <key>`, its workspaces as
-/// `group workspaces <key>` and each one's link as `workspace link <key> <name>`.
+/// none, then, pushed right into the rows' `Menu` column, its `menu`. `key` names it: tests
+/// find it as `group <key>`, its workspaces as `group workspaces <key>` and each one's link as
+/// `workspace link <key> <name>`.
 #[allow(clippy::too_many_arguments)]
 pub fn group_header(
     key: SharedString,
@@ -123,6 +124,7 @@ pub fn group_header(
     workspaces: &[Linker],
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_workspace: OnWorkspace,
+    menu: Option<AnyElement>,
     cx: &App,
 ) -> AnyElement {
     let s = cx.theme().semantic();
@@ -130,6 +132,7 @@ pub fn group_header(
     let names = div()
         .debug_selector(move || format!("group workspaces {selector}"))
         .flex()
+        .flex_1()
         .min_w_0()
         .text_size(font_size::SM)
         .text_color(s.muted_foreground);
@@ -168,6 +171,8 @@ pub fn group_header(
             key, label, count, collapsed, select, on_toggle, cx,
         ))
         .child(names)
+        // Penpot `Group`: its `Menu` sits where the rows' does, `space.2` in from the right.
+        .children(menu.map(|menu| div().flex_none().pr(space::S2).child(menu)))
         .into_any_element()
 }
 

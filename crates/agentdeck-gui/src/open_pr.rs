@@ -39,6 +39,20 @@ pub fn open(url: &str, window: &mut Window, cx: &mut App) {
     open::open_url(url, "Couldn't open the PR", window, cx);
 }
 
+/// Opens `url`, a Repository's GitHub page (a group's Open on GitHub), as [`open()`] opens a
+/// PR's: refused unless [`openable`]; a toast "Couldn't open the repository" when the handler
+/// can't start.
+pub fn open_repository(url: &str, window: &mut Window, cx: &mut App) {
+    if !openable(url) {
+        tracing::debug!(
+            url,
+            "refused to open a Repository link that isn't a GitHub https URL"
+        );
+        return;
+    }
+    open::open_url(url, "Couldn't open the repository", window, cx);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

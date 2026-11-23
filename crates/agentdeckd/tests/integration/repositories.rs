@@ -363,7 +363,7 @@ mod post_v1_workspaces_links {
 
         #[tokio::test]
         async fn should_store_a_deleted_repository_again_from_what_the_client_holds_signed_out_200()
-         {
+        {
             let daemon = TestDaemon::start().await;
             let web = workspace(&daemon.client, "web").await;
             let private = RestRepo {

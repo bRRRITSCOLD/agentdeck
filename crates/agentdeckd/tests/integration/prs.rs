@@ -2331,7 +2331,9 @@ mod finished {
             .into_inner();
         (daemon.client.link_create())
             .id(web.id)
-            .body(NewLink::named("acme/widgets".parse().expect("a Repository")))
+            .body(NewLink::named(
+                "acme/widgets".parse().expect("a Repository"),
+            ))
             .send()
             .await
             .expect("link");
