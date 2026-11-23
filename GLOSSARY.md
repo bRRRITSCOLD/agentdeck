@@ -40,6 +40,10 @@ _Avoid_: Tab, session
 The tie, made by you, between a Workspace and a Repository. One Repository can be linked to many Workspaces; its Pull requests show in each.
 _Avoid_: Attach, assign, match
 
+**Suggestion**:
+A Repository that one of a Workspace's Panes works in and that the Workspace doesn't link, offered for linking. Nothing is stored except that you said Not now.
+_Avoid_: Detected repo, auto-link, match
+
 ### Views
 
 **Pull requests view**:
