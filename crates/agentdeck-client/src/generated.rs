@@ -478,6 +478,8 @@ pub mod types {
         ///The exit code, once the process has exited.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub exit_code: ::std::option::Option<i64>,
+        ///Its current folder (spec §6): the folder its shell last reported with OSC 7, else its process's working directory, else `cwd`, the folder it launched in, as the daemon last read them. Kept after it exits; a pane resumed after a restart starts there.
+        pub folder: ::std::string::String,
         ///The agent a shell pane hosts: `claude` or `codex` while the user's own is its foreground process, else null. Its kind stays `shell`; it runs that agent's state rules and takes the task's comments meanwhile (spec §3, §7).
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub hosted_agent: ::std::option::Option<agentdeck_core::Agent>,
@@ -2768,6 +2770,7 @@ pub mod types {
             created_at: ::std::result::Result<::std::string::String, ::std::string::String>,
             cwd: ::std::result::Result<::std::string::String, ::std::string::String>,
             exit_code: ::std::result::Result<::std::option::Option<i64>, ::std::string::String>,
+            folder: ::std::result::Result<::std::string::String, ::std::string::String>,
             hosted_agent: ::std::result::Result<
                 ::std::option::Option<agentdeck_core::Agent>,
                 ::std::string::String,
@@ -2794,6 +2797,7 @@ pub mod types {
                     created_at: Err("no value supplied for created_at".to_string()),
                     cwd: Err("no value supplied for cwd".to_string()),
                     exit_code: Ok(Default::default()),
+                    folder: Err("no value supplied for folder".to_string()),
                     hosted_agent: Ok(Default::default()),
                     id: Err("no value supplied for id".to_string()),
                     kind: Err("no value supplied for kind".to_string()),
@@ -2854,6 +2858,16 @@ pub mod types {
                 self.exit_code = value
                     .try_into()
                     .map_err(|e| format!("error converting supplied value for exit_code: {e}"));
+                self
+            }
+            pub fn folder<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::string::String>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.folder = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for folder: {e}"));
                 self
             }
             pub fn hosted_agent<T>(mut self, value: T) -> Self
@@ -2946,6 +2960,7 @@ pub mod types {
                     created_at: value.created_at?,
                     cwd: value.cwd?,
                     exit_code: value.exit_code?,
+                    folder: value.folder?,
                     hosted_agent: value.hosted_agent?,
                     id: value.id?,
                     kind: value.kind?,
@@ -2965,6 +2980,7 @@ pub mod types {
                     created_at: Ok(value.created_at),
                     cwd: Ok(value.cwd),
                     exit_code: Ok(value.exit_code),
+                    folder: Ok(value.folder),
                     hosted_agent: Ok(value.hosted_agent),
                     id: Ok(value.id),
                     kind: Ok(value.kind),
@@ -5297,7 +5313,9 @@ impl Client {
     pub fn pane_create(&self) -> builder::PaneCreate<'_> {
         builder::PaneCreate::new(self)
     }
-    ///One pane, with its live title and state
+    ///One pane, with its live title, state and current folder
+    ///
+    ///The folder is read now: the folder its shell last reported with OSC 7, else its process's working directory, else the one last known. A pane whose folder moved is saved there, and `changed` goes out for it.
     ///
     ///Sends a `GET` request to `/v1/panes/{id}`
     ///

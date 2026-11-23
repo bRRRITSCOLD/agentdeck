@@ -1,12 +1,12 @@
 //! Resume after a restart (spec §6): every pane that was alive when the daemon last stopped
-//! is spawned again in its `cwd`. Claude Code and Codex panes resume their session;
+//! is spawned again in its last known folder, or in `~` once that folder is gone. Claude Code and Codex panes resume their session;
 //! every other pane comes back as a fresh shell, with hosting on. An
 //! agent pane that comes back as a shell becomes a shell pane (spec §3) before it starts. A
 //! pane that can't be spawned is marked exited. A shell pane comes back as its shell alone,
 //! hosting no agent, whatever it hosted before. A resumed agent that exits non-zero at once,
 //! as one whose session can't be found does, starts afresh once ([`super::restart`]).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use agentdeck_core::PaneKind;
 
@@ -34,7 +34,27 @@ pub async fn resume_panes(restarter: &Restarter) -> Result<(), DbError> {
                 .await?;
             tracing::info!("pane {id} comes back as a shell, so it is a shell pane now");
         }
-        let cwd = PathBuf::from(&pane.cwd);
+        let Some(cwd) = restore_folder(Path::new(&pane.folder), home().as_deref()) else {
+            tracing::warn!(
+                "resuming pane {}: {} is gone, and so is ~",
+                pane.id,
+                pane.folder
+            );
+            let (id, title) = (pane.id, pane.title);
+            db.call(move |c| db::panes::set_exited(c, id, None, &title))
+                .await?;
+            continue;
+        };
+        if cwd != Path::new(&pane.folder) {
+            tracing::info!(
+                "pane {}'s folder {} is gone: resuming it in ~",
+                pane.id,
+                pane.folder
+            );
+            let (id, folder) = (pane.id, cwd.to_string_lossy().into_owned());
+            db.call(move |c| db::panes::set_folder(c, id, Some(&folder)))
+                .await?;
+        }
         let launch = Launch::pane(pane.id, workspace, pane.task_id, argv, cwd.clone());
         let feed = restarter.events.subscribe();
         let spawned = match agent {
@@ -49,7 +69,7 @@ pub async fn resume_panes(restarter: &Restarter) -> Result<(), DbError> {
                 }
             }
             Err(err) => {
-                tracing::warn!("resuming pane {} in {}: {err}", pane.id, pane.cwd);
+                tracing::warn!("resuming pane {} in {}: {err}", pane.id, cwd.display());
                 let (id, title) = (pane.id, pane.title);
                 db.call(move |c| db::panes::set_exited(c, id, None, &title))
                     .await?;
@@ -57,4 +77,54 @@ pub async fn resume_panes(restarter: &Restarter) -> Result<(), DbError> {
         }
     }
     Ok(())
+}
+
+/// Where a pane resumes (spec §6): its last known `folder` while it is a directory, else
+/// `home` while that is; `None` when neither is.
+fn restore_folder(folder: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    [Some(folder), home]
+        .into_iter()
+        .flatten()
+        .find(|dir| dir.is_absolute() && dir.is_dir())
+        .map(Path::to_path_buf)
+}
+
+/// The daemon's `$HOME`, which a pane's environment passes on too.
+fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod restore_folder {
+        use super::*;
+
+        #[test]
+        fn should_be_the_last_known_folder_while_it_is_there() {
+            let folder = tempfile::tempdir().unwrap();
+            let home = tempfile::tempdir().unwrap();
+
+            let restored = restore_folder(folder.path(), Some(home.path()));
+
+            assert_eq!(restored.as_deref(), Some(folder.path()));
+        }
+
+        #[test]
+        fn should_be_home_once_the_folder_is_gone() {
+            let home = tempfile::tempdir().unwrap();
+
+            let restored = restore_folder(&home.path().join("gone"), Some(home.path()));
+
+            assert_eq!(restored.as_deref(), Some(home.path()));
+        }
+
+        #[test]
+        fn should_be_none_without_either() {
+            assert_eq!(restore_folder(Path::new("/no/such/dir"), None), None);
+        }
+    }
 }

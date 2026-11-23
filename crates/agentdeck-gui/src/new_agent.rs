@@ -1,5 +1,6 @@
 //! The new agent dialog (spec §6, §11), Penpot "Screens" → "New agent": an agent CLI, the
-//! folder it runs in (the workspace root or a repo inside it) and an optional task to link.
+//! folder it runs in (the focused pane's current folder, the workspace root or a repo inside
+//! it) and an optional task to link.
 //! The description under the task says what the launch prompt will carry. Enter starts, as
 //! Start agent does, unless a select has it.
 //!
@@ -28,6 +29,7 @@ use gpui::{
 use crate::api::Api;
 use crate::keymap::{self, ConfirmDialog};
 use crate::overview::Snapshot;
+use crate::top_bar::shown_dir;
 use crate::workspace::failed;
 
 actions!(
@@ -72,22 +74,36 @@ pub struct Folder {
     pub label: SharedString,
     /// The absolute dir.
     pub path: SharedString,
+    /// Whether it is the focused pane's folder, outside the root and its repos.
+    pub here: bool,
 }
 
-/// The folders under `root` to offer: the root first, then each repo in `repos` (names of
-/// `root`'s child dirs that hold a git repo) in name order.
-pub fn folders(root: &str, mut repos: Vec<String>) -> Vec<Folder> {
+/// The folders under `root` to offer: `here`, where a new pane starts (spec §11), first when
+/// it is neither the root nor one of its repos, shown with `~` for `home`; then the root, then
+/// each repo in `repos` (names of `root`'s child dirs that hold a git repo) in name order.
+pub fn folders(root: &str, mut repos: Vec<String>, here: &str, home: Option<&Path>) -> Vec<Folder> {
     repos.sort();
     let root_path = Path::new(root);
-    std::iter::once(Folder {
+    let offered: Vec<Folder> = std::iter::once(Folder {
         label: "Workspace root".into(),
         path: root.to_owned().into(),
+        here: false,
     })
     .chain(repos.into_iter().map(|name| Folder {
         path: root_path.join(&name).display().to_string().into(),
         label: name.into(),
+        here: false,
     }))
-    .collect()
+    .collect();
+    let elsewhere = !offered
+        .iter()
+        .any(|folder| Path::new(folder.path.as_ref()) == Path::new(here));
+    let here = elsewhere.then(|| Folder {
+        label: shown_dir(here, home).into(),
+        path: here.to_owned().into(),
+        here: true,
+    });
+    here.into_iter().chain(offered).collect()
 }
 
 /// The names of `root`'s child dirs that hold a git repo (a `.git` dir or file); none if it
@@ -130,8 +146,9 @@ pub struct Target {
     pub id: WorkspaceId,
     /// Its name, for the description.
     pub name: SharedString,
-    /// Its dir.
-    pub dir: SharedString,
+    /// The folder it starts in: where a new pane there starts (spec §11), one of the
+    /// folders offered.
+    pub folder: SharedString,
 }
 
 /// The dialog, kept by the window.
@@ -167,7 +184,7 @@ impl NewAgentDialog {
     }
 
     /// Opens it on `target`, offering `folders` and the workspace's open tasks from
-    /// `snapshot`: Claude Code in the workspace root with no task.
+    /// `snapshot`: Claude Code in the target's folder with no task.
     pub fn open(
         &mut self,
         target: Target,
@@ -176,7 +193,7 @@ impl NewAgentDialog {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.folder = target.dir.clone();
+        self.folder = target.folder.clone();
         self.folders = folders;
         self.target = Some(target);
         self.snapshot = snapshot;
@@ -202,6 +219,12 @@ impl NewAgentDialog {
     #[cfg(test)]
     pub fn task(&self) -> Option<TaskId> {
         self.task
+    }
+
+    /// The folder picked, and the folders offered.
+    #[cfg(test)]
+    pub fn folders(&self) -> (SharedString, Vec<Folder>) {
+        (self.folder.clone(), self.folders.clone())
     }
 
     /// Picks the agent.
@@ -283,6 +306,15 @@ impl NewAgentDialog {
     }
 }
 
+/// The folder field's description: what `folders` holds.
+fn folder_hint(folders: &[Folder]) -> &'static str {
+    if folders.iter().any(|folder| folder.here) {
+        "The focused pane's folder, the workspace root or a repo inside it."
+    } else {
+        "The workspace root or a repo inside it."
+    }
+}
+
 /// `err`; an agent that can't start as the daemon's message alone, which says what to do
 /// when it isn't on the daemon's `PATH`.
 fn refusal(err: anyhow::Error) -> anyhow::Error {
@@ -352,7 +384,7 @@ impl Render for NewAgentDialog {
                             .child(Self::field(
                                 "Folder",
                                 folder_select,
-                                Some("The workspace root or a repo inside it.".to_owned()),
+                                Some(folder_hint(&self.folders).to_owned()),
                             ))
                             .child(Self::field("Task (optional)", task_select, Some(hint))),
                     )
@@ -440,13 +472,13 @@ mod tests {
         let target = Target {
             id: id(1),
             name: "tabs".into(),
-            dir: "/w/tabs".into(),
+            folder: "/w/tabs".into(),
         };
         cx.update(|window, cx| {
             dialog.update(cx, |d, cx| {
                 d.open(
                     target,
-                    folders("/w/tabs", vec!["ts-packages".into()]),
+                    folders("/w/tabs", vec!["ts-packages".into()], "/w/tabs", None),
                     snapshot,
                     window,
                     cx,
@@ -603,17 +635,50 @@ mod tests {
     mod folders {
         use super::*;
 
+        fn paths(offered: &[Folder]) -> Vec<String> {
+            offered.iter().map(|f| f.path.to_string()).collect()
+        }
+
         #[test]
         fn should_offer_the_root_first_then_its_repos_by_name() {
-            let offered = folders("/w/tabs", vec!["ts-packages".into(), "agentdeck".into()]);
+            let repos = vec!["ts-packages".into(), "agentdeck".into()];
 
-            let paths: Vec<_> = offered.iter().map(|f| f.path.to_string()).collect();
+            let offered = folders("/w/tabs", repos, "/w/tabs", None);
+
             assert_eq!(
-                paths,
+                paths(&offered),
                 ["/w/tabs", "/w/tabs/agentdeck", "/w/tabs/ts-packages"]
             );
             assert_eq!(offered[0].label, "Workspace root");
             assert_eq!(offered[2].label, "ts-packages");
+            assert_eq!(
+                folder_hint(&offered),
+                "The workspace root or a repo inside it."
+            );
+        }
+
+        #[test]
+        fn should_offer_the_focused_panes_folder_first_when_it_is_elsewhere() {
+            let home = Path::new("/home/me");
+
+            let offered = folders("/w/tabs", vec!["web".into()], "/home/me/notes", Some(home));
+
+            assert_eq!(
+                paths(&offered),
+                ["/home/me/notes", "/w/tabs", "/w/tabs/web"]
+            );
+            assert_eq!(offered[0].label, "~/notes");
+            assert_eq!(
+                folder_hint(&offered),
+                "The focused pane's folder, the workspace root or a repo inside it."
+            );
+        }
+
+        #[test]
+        fn should_not_offer_a_repo_twice_when_the_focused_pane_is_in_it() {
+            let offered = folders("/w/tabs", vec!["web".into()], "/w/tabs/web", None);
+
+            assert_eq!(paths(&offered), ["/w/tabs", "/w/tabs/web"]);
         }
     }
 

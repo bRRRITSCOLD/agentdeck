@@ -20,7 +20,7 @@ mod agent_ls {
     }
 
     #[test]
-    fn should_print_each_panes_id_workspace_tab_agent_state_and_task() {
+    fn should_print_each_panes_id_workspace_tab_agent_state_folder_and_task() {
         let env = TestEnv::new();
         env.workspace("web");
         let task = env.json(&["task", "add", "Fix the flaky test", "--ws", "web"]);
@@ -35,7 +35,7 @@ mod agent_ls {
         let header: Vec<&str> = lines[0].split_whitespace().collect();
         assert_eq!(
             header,
-            ["ID", "WORKSPACE", "TAB", "AGENT", "STATE", "TASK"],
+            ["ID", "WORKSPACE", "TAB", "AGENT", "STATE", "FOLDER", "TASK"],
             "{stdout}"
         );
         let agent_row = (lines.iter())
@@ -43,12 +43,33 @@ mod agent_ls {
             .unwrap_or_else(|| panic!("no row for the agent: {stdout}"));
         let cells: Vec<&str> = agent_row.split_whitespace().collect();
         assert_eq!(cells[1..4], ["web", "claude", "claude"], "{stdout}");
+        assert_eq!(cells[5], text(&agent, "cwd"), "{stdout}");
         assert!(agent_row.ends_with("  Fix the flaky test"), "{stdout}");
         let shell_row = (lines.iter())
             .find(|line| line.starts_with(&shell))
             .unwrap_or_else(|| panic!("no row for the shell: {stdout}"));
         let cells: Vec<&str> = shell_row.split_whitespace().collect();
         assert_eq!(cells[1..4], ["api", "build", "shell"], "{stdout}");
+        assert_eq!(cells[5], text(&api, "dir"), "{stdout}");
+    }
+
+    #[test]
+    fn should_print_the_folder_a_pane_moved_to() {
+        let env = TestEnv::new();
+        let ws = env.workspace("web");
+        let app = std::path::Path::new(text(&ws, "dir")).join("app");
+        std::fs::create_dir(&app).unwrap();
+        let pane = shell_pane(&env, &ws, "cd app && exec sleep 60");
+
+        let folder = eventually("the pane to be listed in app", || {
+            let list = env.json(&["agent", "ls"]);
+            let folder = listed(&list, &pane)["folder"].clone();
+            (folder == app.to_str().unwrap()).then_some(folder)
+        });
+
+        assert_eq!(folder, app.to_str().unwrap());
+        let stdout = env.ok(&["agent", "ls"]);
+        assert!(stdout.contains(&format!("  {}", app.display())), "{stdout}");
     }
 
     #[test]
@@ -69,6 +90,7 @@ mod agent_ls {
         assert_eq!(pane["workspace"], "web");
         assert_eq!(pane["tab"], "claude");
         assert_eq!(pane["task_title"], "Fix the flaky test");
+        assert_eq!(pane["folder"], agent["cwd"]);
     }
 
     #[test]
@@ -344,7 +366,7 @@ mod agent_new {
     }
 
     #[test]
-    fn should_launch_claude_in_a_new_tab_in_the_workspace_dir() {
+    fn should_launch_claude_in_a_new_tab() {
         let env = TestEnv::new();
         let ws = env.workspace("web");
 
@@ -352,7 +374,6 @@ mod agent_new {
 
         assert_eq!(pane["kind"], "agent");
         assert_eq!(pane["agent"], "claude");
-        assert_eq!(pane["cwd"], ws["dir"]);
         let session = text(&pane, "session_id");
         assert_eq!(pane["argv"][0], "claude");
         let argv = started(&env, text(&pane, "id"));
@@ -434,6 +455,29 @@ mod agent_new {
         ]);
 
         assert_eq!(pane["task_id"], task["id"]);
+    }
+
+    #[test]
+    fn should_run_in_the_current_folder_without_a_cwd() {
+        let env = TestEnv::new();
+        env.workspace("web");
+        let here = env.new_dir("elsewhere");
+
+        let output = env
+            .command()
+            .current_dir(&here)
+            .args(["agent", "new", "--ws", "web", "--json"])
+            .output()
+            .expect("running agentdeck");
+
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let pane: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(std::path::Path::new(text(&pane, "cwd")), here);
+        assert_eq!(std::path::Path::new(text(&pane, "folder")), here);
     }
 
     #[test]

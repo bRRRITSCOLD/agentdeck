@@ -240,7 +240,7 @@ pub enum AgentCommand {
         /// Which agent CLI.
         #[arg(long, default_value = "claude", value_parser = parse_launchable_agent)]
         agent: Agent,
-        /// Where it runs; the workspace's dir without it.
+        /// Where it runs; the current folder without it.
         #[arg(long, value_name = "DIR")]
         cwd: Option<PathBuf>,
         /// A task to link; its title, body and new comments go into the launch prompt.

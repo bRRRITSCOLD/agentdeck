@@ -370,6 +370,7 @@ pub(crate) mod fixtures {
             created_at: "2026-11-12T00:00:00Z".into(),
             cwd: "/w".into(),
             exit_code: None,
+            folder: "/w".into(),
             hosted_agent: None,
             id: id(n),
             kind: PaneKind::Shell,

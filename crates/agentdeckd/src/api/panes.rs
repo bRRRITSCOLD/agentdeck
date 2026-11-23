@@ -96,8 +96,8 @@ fn exited(id: PaneId) -> HttpError {
     )
 }
 
-/// The stored pane, with the live title, state, exit code and hosted agent while this daemon
-/// holds it (they reach the database a little later).
+/// The stored pane, with the live title, state, exit code, hosted agent and folder while this
+/// daemon holds it (they reach the database a little later).
 fn with_live_status(context: &ApiContext, mut pane: Pane) -> Pane {
     if let Some(live) = context.terminals.get(pane.id) {
         let status = live.status();
@@ -105,6 +105,7 @@ fn with_live_status(context: &ApiContext, mut pane: Pane) -> Pane {
         pane.state = status.state;
         pane.exit_code = status.exit_code;
         pane.hosted_agent = status.hosted;
+        pane.folder = live.folder().to_string_lossy().into_owned();
     }
     pane
 }
@@ -205,7 +206,11 @@ fn spawn_error(err: SpawnError) -> HttpError {
     }
 }
 
-/// One pane, with its live title and state.
+/// One pane, with its live title, state and current folder.
+///
+/// The folder is read now: the folder its shell last reported with OSC 7, else its process's
+/// working directory, else the one last known. A pane whose folder moved is saved there, and
+/// `changed` goes out for it.
 #[endpoint { method = GET, path = "/v1/panes/{id}" }]
 pub(crate) async fn pane_get(
     rqctx: RequestContext<ApiContext>,
@@ -214,6 +219,7 @@ pub(crate) async fn pane_get(
 ) -> Result<HttpResponseOk<Pane>, HttpError> {
     let context = rqctx.context();
     let id = path.into_inner().id;
+    context.terminals.refresh_folder(id).await;
     let pane = context.db.call(move |c| db::panes::get(c, id)).await?;
     Ok(HttpResponseOk(with_live_status(context, pane)))
 }

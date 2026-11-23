@@ -4,12 +4,14 @@
 
 use std::path::Path;
 
+use anyhow::Context as _;
+
+use agentdeck_client::ApiError;
 use agentdeck_client::Client;
 use agentdeck_client::types::Pane;
 use agentdeck_core::{Agent, TaskId};
 
 use crate::commands;
-use agentdeck_client::ApiError;
 
 /// What `agent new` was asked for.
 pub struct Launch<'a> {
@@ -17,7 +19,7 @@ pub struct Launch<'a> {
     pub ws: &'a str,
     /// `claude` or `codex`.
     pub agent: Agent,
-    /// Where it runs; the workspace's dir when absent.
+    /// Where it runs; the current folder when absent.
     pub cwd: Option<&'a Path>,
     /// The task to link.
     pub task: Option<TaskId>,
@@ -27,15 +29,11 @@ pub struct Launch<'a> {
 /// new tab of its own (`agentdeck_client::panes::launch_agent`).
 pub async fn agent_new(client: &Client, launch: Launch<'_>) -> anyhow::Result<Pane> {
     let ws_id = commands::workspace_id(client, launch.ws).await?;
-    let ws = client
-        .workspace_get()
-        .id(ws_id)
-        .send()
-        .await
-        .map_err(ApiError::from)?;
     let cwd = match launch.cwd {
         Some(cwd) => commands::absolute(cwd)?,
-        None => ws.dir.clone(),
+        None => std::env::current_dir()
+            .context("reading the current folder")
+            .and_then(|here| commands::absolute(&here))?,
     };
     agentdeck_client::panes::launch_agent(client, ws_id, launch.agent, cwd, launch.task)
         .await

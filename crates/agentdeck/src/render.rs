@@ -136,8 +136,8 @@ pub fn pane(pane: &Pane) -> String {
 }
 
 /// One pane as `agent ls` lists it: the pane, and the workspace, tab and task it is in. With
-/// `--json` it is the pane's own object plus `workspace_id`, `workspace` (the slug), `tab`
-/// (its title) and `task_title`.
+/// `--json` it is the pane's own object, its current `folder` included, plus `workspace_id`,
+/// `workspace` (the slug), `tab` (its title) and `task_title`.
 #[derive(Debug, Serialize)]
 pub struct ListedPane {
     /// The pane, as the API gives it.
@@ -164,10 +164,10 @@ fn pane_agent(pane: &Pane) -> String {
     }
 }
 
-/// `agentdeck agent ls`: a pane a line, its linked task by title, or by id when the title
-/// isn't known.
+/// `agentdeck agent ls`: a pane a line, with its current folder, and its linked task by title,
+/// or by id when the title isn't known.
 pub fn panes(panes: &[ListedPane]) -> String {
-    let rows: Vec<[String; 6]> = panes
+    let rows: Vec<[String; 7]> = panes
         .iter()
         .map(|listed| {
             let pane = &listed.pane;
@@ -182,12 +182,13 @@ pub fn panes(panes: &[ListedPane]) -> String {
                 listed.tab.clone(),
                 pane_agent(pane),
                 pane.state.to_string(),
+                pane.folder.clone(),
                 task,
             ]
         })
         .collect();
     table(
-        ["ID", "WORKSPACE", "TAB", "AGENT", "STATE", "TASK"],
+        ["ID", "WORKSPACE", "TAB", "AGENT", "STATE", "FOLDER", "TASK"],
         &rows,
         "no panes",
     )
@@ -479,6 +480,7 @@ mod tests {
                     created_at: "2026-01-01T00:00:00Z".into(),
                     cwd: "/work/web".into(),
                     exit_code: None,
+                    folder: "/work/web".into(),
                     hosted_agent: None,
                     id: id.parse().unwrap(),
                     kind,
@@ -496,13 +498,14 @@ mod tests {
         }
 
         #[test]
-        fn should_list_id_workspace_tab_agent_state_and_task() {
+        fn should_list_id_workspace_tab_agent_state_folder_and_task() {
             let mut agent = listed(PANE_1, PaneKind::Agent, "agents");
             agent.pane.agent = Some(Agent::Claude);
             agent.pane.state = AgentState::Blocked;
             agent.pane.task_id = Some(TASK.parse().unwrap());
             agent.task_title = Some("Fix the flaky test".into());
             let mut hosting = listed(PANE_2, PaneKind::Shell, "shell");
+            hosting.pane.folder = "/work/web/app".into();
             hosting.pane.hosted_agent = Some(Agent::Codex);
             hosting.pane.state = AgentState::Working;
             let mut exited = listed(PANE_3, PaneKind::Shell, "shell");
@@ -514,10 +517,10 @@ mod tests {
             assert_eq!(
                 out,
                 format!(
-                    "ID{pad}  WORKSPACE  TAB     AGENT          STATE    TASK\n\
-                     {PANE_1}  web        agents  claude         blocked  Fix the flaky test\n\
-                     {PANE_2}  web        shell   hosting codex  working\n\
-                     {PANE_3}  web        shell   shell          exited   {TASK}\n",
+                    "ID{pad}  WORKSPACE  TAB     AGENT          STATE    FOLDER         TASK\n\
+                     {PANE_1}  web        agents  claude         blocked  /work/web      Fix the flaky test\n\
+                     {PANE_2}  web        shell   hosting codex  working  /work/web/app\n\
+                     {PANE_3}  web        shell   shell          exited   /work/web      {TASK}\n",
                     pad = " ".repeat(PANE_1.len() - 2)
                 )
             );

@@ -787,6 +787,10 @@
             "nullable": true,
             "type": "integer"
           },
+          "folder": {
+            "description": "Its current folder (spec §6): the folder its shell last reported with OSC 7, else its process's working directory, else `cwd`, the folder it launched in, as the daemon last read them. Kept after it exits; a pane resumed after a restart starts there.",
+            "type": "string"
+          },
           "hosted_agent": {
             "allOf": [
               {
@@ -851,6 +855,7 @@
           "argv",
           "created_at",
           "cwd",
+          "folder",
           "id",
           "kind",
           "state",
@@ -2276,6 +2281,7 @@
         "summary": "Kills a pane's process (SIGHUP, then SIGKILL after 3 s) and deletes the pane. The caller"
       },
       "get": {
+        "description": "The folder is read now: the folder its shell last reported with OSC 7, else its process's working directory, else the one last known. A pane whose folder moved is saved there, and `changed` goes out for it.",
         "operationId": "pane_get",
         "parameters": [
           {
@@ -2306,7 +2312,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "One pane, with its live title and state."
+        "summary": "One pane, with its live title, state and current folder."
       },
       "patch": {
         "description": "null). Linking a live agent pane to another task first tells its agent the task itself (its title, id, how to report back on it, and body), then types in the task's comments no agent has had yet, each once the agent is idle or done, as a new comment would be (spec §9). Whatever was still waiting to be typed for the task it leaves is dropped from the pane, and a comment held for it moves on to that task's next live agent pane.",

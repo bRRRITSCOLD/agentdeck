@@ -15,6 +15,10 @@
 //! start an exited agent pane again in place; its view is made afresh, so it attaches the new
 //! process. A workspace with no tabs when it opens gets a shell tab.
 //!
+//! A new pane starts where the user is ([`WorkspaceView::new_pane_folder`], spec §11): a split
+//! in the current folder of the pane it splits, a new tab or agent in the focused pane's, or
+//! the last pane here that had the keyboard, else in the workspace's dir.
+//!
 //! An archived workspace shows only its top bar over a note saying so: it reads no tabs and
 //! attaches no terminals. The window opens a fresh view when that changes.
 
@@ -96,6 +100,10 @@ pub struct WorkspaceView {
     requests: HashMap<PaneId, Subscription>,
     /// A pane to focus once a read shows it: the new side of a split.
     focus_next: Option<PaneId>,
+    /// The pane here that last had the keyboard, for where a new pane starts.
+    last_focused: Option<PaneId>,
+    /// Each shown pane's focus watch, which keeps `last_focused`.
+    focus_watches: HashMap<PaneId, Subscription>,
     /// Panes started again whose views the next read makes afresh, so they attach the new
     /// process.
     renew: HashSet<PaneId>,
@@ -154,6 +162,8 @@ impl WorkspaceView {
             panes: HashMap::new(),
             requests: HashMap::new(),
             focus_next: None,
+            last_focused: None,
+            focus_watches: HashMap::new(),
             renew: HashSet::new(),
             closing: None,
             close_dialog: DialogHandle::new(false),
@@ -188,9 +198,26 @@ impl WorkspaceView {
         &self.top_bar
     }
 
-    /// Opens a tab with a shell in the workspace's dir, then shows it.
+    /// Where a new pane here starts (spec §11): the current folder of the pane with the
+    /// keyboard, else of the pane here that last had it; the workspace's dir when neither is
+    /// still here.
+    pub fn new_pane_folder(&self, window: &Window, cx: &App) -> String {
+        let focused = (self.shown().into_iter())
+            .find(|pane| pane.focus_handle(cx).contains_focused(window, cx))
+            .map(|pane| pane.read(cx).id());
+        (focused.or(self.last_focused))
+            .and_then(|id| self.read.panes.iter().find(|pane| pane.id == id))
+            .map_or_else(
+                || self.top_bar.dir().to_string(),
+                |pane| pane.folder.clone(),
+            )
+    }
+
+    /// Opens a tab with a shell where a new pane starts ([`WorkspaceView::new_pane_folder`]),
+    /// then shows it.
     pub fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let opening = (self.api).new_shell_tab(self.workspace, self.top_bar.dir().to_string(), cx);
+        let folder = self.new_pane_folder(window, cx);
+        let opening = (self.api).new_shell_tab(self.workspace, folder, cx);
         cx.spawn_in(window, async move |this, cx| {
             let opened = opening.await;
             let _ = this.update_in(cx, |this, window, cx| match opened {
@@ -228,7 +255,7 @@ impl WorkspaceView {
         };
         match request {
             PaneRequest::Split(direction) => {
-                let cwd = pane.cwd.clone();
+                let cwd = pane.folder.clone();
                 self.split_pane(Split { at, direction, cwd }, window, cx);
             }
             PaneRequest::Close if pane.state == AgentState::Exited => {
@@ -572,6 +599,12 @@ impl WorkspaceView {
                         this.on_request(pane, *request, w, cx);
                     });
                     self.requests.insert(*id, requests);
+                    let pane = *id;
+                    let focused =
+                        cx.on_focus_in(&view.focus_handle(cx), window, move |this, _, _| {
+                            this.last_focused = Some(pane);
+                        });
+                    self.focus_watches.insert(*id, focused);
                     view
                 }
             };
@@ -581,6 +614,8 @@ impl WorkspaceView {
         // A renewed pane not shown now gets a fresh view whenever it is shown again.
         self.renew.clear();
         self.requests.retain(|id, _| self.panes.contains_key(id));
+        self.focus_watches
+            .retain(|id, _| self.panes.contains_key(id));
         let waiting = self
             .focus_next
             .and_then(|pane| self.panes.get(&pane))
@@ -1473,24 +1508,70 @@ mod tests {
             assert_eq!(harness.focused(cx), Some(id(102)));
         }
 
-        #[gpui::test]
-        fn should_start_the_shell_in_the_workspaces_dir(cx: &mut TestAppContext) {
-            let (harness, cx) = one_tab(cx);
+        /// Two panes side by side in tab 1: 11 in `/w/web`, 12 in `/srv/notes`, each
+        /// launched in `/w`.
+        fn two_panes(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
+            let panes = vec![
+                Pane {
+                    folder: "/w/web".into(),
+                    ..shell_pane(11, id(1))
+                },
+                Pane {
+                    folder: "/srv/notes".into(),
+                    ..shell_pane(12, id(1))
+                },
+            ];
+            Harness::open(vec![split_tab(1, 0, 11, 12)], panes, cx)
+        }
 
-            harness.act(WorkspaceView::new_tab, cx);
-
-            let cwd = harness
+        /// The shell the new tab shows started in.
+        fn started_in(harness: &Harness, cx: &mut VisualTestContext) -> String {
+            harness
                 .pane(0, cx)
-                .read_with(cx, |pane, _| pane.pane().cwd.clone());
-            assert_eq!(cwd, "/w/agentdeck");
+                .read_with(cx, |pane, _| pane.pane().cwd.clone())
         }
 
         #[gpui::test]
-        fn should_open_one_when_the_workspace_has_none(cx: &mut TestAppContext) {
+        fn should_start_the_shell_in_the_focused_panes_current_folder(cx: &mut TestAppContext) {
+            let (harness, cx) = two_panes(cx);
+            let second = harness.pane(1, cx);
+            cx.update(|window, cx| window.focus(&second.focus_handle(cx), cx));
+
+            harness.act(WorkspaceView::new_tab, cx);
+
+            assert_eq!(started_in(&harness, cx), "/srv/notes");
+        }
+
+        #[gpui::test]
+        fn should_start_the_shell_where_the_pane_that_last_had_the_keyboard_is(
+            cx: &mut TestAppContext,
+        ) {
+            let (harness, cx) = two_panes(cx);
+            // Focus events need an active window.
+            cx.update(|window, _| window.activate_window());
+            cx.run_until_parked();
+            let second = harness.pane(1, cx);
+            cx.update(|window, cx| window.focus(&second.focus_handle(cx), cx));
+            harness.draw(cx);
+            // The keyboard leaves the panes, as for a button in the top bar.
+            let view = harness.view.clone();
+            cx.update(|window, cx| window.focus(&view.read(cx).focus.clone(), cx));
+            harness.draw(cx);
+
+            harness.act(WorkspaceView::new_tab, cx);
+
+            assert_eq!(started_in(&harness, cx), "/srv/notes");
+        }
+
+        #[gpui::test]
+        fn should_open_one_in_the_workspaces_dir_when_the_workspace_has_none(
+            cx: &mut TestAppContext,
+        ) {
             let (harness, cx) = Harness::open(vec![], vec![], cx);
 
             assert_eq!(harness.selected(cx), Some(id(101)));
             assert_eq!(harness.shown(cx), [id(102)]);
+            assert_eq!(started_in(&harness, cx), "/w/agentdeck");
         }
 
         #[gpui::test]
@@ -1547,8 +1628,15 @@ mod tests {
             use super::*;
 
             #[gpui::test]
-            fn should_split_right_with_a_shell_in_the_panes_cwd(cx: &mut TestAppContext) {
-                let (harness, cx) = one_pane(AgentState::Idle, cx);
+            fn should_split_right_with_a_shell_in_the_panes_current_folder(
+                cx: &mut TestAppContext,
+            ) {
+                let pane = Pane {
+                    folder: "/w/web".into(),
+                    ..shell_pane(7, id(1))
+                };
+                let (harness, cx) =
+                    Harness::open(vec![tab(1, id(1), 0, Some(id(7)))], vec![pane], cx);
 
                 harness.request(0, PaneRequest::Split(SplitDirection::Horizontal), cx);
 
@@ -1560,7 +1648,7 @@ mod tests {
                 let cwd = harness
                     .pane(1, cx)
                     .read_with(cx, |pane, _| pane.pane().cwd.clone());
-                assert_eq!(cwd, "/w");
+                assert_eq!(cwd, "/w/web");
             }
 
             #[gpui::test]

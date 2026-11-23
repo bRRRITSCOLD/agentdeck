@@ -2,7 +2,8 @@
 //! live pane.
 //!
 //! - [`Terminals`]: the live panes by id. It spawns and kills them, runs the state timer,
-//!   and persists state changes, exits and the agents shell panes host.
+//!   and persists state changes, exits, the agents shell panes host and the folders panes
+//!   move to.
 //! - [`pane`]: one live pane. Its `Term` is the only thing that answers the program's
 //!   terminal queries.
 //! - [`fanout`]: a pane's attached WebSocket clients: output, `lagged`, the primary rule.
@@ -20,7 +21,7 @@ pub mod snapshot;
 pub mod tail;
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -33,7 +34,7 @@ use tokio::runtime::Handle;
 use tokio::sync::broadcast;
 
 use self::fanout::SubscriberId;
-use self::pane::{Launch, NothingToStop, Observed, Pane, Rules, SpawnError};
+use self::pane::{Ended, Launch, NothingToStop, Observed, Pane, Rules, SpawnError};
 use crate::db::{self, Db};
 use crate::events::Events;
 
@@ -115,7 +116,7 @@ impl Terminals {
 
     fn start(&self, id: PaneId, launch: Launch, rules: Rules) -> Result<(), SpawnError> {
         let shared = Arc::clone(&self.shared);
-        let on_exit = Box::new(move |id, code, title: String| shared.persist_exit(id, code, title));
+        let on_exit = Box::new(move |id, ended: Ended| shared.persist_exit(id, ended));
         let pane = Pane::spawn(id, launch, rules, self.shared.events.clone(), on_exit)?;
         self.panes().insert(id, pane);
         Ok(())
@@ -218,8 +219,15 @@ impl Terminals {
         let now = self.shared.origin.elapsed();
         let panes: Vec<Arc<Pane>> = self.panes().values().cloned().collect();
         for pane in panes {
-            let Observed { state, hosted } = pane.observe(now);
+            let Observed {
+                state,
+                hosted,
+                folder,
+            } = pane.observe(now);
             let id = pane.id();
+            if let Some(folder) = folder {
+                self.shared.save_folder(id, &folder).await;
+            }
             if let Some((state, title)) = state {
                 let saved = self
                     .shared
@@ -233,6 +241,15 @@ impl Terminals {
             if let Some(hosted) = hosted {
                 self.hosted(id, hosted).await;
             }
+        }
+    }
+
+    /// Reads live pane `id`'s current folder now and, when it moved, saves it and tells
+    /// clients (spec §6). Nothing for a pane this daemon doesn't hold.
+    pub async fn refresh_folder(&self, id: PaneId) {
+        let moved = self.get(id).and_then(|pane| pane.refresh_folder());
+        if let Some(folder) = moved {
+            self.shared.save_folder(id, &folder).await;
         }
     }
 
@@ -262,7 +279,13 @@ impl Terminals {
     /// The daemon is stopping: from now on, processes that die aren't recorded as exited, so
     /// they are resumed (spec §6). An agent pane stopped on purpose whose process hasn't
     /// exited yet, inside its kill grace, is recorded as exited now instead, so it isn't.
+    /// Each live pane's current folder is read and saved first, while its process still runs,
+    /// so a resumed pane starts where it was.
     pub async fn close(&self) {
+        let live: Vec<PaneId> = self.panes().keys().copied().collect();
+        for id in live {
+            self.refresh_folder(id).await;
+        }
         self.shared.closing.store(true, Ordering::SeqCst);
         let stopped: Vec<(PaneId, String)> = (self.panes().values())
             .filter(|pane| pane.stopped())
@@ -291,16 +314,36 @@ impl Shared {
     /// Records an exit, and returns once it is saved: the pane reads as exited only after
     /// this, so the API never reports an exit that archiving can't yet see (spec §7). Called
     /// on the pane's reader thread, which is outside the runtime and may block.
-    fn persist_exit(&self, id: PaneId, code: Option<i64>, title: String) {
+    fn persist_exit(&self, id: PaneId, ended: Ended) {
         if self.closing.load(Ordering::SeqCst) {
             return;
         }
+        let Ended {
+            code,
+            title,
+            folder,
+        } = ended;
         let saved = self.runtime.block_on(
             self.db
                 .call(move |c| db::panes::set_exited(c, id, code, &title)),
         );
         if let Err(err) = saved {
             tracing::warn!("saving pane {id}'s exit: {err}");
+        }
+        if let Some(folder) = folder {
+            self.runtime.block_on(self.save_folder(id, &folder));
+        }
+    }
+
+    /// Saves `folder` as pane `id`'s last known folder, then tells clients (spec §6).
+    async fn save_folder(&self, id: PaneId, folder: &Path) {
+        let folder = folder.to_string_lossy().into_owned();
+        let saved = (self.db)
+            .call(move |c| db::panes::set_folder(c, id, Some(&folder)))
+            .await;
+        match saved {
+            Ok(()) => self.events.changed(Entity::Pane, id),
+            Err(err) => tracing::warn!("saving pane {id}'s folder: {err}"),
         }
     }
 }

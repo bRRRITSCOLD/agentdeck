@@ -573,6 +573,10 @@ pub struct Pane {
     pub argv: Vec<String>,
     /// The working directory it was launched in.
     pub cwd: String,
+    /// Its current folder (spec §6): the folder its shell last reported with OSC 7, else its
+    /// process's working directory, else `cwd`, the folder it launched in, as the daemon last
+    /// read them. Kept after it exits; a pane resumed after a restart starts there.
+    pub folder: String,
     /// The agent's session id: chosen at launch for `claude`, found after launch for `codex`
     /// (null until Codex has written its session file).
     pub session_id: Option<String>,

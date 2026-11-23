@@ -209,9 +209,12 @@ impl TestEnv {
     }
 
     /// `agentdeck` with only `PATH` from the test's environment, behind the stub `gh`; `$HOME`
-    /// and the `$XDG_*` dirs under the root; and the daemon under test as `agentdeckd`.
+    /// and the `$XDG_*` dirs under the root; and the daemon under test as `agentdeckd`. It runs
+    /// in `$HOME`, so an agent it starts without `--cwd` runs there too.
     pub fn command(&self) -> Command {
         let root = self.root();
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).expect("creating $HOME");
         let mut path = vec![root.join("bin")];
         path.extend(std::env::split_paths(
             &std::env::var_os("PATH").unwrap_or_default(),
@@ -220,7 +223,7 @@ impl TestEnv {
         command
             .env_clear()
             .env("PATH", std::env::join_paths(path).expect("a PATH"))
-            .env("HOME", root.join("home"))
+            .env("HOME", &home)
             .env("XDG_RUNTIME_DIR", root.join("run"))
             .env("XDG_DATA_HOME", root.join("data"))
             .env("XDG_STATE_HOME", root.join("state"))
@@ -231,6 +234,7 @@ impl TestEnv {
                 self.github_api.as_deref().unwrap_or(UNREACHABLE),
             )
             .env("AGENTDECK_DAEMON", daemon_binary())
+            .current_dir(&home)
             .stdin(Stdio::null());
         if self.github_api.is_some() {
             command.env("AGENTDECK_PR_MAX_AGE_DAYS", "0");
