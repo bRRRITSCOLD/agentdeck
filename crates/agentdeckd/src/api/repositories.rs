@@ -158,7 +158,7 @@ pub(crate) async fn link_delete(
 
 /// What linking each of `names` takes, in order: a Repository agentdeck keeps by that name
 /// now, ignoring case, or else the one GitHub shows by it, looked up as
-/// [`repository_resolve`] does. The first that fails fails them all, before anything is
+/// `GET /v1/repositories/resolve` does. The first that fails fails them all, before anything is
 /// linked.
 pub(crate) async fn linkings(
     context: &ApiContext,

@@ -13,7 +13,9 @@
 //! Repository (`owner/name` or its GitHub URL) that isn't listed offers a "Link owner/name" row,
 //! which asks GitHub ([`Api::resolve_repository`]); signed out, typed names are off.
 
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use agentdeck_client::ApiError;
@@ -25,9 +27,10 @@ use brrritscold_core_gpui::{
 use brrritscold_core_gpui_tokens::primitive::{font_size, shadow, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Anchor, App, AppContext as _, BoxShadow, Context, Entity, EventEmitter,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, point, px,
+    Anchor, App, AppContext as _, Bounds, BoxShadow, Context, Entity, EventEmitter,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, canvas, div, point,
+    px,
 };
 use gpui_base::input::InputEvent;
 
@@ -162,6 +165,8 @@ pub struct LinkPicker {
     /// Whether the field takes the keyboard on the next draw.
     focus: bool,
     lookup: Option<Task<()>>,
+    /// The field's bounds last frame: the list is as wide.
+    field: Rc<Cell<Bounds<Pixels>>>,
     _input: Subscription,
 }
 
@@ -197,6 +202,7 @@ impl LinkPicker {
             problem: None,
             focus: false,
             lookup: None,
+            field: Rc::new(Cell::new(Bounds::default())),
             _input,
         }
     }
@@ -344,13 +350,17 @@ impl LinkPicker {
                         this.stage(choice, cx);
                         this.clear(window, cx);
                     }
-                    Err(err) => match err.downcast_ref::<ApiError>() {
-                        Some(ApiError {
-                            message,
-                            code: Some(_),
-                        }) => this.problem = Some(message.clone().into()),
-                        _ => failed(format!("Couldn't look up {name}"), &err, window, cx),
-                    },
+                    Err(err) => {
+                        // The list would cover what shows under the field; typing reopens it.
+                        this.open = false;
+                        match err.downcast_ref::<ApiError>() {
+                            Some(ApiError {
+                                message,
+                                code: Some(_),
+                            }) => this.problem = Some(message.clone().into()),
+                            _ => failed(format!("Couldn't look up {name}"), &err, window, cx),
+                        }
+                    }
                 }
                 cx.emit(Staging);
                 cx.notify();
@@ -580,6 +590,7 @@ impl LinkPicker {
         div()
             .debug_selector(|| "picker list".into())
             .id("link-picker-list")
+            .w_full()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.open = false;
                 cx.notify();
@@ -677,15 +688,28 @@ impl Render for LinkPicker {
             .collect();
         let note = self.note();
         let problem = self.problem.clone();
+        let bounds = self.field.clone();
         let field = div()
             .debug_selector(|| "link picker".into())
-            .child(Input::new(&self.input).aria_invalid(problem.is_some()));
+            .relative()
+            .child(Input::new(&self.input).aria_invalid(problem.is_some()))
+            .child(
+                // Notes the field's bounds for the list.
+                canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {})
+                    .absolute()
+                    .size_full()
+                    .top_0()
+                    .left_0(),
+            );
         let field = gpui_base::Popup::new("link-picker", field)
             .anchor(Anchor::TopLeft)
             .offset(SIDE_OFFSET)
             .w_full();
         let field = match self.open {
-            true => field.content(div().w_full().child(self.list(cx))),
+            true => {
+                let width = self.field.get().size.width;
+                field.content(div().w(width).child(self.list(cx)))
+            }
             false => field,
         };
         div()
@@ -1194,6 +1218,7 @@ pub(crate) mod tests {
                 Some("GitHub can't see octo/nope. Check the name or your token's access.".into())
             );
             assert!(cx.debug_bounds("picker error").is_some());
+            assert!(!harness.picker.read_with(cx, |p, _| p.is_open()));
             assert_eq!(harness.rows(cx).len(), 2);
             assert_eq!(harness.change(cx), (vec![], vec![]));
             harness.type_in("octo/nop", cx);
