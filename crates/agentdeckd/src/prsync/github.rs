@@ -5,8 +5,8 @@
 
 use std::time::Duration;
 
-use agentdeck_core::{ChecksState, PrState, ReviewState};
-use serde::Deserialize;
+use agentdeck_core::{ChecksState, PrState, RepositoryId, RepositoryName, ReviewState};
+use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
 /// Where the GraphQL API lives unless `AGENTDECK_GITHUB_API` says otherwise.
@@ -41,8 +41,9 @@ pub const TIMEOUT: Duration = Duration::from_secs(30);
 const RETRY_WAITS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(2)];
 
 const PR_FIELDS: &str = "fragment pr on PullRequest {
-  number title url state isDraft headRefName updatedAt
-  repository { nameWithOwner }
+  number title url state isDraft headRefName baseRefName updatedAt
+  author { login }
+  repository { fullDatabaseId nameWithOwner url isPrivate isArchived }
   reviewDecision
   commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
 }";
@@ -50,8 +51,9 @@ const PR_FIELDS: &str = "fragment pr on PullRequest {
 /// The list's light fields: no review and no checks, the costly ones (the rollup made a
 /// 100-PR page time out).
 const LIGHT_FIELDS: &str = "fragment light on PullRequest {
-  number title url state isDraft headRefName updatedAt
-  repository { nameWithOwner }
+  number title url state isDraft headRefName baseRefName updatedAt
+  author { login }
+  repository { fullDatabaseId nameWithOwner url isPrivate isArchived }
 }";
 
 /// Only the node id, which `closePullRequest` takes.
@@ -65,11 +67,14 @@ const CLOSE_MUTATION: &str = "mutation($id: ID!) {
 /// One PR's state by node id: whether a close GitHub didn't answer took effect.
 const STATE_QUERY: &str = "query($id: ID!) { node(id: $id) { ... on PullRequest { state } } }";
 
-/// A pull request as GitHub reports it.
+/// A pull request as GitHub reports it, or as PR sync last stored it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemotePr {
     /// `owner/name` of the repo the PR targets.
     pub repo: String,
+    /// Its Repository. `None` only for a PR stored before PR sync read Repositories, which it
+    /// hasn't read again since.
+    pub repository: Option<RemoteRepository>,
     /// The PR's number in that repo.
     pub number: i64,
     /// The PR's title.
@@ -82,12 +87,32 @@ pub struct RemotePr {
     pub draft: bool,
     /// The branch the PR merges from.
     pub head_ref: String,
+    /// The branch the PR merges into; `None` as [`RemotePr::repository`] is.
+    pub base_ref: Option<String>,
+    /// The login of who opened it; `None` when that account is gone, or as
+    /// [`RemotePr::repository`] is.
+    pub author: Option<String>,
     /// The head commit's rolled-up checks; `None` when it has none.
     pub checks: Option<ChecksState>,
     /// The review decision; `None` when the repo requires no review.
     pub review: Option<ReviewState>,
     /// When the PR last changed on GitHub.
     pub updated_at: String,
+}
+
+/// A Repository as GitHub reports it with one of its pull requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteRepository {
+    /// GitHub's id for it, which a rename or a transfer keeps.
+    pub id: RepositoryId,
+    /// `owner/name`, as GitHub calls it now.
+    pub name: RepositoryName,
+    /// Its GitHub page.
+    pub url: String,
+    /// Private.
+    pub private: bool,
+    /// Archived.
+    pub archived: bool,
 }
 
 /// Who a token belongs to, and what it may do.
@@ -663,7 +688,8 @@ fn parse_search(data: Value) -> Result<SearchPage, GithubError> {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum SearchNode {
-        Pr(PrNode),
+        // Boxed: a PR node is far larger than the empty one a non-PR result is.
+        Pr(Box<PrNode>),
         Other(serde::de::IgnoredAny),
     }
 
@@ -673,7 +699,7 @@ fn parse_search(data: Value) -> Result<SearchPage, GithubError> {
         .nodes
         .into_iter()
         .filter_map(|node| match node {
-            SearchNode::Pr(pr) => Some(pr.into()),
+            SearchNode::Pr(pr) => Some(RemotePr::from(*pr)),
             SearchNode::Other(_) => None,
         })
         .collect();
@@ -744,20 +770,25 @@ struct LightNode {
     state: GqlPrState,
     is_draft: bool,
     head_ref_name: String,
+    base_ref_name: String,
     updated_at: String,
-    repository: NameWithOwner,
+    author: Option<Author>,
+    repository: RepositoryNode,
 }
 
 impl From<LightNode> for RemotePr {
     fn from(node: LightNode) -> RemotePr {
         RemotePr {
-            repo: node.repository.name_with_owner,
+            repo: node.repository.name_with_owner.to_string(),
+            repository: node.repository.remote(),
             number: node.number,
             title: node.title,
             url: node.url,
             state: node.state.into(),
             draft: node.is_draft,
             head_ref: node.head_ref_name,
+            base_ref: Some(node.base_ref_name),
+            author: node.author.map(|author| author.login),
             checks: None,
             review: None,
             updated_at: node.updated_at,
@@ -775,16 +806,59 @@ struct PrNode {
     state: GqlPrState,
     is_draft: bool,
     head_ref_name: String,
+    base_ref_name: String,
     updated_at: String,
-    repository: NameWithOwner,
+    author: Option<Author>,
+    repository: RepositoryNode,
     review_decision: Option<GqlReview>,
     commits: Commits,
 }
 
+/// A PR's `author`; null once the account is gone.
+#[derive(Deserialize)]
+struct Author {
+    login: String,
+}
+
+/// A PR's `repository`.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct NameWithOwner {
-    name_with_owner: String,
+struct RepositoryNode {
+    /// GitHub's id, a `BigInt`, which GraphQL writes as a string.
+    #[serde(deserialize_with = "big_int")]
+    full_database_id: Option<u64>,
+    name_with_owner: RepositoryName,
+    url: String,
+    is_private: bool,
+    is_archived: bool,
+}
+
+impl RepositoryNode {
+    /// The Repository, unless GitHub gave no id for it.
+    fn remote(&self) -> Option<RemoteRepository> {
+        Some(RemoteRepository {
+            id: RepositoryId::from(self.full_database_id?),
+            name: self.name_with_owner.clone(),
+            url: self.url.clone(),
+            private: self.is_private,
+            archived: self.is_archived,
+        })
+    }
+}
+
+/// A GraphQL `BigInt`: a string of digits (a number too, to be lenient); `None` for null.
+fn big_int<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u64>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum BigInt {
+        Text(String),
+        Number(u64),
+    }
+    match Option::<BigInt>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(BigInt::Number(n)) => Ok(Some(n)),
+        Some(BigInt::Text(text)) => text.parse().map(Some).map_err(serde::de::Error::custom),
+    }
 }
 
 #[derive(Deserialize)]
@@ -858,13 +932,16 @@ impl From<PrNode> for RemotePr {
                 GqlRollup::Pending | GqlRollup::Expected => ChecksState::Pending,
             });
         RemotePr {
-            repo: node.repository.name_with_owner,
+            repo: node.repository.name_with_owner.to_string(),
+            repository: node.repository.remote(),
             number: node.number,
             title: node.title,
             url: node.url,
             state: node.state.into(),
             draft: node.is_draft,
             head_ref: node.head_ref_name,
+            base_ref: Some(node.base_ref_name),
+            author: node.author.map(|author| author.login),
             checks,
             review: node.review_decision.map(|review| match review {
                 GqlReview::Approved => ReviewState::Approved,
@@ -888,8 +965,16 @@ mod tests {
             "state": state,
             "isDraft": false,
             "headRefName": "feat/sync",
+            "baseRefName": "main",
             "updatedAt": "2026-11-01T10:00:00Z",
-            "repository": { "nameWithOwner": "acme/widgets" },
+            "author": { "login": "octocat" },
+            "repository": {
+                "fullDatabaseId": "1296269",
+                "nameWithOwner": "acme/widgets",
+                "url": "https://github.com/acme/widgets",
+                "isPrivate": true,
+                "isArchived": false
+            },
             "reviewDecision": review,
             "commits": { "nodes": [ { "commit": { "statusCheckRollup": rollup } } ] }
         })
@@ -1052,12 +1137,21 @@ mod tests {
                 page.prs,
                 vec![RemotePr {
                     repo: "acme/widgets".into(),
+                    repository: Some(RemoteRepository {
+                        id: RepositoryId::from(1_296_269),
+                        name: "acme/widgets".parse().unwrap(),
+                        url: "https://github.com/acme/widgets".into(),
+                        private: true,
+                        archived: false,
+                    }),
                     number: 7,
                     title: "Add PR sync".into(),
                     url: "https://github.com/acme/widgets/pull/7".into(),
                     state: PrState::Open,
                     draft: false,
                     head_ref: "feat/sync".into(),
+                    base_ref: Some("main".into()),
+                    author: Some("octocat".into()),
                     checks: Some(ChecksState::Success),
                     review: Some(ReviewState::Approved),
                     updated_at: "2026-11-01T10:00:00Z".into(),
@@ -1173,6 +1267,52 @@ mod tests {
             let pr = &page.prs[0];
             assert_eq!((pr.repo.as_str(), pr.number), ("acme/widgets", 7));
             assert_eq!((pr.checks, pr.review), (None, None));
+            assert_eq!(pr.base_ref.as_deref(), Some("main"));
+            assert_eq!(pr.author.as_deref(), Some("octocat"));
+            let repository = pr.repository.as_ref().expect("its Repository");
+            assert_eq!(repository.id, RepositoryId::from(1_296_269));
+        }
+    }
+
+    mod repository {
+        use super::*;
+
+        fn repository(node: Value) -> Option<RemoteRepository> {
+            let page = parse_search(search(vec![node], None)).unwrap();
+            page.prs[0].repository.clone()
+        }
+
+        #[test]
+        fn should_read_githubs_id_written_as_a_string_or_a_number() {
+            let mut pr = node("OPEN", Value::Null, Value::Null);
+            assert_eq!(
+                repository(pr.clone()).map(|r| r.id),
+                Some(RepositoryId::from(1_296_269))
+            );
+
+            pr["repository"]["fullDatabaseId"] = json!(1_296_270);
+            assert_eq!(
+                repository(pr).map(|r| r.id),
+                Some(RepositoryId::from(1_296_270))
+            );
+        }
+
+        #[test]
+        fn should_have_no_repository_when_github_gives_no_id() {
+            let mut pr = node("OPEN", Value::Null, Value::Null);
+            pr["repository"]["fullDatabaseId"] = Value::Null;
+
+            assert_eq!(repository(pr), None);
+        }
+
+        #[test]
+        fn should_read_no_author_when_the_account_is_gone() {
+            let mut pr = node("OPEN", Value::Null, Value::Null);
+            pr["author"] = Value::Null;
+
+            let page = parse_search(search(vec![pr], None)).unwrap();
+
+            assert_eq!(page.prs[0].author, None);
         }
     }
 

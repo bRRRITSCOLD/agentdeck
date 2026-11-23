@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use agentdeck_core::{Agent, InstructionId, TaskStatus};
+use agentdeck_core::{Agent, InstructionId, PrRef, RepositoryName, TaskStatus};
 use clap::{ArgGroup, Parser, Subcommand};
 
 /// `agentdeck`: drive agentdeck's workspaces, tasks, comments, instructions and agents from a
@@ -36,7 +36,7 @@ pub enum Command {
     /// Agent panes.
     #[command(subcommand)]
     Agent(AgentCommand),
-    /// GitHub pull request sync.
+    /// Your GitHub pull requests, and syncing them.
     #[command(subcommand)]
     Pr(PrCommand),
     /// Settings, kept in config.toml; a change applies at once.
@@ -297,19 +297,25 @@ pub enum AgentCommand {
     },
 }
 
-/// `agentdeck pr …`.
+/// `agentdeck pr …`. A pull request is `owner/name#123` or its GitHub URL; a Repository is
+/// `owner/name` or its GitHub URL.
 #[derive(Debug, Subcommand)]
 pub enum PrCommand {
+    /// List the pull requests agentdeck keeps, with their state.
+    Ls {
+        /// Only this Repository's: `owner/name` or its GitHub URL.
+        #[arg(long, value_name = "REPO")]
+        repo: Option<RepositoryName>,
+    },
     /// Sync PR tasks with GitHub now: a full sync, which reads every open PR again.
     Sync,
     /// Whether GitHub takes the token, and the last sync.
     Status,
-    /// Close the PRs of PR tasks on GitHub, after asking. Closes only: no comment, no branch
-    /// delete.
+    /// Close pull requests on GitHub, after asking. Closes only: no comment, no branch delete.
     Close {
-        /// The PR tasks: their ids or short ids.
-        #[arg(required = true, value_name = "ID")]
-        ids: Vec<String>,
+        /// The pull requests: `owner/name#123` or their GitHub URLs.
+        #[arg(required = true, value_name = "PR")]
+        prs: Vec<PrRef>,
         /// Close them without asking.
         #[arg(long)]
         yes: bool,
@@ -588,20 +594,47 @@ mod tests {
         }
 
         #[test]
-        fn should_close_several_prs_and_take_yes() {
-            let id = "019a1dd1-5b85-75ae-af0b-6d1a8b211cc0";
-            let cli = parse(&["pr", "close", id, id, "--yes"]).unwrap();
+        fn should_close_prs_named_by_reference_or_url_and_take_yes() {
+            let cli = parse(&[
+                "pr",
+                "close",
+                "acme/widgets#7",
+                "https://github.com/acme/gadgets/pull/9",
+                "--yes",
+            ])
+            .unwrap();
 
-            let Command::Pr(PrCommand::Close { ids, yes }) = cli.command else {
+            let Command::Pr(PrCommand::Close { prs, yes }) = cli.command else {
                 panic!("not pr close: {cli:?}");
             };
-            assert_eq!(ids.len(), 2);
+            let prs: Vec<String> = prs.iter().map(ToString::to_string).collect();
+            assert_eq!(prs, ["acme/widgets#7", "acme/gadgets#9"]);
             assert!(yes);
         }
 
         #[test]
-        fn should_need_a_task_to_close() {
+        fn should_need_a_pr_to_close() {
             assert!(parse(&["pr", "close"]).is_err());
+        }
+
+        #[test]
+        fn should_refuse_to_close_what_names_no_pull_request() {
+            let err = parse(&["pr", "close", "019a1dd1-5b85-75ae-af0b-6d1a8b211cc0"]).unwrap_err();
+
+            assert!(err.to_string().contains("isn't a pull request"), "{err}");
+        }
+
+        #[test]
+        fn should_list_one_repository_named_by_its_url() {
+            let cli = parse(&["pr", "ls", "--repo", "https://github.com/acme/widgets"]).unwrap();
+
+            let Command::Pr(PrCommand::Ls { repo }) = cli.command else {
+                panic!("not pr ls: {cli:?}");
+            };
+            assert_eq!(
+                repo.map(|repo| repo.to_string()),
+                Some("acme/widgets".into())
+            );
         }
 
         #[test]

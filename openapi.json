@@ -1050,18 +1050,18 @@
         ]
       },
       "PrClose": {
-        "description": "`POST /v1/prs/close`: the PR tasks whose PRs to close on GitHub.",
+        "description": "`POST /v1/prs/close`: the pull requests to close on GitHub.",
         "properties": {
-          "task_ids": {
-            "description": "The tasks, each a PR task whose PR is open; the results come back in this order.",
+          "prs": {
+            "description": "Each pull request's reference, `owner/name#123`; each must be stored open and reachable. The results come back in this order.",
             "items": {
-              "$ref": "#/components/schemas/TaskId"
+              "$ref": "#/components/schemas/PrRef"
             },
             "type": "array"
           }
         },
         "required": [
-          "task_ids"
+          "prs"
         ],
         "type": "object"
       },
@@ -1077,26 +1077,26 @@
             "description": "Whether GitHub closed the PR.",
             "type": "boolean"
           },
-          "task_id": {
+          "pr": {
             "allOf": [
               {
-                "$ref": "#/components/schemas/TaskId"
+                "$ref": "#/components/schemas/PrRef"
               }
             ],
-            "description": "The PR task."
+            "description": "The pull request, as it was asked for."
           }
         },
         "required": [
           "ok",
-          "task_id"
+          "pr"
         ],
         "type": "object"
       },
       "PrCloseResults": {
-        "description": "`POST /v1/prs/close`'s answer: one result per task asked for, in the order asked.",
+        "description": "`POST /v1/prs/close`'s answer: one result per reference asked for, in the order asked.",
         "properties": {
           "results": {
-            "description": "Each task's result.",
+            "description": "Each reference's result.",
             "items": {
               "$ref": "#/components/schemas/PrCloseResult"
             },
@@ -1107,6 +1107,10 @@
           "results"
         ],
         "type": "object"
+      },
+      "PrRef": {
+        "description": "A pull request's reference, `owner/name#123`. Given to the daemon, its GitHub URL also works.",
+        "type": "string"
       },
       "PrState": {
         "enum": [
@@ -1243,8 +1247,17 @@
         "type": "object"
       },
       "PullRequest": {
-        "description": "The GitHub pull request behind a PR task, as PR sync last saw it (spec §8).",
+        "description": "A pull request PR sync keeps (spec §3, §8), as it last saw it.",
         "properties": {
+          "author": {
+            "description": "The GitHub login of who opened it; `None` when that account is gone.",
+            "nullable": true,
+            "type": "string"
+          },
+          "base_ref": {
+            "description": "The branch it merges into.",
+            "type": "string"
+          },
           "checks": {
             "allOf": [
               {
@@ -1255,21 +1268,34 @@
             "nullable": true
           },
           "draft": {
-            "description": "A draft PR.",
+            "description": "A draft.",
             "type": "boolean"
           },
           "head_ref": {
-            "description": "The branch the PR merges from.",
+            "description": "The branch it merges from.",
             "type": "string"
           },
           "number": {
-            "description": "The PR's number in that repo.",
-            "format": "int64",
+            "description": "Its number in its Repository.",
+            "format": "uint32",
+            "minimum": 0,
             "type": "integer"
           },
-          "repo": {
-            "description": "`owner/name` of the repo the PR targets.",
-            "type": "string"
+          "reference": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PrRef"
+              }
+            ],
+            "description": "`owner/name#123`, by its Repository's name now."
+          },
+          "repository": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Repository"
+              }
+            ],
+            "description": "The Repository it belongs to."
           },
           "review": {
             "allOf": [
@@ -1277,7 +1303,7 @@
                 "$ref": "#/components/schemas/ReviewState"
               }
             ],
-            "description": "The review decision; `None` when the repo requires no review.",
+            "description": "The review decision; `None` when the Repository requires no review.",
             "nullable": true
           },
           "state": {
@@ -1288,35 +1314,87 @@
             ],
             "description": "Open, merged or closed."
           },
-          "synced_at": {
-            "description": "When PR sync last saw the PR.",
+          "title": {
+            "description": "Its title.",
             "type": "string"
           },
           "unreachable": {
-            "default": false,
-            "description": "Whether the GitHub sign-in can't see the PR: the last full sync fetched it by number and GitHub didn't show it to the token (not found, or no access). It is shown as it was last synced. Absent from an older daemon, which reads as false.",
+            "description": "Whether the GitHub sign-in can't see it: it shows as last synced (spec §8).",
             "type": "boolean"
           },
           "updated_at": {
-            "description": "When the PR last changed on GitHub.",
+            "description": "When it last changed on GitHub.",
             "type": "string"
           },
           "url": {
-            "description": "The PR's web URL.",
+            "description": "Its GitHub page.",
             "type": "string"
           }
         },
         "required": [
+          "base_ref",
           "draft",
           "head_ref",
           "number",
-          "repo",
+          "reference",
+          "repository",
           "state",
-          "synced_at",
+          "title",
+          "unreachable",
           "updated_at",
           "url"
         ],
         "type": "object"
+      },
+      "Repository": {
+        "description": "A GitHub Repository a pull request belongs to (spec §3): what GitHub says of it, as PR sync last read it with one of its pull requests.",
+        "properties": {
+          "archived": {
+            "description": "Archived on GitHub: read-only.",
+            "type": "boolean"
+          },
+          "id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/RepositoryId"
+              }
+            ],
+            "description": "GitHub's id for it, which a rename or a transfer keeps."
+          },
+          "name": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/RepositoryName"
+              }
+            ],
+            "description": "`owner/name`, as GitHub calls it now."
+          },
+          "private": {
+            "description": "Only those GitHub lets in can see it.",
+            "type": "boolean"
+          },
+          "url": {
+            "description": "Its GitHub page.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "archived",
+          "id",
+          "name",
+          "private",
+          "url"
+        ],
+        "type": "object"
+      },
+      "RepositoryId": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "RepositoryName": {
+        "description": "A Repository's `owner/name`. Given to the daemon, its GitHub URL also works.",
+        "type": "string"
       },
       "ReviewState": {
         "enum": [
@@ -1538,7 +1616,7 @@
           "pr": {
             "allOf": [
               {
-                "$ref": "#/components/schemas/PullRequest"
+                "$ref": "#/components/schemas/TaskPr"
               }
             ],
             "description": "The pull request behind a PR task; `None` for a plain task.",
@@ -1641,6 +1719,82 @@
         ],
         "description": "A workspace's id, or null for the inbox.",
         "nullable": true
+      },
+      "TaskPr": {
+        "description": "The GitHub pull request behind a PR task, as PR sync last saw it (spec §8).",
+        "properties": {
+          "checks": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChecksState"
+              }
+            ],
+            "description": "The head commit's rolled-up checks; `None` when it has none.",
+            "nullable": true
+          },
+          "draft": {
+            "description": "A draft PR.",
+            "type": "boolean"
+          },
+          "head_ref": {
+            "description": "The branch the PR merges from.",
+            "type": "string"
+          },
+          "number": {
+            "description": "The PR's number in that repo.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "repo": {
+            "description": "`owner/name` of the repo the PR targets.",
+            "type": "string"
+          },
+          "review": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ReviewState"
+              }
+            ],
+            "description": "The review decision; `None` when the repo requires no review.",
+            "nullable": true
+          },
+          "state": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PrState"
+              }
+            ],
+            "description": "Open, merged or closed."
+          },
+          "synced_at": {
+            "description": "When PR sync last saw the PR.",
+            "type": "string"
+          },
+          "unreachable": {
+            "default": false,
+            "description": "Whether the GitHub sign-in can't see the PR: the last full sync fetched it by number and GitHub didn't show it to the token (not found, or no access). It is shown as it was last synced. Absent from an older daemon, which reads as false.",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "description": "When the PR last changed on GitHub.",
+            "type": "string"
+          },
+          "url": {
+            "description": "The PR's web URL.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "draft",
+          "head_ref",
+          "number",
+          "repo",
+          "state",
+          "synced_at",
+          "updated_at",
+          "url"
+        ],
+        "type": "object"
       },
       "TaskStatus": {
         "enum": [
@@ -2510,9 +2664,48 @@
         "summary": "The pane's raw output: the last `bytes` bytes of the 256 KiB it keeps. Empty for a pane"
       }
     },
+    "/v1/prs": {
+      "get": {
+        "description": "its fields as last synced, by Repository name, then number. With `repository`, only that Repository's, by the name GitHub gives it now, ignoring case. A PR stored before Repositories were read is left out until PR sync reads it again.",
+        "operationId": "pr_list",
+        "parameters": [
+          {
+            "description": "Only the pull requests of the Repository GitHub calls this now, `owner/name`, ignoring case.",
+            "in": "query",
+            "name": "repository",
+            "schema": {
+              "$ref": "#/components/schemas/RepositoryName"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PullRequest"
+                  },
+                  "title": "Array_of_PullRequest",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "The pull requests PR sync keeps, each with its reference, its Repository and the rest of"
+      }
+    },
     "/v1/prs/close": {
       "post": {
-        "description": "result per task, in the order asked, once every PR is tried; 200 even when some failed. A closed PR's task moves to done at once.",
+        "description": "delete. Answers one result per reference, in the order asked, once every PR is tried; 200 even when some failed. Only a PR stored open and reachable closes; a closed PR's task moves to done at once.",
         "operationId": "prs_close",
         "requestBody": {
           "content": {
@@ -2542,7 +2735,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Closes PRs on GitHub: only closes them, with no comment and no branch delete. Answers one"
+        "summary": "Closes PRs on GitHub, named by reference: only closes them, with no comment and no branch"
       }
     },
     "/v1/prs/status": {

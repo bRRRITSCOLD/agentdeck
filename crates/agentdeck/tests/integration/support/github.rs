@@ -1,11 +1,12 @@
-//! GitHub's GraphQL API on httpmock, for `pr close`: the open PRs a sync stores as PR tasks,
-//! their node ids, and `closePullRequest`. No test reaches the real GitHub.
+//! GitHub's GraphQL API on httpmock, for `pr ls` and `pr close`: the open PRs a sync stores,
+//! with their Repositories, their node ids, and `closePullRequest`. No test reaches the real
+//! GitHub.
 
 use httpmock::prelude::*;
 use httpmock::{Mock, MockServer};
 use serde_json::{Value, json};
 
-/// An open PR on `repo`.
+/// An open PR on `repo`, from `feat/x` into `main`.
 #[derive(Clone, Copy)]
 pub struct Pr {
     pub repo: &'static str,
@@ -17,6 +18,13 @@ impl Pr {
         format!("PR_{}_{}", self.repo.replace('/', "_"), self.number)
     }
 
+    /// GitHub's id for its Repository: a different one for each name.
+    fn repository_id(&self) -> u64 {
+        self.repo.bytes().fold(17_u64, |id, byte| {
+            id.wrapping_mul(31).wrapping_add(u64::from(byte))
+        }) & 0x7fff_ffff
+    }
+
     /// The fields a sync reads, light and full alike.
     fn node(&self) -> Value {
         json!({
@@ -26,8 +34,16 @@ impl Pr {
             "state": "OPEN",
             "isDraft": false,
             "headRefName": "feat/x",
+            "baseRefName": "main",
             "updatedAt": "2026-11-01T10:00:00Z",
-            "repository": { "nameWithOwner": self.repo },
+            "author": { "login": "octocat" },
+            "repository": {
+                "fullDatabaseId": self.repository_id().to_string(),
+                "nameWithOwner": self.repo,
+                "url": format!("https://github.com/{}", self.repo),
+                "isPrivate": false,
+                "isArchived": false
+            },
             "reviewDecision": null,
             "commits": { "nodes": [] }
         })

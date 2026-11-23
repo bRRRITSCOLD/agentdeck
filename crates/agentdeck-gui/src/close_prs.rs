@@ -1,6 +1,6 @@
 //! Closing PRs on GitHub from a task list (spec §11, Closing PRs): the Inbox, the Tasks view
 //! and the right panel each own a [`ClosePrs`], which holds Select mode, the selection and
-//! the confirm dialog, and closes PRs with `POST /v1/prs/close` (spec §8).
+//! the confirm dialog, and closes PRs by reference with `POST /v1/prs/close` (spec §8).
 //!
 //! A list draws the parts from it: the header's **Select** toggle ([`select_toggle`]), each
 //! row's checkbox and `…` menu ([`row_parts`]), a group header's or the columns' select-all
@@ -22,7 +22,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use agentdeck_client::types::{PrCloseResult, Task};
-use agentdeck_core::{PrState, TaskId};
+use agentdeck_core::{PrRef, PrState, TaskId};
 use brrritscold_core_gpui::{
     ActiveTheme as _, AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
     AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, Button,
@@ -153,25 +153,25 @@ impl Selection {
         self.errors.get(&task)
     }
 
-    /// Takes in the results of closing the picked PRs and says how it went. When every one
-    /// closed, Select mode ends. Otherwise it stays on with the failed ones still picked,
-    /// each with its error, and the rest unpicked. When some closed, the toast says how many
-    /// and to hover the marked rows; when none closed, it is an error with the first one's
-    /// error, as a close from a row's menu says why.
-    pub fn closed(&mut self, results: &[PrCloseResult]) -> Notice {
-        let closed = results.iter().filter(|r| r.ok).count();
+    /// Takes in the results of closing the picked PRs, each with its task, and says how it
+    /// went. When every one closed, Select mode ends. Otherwise it stays on with the failed
+    /// ones still picked, each with its error, and the rest unpicked. When some closed, the
+    /// toast says how many and to hover the marked rows; when none closed, it is an error with
+    /// the first one's error, as a close from a row's menu says why.
+    pub fn closed(&mut self, results: &[(TaskId, PrCloseResult)]) -> Notice {
+        let closed = results.iter().filter(|(_, r)| r.ok).count();
         if closed == results.len() {
             self.set_active(false);
             return Notice::new(format!("Closed {}", prs(closed)));
         }
         let failed: Vec<(TaskId, SharedString)> = (results.iter())
-            .filter(|r| !r.ok)
-            .map(|r| {
+            .filter(|(_, r)| !r.ok)
+            .map(|(task, r)| {
                 let error = r
                     .error
                     .clone()
                     .unwrap_or_else(|| "GitHub didn't close it".into());
-                (r.task_id, error.into())
+                (*task, error.into())
             })
             .collect();
         self.selected = failed.iter().map(|(task, _)| *task).collect();
@@ -243,6 +243,8 @@ pub fn bar_label(selected: usize, closing: Option<&Closing>) -> String {
 pub struct Target {
     /// Its task.
     pub id: TaskId,
+    /// Its reference, `owner/name#123`, which closing it sends.
+    pub pr: PrRef,
     /// Its repo's name without the owner.
     pub repo: SharedString,
     /// Its repo and number: `ts-packages #151`.
@@ -255,6 +257,7 @@ impl Target {
         let pr = row.pr.as_ref().filter(|_| row.closable)?;
         Some(Target {
             id: row.id,
+            pr: pr.full_reference.clone()?,
             repo: pr.repo.clone(),
             reference: pr.reference.clone(),
         })
@@ -461,19 +464,19 @@ impl ClosePrs {
         self.dialog.is_open()
     }
 
-    /// Closes the PRs the dialog asks about: what its Close button and Enter do. The dialog
-    /// closes; the closed PRs' tasks go to done through the daemon's `changed`. For the
-    /// picked PRs, the selection bar counts them closing until the daemon answers.
+    /// Closes the PRs the dialog asks about, by reference: what its Close button and Enter
+    /// do. The dialog closes; the closed PRs' tasks go to done through the daemon's `changed`.
+    /// For the picked PRs, the selection bar counts them closing until the daemon answers.
     pub fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(asking) = self.asking.take() else {
             return;
         };
         self.dialog.close(window, cx);
-        let ids: Vec<TaskId> = asking.targets().iter().map(|t| t.id).collect();
-        if let Asking::Selected(_) = asking {
-            self.closing = Some(Closing::new(ids.clone()));
+        if let Asking::Selected(targets) = &asking {
+            self.closing = Some(Closing::new(targets.iter().map(|t| t.id).collect()));
         }
-        let closing = self.api.close_prs(ids, cx);
+        let prs: Vec<PrRef> = asking.targets().iter().map(|t| t.pr.clone()).collect();
+        let closing = self.api.close_prs(prs, cx);
         cx.spawn_in(window, async move |this, cx| {
             let closed = closing.await;
             let _ = this.update_in(cx, |this, window, cx| {
@@ -497,7 +500,12 @@ impl ClosePrs {
         cx: &mut Context<Self>,
     ) {
         match (asking, closed) {
-            (Asking::Selected(_), Ok(results)) => self.selection.closed(&results).show(window, cx),
+            (Asking::Selected(targets), Ok(results)) => {
+                // One result per reference, in the order asked.
+                let results: Vec<(TaskId, PrCloseResult)> =
+                    targets.iter().map(|t| t.id).zip(results).collect();
+                self.selection.closed(&results).show(window, cx);
+            }
             (Asking::Selected(_), Err(err)) => failed("Couldn't close PRs", &err, window, cx),
             (Asking::One(target), Ok(results)) => match results.first() {
                 Some(result) if !result.ok => {
@@ -943,12 +951,14 @@ mod tests {
     use super::*;
     use crate::overview::fixtures::id;
 
-    fn result(task: u32, error: Option<&str>) -> PrCloseResult {
-        PrCloseResult {
-            task_id: id(task),
+    /// Task `task`'s result: its PR, `acme/widgets#<task>`, closed or refused with `error`.
+    fn result(task: u32, error: Option<&str>) -> (TaskId, PrCloseResult) {
+        let result = PrCloseResult {
+            pr: format!("acme/widgets#{task}").parse().unwrap(),
             ok: error.is_none(),
             error: error.map(str::to_owned),
-        }
+        };
+        (id(task), result)
     }
 
     fn picking(tasks: &[u32]) -> Selection {
@@ -999,6 +1009,7 @@ mod tests {
                     MenuEntry::Separator,
                     MenuEntry::ClosePr(Target {
                         id: id(1),
+                        pr: "acme/widgets#1".parse().unwrap(),
                         repo: "widgets".into(),
                         reference: "widgets #1".into(),
                     }),
@@ -1279,6 +1290,7 @@ mod tests {
         fn target(task: u32, repo: &'static str) -> Target {
             Target {
                 id: id(task),
+                pr: format!("acme/{repo}#{task}").parse().unwrap(),
                 repo: repo.into(),
                 reference: format!("{repo} #{task}").into(),
             }

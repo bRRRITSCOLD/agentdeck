@@ -2454,7 +2454,7 @@ mod tests {
     }
 
     mod notifications {
-        use agentdeck_client::types::{Pane, PullRequest};
+        use agentdeck_client::types::{Pane, TaskPr};
         use agentdeck_client::ws::{Event, Remote};
         use agentdeck_core::ws::{Entity as Changed, ServerMessage};
         use agentdeck_core::{Agent, AgentState, ChecksState, PaneId, PaneKind, PrState, TaskKind};
@@ -2857,7 +2857,7 @@ mod tests {
                 checks: ChecksState,
             ) -> agentdeck_client::types::Task {
                 agentdeck_client::types::Task {
-                    pr: Some(PullRequest {
+                    pr: Some(TaskPr {
                         checks: Some(checks),
                         draft: false,
                         head_ref: "feat/x".into(),

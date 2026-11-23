@@ -13,6 +13,33 @@ pub(crate) fn uuid_string() -> Schema {
     .into()
 }
 
+/// A string in a form `description` gives, which its `FromStr` checks.
+pub(crate) fn string(description: &str) -> Schema {
+    SchemaObject {
+        instance_type: Some(InstanceType::String.into()),
+        metadata: Some(Box::new(schemars::schema::Metadata {
+            description: Some(description.to_owned()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+    .into()
+}
+
+/// A whole number from 0: a `u64`.
+pub(crate) fn unsigned_integer() -> Schema {
+    SchemaObject {
+        instance_type: Some(InstanceType::Integer.into()),
+        format: Some("uint64".to_owned()),
+        number: Some(Box::new(NumberValidation {
+            minimum: Some(0.0),
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+    .into()
+}
+
 /// A text enum: exactly one of `values`.
 pub(crate) fn one_of_strings(values: &[&str]) -> Schema {
     SchemaObject {

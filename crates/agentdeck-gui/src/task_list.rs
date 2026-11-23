@@ -7,7 +7,8 @@
 
 use agentdeck_client::types::Task;
 use agentdeck_core::{
-    AgentState, ChecksState, PrState, ReviewState, TaskId, TaskKind, TaskStatus, WorkspaceId,
+    AgentState, ChecksState, PrRef, PrState, RepositoryName, ReviewState, TaskId, TaskKind,
+    TaskStatus, WorkspaceId,
 };
 use gpui::SharedString;
 
@@ -37,6 +38,9 @@ pub struct PrCell {
     pub repo: SharedString,
     /// The repository's name without its owner, then the number: `ts-packages #142`.
     pub reference: SharedString,
+    /// Its reference GitHub's way, `owner/name#142`: what closing it sends. `None` for a PR
+    /// stored under a name that isn't `owner/name`, which can't be closed from here.
+    pub full_reference: Option<PrRef>,
     /// Open, merged or closed: with `draft`, the row's icon.
     pub state: PrState,
     /// Whether it is a draft.
@@ -69,8 +73,9 @@ pub struct Row {
     /// Whether an agent commented on it since the user last opened it: the row's unseen mark.
     pub unseen: bool,
     /// Whether its PR can be closed from here: a PR task whose PR is stored open, aged out or
-    /// not, and not [`Self::unreachable`] (spec §11, Closing PRs). Only such a row is
-    /// selectable, and only its menu holds Close PR.
+    /// not, and not [`Self::unreachable`] (spec §11, Closing PRs), with a
+    /// [`PrCell::full_reference`] to close it by. Only such a row is selectable, and only its
+    /// menu holds Close PR.
     pub closable: bool,
     /// Whether the GitHub sign-in can't see its PR, which shows as last synced: the row is
     /// dimmed, with a tooltip on its title (spec §11).
@@ -166,9 +171,13 @@ fn row(snapshot: &Snapshot, task: &Task) -> Row {
     });
     let pr = task.pr.as_ref().map(|pr| {
         let repo = pr.repo.rsplit('/').next().unwrap_or(&pr.repo);
+        let full_reference = (pr.repo.parse::<RepositoryName>().ok())
+            .zip(u32::try_from(pr.number).ok())
+            .map(|(repository, number)| PrRef::new(repository, number));
         PrCell {
             repo: repo.to_owned().into(),
             reference: format!("{repo} #{}", pr.number).into(),
+            full_reference,
             state: pr.state,
             draft: pr.draft,
             checks: pr.checks,
@@ -181,6 +190,9 @@ fn row(snapshot: &Snapshot, task: &Task) -> Row {
             .find(|w| w.id == ws)
             .map(|w| SharedString::from(w.name.clone()))
     });
+    let closable = (task.pr.as_ref())
+        .is_some_and(|pr| pr.state == PrState::Open && !pr.unreachable)
+        && (pr.as_ref()).is_some_and(|cell| cell.full_reference.is_some());
     Row {
         id: task.id,
         status: task.status,
@@ -190,14 +202,14 @@ fn row(snapshot: &Snapshot, task: &Task) -> Row {
         pr,
         workspace,
         unseen: task.unseen_agent_comments > 0,
-        closable: (task.pr.as_ref()).is_some_and(|pr| pr.state == PrState::Open && !pr.unreachable),
+        closable,
         unreachable: task.pr.as_ref().is_some_and(|pr| pr.unreachable),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use agentdeck_client::types::PullRequest;
+    use agentdeck_client::types::TaskPr;
     use agentdeck_core::Agent;
 
     use super::*;
@@ -218,8 +230,8 @@ mod tests {
         }
     }
 
-    fn pr(repo: &str, number: i64) -> PullRequest {
-        PullRequest {
+    fn pr(repo: &str, number: i64) -> TaskPr {
+        TaskPr {
             checks: Some(ChecksState::Failure),
             draft: true,
             head_ref: "feat/x".into(),
@@ -400,6 +412,7 @@ mod tests {
                 Some(PrCell {
                     repo: "rust-packages".into(),
                     reference: "rust-packages #61".into(),
+                    full_reference: Some("bRRRITSCOLD/rust-packages#61".parse().unwrap()),
                     state: PrState::Open,
                     draft: true,
                     checks: Some(ChecksState::Failure),
@@ -416,7 +429,7 @@ mod tests {
                     .into_iter()
                     .zip(1..)
                     .map(|(state, n)| Task {
-                        pr: Some(PullRequest {
+                        pr: Some(TaskPr {
                             state,
                             ..pr("acme/widgets", i64::from(n))
                         }),
@@ -442,7 +455,7 @@ mod tests {
         #[test]
         fn should_make_only_an_open_pr_closable() {
             let with_state = |n: u32, state: PrState| Task {
-                pr: Some(PullRequest {
+                pr: Some(TaskPr {
                     state,
                     ..pr("acme/widgets", i64::from(n))
                 }),

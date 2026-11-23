@@ -1118,7 +1118,7 @@ impl Render for TaskSheet {
 
 #[cfg(test)]
 mod tests {
-    use agentdeck_client::types::{PullRequest, Workspace};
+    use agentdeck_client::types::{TaskPr, Workspace};
     use agentdeck_core::{ChecksState, PaneId, PrState, ReviewState, TaskKind};
 
     use super::*;
@@ -1206,7 +1206,7 @@ mod tests {
         fn should_place_an_inbox_task_in_the_inbox_with_its_pr() {
             let snapshot = Snapshot {
                 tasks: vec![Task {
-                    pr: Some(PullRequest {
+                    pr: Some(TaskPr {
                         checks: Some(ChecksState::Success),
                         review: Some(ReviewState::Approved),
                         ..pr_info()
@@ -1314,8 +1314,8 @@ mod tests {
         }
     }
 
-    fn pr_info() -> PullRequest {
-        PullRequest {
+    fn pr_info() -> TaskPr {
+        TaskPr {
             checks: None,
             draft: false,
             head_ref: "feat/tabs-keyboard".into(),

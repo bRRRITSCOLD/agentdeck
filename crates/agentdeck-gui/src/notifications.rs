@@ -330,7 +330,7 @@ pub(crate) mod fake {
 
 #[cfg(test)]
 mod tests {
-    use agentdeck_client::types::{PrSyncProgress, PrSyncStage, PullRequest};
+    use agentdeck_client::types::{PrSyncProgress, PrSyncStage, TaskPr};
     use agentdeck_core::{Agent, PrState, TaskKind};
 
     use super::*;
@@ -545,7 +545,7 @@ mod tests {
             review: Option<ReviewState>,
         ) -> Task {
             Task {
-                pr: Some(PullRequest {
+                pr: Some(TaskPr {
                     checks,
                     draft: false,
                     head_ref: "feat/x".into(),

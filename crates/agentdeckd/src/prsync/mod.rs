@@ -1,4 +1,5 @@
 //! PR sync (spec §8): the viewer's open GitHub PRs become PR tasks, every 120 s and on demand.
+//! Each PR's Repository is stored by GitHub's id, so a rename or a transfer keeps it.
 //!
 //! The first sync, and one every [`FULL_SYNC_VAR`] seconds (an hour by default), is full: it
 //! lists the open PRs, most recently updated first, down to the age cutoff (`[pr_sync]
@@ -11,7 +12,8 @@
 //! - [`crate::github_auth`]: the token, from the first source that gives one.
 //! - [`github`]: the GraphQL search and the fetch by number.
 //! - [`matching`]: which workspace holds a clone of a PR's repo with its branch.
-//! - `db::pull_requests`: storing the PRs and moving their tasks.
+//! - `db::pull_requests`: storing the PRs and moving their tasks; `db::repositories`: storing
+//!   their Repositories.
 //!
 //! `POST /v1/prs/sync?full=true` (Sync now) is full whatever sync is due, and so is the first
 //! sync with another token than the last good one ran with, or after one found none.
@@ -32,7 +34,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use agentdeck_core::ws::Entity;
-use agentdeck_core::{ChecksState, PrState, ReviewState, TaskId, WorkspaceId};
+use agentdeck_core::{ChecksState, PrRef, PrState, ReviewState, WorkspaceId};
 use chrono::{DateTime, SecondsFormat, Utc};
 use tokio::time::MissedTickBehavior;
 
@@ -61,7 +63,7 @@ pub const FULL_SYNC_VAR: &str = "AGENTDECK_PR_FULL_SYNC_SECS";
 /// How often a sync is full, unless [`FULL_SYNC_VAR`] says otherwise.
 pub const FULL_SYNC_EVERY: Duration = Duration::from_secs(60 * 60);
 
-/// Why a task asked to close isn't closed: it isn't a PR task whose PR is stored open.
+/// Why a PR asked to close isn't closed: it isn't stored open, or the sign-in can't see it.
 const NOT_AN_OPEN_PR: &str = "Not an open PR";
 
 /// Why no PR closes: there is no token.
@@ -82,7 +84,7 @@ pub struct PrSync {
 
 struct Inner {
     db: Db,
-    /// Gets a `changed` event for each task a sync creates or changes.
+    /// Gets a `changed` event for each task and Repository a sync creates or changes.
     events: Events,
     github: Github,
     /// The token, and whether GitHub accepts it.
@@ -308,34 +310,34 @@ impl PrSync {
         }
     }
 
-    /// Closes the PRs of `task_ids` on GitHub, after any sync running, and answers one result
-    /// per task in the order asked (spec §8). A task that isn't a PR task whose PR is stored
-    /// open fails without reaching GitHub; with no token, every one fails. The node ids are
-    /// looked up 25 to a request, then each PR is closed on its own, one at a time; one
-    /// GitHub closes is stored closed and its task moves to done at once, with a `changed`
-    /// event. A failure is that PR's alone.
-    pub async fn close(&self, task_ids: Vec<TaskId>) -> Vec<PrCloseResult> {
+    /// Closes the pull requests `prs` names on GitHub, after any sync running, and answers one
+    /// result per reference in the order asked (spec §8). A PR that isn't stored open, or that
+    /// the GitHub sign-in can't see, fails without reaching GitHub; with no token, every one
+    /// fails. The node ids are looked up 25 to a request, then each PR is closed on its own,
+    /// one at a time; one GitHub closes is stored closed and its task moves to done at once,
+    /// with a `changed` event. A failure is that PR's alone.
+    pub async fn close(&self, prs: Vec<PrRef>) -> Vec<PrCloseResult> {
         let _running = self.inner.running.lock().await;
-        let ids = task_ids.clone();
-        let prs = match self
+        let asked = prs.clone();
+        let found = match self
             .inner
             .db
-            .call(move |conn| db::pull_requests::closable(conn, &ids))
+            .call(move |conn| db::pull_requests::closable(conn, &asked))
             .await
         {
-            Ok(prs) => prs,
+            Ok(found) => found,
             Err(err) => {
-                return task_ids
+                return prs
                     .into_iter()
-                    .map(|id| PrCloseResult::failed(id, err.to_string()))
+                    .map(|pr| PrCloseResult::failed(pr, err.to_string()))
                     .collect();
             }
         };
-        let mut results: Vec<PrCloseResult> = task_ids
+        let mut results: Vec<PrCloseResult> = prs
             .iter()
-            .map(|id| PrCloseResult::failed(*id, NOT_AN_OPEN_PR))
+            .map(|pr| PrCloseResult::failed(pr.clone(), NOT_AN_OPEN_PR))
             .collect();
-        let open: Vec<(usize, (String, i64))> = prs
+        let open: Vec<(usize, db::pull_requests::Closable)> = found
             .into_iter()
             .enumerate()
             .filter_map(|(i, pr)| Some((i, pr?)))
@@ -346,11 +348,14 @@ impl PrSync {
         let auth = &self.inner.auth;
         let Ok(mut token) = auth.current_token().await else {
             for (i, _) in &open {
-                results[*i] = PrCloseResult::failed(task_ids[*i], NOT_SIGNED_IN);
+                results[*i] = PrCloseResult::failed(prs[*i].clone(), NOT_SIGNED_IN);
             }
             return results;
         };
-        let wanted: Vec<(String, i64)> = open.iter().map(|(_, pr)| pr.clone()).collect();
+        let wanted: Vec<(String, i64)> = open
+            .iter()
+            .map(|(_, pr)| (pr.repo.clone(), pr.number))
+            .collect();
         let github = &self.inner.github;
         let node_ids = match github.node_ids(&token, &wanted).await {
             Ok(node_ids) => node_ids,
@@ -370,16 +375,16 @@ impl PrSync {
             },
             Err(err) => vec![Err(err.to_string()); wanted.len()],
         };
-        for ((i, (repo, number)), node_id) in open.into_iter().zip(node_ids) {
-            let task_id = task_ids[i];
+        for ((i, stored), node_id) in open.into_iter().zip(node_ids) {
+            let pr = prs[i].clone();
             results[i] = match node_id {
-                Err(error) => PrCloseResult::failed(task_id, error),
+                Err(error) => PrCloseResult::failed(pr, error),
                 Ok(node_id) => match github.close(&token, &node_id).await {
-                    Err(GithubError::GraphQl(message)) => PrCloseResult::failed(task_id, message),
-                    Err(err) => PrCloseResult::failed(task_id, err.to_string()),
+                    Err(GithubError::GraphQl(message)) => PrCloseResult::failed(pr, message),
+                    Err(err) => PrCloseResult::failed(pr, err.to_string()),
                     Ok(()) => {
-                        self.closed(task_id, &repo, number).await;
-                        PrCloseResult::closed(task_id)
+                        self.closed(&stored).await;
+                        PrCloseResult::closed(pr)
                     }
                 },
             };
@@ -387,10 +392,10 @@ impl PrSync {
         results
     }
 
-    /// Stores task `task_id`'s PR, `repo#number`, which GitHub just closed, as closed, and
-    /// tells clients its task changed. A failure only logs: GitHub closed it, and the next
-    /// full sync reads it closed.
-    async fn closed(&self, task_id: TaskId, repo: &str, number: i64) {
+    /// Stores `pr`, which GitHub just closed, as closed, and tells clients its task changed. A
+    /// failure only logs: GitHub closed it, and the next full sync reads it closed.
+    async fn closed(&self, pr: &db::pull_requests::Closable) {
+        let task_id = pr.task;
         match self
             .inner
             .db
@@ -399,7 +404,7 @@ impl PrSync {
         {
             Ok(true) => self.inner.events.changed(Entity::Task, task_id),
             Ok(false) => {}
-            Err(err) => tracing::warn!("storing {repo}#{number} as closed: {err}"),
+            Err(err) => tracing::warn!("storing {}#{} as closed: {err}", pr.repo, pr.number),
         }
     }
 
@@ -597,6 +602,13 @@ impl PrSync {
             .collect();
         self.store(details, Vec::new(), clones).await?;
 
+        // Read again, now the list is stored: a PR whose Repository GitHub renamed is stored
+        // under its new name, which the list showed, so it didn't leave it.
+        let stored = self
+            .inner
+            .db
+            .call(|conn| db::pull_requests::open_prs(conn))
+            .await?;
         let (aged, stored): (Vec<RemotePr>, Vec<RemotePr>) = stored
             .into_iter()
             .partition(|pr| older_than(&pr.updated_at, cutoff));
@@ -644,9 +656,7 @@ impl PrSync {
             let prs: Vec<RemotePr> = page
                 .prs
                 .into_iter()
-                .filter(|pr| {
-                    pr.state == PrState::Open || stored.contains(&(pr.repo.clone(), pr.number))
-                })
+                .filter(|pr| pr.state == PrState::Open || stored.iter().any(|open| open.is(pr)))
                 .filter(|pr| !older_than(&pr.updated_at, cutoff))
                 .collect();
             self.store(prs, Vec::new(), clones).await?;
@@ -695,8 +705,8 @@ impl PrSync {
         self.store(prs, Vec::new(), clones).await
     }
 
-    /// Matches `prs` to workspaces, stores them, marks the `unreachable` ones, and tells
-    /// clients which tasks changed.
+    /// Matches `prs` to workspaces, stores them with their Repositories, marks the
+    /// `unreachable` ones, and tells clients which tasks and Repositories changed.
     async fn store(
         &self,
         prs: Vec<RemotePr>,
@@ -721,7 +731,10 @@ impl PrSync {
             .db
             .call(move |conn| db::pull_requests::store(conn, &matched, &unreachable))
             .await?;
-        for task in changed {
+        for repository in changed.repositories {
+            self.inner.events.changed(Entity::Repository, repository);
+        }
+        for task in changed.tasks {
             self.inner.events.changed(Entity::Task, task);
         }
         Ok(())
@@ -883,12 +896,15 @@ mod tests {
         fn pr(checks: Option<ChecksState>, review: Option<ReviewState>) -> RemotePr {
             RemotePr {
                 repo: "acme/widgets".into(),
+                repository: None,
                 number: 7,
                 title: "Add PR sync".into(),
                 url: "https://github.com/acme/widgets/pull/7".into(),
                 state: PrState::Open,
                 draft: false,
                 head_ref: "feat/sync".into(),
+                base_ref: None,
+                author: None,
                 checks,
                 review,
                 updated_at: "2026-11-01T10:00:00Z".into(),

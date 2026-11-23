@@ -11,7 +11,8 @@ use anyhow::{Context, bail};
 const GENERATED: &str = "crates/agentdeck-client/src/generated.rs";
 
 /// Schemas the client takes from `agentdeck-core` instead of generating: the ids, the
-/// column enums (both `Display` and `FromStr`), the layout tree and where a task lives.
+/// references, the column enums (all `Display` and `FromStr`), the layout tree and where a
+/// task lives.
 const CORE_TYPES: &[&str] = &[
     "WorkspaceId",
     "TabId",
@@ -19,6 +20,9 @@ const CORE_TYPES: &[&str] = &[
     "TaskId",
     "CommentId",
     "InstructionId",
+    "RepositoryId",
+    "RepositoryName",
+    "PrRef",
     "CommentAuthor",
     "TaskStatus",
     "TaskKind",

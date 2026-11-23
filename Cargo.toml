@@ -74,7 +74,8 @@ reqwest = { version = "=0.13.5", default-features = false, features = ["json", "
 # `agentdeck mcp`'s MCP server over stdio (Apache-2.0). Its tool parameters derive `JsonSchema`
 # through `rmcp::schemars` (schemars 1), not the daemon's schemars 0.8.
 rmcp = { version = "=3.7.0", default-features = false, features = ["server", "macros", "schemars", "transport-io"] }
-rusqlite = { version = "=0.40.2", features = ["bundled"] }
+# `fallible_uint`: u64 columns (GitHub's repository ids), checked against i64 as they go in and out.
+rusqlite = { version = "=0.40.2", features = ["bundled", "fallible_uint"] }
 rusqlite_migration = "=2.6.0"
 schemars = { version = "=0.8.22", features = ["uuid1"] }
 semver = "=1.0.28"

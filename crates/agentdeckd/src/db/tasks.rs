@@ -5,7 +5,7 @@ use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 
 use super::{DbError, exists, new_id, now, opt_text, text};
-use crate::model::{NewTask, PullRequest, Task, TaskFilter, TaskPatch};
+use crate::model::{NewTask, Task, TaskFilter, TaskPatch, TaskPr};
 
 /// A task with its PR row, if any: `FROM {TABLES}` reads both.
 const COLUMNS: &str = "t.id, t.title, t.body, t.status, t.kind, t.workspace_id, t.created_at,
@@ -16,11 +16,11 @@ const COLUMNS: &str = "t.id, t.title, t.body, t.status, t.kind, t.workspace_id, 
      WHERE c.task_id = t.id AND c.author = 'agent' AND c.seen_at IS NULL) AS unseen_agent_comments";
 const TABLES: &str = "tasks t LEFT JOIN pull_requests p ON p.task_id = t.id";
 
-fn pr_from_row(row: &Row<'_>) -> rusqlite::Result<Option<PullRequest>> {
+fn pr_from_row(row: &Row<'_>) -> rusqlite::Result<Option<TaskPr>> {
     let Some(repo) = row.get::<_, Option<String>>("repo")? else {
         return Ok(None);
     };
-    Ok(Some(PullRequest {
+    Ok(Some(TaskPr {
         repo,
         number: row.get("number")?,
         url: row.get("url")?,

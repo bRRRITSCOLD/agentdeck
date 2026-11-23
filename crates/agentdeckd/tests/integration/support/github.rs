@@ -56,26 +56,49 @@ fn gh_token_file(root: &Path) -> PathBuf {
 /// A PR as GitHub's GraphQL API returns it, through the daemon's fragments.
 #[derive(Clone)]
 pub struct Pr {
+    /// Its Repository's `owner/name` now.
     pub repo: &'static str,
+    /// GitHub's id for its Repository; [`repository_id`] of `repo` when `None`, so each name
+    /// is its own Repository unless a test says otherwise (a rename).
+    pub repo_id: Option<u64>,
+    /// Whether its Repository is private.
+    pub private: bool,
     pub number: i64,
     pub title: &'static str,
     pub state: &'static str,
     pub head_ref: &'static str,
+    pub base_ref: &'static str,
+    /// Who opened it; `None` once that account is gone.
+    pub author: Option<&'static str>,
     pub draft: bool,
     pub checks: Option<&'static str>,
     pub review: Option<&'static str>,
     pub updated_at: &'static str,
 }
 
+/// The id GitHub gives Repository `repo` in these tests: the same for the same name.
+pub fn repository_id(repo: &str) -> u64 {
+    // FNV-1a, kept well inside SQLite's i64.
+    let hash = repo.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    });
+    hash & 0x7fff_ffff
+}
+
 impl Pr {
-    /// An open PR on `acme/widgets` from `feat/sync`, with no checks and no review.
+    /// An open PR on `acme/widgets` from `feat/sync` into `main`, opened by `octocat`, with no
+    /// checks and no review.
     pub fn open(number: i64) -> Pr {
         Pr {
             repo: "acme/widgets",
+            repo_id: None,
+            private: false,
             number,
             title: "Add PR sync",
             state: "OPEN",
             head_ref: "feat/sync",
+            base_ref: "main",
+            author: Some("octocat"),
             draft: false,
             checks: None,
             review: None,
@@ -85,6 +108,11 @@ impl Pr {
 
     pub fn url(&self) -> String {
         format!("https://github.com/{}/pull/{}", self.repo, self.number)
+    }
+
+    /// GitHub's id for its Repository.
+    pub fn repository_id(&self) -> u64 {
+        self.repo_id.unwrap_or_else(|| repository_id(self.repo))
     }
 
     /// The PR's GraphQL node id, as the lookup before a close answers it.
@@ -111,8 +139,17 @@ impl Pr {
             "state": self.state,
             "isDraft": self.draft,
             "headRefName": self.head_ref,
+            "baseRefName": self.base_ref,
             "updatedAt": self.updated_at,
-            "repository": { "nameWithOwner": self.repo }
+            "author": self.author.map(|login| json!({ "login": login })),
+            "repository": {
+                // A `BigInt`, which GraphQL writes as a string.
+                "fullDatabaseId": self.repository_id().to_string(),
+                "nameWithOwner": self.repo,
+                "url": format!("https://github.com/{}", self.repo),
+                "isPrivate": self.private,
+                "isArchived": false
+            }
         })
     }
 }

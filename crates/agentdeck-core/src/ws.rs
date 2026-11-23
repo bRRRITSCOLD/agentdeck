@@ -207,6 +207,10 @@ pub enum Entity {
     PrSync,
     /// `/v1/settings`: a setting changed. Its id is always `settings`.
     Settings,
+    /// A Repository was created, or GitHub renamed or otherwise changed it: `GET /v1/prs`
+    /// carries it on each of its pull requests. Its id is GitHub's repository id. It came with
+    /// `API_VERSION` 16; an older client skips the message.
+    Repository,
 }
 
 #[cfg(test)]
@@ -387,6 +391,13 @@ mod tests {
                         id: "settings".into(),
                     },
                     json!({"t": "changed", "entity": "settings", "id": "settings"}),
+                ),
+                (
+                    ServerMessage::Changed {
+                        entity: Entity::Repository,
+                        id: "1296269".into(),
+                    },
+                    json!({"t": "changed", "entity": "repository", "id": "1296269"}),
                 ),
                 (
                     ServerMessage::Lagged { channel: 3 },
