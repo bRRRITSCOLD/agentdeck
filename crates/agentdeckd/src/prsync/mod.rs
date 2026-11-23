@@ -52,6 +52,9 @@ const INTERVAL: Duration = Duration::from_secs(120);
 /// The environment variable that points PR sync at another GraphQL endpoint (tests use it).
 pub const ENDPOINT_VAR: &str = "AGENTDECK_GITHUB_API";
 
+/// The environment variable that points GitHub's REST calls at another base URL (tests use it).
+pub const REST_ENDPOINT_VAR: &str = "AGENTDECK_GITHUB_REST_API";
+
 /// The environment variable holding how many milliseconds one GitHub request may take
 /// (tests use it); [`github::TIMEOUT`] when unset.
 pub const TIMEOUT_VAR: &str = "AGENTDECK_GITHUB_TIMEOUT_MS";

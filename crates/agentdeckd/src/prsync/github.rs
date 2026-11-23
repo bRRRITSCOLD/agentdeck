@@ -1,7 +1,7 @@
 //! GitHub's GraphQL API (spec §8): the viewer's login and scopes, the list of the viewer's
 //! open PRs with light fields, the search for PRs updated since a time, PRs by number with
 //! every field, in batches, and closing a PR: its node id by number, in batches, then one
-//! `closePullRequest` each.
+//! `closePullRequest` each. And GitHub's REST API, for a Repository by name.
 
 use std::time::Duration;
 
@@ -11,6 +11,12 @@ use serde_json::{Value, json};
 
 /// Where the GraphQL API lives unless `AGENTDECK_GITHUB_API` says otherwise.
 pub const DEFAULT_ENDPOINT: &str = "https://api.github.com/graphql";
+
+/// Where the REST API lives unless `AGENTDECK_GITHUB_REST_API` says otherwise.
+pub const DEFAULT_REST_ENDPOINT: &str = "https://api.github.com";
+
+/// The REST API version every REST request asks for.
+const REST_API_VERSION: &str = "2022-11-28";
 
 /// The incremental search: every PR the token's user authored, in any state, that changed at
 /// or after `since` (RFC 3339).
@@ -155,22 +161,74 @@ pub enum GithubError {
     Shape(#[from] serde_json::Error),
 }
 
-/// A GraphQL client for one endpoint.
+/// A client for GitHub's GraphQL API at one endpoint and its REST API at one base URL.
 #[derive(Clone)]
 pub struct Github {
     http: reqwest::Client,
     endpoint: String,
+    rest: String,
 }
 
 impl Github {
-    /// A client for the GraphQL API at `endpoint` whose requests give up after `timeout`
-    /// ([`TIMEOUT`] unless a test says otherwise).
-    pub fn new(endpoint: String, timeout: Duration) -> anyhow::Result<Github> {
+    /// A client for the GraphQL API at `endpoint` and the REST API under `rest`, whose requests
+    /// give up after `timeout` ([`TIMEOUT`] unless a test says otherwise).
+    pub fn new(endpoint: String, rest: String, timeout: Duration) -> anyhow::Result<Github> {
         let http = reqwest::Client::builder()
             .user_agent(concat!("agentdeck/", env!("CARGO_PKG_VERSION")))
             .timeout(timeout)
             .build()?;
-        Ok(Github { http, endpoint })
+        let rest = rest.trim_end_matches('/').to_owned();
+        Ok(Github {
+            http,
+            endpoint,
+            rest,
+        })
+    }
+
+    /// The Repository GitHub calls `name`, read with the REST API's `GET /repos/{owner}/{repo}`;
+    /// `None` when GitHub doesn't show it to `token` (a 404: no such Repository, or one the
+    /// token can't see). An old name of a renamed or transferred Repository finds it under its
+    /// new one, as GitHub redirects. Tried again after each of `RETRY_WAITS` while it fails for
+    /// a reason that may pass.
+    pub async fn repository(
+        &self,
+        token: &str,
+        name: &RepositoryName,
+    ) -> Result<Option<RemoteRepository>, GithubError> {
+        retrying(GithubError::may_pass, || self.repository_once(token, name)).await
+    }
+
+    /// [`Github::repository`], once.
+    async fn repository_once(
+        &self,
+        token: &str,
+        name: &RepositoryName,
+    ) -> Result<Option<RemoteRepository>, GithubError> {
+        let url = format!("{}/repos/{}/{}", self.rest, name.owner(), name.name());
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .header("accept", "application/vnd.github+json")
+            .header("x-github-api-version", REST_API_VERSION)
+            .send()
+            .await?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(GithubError::Unauthorized);
+        }
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(GithubError::Status {
+                status: status.as_u16(),
+                message: message(&body),
+            });
+        }
+        let repository: RestRepository = response.json().await?;
+        Ok(Some(repository.into()))
     }
 
     /// Who `token` belongs to, and its scopes. A token GitHub rejects is
@@ -397,19 +455,7 @@ impl Github {
         variables: &Value,
         retry: fn(&GithubError) -> bool,
     ) -> Result<(Value, Option<String>), GithubError> {
-        let mut waits = RETRY_WAITS.iter();
-        loop {
-            match self.query_once(token, query, variables).await {
-                Err(err) if retry(&err) => match waits.next() {
-                    Some(wait) => {
-                        tracing::info!("GitHub call failed, trying again in {wait:?}: {err}");
-                        tokio::time::sleep(*wait).await;
-                    }
-                    None => return Err(err),
-                },
-                result => return result,
-            }
-        }
+        retrying(retry, || self.query_once(token, query, variables)).await
     }
 
     /// Posts one GraphQL query once and returns the response body and its `X-OAuth-Scopes`
@@ -443,6 +489,50 @@ impl Github {
             .get("x-oauth-scopes")
             .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned());
         Ok((response.json().await?, scopes))
+    }
+}
+
+/// Runs `call`, and again after each of `RETRY_WAITS` while it fails with an error `retry`
+/// accepts.
+async fn retrying<T, F, Fut>(retry: fn(&GithubError) -> bool, mut call: F) -> Result<T, GithubError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, GithubError>>,
+{
+    let mut waits = RETRY_WAITS.iter();
+    loop {
+        match call().await {
+            Err(err) if retry(&err) => match waits.next() {
+                Some(wait) => {
+                    tracing::info!("GitHub call failed, trying again in {wait:?}: {err}");
+                    tokio::time::sleep(*wait).await;
+                }
+                None => return Err(err),
+            },
+            result => return result,
+        }
+    }
+}
+
+/// A Repository as the REST API's `GET /repos/{owner}/{repo}` answers it.
+#[derive(Deserialize)]
+struct RestRepository {
+    id: u64,
+    full_name: RepositoryName,
+    html_url: String,
+    private: bool,
+    archived: bool,
+}
+
+impl From<RestRepository> for RemoteRepository {
+    fn from(repository: RestRepository) -> RemoteRepository {
+        RemoteRepository {
+            id: RepositoryId::from(repository.id),
+            name: repository.full_name,
+            url: repository.html_url,
+            private: repository.private,
+            archived: repository.archived,
+        }
     }
 }
 
@@ -1107,7 +1197,8 @@ mod tests {
         #[tokio::test]
         async fn should_name_the_kind_and_cause_of_a_request_reqwest_could_not_build() {
             // No I/O: reqwest refuses the URL before sending anything.
-            let github = Github::new("not a url".into(), TIMEOUT).expect("a client");
+            let github =
+                Github::new("not a url".into(), "not a url".into(), TIMEOUT).expect("a client");
 
             let err = github.viewer("gho_test").await.unwrap_err();
 
@@ -1453,7 +1544,7 @@ mod integration_tests {
     const SLOW: Duration = Duration::from_secs(3);
 
     fn github(server: &MockServer) -> Github {
-        Github::new(server.url("/graphql"), SHORT).expect("a client")
+        Github::new(server.url("/graphql"), server.base_url(), SHORT).expect("a client")
     }
 
     /// The close mutation, answered `then` after `delay`.
@@ -1564,8 +1655,12 @@ mod integration_tests {
                 .and_then(|listener| listener.local_addr())
                 .expect("a free port")
                 .port();
-            let github =
-                Github::new(format!("http://127.0.0.1:{port}/graphql"), SHORT).expect("a client");
+            let github = Github::new(
+                format!("http://127.0.0.1:{port}/graphql"),
+                format!("http://127.0.0.1:{port}"),
+                SHORT,
+            )
+            .expect("a client");
             let started = Instant::now();
 
             let err = github.close(TOKEN, ID).await.unwrap_err();

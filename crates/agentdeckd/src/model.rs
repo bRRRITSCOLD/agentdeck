@@ -195,12 +195,50 @@ pub struct PullRequest {
     pub unreachable: bool,
 }
 
-/// `GET /v1/prs` filters.
+/// `GET /v1/prs` filters; given together, a PR must pass both.
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct PrFilter {
     /// Only the pull requests of the Repository GitHub calls this now, `owner/name`, ignoring
     /// case.
     pub repository: Option<RepositoryName>,
+    /// Only the pull requests of the Repositories this Workspace links.
+    pub workspace: Option<WorkspaceId>,
+}
+
+/// A Repository and the Workspaces that link it (spec §3): what GitHub last said of it, and
+/// whether the GitHub sign-in can still see it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RepositoryLinks {
+    /// GitHub's id for it, which a rename or a transfer keeps.
+    pub id: RepositoryId,
+    /// `owner/name`, as GitHub calls it now.
+    pub name: RepositoryName,
+    /// Its GitHub page.
+    pub url: String,
+    /// Only those GitHub lets in can see it.
+    pub private: bool,
+    /// Archived on GitHub: read-only.
+    pub archived: bool,
+    /// Whether the GitHub sign-in can no longer see it: it shows as last read (spec §8).
+    pub unreachable: bool,
+    /// The Workspaces that link it, archived ones included, oldest first; empty when none
+    /// does and it is kept for its pull requests.
+    pub workspaces: Vec<WorkspaceId>,
+}
+
+/// `GET /v1/repositories` filters.
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct RepositoryFilter {
+    /// Only the Repositories this Workspace links.
+    pub workspace: Option<WorkspaceId>,
+}
+
+/// `POST /v1/workspaces/{id}/links`: the Repository to link.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct NewLink {
+    /// The Repository's `owner/name` (or its GitHub URL). One agentdeck doesn't know by that
+    /// name is looked up on GitHub first.
+    pub repository: RepositoryName,
 }
 
 /// The GitHub pull request behind a PR task, as PR sync last saw it (spec §8).

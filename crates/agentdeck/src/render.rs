@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use agentdeck_client::types::{
     Comment, DirtyReport, Instruction, Pane, PrCloseResult, PrSyncStage, PrSyncStatus, PullRequest,
-    Settings, Task, Workspace,
+    RepositoryLinks, Settings, Task, Workspace,
 };
 use agentdeck_core::{CommentAuthor, PaneKind, PrState, WorkspaceId};
 use serde::Serialize;
@@ -318,6 +318,38 @@ fn pr_state(pr: &PullRequest) -> String {
     } else {
         state.to_owned()
     }
+}
+
+/// `agentdeck repo ls`: a line per Repository under `REPOSITORY  WORKSPACES`, its name marked
+/// `(unreachable)` while the GitHub sign-in can't see it, and the slugs of the Workspaces that
+/// link it, oldest first, an archived one marked `(archived)`; `-` when none does.
+pub fn repositories(repositories: &[RepositoryLinks], workspaces: &[Workspace]) -> String {
+    let rows: Vec<[String; 2]> = repositories
+        .iter()
+        .map(|repository| {
+            let name = if repository.unreachable {
+                format!("{} (unreachable)", repository.name)
+            } else {
+                repository.name.to_string()
+            };
+            let linking: Vec<String> = repository
+                .workspaces
+                .iter()
+                .map(|id| match workspaces.iter().find(|ws| ws.id == *id) {
+                    Some(ws) if ws.archived_at.is_some() => format!("{} (archived)", ws.slug),
+                    Some(ws) => ws.slug.clone(),
+                    None => id.to_string(),
+                })
+                .collect();
+            let linking = if linking.is_empty() {
+                "-".to_owned()
+            } else {
+                linking.join(", ")
+            };
+            [name, linking]
+        })
+        .collect();
+    table(["REPOSITORY", "WORKSPACES"], &rows, "no repositories")
 }
 
 /// `pr close`'s results: `closed <pr>` or `failed <pr>: <error>` per PR, by its reference,
@@ -862,6 +894,54 @@ mod tests {
         #[test]
         fn should_say_when_there_are_none() {
             assert_eq!(pull_requests(&[]), "no pull requests\n");
+        }
+    }
+
+    mod repositories {
+        use super::*;
+
+        fn repository(name: &str, workspaces: &[WorkspaceId]) -> RepositoryLinks {
+            RepositoryLinks {
+                archived: false,
+                id: 1_296_269.into(),
+                name: name.parse().expect("a Repository"),
+                private: false,
+                unreachable: false,
+                url: format!("https://github.com/{name}"),
+                workspaces: workspaces.to_vec(),
+            }
+        }
+
+        fn ws(slug: &str, id: &str, archived: bool) -> Workspace {
+            Workspace {
+                id: id.parse().unwrap(),
+                ..workspace_named(slug, slug, archived)
+            }
+        }
+
+        const WEB: &str = "0190a1b2-c3d4-7e5f-8a9b-00000000000a";
+        const API: &str = "0190a1b2-c3d4-7e5f-8a9b-00000000000b";
+
+        #[test]
+        fn should_list_each_repository_with_the_slugs_of_the_workspaces_linking_it() {
+            let workspaces = [ws("web", WEB, false), ws("api", API, true)];
+            let both = [WEB.parse().unwrap(), API.parse().unwrap()];
+            let hidden = RepositoryLinks {
+                unreachable: true,
+                ..repository("acme/secret", &[])
+            };
+
+            assert_eq!(
+                repositories(&[repository("acme/widgets", &both), hidden], &workspaces),
+                "REPOSITORY                 WORKSPACES\n\
+                 acme/widgets               web, api (archived)\n\
+                 acme/secret (unreachable)  -\n"
+            );
+        }
+
+        #[test]
+        fn should_say_when_there_are_none() {
+            assert_eq!(repositories(&[], &[]), "no repositories\n");
         }
     }
 

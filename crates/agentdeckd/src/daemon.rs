@@ -48,6 +48,8 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
     let db = Db::open(&paths.database())?;
     let github_api = std::env::var(prsync::ENDPOINT_VAR)
         .unwrap_or_else(|_| prsync::github::DEFAULT_ENDPOINT.into());
+    let github_rest = std::env::var(prsync::REST_ENDPOINT_VAR)
+        .unwrap_or_else(|_| prsync::github::DEFAULT_REST_ENDPOINT.into());
     let events = Events::new();
     let full_every = std::env::var(prsync::FULL_SYNC_VAR)
         .ok()
@@ -61,7 +63,7 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
         .ok()
         .and_then(|ms| ms.parse().ok())
         .map_or(prsync::github::TIMEOUT, Duration::from_millis);
-    let github = prsync::github::Github::new(github_api, timeout)?;
+    let github = prsync::github::Github::new(github_api, github_rest, timeout)?;
     let oauth = device::OAuth::new(
         std::env::var(device::OAUTH_VAR).unwrap_or_else(|_| device::DEFAULT_OAUTH.into()),
     )?;
@@ -75,7 +77,7 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
     let prs = PrSync::start(
         db.clone(),
         events.clone(),
-        github,
+        github.clone(),
         credentials.clone(),
         full_every,
         settings.clone(),
@@ -107,6 +109,7 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
         scratch_root: paths.scratch_workspaces(),
         prs,
         github: credentials,
+        github_api: github,
         settings,
         terminals: terminals.clone(),
         claims,

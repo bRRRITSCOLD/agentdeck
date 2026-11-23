@@ -232,7 +232,9 @@ impl HttpResponseError for DeleteWorkspaceError {
     }
 }
 
-/// Deletes a workspace, and its dir when agentdeck created it. Its tasks move to the inbox.
+/// Deletes a workspace, and its dir when agentdeck created it. Its tasks move to the inbox; its
+/// Links go, and with them each Repository nothing else names, with a `repository` change
+/// for each Repository it linked.
 /// Without `force`, a dir holding uncommitted or unpushed work is a 409 `dirty` carrying the
 /// dirty report.
 #[endpoint { method = DELETE, path = "/v1/workspaces/{id}" }]
@@ -274,9 +276,13 @@ pub(crate) async fn workspace_delete(
         .map_err(|err| HttpError::for_internal_error(err.to_string()))?
         .map_err(|err| HttpError::for_internal_error(format!("removing the dir: {err}")))?;
     }
-    db.call(move |c| db::workspaces::delete(c, id)).await?;
+    let unlinked = db.call(move |c| db::workspaces::delete(c, id)).await?;
     // Its panes went with it: stop their processes.
     rqctx.context().terminals.reap().await?;
-    rqctx.context().events.changed(Entity::Workspace, id);
+    let events = &rqctx.context().events;
+    for repository in unlinked {
+        events.changed(Entity::Repository, repository);
+    }
+    events.changed(Entity::Workspace, id);
     Ok(HttpResponseDeleted())
 }
