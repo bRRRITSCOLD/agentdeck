@@ -4,13 +4,18 @@
 //! a workspace" until Links come, and collapses at a click, remembered per Repository across
 //! restarts in the GUI's own state ([`gui_state`]).
 //!
+//! Finished pull requests are hidden until **Show finished** is on (Penpot "Pull requests ·
+//! show finished"): one preference, kept in the GUI's state too. A Finished row shows GitHub's
+//! state with its state icon: merged, closed, or open past the age cutoff.
+//!
 //! A row's reference (`#63`) opens the PR on GitHub; nothing else on the row reacts to a click.
 //! Its `…` menu has **Open on GitHub**, **Copy PR details** (the three lines
 //! [`pr_details`] gives) and, while the PR can close, **Close PR** after a separator, which
 //! asks first ([`ClosePrs`]). A PR the GitHub sign-in can't see is dimmed with its tooltip,
 //! left out of the sidebar's count and never closed here.
 //!
-//! The header ends in when PRs last synced and **Sync now**, which runs a full sync and emits
+//! The header ends in Show finished, when PRs last synced and **Sync now**, which runs a full
+//! sync and emits
 //! [`Synced`] once done, so the window can have the sidebar read again: a sync that changes no
 //! PR broadcasts nothing, yet moves the time it last ran. While no GitHub token works, the
 //! logged-out banner sits over the list, its **Open Settings** asking for Settings with
@@ -28,12 +33,12 @@ use agentdeck_core::{PrState, RepositoryId, pr_details};
 use brrritscold_core_gpui::{
     ActiveTheme as _, Button, ButtonSize, ButtonVariant, DropdownMenu, DropdownMenuAlign,
     DropdownMenuContent, DropdownMenuItem, DropdownMenuItemVariant, DropdownMenuSeparator,
-    IconName,
+    IconName, Label, Switch,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
     IntoElement, ListState, ParentElement as _, Render, SharedString, Styled as _, Task, Window,
     div, list,
 };
@@ -53,6 +58,9 @@ const SYNCED_TICK: Duration = Duration::from_secs(30);
 
 /// The description's first line.
 const ABOUT: &str = "Your open PRs, by repository.";
+
+/// The description's first line while Show finished is on.
+const ABOUT_FINISHED: &str = "Your open and finished PRs, by repository.";
 
 /// What the view says with no PR to show (Penpot "Pull requests · empty").
 pub const EMPTY: &str = "No open PRs. PRs you open on GitHub show here.";
@@ -75,12 +83,13 @@ pub struct Group {
     pub prs: Vec<PullRequest>,
 }
 
-/// The groups of `prs` the view shows: one per Repository with an open PR, alphabetical by the
-/// Repository's name (without the owner, ignoring case, then by owner), its PRs by number.
-/// Merged and closed PRs aren't shown.
-pub fn groups(prs: &[PullRequest]) -> Vec<Group> {
+/// The groups of `prs` the view shows: one per Repository with a PR to show, alphabetical by
+/// the Repository's name (without the owner, ignoring case, then by owner), its PRs by number.
+/// Finished PRs are shown only with `show_finished`; merged and closed ones are Finished.
+pub fn groups(prs: &[PullRequest], show_finished: bool) -> Vec<Group> {
+    let shown = |pr: &&PullRequest| show_finished || (pr.state == PrState::Open && !pr.finished);
     let mut groups: Vec<Group> = Vec::new();
-    for pr in prs.iter().filter(|pr| pr.state == PrState::Open) {
+    for pr in prs.iter().filter(shown) {
         match groups.iter_mut().find(|g| g.repository == pr.repository.id) {
             Some(group) => group.prs.push(pr.clone()),
             None => groups.push(Group {
@@ -191,8 +200,8 @@ impl PullRequestsView {
     }
 
     /// The groups shown.
-    pub fn groups(&self) -> Vec<Group> {
-        groups(&self.snapshot.prs)
+    pub fn groups(&self, cx: &App) -> Vec<Group> {
+        groups(&self.snapshot.prs, show_finished(cx))
     }
 
     /// Close PR's confirm dialog.
@@ -207,6 +216,12 @@ impl PullRequestsView {
             let collapsed = state.collapsed.pull_requests.contains(&repository);
             state.collapsed.set_pull_requests(repository, !collapsed);
         });
+        cx.notify();
+    }
+
+    /// Turns Show finished on or off, remembering it for the next start.
+    pub fn set_show_finished(&mut self, show: bool, cx: &mut Context<Self>) {
+        gui_state::update(cx, |state| state.show_finished = show);
         cx.notify();
     }
 
@@ -244,9 +259,14 @@ impl PullRequestsView {
 
     /// The lines under the heading: what the view holds, then which PRs the age cutoff leaves
     /// out, once the PR sync status is read.
-    pub fn description(&self) -> Vec<SharedString> {
+    pub fn description(&self, cx: &App) -> Vec<SharedString> {
         let cutoff = (self.snapshot.pr_sync.as_ref()).map(|status| cutoff(status.max_age_days));
-        std::iter::once(SharedString::new_static(ABOUT))
+        let about = if show_finished(cx) {
+            ABOUT_FINISHED
+        } else {
+            ABOUT
+        };
+        std::iter::once(SharedString::new_static(about))
             .chain(cutoff.map(SharedString::from))
             .collect()
     }
@@ -286,11 +306,15 @@ impl PullRequestsView {
         task_row::spaced(item)
     }
 
-    /// Penpot `Header`: heading and description, a spacer, when PRs last synced, "Sync now".
+    /// Penpot `Header`: heading and description, a spacer, Show finished, when PRs last
+    /// synced, "Sync now", `space.3` apart.
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
         let synced = self.sync_label(chrono::Utc::now());
-        let lines: Vec<AnyElement> = (self.description().into_iter().enumerate())
+        let finished = show_finished(cx);
+        let toggle =
+            cx.listener(|this, checked: &bool, _, cx| this.set_show_finished(*checked, cx));
+        let lines: Vec<AnyElement> = (self.description(cx).into_iter().enumerate())
             .map(|(ix, line)| {
                 let line_div = div()
                     .debug_selector(move || format!("pull requests description {ix}"))
@@ -328,6 +352,24 @@ impl PullRequestsView {
                     .child(div().flex().flex_col().children(lines)),
             )
             .child(div().flex_1())
+            // Penpot `ShowFinished`: a Switch and its Label, `space.2` apart.
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(space::S2)
+                    .child(
+                        div().debug_selector(|| "show finished".into()).child(
+                            Switch::new("show-finished")
+                                .checked(finished)
+                                .accessibility_label("Show finished")
+                                .on_change(move |checked, window, cx| {
+                                    toggle(&checked, window, cx);
+                                }),
+                        ),
+                    )
+                    .child(Label::new().child("Show finished")),
+            )
             .child(
                 div()
                     .debug_selector(|| "pull requests synced".into())
@@ -345,6 +387,11 @@ impl PullRequestsView {
                 ),
             )
     }
+}
+
+/// Whether Show finished is on.
+fn show_finished(cx: &App) -> bool {
+    gui_state::read(cx, |state| state.show_finished)
 }
 
 /// One entry in a row's `…` menu.
@@ -442,7 +489,7 @@ fn row_menu(close: &Entity<ClosePrs>, pr: &PullRequest) -> AnyElement {
 impl Render for PullRequestsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
-        let groups = self.groups();
+        let groups = self.groups(cx);
         let collapsed = gui_state::read(cx, |state| state.collapsed.pull_requests.clone());
         let items = items(&groups, &collapsed);
         if items != self.shown {
@@ -622,13 +669,15 @@ mod tests {
         text.parse().expect("a PR reference")
     }
 
-    /// `acme/widgets` #1 and #4, `acme/gadgets` #2, and merged `acme/gizmos` #3, signed in.
+    /// `acme/widgets` #1 and #4, `acme/gadgets` #2, and `acme/gizmos` #3, merged and so
+    /// Finished, signed in.
     fn prs() -> Snapshot {
         Snapshot {
             prs: vec![
                 pull_request(2, "acme/gadgets"),
                 PullRequest {
                     state: PrState::Merged,
+                    finished: true,
                     ..pull_request(3, "acme/gizmos")
                 },
                 pull_request(4, "acme/widgets"),
@@ -648,7 +697,7 @@ mod tests {
 
         #[test]
         fn should_put_each_pr_under_its_repository_alphabetically_by_name() {
-            let groups = groups(&prs().prs);
+            let groups = groups(&prs().prs, false);
 
             assert_eq!(names(&groups), ["gadgets", "widgets"]);
             let numbers: Vec<u32> = groups[1].prs.iter().map(|pr| pr.number).collect();
@@ -663,14 +712,43 @@ mod tests {
                 pull_request(3, "bee/alpha"),
             ];
 
-            assert_eq!(names(&groups(&prs)), ["alpha", "Beta", "gamma"]);
+            assert_eq!(names(&groups(&prs, false)), ["alpha", "Beta", "gamma"]);
         }
 
         #[test]
         fn should_leave_out_a_repository_with_no_open_pr() {
-            let groups = groups(&prs().prs);
+            let groups = groups(&prs().prs, false);
 
             assert!(!names(&groups).contains(&"gizmos".to_owned()));
+        }
+
+        #[test]
+        fn should_leave_out_finished_prs_unless_asked_for_them() {
+            let prs = [
+                pull_request(1, "acme/widgets"),
+                PullRequest {
+                    finished: true,
+                    ..pull_request(2, "acme/widgets")
+                },
+                PullRequest {
+                    state: PrState::Closed,
+                    finished: true,
+                    ..pull_request(5, "acme/widgets")
+                },
+                PullRequest {
+                    state: PrState::Merged,
+                    finished: true,
+                    ..pull_request(3, "acme/gizmos")
+                },
+            ];
+            let numbers = |groups: Vec<Group>| -> Vec<u32> {
+                (groups.iter())
+                    .flat_map(|g| g.prs.iter().map(|pr| pr.number))
+                    .collect()
+            };
+
+            assert_eq!(numbers(groups(&prs, false)), [1]);
+            assert_eq!(numbers(groups(&prs, true)), [3, 1, 2, 5]);
         }
 
         #[test]
@@ -680,7 +758,10 @@ mod tests {
                 pull_request(2, "upstream/agentdeck"),
             ];
 
-            assert_eq!(names(&groups(&prs)), ["me/agentdeck", "upstream/agentdeck"]);
+            assert_eq!(
+                names(&groups(&prs, false)),
+                ["me/agentdeck", "upstream/agentdeck"]
+            );
         }
 
         #[test]
@@ -696,7 +777,7 @@ mod tests {
                 },
             ];
 
-            assert_eq!(groups(&prs)[0].prs.len(), 2);
+            assert_eq!(groups(&prs, false)[0].prs.len(), 2);
         }
     }
 
@@ -713,6 +794,30 @@ mod tests {
                     MenuEntry::Separator,
                     MenuEntry::ClosePr
                 ]
+            );
+        }
+
+        #[test]
+        fn should_offer_to_close_a_finished_pr_still_open() {
+            let stale = PullRequest {
+                finished: true,
+                ..pull_request(1, "acme/widgets")
+            };
+
+            assert_eq!(menu_entries(&stale).last(), Some(&MenuEntry::ClosePr));
+        }
+
+        #[test]
+        fn should_not_offer_to_close_a_merged_pr() {
+            let merged = PullRequest {
+                state: PrState::Merged,
+                finished: true,
+                ..pull_request(1, "acme/widgets")
+            };
+
+            assert_eq!(
+                menu_entries(&merged),
+                [MenuEntry::OpenOnGitHub, MenuEntry::CopyPrDetails]
             );
         }
 
@@ -1098,6 +1203,86 @@ mod tests {
         }
     }
 
+    mod show_finished {
+        use super::*;
+
+        #[gpui::test]
+        fn should_hide_finished_prs_until_it_is_on(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open(prs(), cx);
+            assert!(!shows("pr acme/gizmos#3".into(), cx));
+
+            click("show finished".into(), cx);
+
+            assert!(shows("group acme/gizmos".into(), cx));
+            assert!(shows("pr acme/gizmos#3".into(), cx));
+            assert!(shows("pr acme/widgets#1".into(), cx));
+
+            click("show finished".into(), cx);
+
+            assert!(!shows("pr acme/gizmos#3".into(), cx));
+        }
+
+        #[gpui::test]
+        fn should_remember_it_across_restarts(cx: &mut TestAppContext) {
+            let dir = tempfile::tempdir().expect("a temp dir");
+            let path = dir.path().join(gui_state::FILE);
+            cx.update(|cx| gui_state::init(Some(path.clone()), cx));
+            let (_harness, window) = Harness::open(prs(), cx);
+            click("show finished".into(), window);
+
+            // The next start reads the file again.
+            assert!(gui_state::load(&path).show_finished);
+            cx.update(|cx| gui_state::init(Some(path), cx));
+            let (_harness, cx) = Harness::open(prs(), cx);
+
+            assert!(shows("pr acme/gizmos#3".into(), cx));
+        }
+
+        #[gpui::test]
+        fn should_sit_in_the_header_before_when_prs_synced(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open(prs(), cx);
+
+            let toggle = bounds("show finished".into(), cx);
+            let synced = bounds("pull requests synced".into(), cx);
+
+            assert!(
+                toggle.right() < synced.left(),
+                "{toggle:?} before {synced:?}"
+            );
+        }
+
+        #[gpui::test]
+        fn should_say_the_list_holds_finished_prs_while_on(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+
+            click("show finished".into(), cx);
+
+            let lines = harness.view.read_with(cx, |view, cx| view.description(cx));
+            assert_eq!(lines[0], ABOUT_FINISHED);
+            assert_eq!(ABOUT_FINISHED, "Your open and finished PRs, by repository.");
+        }
+
+        #[gpui::test]
+        fn should_count_the_finished_prs_in_their_group(cx: &mut TestAppContext) {
+            let mut snapshot = prs();
+            snapshot.prs.push(PullRequest {
+                state: PrState::Closed,
+                finished: true,
+                ..pull_request(5, "acme/widgets")
+            });
+            let (harness, cx) = Harness::open(snapshot, cx);
+
+            click("show finished".into(), cx);
+
+            let groups = harness.view.read_with(cx, |view, cx| view.groups(cx));
+            let widgets = groups
+                .iter()
+                .find(|g| g.label == "widgets")
+                .expect("widgets");
+            assert_eq!(widgets.prs.len(), 3);
+        }
+    }
+
     mod sync_now {
         use super::*;
 
@@ -1212,7 +1397,7 @@ mod tests {
         fn should_say_what_it_lists_then_the_cutoff_with_a_settings_link(cx: &mut TestAppContext) {
             let (harness, cx) = Harness::open(prs(), cx);
 
-            let lines = harness.view.read_with(cx, |view, _| view.description());
+            let lines = harness.view.read_with(cx, |view, cx| view.description(cx));
             assert_eq!(
                 lines,
                 [

@@ -765,6 +765,9 @@ pub mod types {
         pub checks: ::std::option::Option<agentdeck_core::ChecksState>,
         ///A draft.
         pub draft: bool,
+        ///Whether it is Finished: merged, closed, or open but not updated within the age cutoff. PR sync deletes it 7 days after it became Finished (spec §8). Absent from an older daemon, which reads as false.
+        #[serde(default)]
+        pub finished: bool,
         ///The branch it merges from.
         pub head_ref: ::std::string::String,
         ///Its number in its Repository.
@@ -3572,6 +3575,7 @@ pub mod types {
                 ::std::string::String,
             >,
             draft: ::std::result::Result<bool, ::std::string::String>,
+            finished: ::std::result::Result<bool, ::std::string::String>,
             head_ref: ::std::result::Result<::std::string::String, ::std::string::String>,
             number: ::std::result::Result<u32, ::std::string::String>,
             reference: ::std::result::Result<agentdeck_core::PrRef, ::std::string::String>,
@@ -3593,6 +3597,7 @@ pub mod types {
                     base_ref: Err("no value supplied for base_ref".to_string()),
                     checks: Ok(Default::default()),
                     draft: Err("no value supplied for draft".to_string()),
+                    finished: Ok(Default::default()),
                     head_ref: Err("no value supplied for head_ref".to_string()),
                     number: Err("no value supplied for number".to_string()),
                     reference: Err("no value supplied for reference".to_string()),
@@ -3645,6 +3650,16 @@ pub mod types {
                 self.draft = value
                     .try_into()
                     .map_err(|e| format!("error converting supplied value for draft: {e}"));
+                self
+            }
+            pub fn finished<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<bool>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.finished = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for finished: {e}"));
                 self
             }
             pub fn head_ref<T>(mut self, value: T) -> Self
@@ -3758,6 +3773,7 @@ pub mod types {
                     base_ref: value.base_ref?,
                     checks: value.checks?,
                     draft: value.draft?,
+                    finished: value.finished?,
                     head_ref: value.head_ref?,
                     number: value.number?,
                     reference: value.reference?,
@@ -3778,6 +3794,7 @@ pub mod types {
                     base_ref: Ok(value.base_ref),
                     checks: Ok(value.checks),
                     draft: Ok(value.draft),
+                    finished: Ok(value.finished),
                     head_ref: Ok(value.head_ref),
                     number: Ok(value.number),
                     reference: Ok(value.reference),
@@ -5445,9 +5462,11 @@ impl Client {
     ///Sends a `GET` request to `/v1/prs`
     ///
     ///Arguments:
+    ///- `finished`: Include Finished pull requests; without it they are left out.
     ///- `repository`: Only the pull requests of the Repository GitHub calls this now, `owner/name`, ignoring case.
     ///```ignore
     ///let response = client.pr_list()
+    ///    .finished(finished)
     ///    .repository(repository)
     ///    .send()
     ///    .await;
@@ -7208,14 +7227,26 @@ pub mod builder {
     #[derive(Debug, Clone)]
     pub struct PrList<'a> {
         client: &'a super::Client,
+        finished: Result<Option<bool>, String>,
         repository: Result<Option<agentdeck_core::RepositoryName>, String>,
     }
     impl<'a> PrList<'a> {
         pub fn new(client: &'a super::Client) -> Self {
             Self {
                 client: client,
+                finished: Ok(None),
                 repository: Ok(None),
             }
+        }
+        pub fn finished<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<bool>,
+        {
+            self.finished = value
+                .try_into()
+                .map(Some)
+                .map_err(|_| "conversion to `bool` for finished failed".to_string());
+            self
         }
         pub fn repository<V>(mut self, value: V) -> Self
         where
@@ -7231,7 +7262,12 @@ pub mod builder {
             self,
         ) -> Result<ResponseValue<::std::vec::Vec<types::PullRequest>>, Error<types::Error>>
         {
-            let Self { client, repository } = self;
+            let Self {
+                client,
+                finished,
+                repository,
+            } = self;
+            let finished = finished.map_err(Error::InvalidRequest)?;
             let repository = repository.map_err(Error::InvalidRequest)?;
             let url = format!("{}/v1/prs", client.baseurl,);
             let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
@@ -7247,6 +7283,7 @@ pub mod builder {
                     ::reqwest::header::ACCEPT,
                     ::reqwest::header::HeaderValue::from_static("application/json"),
                 )
+                .query(&progenitor_client::QueryParam::new("finished", &finished))
                 .query(&progenitor_client::QueryParam::new(
                     "repository",
                     &repository,

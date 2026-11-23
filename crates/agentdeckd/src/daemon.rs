@@ -53,6 +53,10 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
         .ok()
         .and_then(|secs| secs.parse().ok())
         .map_or(prsync::FULL_SYNC_EVERY, Duration::from_secs);
+    let keep_finished = std::env::var(prsync::FINISHED_VAR)
+        .ok()
+        .and_then(|secs| secs.parse().ok())
+        .map_or(prsync::KEEP_FINISHED, Duration::from_secs);
     let settings = Config::load(
         paths.config_file(),
         std::env::var(config::PR_MAX_AGE_VAR).ok().as_deref(),
@@ -78,6 +82,7 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
         github,
         credentials.clone(),
         full_every,
+        keep_finished,
         settings.clone(),
     );
     let terminals = Terminals::new(db.clone(), events.clone(), paths.rules_dir());

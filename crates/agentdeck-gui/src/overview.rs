@@ -137,7 +137,7 @@ pub fn ago(since: chrono::TimeDelta) -> String {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Overview {
     /// The Pull requests view's counts: open pull requests, drafts included, but for those the
-    /// GitHub sign-in can't see (spec §11).
+    /// GitHub sign-in can't see and Finished ones (spec §11).
     pub pull_requests: Counts,
     /// The inbox's counts: open PRs among tasks with no workspace.
     pub inbox: Counts,
@@ -209,7 +209,7 @@ impl Snapshot {
             .partition(|row| row.archived);
         let pull_requests = Counts {
             prs: (self.prs.iter())
-                .filter(|pr| pr.state == PrState::Open && !pr.unreachable)
+                .filter(|pr| pr.state == PrState::Open && !pr.unreachable && !pr.finished)
                 .count(),
         };
         let Some(status) = &self.pr_sync else {
@@ -406,6 +406,7 @@ pub(crate) mod fixtures {
             state: PrState::Open,
             title: format!("PR {n}"),
             unreachable: false,
+            finished: false,
             updated_at: CREATED.into(),
             url: format!("https://github.com/{repo}/pull/{n}"),
         }
@@ -477,6 +478,25 @@ mod tests {
                 };
 
                 assert_eq!(snapshot.overview().pull_requests, Counts { prs: 2 });
+            }
+
+            #[test]
+            fn should_leave_out_finished_prs_open_ones_included() {
+                let stale = PullRequest {
+                    finished: true,
+                    ..pull_request(2, "acme/widgets")
+                };
+                let closed = PullRequest {
+                    state: PrState::Closed,
+                    finished: true,
+                    ..pull_request(3, "acme/widgets")
+                };
+                let snapshot = Snapshot {
+                    prs: vec![pull_request(1, "acme/widgets"), stale, closed],
+                    ..Snapshot::default()
+                };
+
+                assert_eq!(snapshot.overview().pull_requests, Counts { prs: 1 });
             }
         }
 

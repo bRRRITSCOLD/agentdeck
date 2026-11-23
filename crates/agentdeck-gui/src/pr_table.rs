@@ -5,6 +5,9 @@
 //! GitHub. A group header is Penpot's `GroupHeader` followed by who links the Repository:
 //! "Not in a workspace" until Links come.
 //!
+//! A Finished row is drawn as any other: its state icon shows GitHub's state, merged, closed,
+//! or open for one past the age cutoff (Penpot "Pull requests · show finished").
+//!
 //! The fixed column widths are the task tables' [`Columns`], so the PR table lines up with
 //! them; it has no column to drop, as it fits the narrowest window whole.
 
@@ -228,7 +231,36 @@ pub fn row(
 
 #[cfg(test)]
 mod tests {
+    use gpui::TestAppContext;
+
     use super::*;
+    use crate::overview::fixtures::pull_request;
+
+    #[gpui::test]
+    fn should_show_githubs_state_on_finished_rows(cx: &mut TestAppContext) {
+        cx.update(brrritscold_core_gpui::init);
+        let finished = |state| PullRequest {
+            state,
+            finished: true,
+            ..pull_request(1, "acme/widgets")
+        };
+
+        cx.update(|cx| {
+            let s = cx.theme().semantic();
+            assert_eq!(
+                state_icon(&finished(PrState::Merged), cx),
+                (IconName::GitMerge, s.merged)
+            );
+            assert_eq!(
+                state_icon(&finished(PrState::Closed), cx),
+                (IconName::GitPullRequestClosed, s.destructive)
+            );
+            assert_eq!(
+                state_icon(&finished(PrState::Open), cx),
+                (IconName::GitPullRequest, s.foreground)
+            );
+        });
+    }
 
     #[test]
     fn should_fit_beside_the_sidebar_at_the_narrowest_window() {

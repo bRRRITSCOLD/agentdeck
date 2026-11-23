@@ -1520,7 +1520,7 @@ mod tests {
                     assert_eq!(shell.selection, Some(Selection::PullRequests));
                     shell.pull_requests.clone().unwrap()
                 });
-                let groups = view.read_with(cx, |view, _| view.groups());
+                let groups = view.read_with(cx, |view, cx| view.groups(cx));
                 assert_eq!(groups.len(), 1);
                 assert_eq!(groups[0].prs[0].number, 7);
                 assert_eq!(shown_workspace(&shell, cx), None);

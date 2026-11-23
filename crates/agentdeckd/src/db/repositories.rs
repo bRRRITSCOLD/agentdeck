@@ -1,5 +1,7 @@
 //! `repositories` queries: the Repository of each pull request PR sync reads (spec §3, §8).
+//! A Repository is kept while a kept pull request belongs to it.
 
+use agentdeck_core::RepositoryId;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::DbError;
@@ -35,4 +37,14 @@ pub fn store(conn: &Connection, repository: &RemoteRepository) -> Result<bool, D
         params![id, now.0, now.1, now.2, now.3],
     )?;
     Ok(true)
+}
+
+/// Deletes Repository `id` when no kept pull request names it. Returns whether it was deleted.
+pub fn forget_if_unreferenced(conn: &Connection, id: RepositoryId) -> Result<bool, DbError> {
+    let deleted = conn.execute(
+        "DELETE FROM repositories WHERE id = ?1
+           AND NOT EXISTS (SELECT 1 FROM pull_requests WHERE repository_id = ?1)",
+        [id.get()],
+    )?;
+    Ok(deleted > 0)
 }

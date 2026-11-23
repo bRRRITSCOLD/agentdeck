@@ -34,6 +34,7 @@ const MIGRATION_LIST: &[M<'static>] = &[
     M::up(include_str!("migrations/0006_pr_unreachable.sql")),
     M::up(include_str!("migrations/0007_repositories.sql")),
     M::up(include_str!("migrations/0008_pane_folder.sql")),
+    M::up(include_str!("migrations/0009_pr_finished.sql")),
 ];
 const MIGRATIONS: Migrations<'static> = Migrations::from_slice(MIGRATION_LIST);
 
@@ -147,7 +148,7 @@ pub fn now() -> String {
 /// `at` as the RFC 3339 UTC string every time column holds: to the microsecond, so a create
 /// and an edit in the same millisecond still stamp in order. Every stamp has six fraction digits
 /// and a `Z`, so stamps sort as text, also after the millisecond stamps older rows carry.
-fn stamp(at: chrono::DateTime<chrono::Utc>) -> String {
+pub fn stamp(at: chrono::DateTime<chrono::Utc>) -> String {
     at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
 }
 

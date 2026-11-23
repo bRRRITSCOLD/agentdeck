@@ -50,10 +50,10 @@ use crate::workspace::failed;
 /// A section's width. Raw in Penpot too: the fields are 480px wide.
 const SECTION_WIDTH: gpui::Pixels = px(480.);
 
-/// The age cutoff field's description. A narrower cutoff ages the PRs past it out at the
-/// next full sync, hourly, which moves their tasks to done (spec §8 → Aged out).
-const DAYS_DESCRIPTION: &str =
-    "0 syncs every open PR. Older PRs already here move to done within the hour.";
+/// The age cutoff field's description. A narrower cutoff makes the open PRs past it Finished
+/// at the next full sync, hourly, and a sync deletes each 7 days after that (spec §8 →
+/// Finished).
+const DAYS_DESCRIPTION: &str = "0 syncs every open PR. Older PRs leave within 7 days.";
 
 /// What the field shows for text that isn't a count of days.
 const NOT_DAYS: &str = "Enter a whole number of days, 0 or more.";
@@ -926,10 +926,10 @@ mod tests {
         use super::*;
 
         #[test]
-        fn should_say_older_prs_move_to_done_as_a_full_sync_ages_them_out() {
+        fn should_say_older_prs_leave_within_their_finished_window() {
             assert_eq!(
                 DAYS_DESCRIPTION,
-                "0 syncs every open PR. Older PRs already here move to done within the hour."
+                "0 syncs every open PR. Older PRs leave within 7 days."
             );
         }
 

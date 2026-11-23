@@ -193,6 +193,11 @@ pub struct PullRequest {
     pub updated_at: String,
     /// Whether the GitHub sign-in can't see it: it shows as last synced (spec §8).
     pub unreachable: bool,
+    /// Whether it is Finished: merged, closed, or open but not updated within the age cutoff.
+    /// PR sync deletes it 7 days after it became Finished (spec §8). Absent from an older
+    /// daemon, which reads as false.
+    #[serde(default)]
+    pub finished: bool,
 }
 
 /// `GET /v1/prs` filters.
@@ -201,6 +206,8 @@ pub struct PrFilter {
     /// Only the pull requests of the Repository GitHub calls this now, `owner/name`, ignoring
     /// case.
     pub repository: Option<RepositoryName>,
+    /// Include Finished pull requests; without it they are left out.
+    pub finished: Option<bool>,
 }
 
 /// The GitHub pull request behind a PR task, as PR sync last saw it (spec §8).

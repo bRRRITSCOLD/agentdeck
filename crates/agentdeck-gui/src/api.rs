@@ -1240,7 +1240,8 @@ pub(crate) mod fake {
                     if let Some(message) = refused {
                         return failed(message);
                     }
-                    // GitHub closed it: the daemon stores it closed and its task done.
+                    // GitHub closed it: the daemon stores it closed and Finished, and its task
+                    // done.
                     if let Some(task) = task {
                         task.status = TaskStatus::Done;
                         if let Some(stored) = &mut task.pr {
@@ -1249,6 +1250,7 @@ pub(crate) mod fake {
                     }
                     if let Some(stored) = stored {
                         stored.state = agentdeck_core::PrState::Closed;
+                        stored.finished = true;
                     }
                     PrCloseResult {
                         pr,
