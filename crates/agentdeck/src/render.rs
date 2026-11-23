@@ -4,8 +4,8 @@ use agentdeck_client::settings;
 use std::collections::BTreeMap;
 
 use agentdeck_client::types::{
-    Comment, DirtyReport, Instruction, McpAgent, McpRegistration, McpState, Pane, PrCloseResult,
-    PrSyncStage, PrSyncStatus, PullRequest, Settings, Task, Workspace,
+    Comment, DirtyReport, Instruction, Pane, PrCloseResult, PrSyncStage, PrSyncStatus, PullRequest,
+    Settings, Task, Workspace,
 };
 use agentdeck_core::{CommentAuthor, PaneKind, PrState, WorkspaceId};
 use serde::Serialize;
@@ -390,94 +390,6 @@ pub fn dirty(report: &DirtyReport) -> String {
             };
             out.push_str(&format!("  unpushed:    {} ({commits})\n", branch.name));
         }
-    }
-    out
-}
-
-/// Claude Code and Codex, as `mcp install` names them, with where agentdeck stands in each.
-fn mcp_agents(registration: &McpRegistration) -> [(&'static str, &McpAgent); 2] {
-    [
-        ("Claude Code", &registration.claude),
-        ("Codex", &registration.codex),
-    ]
-}
-
-/// Whether `mcp install` would change either agent's config.
-pub fn mcp_changes_anything(registration: &McpRegistration) -> bool {
-    mcp_agents(registration)
-        .iter()
-        .any(|(_, agent)| matches!(agent.state, McpState::Missing | McpState::Outdated))
-}
-
-/// Whether either agent's config couldn't be read or changed.
-pub fn mcp_failed(registration: &McpRegistration) -> bool {
-    mcp_agents(registration)
-        .iter()
-        .any(|(_, agent)| agent.error.is_some())
-}
-
-/// What `mcp install` does to `agent`'s config, or why it does nothing.
-fn mcp_change(name: &str, agent: &McpAgent, command: &str) -> String {
-    let add = format!("claude mcp add --scope user agentdeck -- {command} mcp");
-    let config = &agent.config;
-    match (name, agent.state) {
-        ("Claude Code", McpState::Missing) => format!("run {add}"),
-        ("Claude Code", McpState::Outdated) => format!(
-            "run claude mcp remove --scope user agentdeck, then {add}, replacing the agentdeck \
-             server it runs now"
-        ),
-        (_, McpState::Missing) => format!("add [mcp_servers.agentdeck] to {config}"),
-        (_, McpState::Outdated) => format!("replace [mcp_servers.agentdeck] in {config}"),
-        (_, state) => mcp_state(agent, state),
-    }
-}
-
-/// An agent's line when `mcp install` leaves it alone.
-fn mcp_state(agent: &McpAgent, state: McpState) -> String {
-    match state {
-        McpState::Added => "already added".to_owned(),
-        McpState::NotInstalled => "not installed; skipped".to_owned(),
-        McpState::Unreadable | McpState::Missing | McpState::Outdated => format!(
-            "can't read {}: {}",
-            agent.config,
-            agent.error.as_deref().unwrap_or("unknown error")
-        ),
-    }
-}
-
-/// `mcp install`'s question: what it changes in each agent's config, then `[y/N]`.
-pub fn mcp_prompt(registration: &McpRegistration) -> String {
-    let mut out = "Add agentdeck's MCP server to your agents' own config, so agents you start \
-                   yourself in a shell pane have its tools:\n"
-        .to_owned();
-    for (name, agent) in mcp_agents(registration) {
-        let change = mcp_change(name, agent, &registration.command);
-        out.push_str(&format!("  {name}: {change}\n"));
-    }
-    out.push_str("Add it? [y/N] ");
-    out
-}
-
-/// `mcp install` when it has nothing to change: a line per agent.
-pub fn mcp_unchanged(registration: &McpRegistration) -> String {
-    mcp_agents(registration)
-        .iter()
-        .map(|(name, agent)| format!("{name}: {}\n", mcp_state(agent, agent.state)))
-        .collect()
-}
-
-/// `mcp install`'s results: a line per agent, from where it stood `before` to `after`.
-pub fn mcp_results(before: &McpRegistration, after: &McpRegistration) -> String {
-    let mut out = String::new();
-    for ((name, was), (_, now)) in mcp_agents(before).into_iter().zip(mcp_agents(after)) {
-        let line = match (&now.error, now.state) {
-            (Some(why), _) => format!("couldn't add agentdeck: {why}"),
-            (None, McpState::Added) if was.state != McpState::Added => {
-                format!("added agentdeck ({})", now.config)
-            }
-            (None, state) => mcp_state(now, state),
-        };
-        out.push_str(&format!("{name}: {line}\n"));
     }
     out
 }
@@ -977,79 +889,6 @@ mod tests {
                 "/work/web\n  uncommitted:  M src/main.rs\n  unpushed:    feat/x (2 commits)\n  \
                  unpushed:    fix/y (1 commit)\n"
             );
-        }
-    }
-
-    mod mcp_install {
-        use super::*;
-
-        fn agent(state: McpState, config: &str) -> McpAgent {
-            McpAgent {
-                state,
-                config: config.to_owned(),
-                error: None,
-            }
-        }
-
-        fn registration(claude: McpState, codex: McpState) -> McpRegistration {
-            McpRegistration {
-                command: "/opt/bin/agentdeck".to_owned(),
-                claude: agent(claude, "~/.claude.json"),
-                codex: agent(codex, "~/.codex/config.toml"),
-            }
-        }
-
-        #[test]
-        fn should_ask_naming_the_command_and_the_codex_table() {
-            let prompt = mcp_prompt(&registration(McpState::Missing, McpState::Missing));
-
-            assert_eq!(
-                prompt,
-                "Add agentdeck's MCP server to your agents' own config, so agents you start \
-                 yourself in a shell pane have its tools:\n  Claude Code: run claude mcp add \
-                 --scope user agentdeck -- /opt/bin/agentdeck mcp\n  Codex: add \
-                 [mcp_servers.agentdeck] to ~/.codex/config.toml\nAdd it? [y/N] "
-            );
-        }
-
-        #[test]
-        fn should_say_what_it_replaces_and_what_it_skips() {
-            let prompt = mcp_prompt(&registration(McpState::Outdated, McpState::NotInstalled));
-
-            assert!(
-                prompt.contains("  Claude Code: run claude mcp remove --scope user agentdeck, then claude mcp add"),
-                "{prompt}"
-            );
-            assert!(
-                prompt.contains("  Codex: not installed; skipped\n"),
-                "{prompt}"
-            );
-        }
-
-        #[test]
-        fn should_change_nothing_once_both_are_added_or_not_installed() {
-            assert!(!mcp_changes_anything(&registration(
-                McpState::Added,
-                McpState::NotInstalled
-            )));
-            assert!(mcp_changes_anything(&registration(
-                McpState::Added,
-                McpState::Outdated
-            )));
-        }
-
-        #[test]
-        fn should_say_which_were_added_and_why_one_failed() {
-            let before = registration(McpState::Missing, McpState::Missing);
-            let mut after = registration(McpState::Added, McpState::Missing);
-            after.codex.error = Some("~/.codex/config.toml: expected `]`".to_owned());
-
-            assert_eq!(
-                mcp_results(&before, &after),
-                "Claude Code: added agentdeck (~/.claude.json)\nCodex: couldn't add agentdeck: \
-                 ~/.codex/config.toml: expected `]`\n"
-            );
-            assert!(mcp_failed(&after));
         }
     }
 }

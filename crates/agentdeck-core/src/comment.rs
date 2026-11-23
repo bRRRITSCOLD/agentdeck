@@ -7,7 +7,7 @@ text_enum! {
     pub enum CommentAuthor ("comment author") {
         /// The user, from the GUI or a shell outside any pane.
         User => "user",
-        /// An agent, through the CLI or MCP from inside its pane.
+        /// An agent, through the CLI from inside its pane.
         Agent => "agent",
     }
 }

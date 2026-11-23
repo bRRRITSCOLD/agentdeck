@@ -586,104 +586,6 @@
         ],
         "description": "A tab's split tree. Every pane appears once; [`Layout::split`] keeps it that way."
       },
-      "McpAgent": {
-        "description": "Where agentdeck's MCP server stands in one agent CLI's config.",
-        "properties": {
-          "config": {
-            "description": "The config file, with `~` for `$HOME`: `~/.claude.json` (or under `$CLAUDE_CONFIG_DIR`), `~/.codex/config.toml` (or under `$CODEX_HOME`).",
-            "type": "string"
-          },
-          "error": {
-            "description": "Why the config couldn't be read (`unreadable`), or, from `PUT`, why adding the entry failed.",
-            "nullable": true,
-            "type": "string"
-          },
-          "state": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/McpState"
-              }
-            ],
-            "description": "Whether the entry is there."
-          }
-        },
-        "required": [
-          "config",
-          "state"
-        ],
-        "type": "object"
-      },
-      "McpRegistration": {
-        "description": "`GET /v1/agents/mcp`, and what `PUT /v1/agents/mcp` answers: whether agentdeck's MCP server is in each agent CLI's own config, so agents the user starts in a shell pane have it too (spec §6, §11).",
-        "properties": {
-          "claude": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/McpAgent"
-              }
-            ],
-            "description": "Claude Code: its user config, changed with `claude mcp add --scope user`."
-          },
-          "codex": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/McpAgent"
-              }
-            ],
-            "description": "Codex: `[mcp_servers.agentdeck]` in its `config.toml`."
-          },
-          "command": {
-            "description": "The `agentdeck` CLI the entry runs as `<command> mcp`: the one beside agentdeckd, else `agentdeck` from `PATH`, as the launch flags resolve it (spec §6).",
-            "type": "string"
-          }
-        },
-        "required": [
-          "claude",
-          "codex",
-          "command"
-        ],
-        "type": "object"
-      },
-      "McpState": {
-        "description": "Whether an agent CLI's config holds agentdeck's MCP server.",
-        "oneOf": [
-          {
-            "description": "The agent CLI isn't on agentdeckd's `PATH`; adding skips it.",
-            "enum": [
-              "not_installed"
-            ],
-            "type": "string"
-          },
-          {
-            "description": "No `agentdeck` entry.",
-            "enum": [
-              "missing"
-            ],
-            "type": "string"
-          },
-          {
-            "description": "An `agentdeck` entry that runs another command; adding replaces it.",
-            "enum": [
-              "outdated"
-            ],
-            "type": "string"
-          },
-          {
-            "description": "An entry that runs this `agentdeck mcp`.",
-            "enum": [
-              "added"
-            ],
-            "type": "string"
-          },
-          {
-            "description": "The config couldn't be read or doesn't parse; `error` says why.",
-            "enum": [
-              "unreadable"
-            ],
-            "type": "string"
-          }
-        ]
-      },
       "NewComment": {
         "description": "`POST /v1/tasks/{id}/comments`.",
         "properties": {
@@ -2008,54 +1910,6 @@
   },
   "openapi": "3.0.3",
   "paths": {
-    "/v1/agents/mcp": {
-      "get": {
-        "description": "user starts in a shell pane have its tools too.\n\nAn agent CLI not on agentdeckd's `PATH` is `not_installed`; a config that can't be read is `unreadable`, with `error` saying why. Neither is an error for the other agent.",
-        "operationId": "agents_mcp_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/McpRegistration"
-                }
-              }
-            },
-            "description": "successful operation"
-          },
-          "4XX": {
-            "$ref": "#/components/responses/Error"
-          },
-          "5XX": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "Whether agentdeck's MCP server is in Claude Code's and Codex's own config, so agents the"
-      },
-      "put": {
-        "description": "mcp`) and Codex (`[mcp_servers.agentdeck]` in its `config.toml`) where it isn't yet, and answers with where it stands after.\n\nIdempotent: an entry that already runs this `agentdeck mcp` is left alone, and an agent CLI that isn't installed is skipped. An agent whose entry couldn't be added has `error` saying why; the other is still added, and the answer is 200.",
-        "operationId": "agents_mcp_install",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/McpRegistration"
-                }
-              }
-            },
-            "description": "successful operation"
-          },
-          "4XX": {
-            "$ref": "#/components/responses/Error"
-          },
-          "5XX": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "Adds agentdeck's MCP server to Claude Code (`claude mcp add --scope user agentdeck -- <cli>"
-      }
-    },
     "/v1/comments/{id}": {
       "delete": {
         "operationId": "comment_delete",
@@ -2360,7 +2214,7 @@
     },
     "/v1/panes": {
       "post": {
-        "description": "the tab's layout.\n\n`claude` and `codex` panes get agentdeck's MCP server (`agentdeck mcp`) and start with a launch prompt: the linked task's title, its `Task id:` and how to report back on it with the MCP tools, and its body; then every instruction for the pane's workspace and the task's comments no agent has had yet, which are then marked delivered to the pane. Claude Code starts on a session id agentdeck chooses; a Codex pane's is found once Codex writes its session file, and `session_id` is set then.",
+        "description": "the tab's layout.\n\n`claude` and `codex` panes start with a launch prompt: the linked task's title, its `Task id:` and how to report back on it with the `agentdeck` CLI, and its body; then every instruction for the pane's workspace and the task's comments no agent has had yet, which are then marked delivered to the pane. Claude Code starts on a session id agentdeck chooses; a Codex pane's is found once Codex writes its session file, and `session_id` is set then.",
         "operationId": "pane_create",
         "requestBody": {
           "content": {

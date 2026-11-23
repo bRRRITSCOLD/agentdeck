@@ -13,7 +13,7 @@ use agentdeck_client::types::{
 use agentdeck_core::{Agent, AgentState, CommentId, PaneId, PaneKind, TaskId, WorkspaceId};
 
 use crate::support::agents::{
-    codex_session, launches, task_brief, task_header, task_var, trust_answer, typed, with_mcp,
+    args, codex_session, launches, task_brief, task_header, task_var, trust_answer, typed,
 };
 use crate::support::terminal::{
     Place, daemon_with_shell_rules, eventually, holds_for, in_state, printed, sh,
@@ -208,7 +208,7 @@ mod post_v1_panes {
             let session = pane.session_id.clone().expect("a session id");
             assert!(uuid::Uuid::parse_str(&session).is_ok(), "{session}");
             assert_eq!(pane.kind, PaneKind::Agent);
-            let args = with_mcp(Agent::Claude, &["--session-id", &session]);
+            let args = args(&["--session-id", &session]);
             assert_eq!(pane.argv[0], "claude");
             assert_eq!(pane.argv[1..], args);
             assert_eq!(launched(&daemon, pane.id, 1).await, [args]);
@@ -246,40 +246,11 @@ mod post_v1_panes {
                  Comments since your last session:\n  - Repro in issue 7",
                 task_header(&task)
             );
-            let args = with_mcp(Agent::Claude, &["--session-id", &session, &prompt]);
+            let args = args(&["--session-id", &session, &prompt]);
             assert_eq!(pane.argv[1..], args);
             assert_eq!(launched(&daemon, pane.id, 1).await, [args]);
             assert_eq!(task_var(&daemon, pane.id), Some(task.id.to_string()));
             delivered_to(&daemon.client, task.id, from_you.id, pane.id).await;
-        }
-
-        #[tokio::test]
-        async fn should_let_the_agent_comment_on_its_task_through_its_mcp_server_201() {
-            let daemon = TestDaemon::start().await;
-            let place = Place::new(&daemon).await;
-            let task = task(&daemon.client, place.workspace.id, "Fix it", "").await;
-            let report_back = std::path::Path::new(&place.workspace.dir).join("report-back");
-            std::fs::write(&report_back, "").expect("asking the stub to report back");
-
-            let pane = place
-                .launch(&daemon.client, Agent::Claude, Some(task.id))
-                .await;
-
-            let reported = eventually("the agent's comment on its task", || async {
-                daemon
-                    .client
-                    .comment_list()
-                    .id(task.id)
-                    .send()
-                    .await
-                    .expect("list comments")
-                    .into_inner()
-                    .into_iter()
-                    .find(|comment| comment.body == "reported back")
-            })
-            .await;
-            assert_eq!(reported.author_agent, Some(Agent::Claude));
-            assert_eq!(reported.author_pane, Some(pane.id));
         }
 
         #[tokio::test]
@@ -385,7 +356,7 @@ mod post_v1_panes {
                 .launch(&daemon.client, Agent::Codex, Some(task.id))
                 .await;
 
-            let args = with_mcp(Agent::Codex, &[&task_header(&task)]);
+            let args = args(&[&task_header(&task)]);
             assert_eq!(pane.argv[0], "codex");
             assert_eq!(pane.argv[1..], args);
             assert_eq!(launched(&daemon, pane.id, 1).await, [args]);
@@ -890,15 +861,9 @@ mod resume_after_restart {
         let daemon = TestDaemon::start_in(dirs).await;
 
         let claude_launches = launched(&daemon, claude.id, 2).await;
-        assert_eq!(
-            claude_launches[1],
-            with_mcp(Agent::Claude, &["--resume", &claude_session])
-        );
+        assert_eq!(claude_launches[1], args(&["--resume", &claude_session]));
         let codex_launches = launched(&daemon, codex.id, 2).await;
-        assert_eq!(
-            codex_launches[1],
-            with_mcp(Agent::Codex, &["resume", &codex_session])
-        );
+        assert_eq!(codex_launches[1], args(&["resume", &codex_session]));
         let resumed = in_state(&daemon.client, claude.id, AgentState::Idle).await;
         assert_eq!(resumed.session_id.as_deref(), Some(claude_session.as_str()));
         assert_eq!(resumed.argv, claude.argv, "argv stays as first launched");
@@ -948,7 +913,7 @@ mod resume_after_restart {
         let daemon = TestDaemon::start_in(dirs).await;
 
         let launches = launched(&daemon, claude.id, 3).await;
-        assert_eq!(launches[1], with_mcp(Agent::Claude, &["--resume", &old]));
+        assert_eq!(launches[1], args(&["--resume", &old]));
         let session = fresh_claude(&launches[2], &old, &task);
         let fresh = in_state(&daemon.client, claude.id, AgentState::Idle).await;
         assert_eq!(fresh.session_id, Some(session));
@@ -1128,7 +1093,7 @@ mod post_v1_panes_id_respawn {
         );
         assert_eq!(
             launched(&daemon, pane.id, 2).await[1],
-            with_mcp(Agent::Claude, &["--resume", &session])
+            args(&["--resume", &session])
         );
         assert_eq!(task_var(&daemon, pane.id), Some(task.id.to_string()));
         in_state(&daemon.client, pane.id, AgentState::Idle).await;
@@ -1163,7 +1128,7 @@ mod post_v1_panes_id_respawn {
             respawn(&daemon.client, pane.id, PaneRun::Agent).await;
 
             let launches = launched(&daemon, pane.id, 3).await;
-            assert_eq!(launches[1], with_mcp(Agent::Claude, &["--resume", &old]));
+            assert_eq!(launches[1], args(&["--resume", &old]));
             let session = fresh_claude(&launches[2], &old, &task);
             let fresh = in_state(&daemon.client, pane.id, AgentState::Idle).await;
             assert_eq!(
@@ -1218,7 +1183,7 @@ mod post_v1_panes_id_respawn {
             respawn(&daemon.client, pane.id, PaneRun::Agent).await;
 
             let launches = launched(&daemon, pane.id, 3).await;
-            assert_eq!(launches[1], with_mcp(Agent::Codex, &["resume", &old]));
+            assert_eq!(launches[1], args(&["resume", &old]));
             assert!(!launches[2].contains(&"resume".to_owned()), "{launches:?}");
             let prompt = launches[2].last().expect("a launch prompt");
             assert!(prompt.starts_with(&task_header(&task)), "{prompt}");
@@ -1429,7 +1394,7 @@ mod post_v1_panes_id_stop {
 
         assert_eq!(
             launched(&daemon, pane.id, 2).await[1],
-            with_mcp(Agent::Claude, &["--resume", &session])
+            args(&["--resume", &session])
         );
         in_state(&daemon.client, pane.id, AgentState::Idle).await;
     }

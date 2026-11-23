@@ -17,8 +17,8 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::cli::{
-    AgentCommand, Command, CommentCommand, ConfigCommand, InstructionCommand, McpCommand,
-    PrCommand, TaskCommand, WsCommand,
+    AgentCommand, Command, CommentCommand, ConfigCommand, InstructionCommand, PrCommand,
+    TaskCommand, WsCommand,
 };
 use crate::resolve::IdRef;
 use crate::{launch, render, resolve};
@@ -27,8 +27,7 @@ use agentdeck_client::ApiError;
 /// Names the pane an agent runs in; a comment added from it is that pane's agent's.
 pub const PANE_VAR: &str = "AGENTDECK_PANE";
 
-/// Names the workspace an agent runs in; the default workspace for instructions and the MCP
-/// tools.
+/// Names the workspace an agent runs in; the default workspace for instructions.
 pub const WORKSPACE_VAR: &str = "AGENTDECK_WORKSPACE";
 
 /// What a command prints: `json` with `--json`, else `human`.
@@ -51,7 +50,7 @@ impl Output {
     }
 }
 
-/// Runs `command`, except `mcp` without `install`, which `main` serves itself.
+/// Runs `command`, except `daemon`, which `main` runs itself.
 pub async fn run(client: &Client, command: Command) -> anyhow::Result<Output> {
     match command {
         Command::Ws(command) => ws(client, command).await,
@@ -62,12 +61,7 @@ pub async fn run(client: &Client, command: Command) -> anyhow::Result<Output> {
         Command::Pr(command) => pr(client, command).await,
         Command::Config(command) => config(client, command).await,
         Command::Tail { pane, bytes } => tail(client, pane_id(client, &pane).await?, bytes).await,
-        Command::Mcp {
-            command: Some(McpCommand::Install { yes }),
-        } => mcp_install(client, yes).await,
-        Command::Mcp { command: None } | Command::Daemon(_) => {
-            unreachable!("main runs mcp and daemon")
-        }
+        Command::Daemon(_) => unreachable!("main runs daemon"),
     }
 }
 
@@ -439,7 +433,7 @@ pub fn caller_workspace() -> Option<String> {
 
 /// `task` when given, else the task the caller's `pane` is linked to now, read from the
 /// daemon: not `$AGENTDECK_TASK`, which keeps the task the pane was spawned on (spec §10).
-/// Without either it is an error that asks for `arg`, the CLI flag or MCP argument naming one.
+/// Without either it is an error that asks for `arg`, the flag naming one.
 pub async fn task_or_callers(
     client: &Client,
     task: Option<TaskId>,
@@ -645,49 +639,6 @@ async fn close_prs(client: &Client, prs: Vec<PrRef>, yes: bool) -> anyhow::Resul
         .into_inner();
     let mut output = Output::new(&closed, render::close_results(&closed.results))?;
     output.failed = closed.results.iter().any(|result| !result.ok);
-    Ok(output)
-}
-
-/// `mcp install`: shows what adding agentdeck's MCP server to Claude Code and Codex changes
-/// and asks first, unless `yes`, on a terminal only; then adds it with `PUT /v1/agents/mcp`
-/// and prints a line per agent. Fails when either couldn't be added.
-async fn mcp_install(client: &Client, yes: bool) -> anyhow::Result<Output> {
-    let before = client
-        .agents_mcp_get()
-        .send()
-        .await
-        .map_err(ApiError::from)?
-        .into_inner();
-    if !render::mcp_changes_anything(&before) {
-        let mut output = Output::new(&before, render::mcp_unchanged(&before))?;
-        output.failed = render::mcp_failed(&before);
-        return Ok(output);
-    }
-    if !yes {
-        if !std::io::stdin().is_terminal() {
-            anyhow::bail!(
-                "mcp install asks before changing your agents' config, and stdin isn't a \
-                 terminal; pass --yes to add it without asking"
-            );
-        }
-        eprint!("{}", render::mcp_prompt(&before));
-        std::io::stderr().flush()?;
-        let mut answer = String::new();
-        std::io::stdin()
-            .read_line(&mut answer)
-            .context("reading the answer")?;
-        if answer.trim() != "y" {
-            return Output::new(&before, "Changed nothing\n".into());
-        }
-    }
-    let after = client
-        .agents_mcp_install()
-        .send()
-        .await
-        .map_err(ApiError::from)?
-        .into_inner();
-    let mut output = Output::new(&after, render::mcp_results(&before, &after))?;
-    output.failed = render::mcp_failed(&after);
     Ok(output)
 }
 

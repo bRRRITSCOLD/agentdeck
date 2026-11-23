@@ -8,8 +8,6 @@
 //!   and saves it.
 //! - **Terminal:** "Open file paths with", `terminal.file_opener`, saved the same way. A
 //!   command that isn't an opener ([`FileOpener::parse`]) shows the field's error instead.
-//! - **Agents:** whether agentdeck's MCP server is in Claude Code's and Codex's own config, and
-//!   the button that adds it ([`AgentsSection`]).
 //! - **General:** "Ask before quitting while agents run", `gui.confirm_quit`, a Switch. Flipping
 //!   it shows the new value at once and saves it; a failed save puts the saved one back. The
 //!   quit dialog's Don't ask again turns it off through [`SettingsView::set_confirm_quit`].
@@ -42,7 +40,6 @@ use gpui::{
 };
 use gpui_base::input::InputEvent;
 
-use crate::agents_section::AgentsSection;
 use crate::api::Api;
 use crate::connection::{Connection, DaemonEvent};
 use crate::github::GithubSection;
@@ -119,8 +116,6 @@ pub struct SettingsView {
     opener_error: Option<(SharedString, SharedString)>,
     /// The GitHub account and client ID, at the top of the GitHub section.
     github: Entity<GithubSection>,
-    /// The Agents section, between Terminal and General.
-    agents: Entity<AgentsSection>,
     /// Scrolls the sections under the heading.
     scroll: ScrollHandle,
     _days: Subscription,
@@ -162,14 +157,12 @@ impl SettingsView {
             }
         });
         let github = cx.new(|cx| GithubSection::new(api.clone(), connection, window, cx));
-        let agents = cx.new(|cx| AgentsSection::new(api.clone(), connection, window, cx));
         let mut view = SettingsView {
             api,
             settings: None,
             read: None,
             rereads: Rereads::default(),
             github,
-            agents,
             scroll: ScrollHandle::new(),
             days,
             days_error: None,
@@ -189,25 +182,12 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// Reads again whether agentdeck is in Claude Code's and Codex's config, as Settings opens:
-    /// `agentdeck mcp install` may have added it meanwhile.
-    pub fn reread_agents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.agents
-            .update(cx, |agents, cx| agents.reread(window, cx));
-    }
-
     /// Scrolls to the bottom, where the General section is, as the user would to reach it.
     #[cfg(test)]
     pub fn scroll_to_bottom(&mut self, cx: &mut Context<Self>) {
         let max = self.scroll.max_offset();
         self.scroll.set_offset(point(px(0.), -max.y));
         cx.notify();
-    }
-
-    /// The Agents section.
-    #[cfg(test)]
-    pub fn agents(&self) -> &Entity<AgentsSection> {
-        &self.agents
     }
 
     /// Why the days typed weren't saved, if they weren't.
@@ -700,7 +680,6 @@ impl Render for SettingsView {
                                     .child(github)
                                     .child(appearance)
                                     .child(terminal)
-                                    .child(div().w(SECTION_WIDTH).child(self.agents.clone()))
                                     .child(general),
                             ),
                     )
@@ -861,53 +840,6 @@ mod tests {
             assert_eq!(preference(ThemePreference::System), Gpui::System);
             assert_eq!(preference(ThemePreference::Dark), Gpui::Dark);
             assert_eq!(preference(ThemePreference::Light), Gpui::Light);
-        }
-    }
-
-    mod agents {
-        use agentdeck_client::types::McpState;
-
-        use super::*;
-        use crate::agents_section::title;
-
-        /// Penpot "Settings · Agents": Terminal, then Agents, then General.
-        #[gpui::test]
-        fn should_sit_between_terminal_and_general(cx: &mut TestAppContext) {
-            let (_harness, cx) = Harness::open(default_settings(), cx);
-
-            let terminal = cx
-                .debug_bounds("settings section Terminal")
-                .expect("Terminal");
-            let agents = cx.debug_bounds("settings section Agents").expect("Agents");
-            let general = cx
-                .debug_bounds("settings section General")
-                .expect("General");
-
-            assert_eq!(agents.top(), terminal.bottom() + space::S8);
-            assert_eq!(general.top(), agents.bottom() + space::S8);
-            assert_eq!(agents.size.width, SECTION_WIDTH);
-        }
-
-        #[gpui::test]
-        fn should_read_again_when_asked_as_settings_opens(cx: &mut TestAppContext) {
-            let (harness, cx) = Harness::open(default_settings(), cx);
-            let mut added = crate::api::fake::mcp_missing();
-            added.claude.state = McpState::Added;
-            added.codex.state = McpState::Added;
-            harness.api.set_mcp(added);
-
-            cx.update(|window, cx| {
-                harness
-                    .view
-                    .update(cx, |view, cx| view.reread_agents(window, cx));
-            });
-            harness.settle(cx);
-
-            let shown = cx.read(|cx| {
-                let agents = harness.view.read(cx).agents().read(cx);
-                title(agents.registration().expect("read"))
-            });
-            assert_eq!(shown, "In Claude Code and Codex");
         }
     }
 

@@ -1,21 +1,16 @@
-//! Launching agents (spec §6, §9): the argv each agent CLI starts and resumes with, which
-//! registers `agentdeck mcp` as its `agentdeck` MCP server, and the launch prompt that carries
-//! a pane's task, its workspace's instructions and the task's comments waiting for it.
+//! Launching agents (spec §6, §9): the argv each agent CLI starts and resumes with, and the
+//! launch prompt that carries a pane's task, its workspace's instructions and the task's
+//! comments waiting for it.
 //!
 //! - [`codex`]: finding the session id a Codex pane's CLI chose.
 //! - [`delivery`]: typing the user's new task comment into the task's live agent pane.
-//! - [`registration`]: adding `agentdeck mcp` to Claude Code's and Codex's own config, for
-//!   agents the user starts in a shell pane.
 //! - [`restart`]: starting an exited pane again, afresh once when its resume fails at once.
 //! - [`resume`]: re-spawning the panes that were alive when the daemon last stopped.
 
 pub mod codex;
 pub mod delivery;
-pub mod registration;
 pub mod restart;
 pub mod resume;
-
-use std::path::{Path, PathBuf};
 
 use agentdeck_core::Agent;
 use uuid::Uuid;
@@ -34,71 +29,6 @@ pub struct AgentLaunch {
 /// The variable a pane linked to a task at launch has its task's id in (spec §6).
 pub const TASK_VAR: &str = "AGENTDECK_TASK";
 
-/// What `agentdeck mcp` reads from its environment: where the daemon is, and who is calling.
-/// Codex passes an MCP server only a few variables of its own (`HOME`, `PATH`, …) plus those
-/// named in its `env_vars`; Claude Code passes its whole environment.
-const MCP_ENV_VARS: &[&str] = &[
-    "XDG_RUNTIME_DIR",
-    "XDG_CONFIG_HOME",
-    "XDG_DATA_HOME",
-    "XDG_STATE_HOME",
-    "AGENTDECK_PANE",
-    "AGENTDECK_WORKSPACE",
-    TASK_VAR,
-];
-
-/// The `agentdeck` CLI the agents run as their MCP server: the one beside this daemon's
-/// executable, else `agentdeck` from the pane's `PATH`, with a warning.
-pub fn cli() -> PathBuf {
-    cli_beside(std::env::current_exe().ok(), Path::is_file).unwrap_or_else(|| {
-        tracing::warn!("no agentdeck beside agentdeckd; agents run `agentdeck mcp` from PATH");
-        "agentdeck".into()
-    })
-}
-
-/// The `agentdeck` in the same directory as `exe`, when it is a file.
-fn cli_beside(exe: Option<PathBuf>, is_file: impl Fn(&Path) -> bool) -> Option<PathBuf> {
-    exe.and_then(|exe| Some(exe.parent()?.join("agentdeck")))
-        .filter(|cli| is_file(cli))
-}
-
-/// The flags registering `<cli> mcp` as `agent`'s `agentdeck` MCP server, on top of the
-/// user's own servers. Claude Code's `--mcp-config` takes every value up to the next flag, so
-/// a flag must follow it, never the prompt.
-fn mcp_flags(agent: Agent, cli: &Path) -> Vec<String> {
-    let command = cli.to_string_lossy().into_owned();
-    match agent {
-        Agent::Claude => {
-            // Written out rather than built as a `Value`: its key order would hang on whether
-            // a feature elsewhere in the workspace turns serde_json's `preserve_order` on.
-            let command = serde_json::Value::String(command);
-            let config = format!(
-                r#"{{"mcpServers":{{"agentdeck":{{"command":{command},"args":["mcp"]}}}}}}"#
-            );
-            vec!["--mcp-config".into(), config]
-        }
-        Agent::Codex => {
-            let env_vars = MCP_ENV_VARS
-                .iter()
-                .map(|name| format!("\"{name}\""))
-                .collect::<Vec<_>>()
-                .join(", ");
-            [
-                format!(
-                    "mcp_servers.agentdeck.command={}",
-                    toml::Value::String(command)
-                ),
-                r#"mcp_servers.agentdeck.args=["mcp"]"#.to_owned(),
-                format!("mcp_servers.agentdeck.env_vars=[{env_vars}]"),
-            ]
-            .into_iter()
-            .flat_map(|value| ["-c".to_owned(), value])
-            .collect()
-        }
-        Agent::Other => Vec::new(),
-    }
-}
-
 /// What an agent is told about `task` (spec §6, §9): its title, its id and how to report back
 /// on it, then its body after a blank line when it has one. It opens a launch prompt, and is
 /// typed into an agent whose pane is linked to the task later, or that starts in a shell pane
@@ -107,8 +37,8 @@ pub fn task_brief(task: &Task) -> String {
     let id = task.id;
     let header = format!(
         "Task: {}\nTask id: {id}\n\
-         Report back with the agentdeck MCP tools: task_comment to comment on this task, \
-         task_update to set its status (or run `agentdeck comment add --task {id} <text>`).",
+         Report back with the agentdeck CLI: `agentdeck comment add --task {id} <text>` to \
+         comment on this task, `agentdeck task set {id} --status <status>` to set its status.",
         task.title
     );
     match task.body.trim() {
@@ -156,19 +86,11 @@ fn bullets<'a>(items: impl Iterator<Item = &'a String>) -> String {
         .join("\n")
 }
 
-/// `agent`'s program and the flags registering `<cli> mcp` as its MCP server.
-fn program(agent: Agent, cli: &Path) -> Vec<String> {
+/// How a new pane of `agent` starts, with `prompt` as its first prompt. Claude Code starts on
+/// a session id agentdeck chooses; Codex chooses its own, which [`codex`] finds afterwards.
+/// `other` panes run their argv as given, so they have none here.
+pub fn launch(agent: Agent, prompt: Option<String>) -> Option<AgentLaunch> {
     let mut argv = vec![agent.as_str().to_owned()];
-    argv.extend(mcp_flags(agent, cli));
-    argv
-}
-
-/// How a new pane of `agent` starts, with `prompt` as its first prompt and `<cli> mcp` as its
-/// `agentdeck` MCP server. Claude Code starts on a session id agentdeck chooses; Codex chooses
-/// its own, which [`codex`] finds afterwards. `other` panes run their argv as given, so they
-/// have none here.
-pub fn launch(agent: Agent, prompt: Option<String>, cli: &Path) -> Option<AgentLaunch> {
-    let mut argv = program(agent, cli);
     let session_id = match agent {
         Agent::Claude => {
             let session_id = Uuid::new_v4().hyphenated().to_string();
@@ -183,13 +105,9 @@ pub fn launch(agent: Agent, prompt: Option<String>, cli: &Path) -> Option<AgentL
 }
 
 /// What a pane that was alive when the daemon stopped resumes with: its agent's resume
-/// command on its session, with `<cli> mcp` as its MCP server. `None` (a fresh shell) for
-/// every other pane, and for an agent pane whose session id was never known.
-pub fn resume_argv(
-    agent: Option<Agent>,
-    session_id: Option<&str>,
-    cli: &Path,
-) -> Option<Vec<String>> {
+/// command on its session. `None` (a fresh shell) for every other pane, and for an agent pane
+/// whose session id was never known.
+pub fn resume_argv(agent: Option<Agent>, session_id: Option<&str>) -> Option<Vec<String>> {
     let session_id = session_id?.to_owned();
     let agent = agent?;
     let resume = match agent {
@@ -197,15 +115,15 @@ pub fn resume_argv(
         Agent::Codex => "resume",
         Agent::Other => return None,
     };
-    let mut argv = program(agent, cli);
-    argv.extend([resume.to_owned(), session_id]);
-    Some(argv)
+    Some(vec![
+        agent.as_str().to_owned(),
+        resume.to_owned(),
+        session_id,
+    ])
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
-
     use agentdeck_core::{CommentAuthor, TaskKind, TaskStatus};
 
     use super::*;
@@ -259,9 +177,9 @@ mod tests {
             let id = task.id;
             format!(
                 "Task: {}\nTask id: {id}\n\
-                 Report back with the agentdeck MCP tools: task_comment to comment on this \
-                 task, task_update to set its status (or run \
-                 `agentdeck comment add --task {id} <text>`).",
+                 Report back with the agentdeck CLI: `agentdeck comment add --task {id} \
+                 <text>` to comment on this task, `agentdeck task set {id} --status <status>` \
+                 to set its status.",
                 task.title
             )
         }
@@ -338,70 +256,36 @@ mod tests {
         }
     }
 
-    /// Where the tests' daemon finds `agentdeck`.
-    const CLI: &str = "/opt/agentdeck/bin/agentdeck";
-
-    /// The `--mcp-config` value registering [`CLI`] as Claude Code's `agentdeck` server.
-    const CLAUDE_MCP: &str =
-        r#"{"mcpServers":{"agentdeck":{"command":"/opt/agentdeck/bin/agentdeck","args":["mcp"]}}}"#;
-
-    /// The `-c` values registering [`CLI`] as Codex's `agentdeck` server.
-    fn codex_mcp() -> Vec<String> {
-        [
-            "-c",
-            r#"mcp_servers.agentdeck.command="/opt/agentdeck/bin/agentdeck""#,
-            "-c",
-            r#"mcp_servers.agentdeck.args=["mcp"]"#,
-            "-c",
-            "mcp_servers.agentdeck.env_vars=[\"XDG_RUNTIME_DIR\", \"XDG_CONFIG_HOME\", \
-             \"XDG_DATA_HOME\", \"XDG_STATE_HOME\", \"AGENTDECK_PANE\", \
-             \"AGENTDECK_WORKSPACE\", \"AGENTDECK_TASK\"]",
-        ]
-        .map(String::from)
-        .to_vec()
-    }
-
     mod launch {
         use super::*;
 
         #[test]
-        fn should_start_claude_on_a_session_it_chooses_with_the_mcp_server_and_the_prompt() {
-            let launch = launch(Agent::Claude, Some("Task: x".into()), Path::new(CLI)).unwrap();
+        fn should_start_claude_on_a_session_it_chooses_with_the_prompt() {
+            let launch = launch(Agent::Claude, Some("Task: x".into())).unwrap();
 
             let session_id = launch.session_id.expect("a session id");
             assert!(Uuid::parse_str(&session_id).is_ok(), "{session_id}");
             assert_eq!(
                 launch.argv,
-                [
-                    "claude",
-                    "--mcp-config",
-                    CLAUDE_MCP,
-                    "--session-id",
-                    session_id.as_str(),
-                    "Task: x"
-                ]
+                ["claude", "--session-id", session_id.as_str(), "Task: x"]
             );
         }
 
         #[test]
         fn should_choose_a_new_session_each_time() {
-            let first = launch(Agent::Claude, None, Path::new(CLI)).unwrap();
-            let second = launch(Agent::Claude, None, Path::new(CLI)).unwrap();
+            let first = launch(Agent::Claude, None).unwrap();
+            let second = launch(Agent::Claude, None).unwrap();
 
             assert_ne!(first.session_id, second.session_id);
-            assert_eq!(first.argv.len(), 5, "no prompt argument: {:?}", first.argv);
+            assert_eq!(first.argv.len(), 3, "no prompt argument: {:?}", first.argv);
         }
 
         #[test]
-        fn should_start_codex_with_the_mcp_server_and_the_prompt() {
-            let mut argv = vec!["codex".to_owned()];
-            argv.extend(codex_mcp());
-            argv.push("Task: x".into());
-
+        fn should_start_codex_with_the_prompt() {
             assert_eq!(
-                launch(Agent::Codex, Some("Task: x".into()), Path::new(CLI)).unwrap(),
+                launch(Agent::Codex, Some("Task: x".into())).unwrap(),
                 AgentLaunch {
-                    argv,
+                    argv: vec!["codex".to_owned(), "Task: x".to_owned()],
                     session_id: None,
                 }
             );
@@ -409,50 +293,7 @@ mod tests {
 
         #[test]
         fn should_leave_other_agents_to_their_own_argv() {
-            assert_eq!(launch(Agent::Other, None, Path::new(CLI)), None);
-        }
-    }
-
-    mod mcp_flags {
-        use super::*;
-
-        #[test]
-        fn should_quote_a_path_for_claudes_json_and_codexs_toml() {
-            let cli = Path::new(r#"/home/a "b"\c/agentdeck"#);
-
-            let claude = mcp_flags(Agent::Claude, cli);
-            let codex = mcp_flags(Agent::Codex, cli);
-
-            let config: serde_json::Value = serde_json::from_str(&claude[1]).expect("JSON");
-            assert_eq!(
-                config["mcpServers"]["agentdeck"]["command"],
-                cli.to_str().unwrap()
-            );
-            let (key, value) = codex[1].split_once('=').expect("key=value");
-            assert_eq!(key, "mcp_servers.agentdeck.command");
-            let parsed: toml::Table = toml::from_str(&format!("v = {value}")).expect("TOML");
-            assert_eq!(parsed["v"].as_str(), cli.to_str());
-        }
-    }
-
-    mod cli_beside {
-        use super::*;
-
-        #[test]
-        fn should_be_the_agentdeck_beside_the_daemon() {
-            assert_eq!(
-                cli_beside(Some("/opt/bin/agentdeckd".into()), |_| true),
-                Some(PathBuf::from("/opt/bin/agentdeck"))
-            );
-        }
-
-        #[test]
-        fn should_be_none_when_there_is_no_agentdeck_beside_it() {
-            assert_eq!(
-                cli_beside(Some("/opt/bin/agentdeckd".into()), |_| false),
-                None
-            );
-            assert_eq!(cli_beside(None, |_| true), None);
+            assert_eq!(launch(Agent::Other, None), None);
         }
     }
 
@@ -460,37 +301,30 @@ mod tests {
         use super::*;
 
         #[test]
-        fn should_resume_claude_on_its_session_with_the_mcp_server() {
+        fn should_resume_claude_on_its_session() {
             assert_eq!(
-                resume_argv(Some(Agent::Claude), Some("s-1"), Path::new(CLI)).unwrap(),
-                ["claude", "--mcp-config", CLAUDE_MCP, "--resume", "s-1"]
+                resume_argv(Some(Agent::Claude), Some("s-1")).unwrap(),
+                ["claude", "--resume", "s-1"]
             );
         }
 
         #[test]
-        fn should_resume_codex_on_its_session_with_the_mcp_server() {
-            let mut argv = vec!["codex".to_owned()];
-            argv.extend(codex_mcp());
-            argv.extend(["resume".to_owned(), "s-1".to_owned()]);
-
+        fn should_resume_codex_on_its_session() {
             assert_eq!(
-                resume_argv(Some(Agent::Codex), Some("s-1"), Path::new(CLI)).unwrap(),
-                argv
+                resume_argv(Some(Agent::Codex), Some("s-1")).unwrap(),
+                ["codex", "resume", "s-1"]
             );
         }
 
         #[test]
         fn should_give_a_shell_to_an_agent_without_a_session() {
-            assert_eq!(resume_argv(Some(Agent::Codex), None, Path::new(CLI)), None);
+            assert_eq!(resume_argv(Some(Agent::Codex), None), None);
         }
 
         #[test]
         fn should_give_a_shell_to_other_agents_and_shells() {
-            assert_eq!(
-                resume_argv(Some(Agent::Other), Some("s-1"), Path::new(CLI)),
-                None
-            );
-            assert_eq!(resume_argv(None, None, Path::new(CLI)), None);
+            assert_eq!(resume_argv(Some(Agent::Other), Some("s-1")), None);
+            assert_eq!(resume_argv(None, None), None);
         }
     }
 }

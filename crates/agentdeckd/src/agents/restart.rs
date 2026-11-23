@@ -132,7 +132,7 @@ impl Restarter {
                     None => Vec::new(),
                 };
                 let prompt = launch_prompt(task.as_ref(), &instructions, &comments);
-                let launch = launch(agent, prompt, &super::cli()).expect("claude and codex launch");
+                let launch = launch(agent, prompt).expect("claude and codex launch");
                 let started = (launch.argv.as_slice(), launch.session_id.as_deref());
                 db::panes::respawned(c, id, Some(started))?;
                 Ok((db::panes::get(c, id)?, workspace, launch.argv, comments))
