@@ -52,9 +52,9 @@ async fn type_now(client: &Client, id: PaneId, text: &str) {
         .expect("type into the pane");
 }
 
-/// A dir `name` inside the workspace's dir.
+/// A dir `name` inside the place's folder.
 fn sub_dir(place: &Place, name: &str) -> PathBuf {
-    let dir = Path::new(&place.workspace.dir).join(name);
+    let dir = place.dir.join(name);
     std::fs::create_dir(&dir).expect("creating a dir in the workspace");
     dir
 }
@@ -80,9 +80,9 @@ mod current_folder {
 
             let pane = place.spawn(&daemon.client, &["true"]).await;
 
-            assert_eq!(pane.folder, place.workspace.dir, "as it starts");
+            assert_eq!(pane.folder, place.folder(), "as it starts");
             let exited = in_state(&daemon.client, pane.id, AgentState::Exited).await;
-            assert_eq!(exited.folder, place.workspace.dir);
+            assert_eq!(exited.folder, place.folder());
         }
     }
 
@@ -99,7 +99,7 @@ mod current_folder {
 
             let pane = place.spawn(&daemon.client, &sh(&script)).await;
 
-            // Its process stays in the workspace's dir: the report wins.
+            // Its process stays in the place's folder: the report wins.
             in_folder(&daemon.client, pane.id, &reported).await;
         }
 
@@ -113,10 +113,7 @@ mod current_folder {
             let pane = place.spawn(&daemon.client, &sh(script)).await;
 
             printed(&daemon.client, pane.id, "reported").await;
-            assert_eq!(
-                read(&daemon.client, pane.id).await.folder,
-                place.workspace.dir
-            );
+            assert_eq!(read(&daemon.client, pane.id).await.folder, place.folder());
         }
 
         #[tokio::test]
@@ -164,7 +161,7 @@ mod current_folder {
 
             let exited = in_state(&daemon.client, pane.id, AgentState::Exited).await;
             assert_eq!(Path::new(&exited.folder), sub);
-            assert_eq!(exited.cwd, place.workspace.dir, "the launch folder stays");
+            assert_eq!(exited.cwd, place.folder(), "the launch folder stays");
         }
     }
 
@@ -240,6 +237,6 @@ mod resume_after_restart {
         assert!(text.contains(&format!("{}\r\n", home.display())), "{text}");
         let resumed = read(&daemon.client, pane.id).await;
         assert_eq!(Path::new(&resumed.folder), home);
-        assert_eq!(resumed.cwd, place.workspace.dir, "the launch folder stays");
+        assert_eq!(resumed.cwd, place.folder(), "the launch folder stays");
     }
 }

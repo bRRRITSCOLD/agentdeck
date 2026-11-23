@@ -30,23 +30,6 @@ pub mod types {
             Default::default()
         }
     }
-    ///`DELETE /v1/workspaces/{id}`'s error: dropshot's error body, plus the dirty report when `error_code` is `dirty` (409).
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
-    pub struct DeleteWorkspaceError {
-        ///What deleting would lose; set only with `error_code` `dirty`.
-        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub dirty: ::std::option::Option<DirtyReport>,
-        ///A machine-readable code: `dirty`, `not_found`, `unauthorized`, …
-        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub error_code: ::std::option::Option<::std::string::String>,
-        ///What went wrong.
-        pub message: ::std::string::String,
-    }
-    impl DeleteWorkspaceError {
-        pub fn builder() -> builder::DeleteWorkspaceError {
-            Default::default()
-        }
-    }
     ///`POST /v1/github/device`: the code the user enters on GitHub to sign in.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct DeviceSignIn {
@@ -59,32 +42,6 @@ pub mod types {
     }
     impl DeviceSignIn {
         pub fn builder() -> builder::DeviceSignIn {
-            Default::default()
-        }
-    }
-    ///One dirty git repo.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
-    pub struct DirtyRepo {
-        ///The repo's absolute path.
-        pub path: ::std::string::String,
-        ///Changed, staged and untracked files, as `git status --porcelain` prints them.
-        pub uncommitted: ::std::vec::Vec<::std::string::String>,
-        ///Local branches with commits that are on no remote, by name.
-        pub unpushed_branches: ::std::vec::Vec<UnpushedBranch>,
-    }
-    impl DirtyRepo {
-        pub fn builder() -> builder::DirtyRepo {
-            Default::default()
-        }
-    }
-    ///The git repos under a workspace's dir that hold work not on any remote.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
-    pub struct DirtyReport {
-        ///Only the dirty repos; an empty list means deleting loses nothing git knows about.
-        pub repos: ::std::vec::Vec<DirtyRepo>,
-    }
-    impl DirtyReport {
-        pub fn builder() -> builder::DirtyReport {
             Default::default()
         }
     }
@@ -350,9 +307,6 @@ pub mod types {
     ///`POST /v1/workspaces`.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct NewWorkspace {
-        ///An existing absolute directory to attach. Without it, agentdeck creates a scratch dir.
-        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub dir: ::std::option::Option<::std::string::String>,
         ///The display name.
         pub name: ::std::string::String,
     }
@@ -997,20 +951,7 @@ pub mod types {
             value.parse()
         }
     }
-    ///A local branch holding commits that are on no remote.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
-    pub struct UnpushedBranch {
-        ///How many of its commits are on no remote branch, whether or not it has an upstream.
-        pub commits: u32,
-        ///The branch's short name, e.g. `feat/tabs`.
-        pub name: ::std::string::String,
-    }
-    impl UnpushedBranch {
-        pub fn builder() -> builder::UnpushedBranch {
-            Default::default()
-        }
-    }
-    ///A free-form unit of work with its own directory.
+    ///A long-lived area of work: a name, the Repositories it links and its Panes. It has no folder: its Panes work wherever they go.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct Workspace {
         ///When the workspace was archived; archived workspaces keep their data.
@@ -1018,17 +959,13 @@ pub mod types {
         pub archived_at: ::std::option::Option<::std::string::String>,
         ///When the workspace was created.
         pub created_at: ::std::string::String,
-        ///The absolute path of the workspace's directory.
-        pub dir: ::std::string::String,
-        ///True when agentdeck created `dir` as a scratch dir, so deleting the workspace removes it.
-        pub dir_owned: bool,
         ///The workspace's id.
         pub id: agentdeck_core::WorkspaceId,
         ///Notifications are muted.
         pub muted: bool,
         ///The display name.
         pub name: ::std::string::String,
-        ///Unique, derived from the name at creation; names a scratch dir.
+        ///Unique, derived from the name at creation; the CLI finds a workspace by it.
         pub slug: ::std::string::String,
     }
     impl Workspace {
@@ -1042,7 +979,7 @@ pub mod types {
         ///Mute or unmute notifications.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub muted: ::std::option::Option<bool>,
-        ///A new display name. The slug and the dir stay as they are.
+        ///A new display name. The slug stays as it is.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub name: ::std::option::Option<::std::string::String>,
     }
@@ -1137,80 +1074,6 @@ pub mod types {
             }
         }
         #[derive(Clone, Debug)]
-        pub struct DeleteWorkspaceError {
-            dirty: ::std::result::Result<
-                ::std::option::Option<super::DirtyReport>,
-                ::std::string::String,
-            >,
-            error_code: ::std::result::Result<
-                ::std::option::Option<::std::string::String>,
-                ::std::string::String,
-            >,
-            message: ::std::result::Result<::std::string::String, ::std::string::String>,
-        }
-        impl ::std::default::Default for DeleteWorkspaceError {
-            fn default() -> Self {
-                Self {
-                    dirty: Ok(Default::default()),
-                    error_code: Ok(Default::default()),
-                    message: Err("no value supplied for message".to_string()),
-                }
-            }
-        }
-        impl DeleteWorkspaceError {
-            pub fn dirty<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::option::Option<super::DirtyReport>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.dirty = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for dirty: {e}"));
-                self
-            }
-            pub fn error_code<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::option::Option<::std::string::String>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.error_code = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for error_code: {e}"));
-                self
-            }
-            pub fn message<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::string::String>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.message = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for message: {e}"));
-                self
-            }
-        }
-        impl ::std::convert::TryFrom<DeleteWorkspaceError> for super::DeleteWorkspaceError {
-            type Error = super::error::ConversionError;
-            fn try_from(
-                value: DeleteWorkspaceError,
-            ) -> ::std::result::Result<Self, super::error::ConversionError> {
-                Ok(Self {
-                    dirty: value.dirty?,
-                    error_code: value.error_code?,
-                    message: value.message?,
-                })
-            }
-        }
-        impl ::std::convert::From<super::DeleteWorkspaceError> for DeleteWorkspaceError {
-            fn from(value: super::DeleteWorkspaceError) -> Self {
-                Self {
-                    dirty: Ok(value.dirty),
-                    error_code: Ok(value.error_code),
-                    message: Ok(value.message),
-                }
-            }
-        }
-        #[derive(Clone, Debug)]
         pub struct DeviceSignIn {
             expires_at: ::std::result::Result<::std::string::String, ::std::string::String>,
             user_code: ::std::result::Result<::std::string::String, ::std::string::String>,
@@ -1275,120 +1138,6 @@ pub mod types {
                     expires_at: Ok(value.expires_at),
                     user_code: Ok(value.user_code),
                     verification_uri: Ok(value.verification_uri),
-                }
-            }
-        }
-        #[derive(Clone, Debug)]
-        pub struct DirtyRepo {
-            path: ::std::result::Result<::std::string::String, ::std::string::String>,
-            uncommitted: ::std::result::Result<
-                ::std::vec::Vec<::std::string::String>,
-                ::std::string::String,
-            >,
-            unpushed_branches: ::std::result::Result<
-                ::std::vec::Vec<super::UnpushedBranch>,
-                ::std::string::String,
-            >,
-        }
-        impl ::std::default::Default for DirtyRepo {
-            fn default() -> Self {
-                Self {
-                    path: Err("no value supplied for path".to_string()),
-                    uncommitted: Err("no value supplied for uncommitted".to_string()),
-                    unpushed_branches: Err("no value supplied for unpushed_branches".to_string()),
-                }
-            }
-        }
-        impl DirtyRepo {
-            pub fn path<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::string::String>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.path = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for path: {e}"));
-                self
-            }
-            pub fn uncommitted<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::vec::Vec<::std::string::String>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.uncommitted = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for uncommitted: {e}"));
-                self
-            }
-            pub fn unpushed_branches<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::vec::Vec<super::UnpushedBranch>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.unpushed_branches = value.try_into().map_err(|e| {
-                    format!("error converting supplied value for unpushed_branches: {e}")
-                });
-                self
-            }
-        }
-        impl ::std::convert::TryFrom<DirtyRepo> for super::DirtyRepo {
-            type Error = super::error::ConversionError;
-            fn try_from(
-                value: DirtyRepo,
-            ) -> ::std::result::Result<Self, super::error::ConversionError> {
-                Ok(Self {
-                    path: value.path?,
-                    uncommitted: value.uncommitted?,
-                    unpushed_branches: value.unpushed_branches?,
-                })
-            }
-        }
-        impl ::std::convert::From<super::DirtyRepo> for DirtyRepo {
-            fn from(value: super::DirtyRepo) -> Self {
-                Self {
-                    path: Ok(value.path),
-                    uncommitted: Ok(value.uncommitted),
-                    unpushed_branches: Ok(value.unpushed_branches),
-                }
-            }
-        }
-        #[derive(Clone, Debug)]
-        pub struct DirtyReport {
-            repos: ::std::result::Result<::std::vec::Vec<super::DirtyRepo>, ::std::string::String>,
-        }
-        impl ::std::default::Default for DirtyReport {
-            fn default() -> Self {
-                Self {
-                    repos: Err("no value supplied for repos".to_string()),
-                }
-            }
-        }
-        impl DirtyReport {
-            pub fn repos<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::vec::Vec<super::DirtyRepo>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.repos = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for repos: {e}"));
-                self
-            }
-        }
-        impl ::std::convert::TryFrom<DirtyReport> for super::DirtyReport {
-            type Error = super::error::ConversionError;
-            fn try_from(
-                value: DirtyReport,
-            ) -> ::std::result::Result<Self, super::error::ConversionError> {
-                Ok(Self {
-                    repos: value.repos?,
-                })
-            }
-        }
-        impl ::std::convert::From<super::DirtyReport> for DirtyReport {
-            fn from(value: super::DirtyReport) -> Self {
-                Self {
-                    repos: Ok(value.repos),
                 }
             }
         }
@@ -2042,31 +1791,16 @@ pub mod types {
         }
         #[derive(Clone, Debug)]
         pub struct NewWorkspace {
-            dir: ::std::result::Result<
-                ::std::option::Option<::std::string::String>,
-                ::std::string::String,
-            >,
             name: ::std::result::Result<::std::string::String, ::std::string::String>,
         }
         impl ::std::default::Default for NewWorkspace {
             fn default() -> Self {
                 Self {
-                    dir: Ok(Default::default()),
                     name: Err("no value supplied for name".to_string()),
                 }
             }
         }
         impl NewWorkspace {
-            pub fn dir<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::option::Option<::std::string::String>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.dir = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for dir: {e}"));
-                self
-            }
             pub fn name<T>(mut self, value: T) -> Self
             where
                 T: ::std::convert::TryInto<::std::string::String>,
@@ -2083,16 +1817,12 @@ pub mod types {
             fn try_from(
                 value: NewWorkspace,
             ) -> ::std::result::Result<Self, super::error::ConversionError> {
-                Ok(Self {
-                    dir: value.dir?,
-                    name: value.name?,
-                })
+                Ok(Self { name: value.name? })
             }
         }
         impl ::std::convert::From<super::NewWorkspace> for NewWorkspace {
             fn from(value: super::NewWorkspace) -> Self {
                 Self {
-                    dir: Ok(value.dir),
                     name: Ok(value.name),
                 }
             }
@@ -3756,68 +3486,12 @@ pub mod types {
             }
         }
         #[derive(Clone, Debug)]
-        pub struct UnpushedBranch {
-            commits: ::std::result::Result<u32, ::std::string::String>,
-            name: ::std::result::Result<::std::string::String, ::std::string::String>,
-        }
-        impl ::std::default::Default for UnpushedBranch {
-            fn default() -> Self {
-                Self {
-                    commits: Err("no value supplied for commits".to_string()),
-                    name: Err("no value supplied for name".to_string()),
-                }
-            }
-        }
-        impl UnpushedBranch {
-            pub fn commits<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<u32>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.commits = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for commits: {e}"));
-                self
-            }
-            pub fn name<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::string::String>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.name = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for name: {e}"));
-                self
-            }
-        }
-        impl ::std::convert::TryFrom<UnpushedBranch> for super::UnpushedBranch {
-            type Error = super::error::ConversionError;
-            fn try_from(
-                value: UnpushedBranch,
-            ) -> ::std::result::Result<Self, super::error::ConversionError> {
-                Ok(Self {
-                    commits: value.commits?,
-                    name: value.name?,
-                })
-            }
-        }
-        impl ::std::convert::From<super::UnpushedBranch> for UnpushedBranch {
-            fn from(value: super::UnpushedBranch) -> Self {
-                Self {
-                    commits: Ok(value.commits),
-                    name: Ok(value.name),
-                }
-            }
-        }
-        #[derive(Clone, Debug)]
         pub struct Workspace {
             archived_at: ::std::result::Result<
                 ::std::option::Option<::std::string::String>,
                 ::std::string::String,
             >,
             created_at: ::std::result::Result<::std::string::String, ::std::string::String>,
-            dir: ::std::result::Result<::std::string::String, ::std::string::String>,
-            dir_owned: ::std::result::Result<bool, ::std::string::String>,
             id: ::std::result::Result<agentdeck_core::WorkspaceId, ::std::string::String>,
             muted: ::std::result::Result<bool, ::std::string::String>,
             name: ::std::result::Result<::std::string::String, ::std::string::String>,
@@ -3828,8 +3502,6 @@ pub mod types {
                 Self {
                     archived_at: Ok(Default::default()),
                     created_at: Err("no value supplied for created_at".to_string()),
-                    dir: Err("no value supplied for dir".to_string()),
-                    dir_owned: Err("no value supplied for dir_owned".to_string()),
                     id: Err("no value supplied for id".to_string()),
                     muted: Err("no value supplied for muted".to_string()),
                     name: Err("no value supplied for name".to_string()),
@@ -3856,26 +3528,6 @@ pub mod types {
                 self.created_at = value
                     .try_into()
                     .map_err(|e| format!("error converting supplied value for created_at: {e}"));
-                self
-            }
-            pub fn dir<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::string::String>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.dir = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for dir: {e}"));
-                self
-            }
-            pub fn dir_owned<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<bool>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.dir_owned = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for dir_owned: {e}"));
                 self
             }
             pub fn id<T>(mut self, value: T) -> Self
@@ -3927,8 +3579,6 @@ pub mod types {
                 Ok(Self {
                     archived_at: value.archived_at?,
                     created_at: value.created_at?,
-                    dir: value.dir?,
-                    dir_owned: value.dir_owned?,
                     id: value.id?,
                     muted: value.muted?,
                     name: value.name?,
@@ -3941,8 +3591,6 @@ pub mod types {
                 Self {
                     archived_at: Ok(value.archived_at),
                     created_at: Ok(value.created_at),
-                    dir: Ok(value.dir),
-                    dir_owned: Ok(value.dir_owned),
                     id: Ok(value.id),
                     muted: Ok(value.muted),
                     name: Ok(value.name),
@@ -4499,7 +4147,7 @@ impl Client {
     pub fn workspace_list(&self) -> builder::WorkspaceList<'_> {
         builder::WorkspaceList::new(self)
     }
-    ///Creates a workspace on an existing dir, or on a new scratch dir when `dir` is absent
+    ///Creates a workspace. It has no folder, so nothing is made on disk
     ///
     ///Sends a `POST` request to `/v1/workspaces`
     ///
@@ -4527,19 +4175,17 @@ impl Client {
     pub fn workspace_get(&self) -> builder::WorkspaceGet<'_> {
         builder::WorkspaceGet::new(self)
     }
-    ///Deletes a workspace, and its dir when agentdeck created it. Its Links go, and with them each
+    ///Deletes a workspace with its tabs and panes, stopping their processes. Its Links go, and
     ///
-    ///Repository nothing else names, with a `repository` change for each Repository it linked. Without `force`, a dir holding uncommitted or unpushed work is a 409 `dirty` carrying the dirty report.
+    ///with them each Repository nothing else names, with a `repository` change for each Repository it linked. It deletes no folder: a workspace has none.
     ///
     ///Sends a `DELETE` request to `/v1/workspaces/{id}`
     ///
     ///Arguments:
     ///- `id`: The entity's id.
-    ///- `force`: Delete even when the dir holds uncommitted or unpushed work.
     ///```ignore
     ///let response = client.workspace_delete()
     ///    .id(id)
-    ///    .force(force)
     ///    .send()
     ///    .await;
     ///```
@@ -4563,7 +4209,7 @@ impl Client {
     pub fn workspace_update(&self) -> builder::WorkspaceUpdate<'_> {
         builder::WorkspaceUpdate::new(self)
     }
-    ///Archives a workspace; its dir is kept. Refused (409 `panes_running`) while
+    ///Archives a workspace; its panes and Links are kept. Refused (409 `panes_running`) while
     ///
     ///any of its panes runs.
     ///
@@ -4579,21 +4225,6 @@ impl Client {
     ///```
     pub fn workspace_archive(&self) -> builder::WorkspaceArchive<'_> {
         builder::WorkspaceArchive::new(self)
-    }
-    ///Each git repo under the workspace's dir with uncommitted files or unpushed branches
-    ///
-    ///Sends a `GET` request to `/v1/workspaces/{id}/dirty`
-    ///
-    ///Arguments:
-    ///- `id`: The entity's id.
-    ///```ignore
-    ///let response = client.workspace_dirty()
-    ///    .id(id)
-    ///    .send()
-    ///    .await;
-    ///```
-    pub fn workspace_dirty(&self) -> builder::WorkspaceDirty<'_> {
-        builder::WorkspaceDirty::new(self)
     }
     ///Links the Workspace to a Repository and answers the Repository with every Workspace that
     ///
@@ -6592,14 +6223,12 @@ pub mod builder {
     pub struct WorkspaceDelete<'a> {
         client: &'a super::Client,
         id: Result<agentdeck_core::WorkspaceId, String>,
-        force: Result<Option<bool>, String>,
     }
     impl<'a> WorkspaceDelete<'a> {
         pub fn new(client: &'a super::Client) -> Self {
             Self {
                 client: client,
                 id: Err("id was not initialized".to_string()),
-                force: Ok(None),
             }
         }
         pub fn id<V>(mut self, value: V) -> Self
@@ -6611,21 +6240,10 @@ pub mod builder {
             });
             self
         }
-        pub fn force<V>(mut self, value: V) -> Self
-        where
-            V: std::convert::TryInto<bool>,
-        {
-            self.force = value
-                .try_into()
-                .map(Some)
-                .map_err(|_| "conversion to `bool` for force failed".to_string());
-            self
-        }
         ///Sends a `DELETE` request to `/v1/workspaces/{id}`
-        pub async fn send(self) -> Result<ResponseValue<()>, Error<types::DeleteWorkspaceError>> {
-            let Self { client, id, force } = self;
+        pub async fn send(self) -> Result<ResponseValue<()>, Error<types::Error>> {
+            let Self { client, id } = self;
             let id = id.map_err(Error::InvalidRequest)?;
-            let force = force.map_err(Error::InvalidRequest)?;
             let url = format!(
                 "{}/v1/workspaces/{}",
                 client.baseurl,
@@ -6644,7 +6262,6 @@ pub mod builder {
                     ::reqwest::header::ACCEPT,
                     ::reqwest::header::HeaderValue::from_static("application/json"),
                 )
-                .query(&progenitor_client::QueryParam::new("force", &force))
                 .headers(header_map)
                 .build()?;
             let info = OperationInfo {
@@ -6807,73 +6424,6 @@ pub mod builder {
                 .build()?;
             let info = OperationInfo {
                 operation_id: "workspace_archive",
-            };
-            client.pre(&mut request, &info).await?;
-            let result = client.exec(request, &info).await;
-            client.post(&result, &info).await?;
-            let response = result?;
-            match response.status().as_u16() {
-                200u16 => ResponseValue::from_response(response).await,
-                400u16..=499u16 => Err(Error::ErrorResponse(
-                    ResponseValue::from_response(response).await?,
-                )),
-                500u16..=599u16 => Err(Error::ErrorResponse(
-                    ResponseValue::from_response(response).await?,
-                )),
-                _ => Err(Error::UnexpectedResponse(response)),
-            }
-        }
-    }
-    ///Builder for [`Client::workspace_dirty`]
-    ///
-    ///[`Client::workspace_dirty`]: super::Client::workspace_dirty
-    #[derive(Debug, Clone)]
-    pub struct WorkspaceDirty<'a> {
-        client: &'a super::Client,
-        id: Result<agentdeck_core::WorkspaceId, String>,
-    }
-    impl<'a> WorkspaceDirty<'a> {
-        pub fn new(client: &'a super::Client) -> Self {
-            Self {
-                client: client,
-                id: Err("id was not initialized".to_string()),
-            }
-        }
-        pub fn id<V>(mut self, value: V) -> Self
-        where
-            V: std::convert::TryInto<agentdeck_core::WorkspaceId>,
-        {
-            self.id = value.try_into().map_err(|_| {
-                "conversion to `agentdeck_core :: WorkspaceId` for id failed".to_string()
-            });
-            self
-        }
-        ///Sends a `GET` request to `/v1/workspaces/{id}/dirty`
-        pub async fn send(self) -> Result<ResponseValue<types::DirtyReport>, Error<types::Error>> {
-            let Self { client, id } = self;
-            let id = id.map_err(Error::InvalidRequest)?;
-            let url = format!(
-                "{}/v1/workspaces/{}/dirty",
-                client.baseurl,
-                encode_path(&id.to_string()),
-            );
-            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
-            header_map.append(
-                ::reqwest::header::HeaderName::from_static("api-version"),
-                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
-            );
-            #[allow(unused_mut)]
-            let mut request = client
-                .client
-                .get(url)
-                .header(
-                    ::reqwest::header::ACCEPT,
-                    ::reqwest::header::HeaderValue::from_static("application/json"),
-                )
-                .headers(header_map)
-                .build()?;
-            let info = OperationInfo {
-                operation_id: "workspace_dirty",
             };
             client.pre(&mut request, &info).await?;
             let result = client.exec(request, &info).await;

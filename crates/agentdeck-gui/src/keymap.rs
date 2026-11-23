@@ -43,7 +43,7 @@ actions!(
         NextPane,
         /// Focuses the previous pane of the tab, wrapping.
         PreviousPane,
-        /// Opens a tab with a shell in the workspace's dir.
+        /// Opens a tab with a shell where a new pane starts: the focused pane's folder, else `~`.
         NewTab,
         /// Splits the focused pane with a shell on its right.
         SplitRight,

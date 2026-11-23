@@ -15,7 +15,7 @@ pub const OLDER_DAEMON: &str = "agentdeck's background service is older than thi
 pub struct ApiError {
     /// The daemon's message, or the transport failure.
     pub message: String,
-    /// The `error_code`, such as `not_found` or `dirty`.
+    /// The `error_code`, such as `not_found` or `invalid_name`.
     pub code: Option<String>,
 }
 
@@ -37,12 +37,6 @@ pub trait ErrorBody: fmt::Debug {
 }
 
 impl ErrorBody for types::Error {
-    fn parts(self) -> (String, Option<String>) {
-        (self.message, self.error_code)
-    }
-}
-
-impl ErrorBody for types::DeleteWorkspaceError {
     fn parts(self) -> (String, Option<String>) {
         (self.message, self.error_code)
     }

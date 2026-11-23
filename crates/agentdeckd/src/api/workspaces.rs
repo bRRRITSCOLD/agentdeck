@@ -1,21 +1,16 @@
 //! Workspaces: `/v1/workspaces`.
 
-use std::fmt;
-use std::path::{Path as FsPath, PathBuf};
-
 use dropshot::{
-    ClientErrorStatusCode, ErrorStatusCode, HttpError, HttpResponseCreated, HttpResponseDeleted,
-    HttpResponseError, HttpResponseOk, Path, Query, RequestContext, TypedBody, endpoint,
+    ClientErrorStatusCode, HttpError, HttpResponseCreated, HttpResponseDeleted, HttpResponseOk,
+    Path, RequestContext, TypedBody, endpoint,
 };
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 
 use agentdeck_core::WorkspaceId;
 use agentdeck_core::ws::Entity;
 
 use super::{ApiContext, Authorized, IdPath, client_error};
-use crate::model::{DirtyReport, NewWorkspace, Workspace, WorkspacePatch};
-use crate::{db, git};
+use crate::db;
+use crate::model::{NewWorkspace, Workspace, WorkspacePatch};
 
 fn check_name(name: Option<&str>) -> Result<(), HttpError> {
     match name {
@@ -28,28 +23,6 @@ fn check_name(name: Option<&str>) -> Result<(), HttpError> {
     }
 }
 
-/// An attached dir must be an absolute path to an existing directory.
-fn check_dir(dir: &str) -> Result<PathBuf, HttpError> {
-    let path = PathBuf::from(dir);
-    if path.is_absolute() && path.is_dir() {
-        Ok(path)
-    } else {
-        Err(client_error(
-            ClientErrorStatusCode::BAD_REQUEST,
-            "invalid_dir",
-            format!("{dir} is not an absolute path to an existing directory"),
-        ))
-    }
-}
-
-/// Runs the git calls off the async threads.
-async fn dirty_report(dir: String) -> Result<DirtyReport, HttpError> {
-    tokio::task::spawn_blocking(move || git::dirty_report(FsPath::new(&dir)))
-        .await
-        .map_err(|err| HttpError::for_internal_error(err.to_string()))?
-        .map_err(|err| HttpError::for_internal_error(format!("dirty check: {err}")))
-}
-
 /// Every workspace, archived ones included, oldest first.
 #[endpoint { method = GET, path = "/v1/workspaces" }]
 pub(crate) async fn workspace_list(
@@ -60,7 +33,7 @@ pub(crate) async fn workspace_list(
     Ok(HttpResponseOk(workspaces))
 }
 
-/// Creates a workspace on an existing dir, or on a new scratch dir when `dir` is absent.
+/// Creates a workspace. It has no folder, so nothing is made on disk.
 #[endpoint { method = POST, path = "/v1/workspaces" }]
 pub(crate) async fn workspace_create(
     rqctx: RequestContext<ApiContext>,
@@ -69,12 +42,10 @@ pub(crate) async fn workspace_create(
 ) -> Result<HttpResponseCreated<Workspace>, HttpError> {
     let new = body.into_inner();
     check_name(Some(&new.name))?;
-    let dir = new.dir.as_deref().map(check_dir).transpose()?;
-    let scratch_root = rqctx.context().scratch_root.clone();
     let workspace = rqctx
         .context()
         .db
-        .call(move |c| db::workspaces::create(c, &new.name, dir.as_deref(), &scratch_root))
+        .call(move |c| db::workspaces::create(c, &new.name))
         .await?;
     rqctx
         .context()
@@ -122,7 +93,7 @@ pub(crate) async fn workspace_update(
     Ok(HttpResponseOk(workspace))
 }
 
-/// Archives a workspace; its dir is kept. Refused (409 `panes_running`) while
+/// Archives a workspace; its panes and Links are kept. Refused (409 `panes_running`) while
 /// any of its panes runs.
 #[endpoint { method = POST, path = "/v1/workspaces/{id}/archive" }]
 pub(crate) async fn workspace_archive(
@@ -163,119 +134,19 @@ pub(crate) async fn workspace_unarchive(
     Ok(HttpResponseOk(workspace))
 }
 
-/// Each git repo under the workspace's dir with uncommitted files or unpushed branches.
-#[endpoint { method = GET, path = "/v1/workspaces/{id}/dirty" }]
-pub(crate) async fn workspace_dirty(
-    rqctx: RequestContext<ApiContext>,
-    _auth: Authorized,
-    path: Path<IdPath<WorkspaceId>>,
-) -> Result<HttpResponseOk<DirtyReport>, HttpError> {
-    let id = path.into_inner().id;
-    let workspace = rqctx
-        .context()
-        .db
-        .call(move |c| db::workspaces::get(c, id))
-        .await?;
-    Ok(HttpResponseOk(dirty_report(workspace.dir).await?))
-}
-
-/// `DELETE /v1/workspaces/{id}` options.
-#[derive(Deserialize, JsonSchema)]
-pub(crate) struct DeleteQuery {
-    /// Delete even when the dir holds uncommitted or unpushed work.
-    force: Option<bool>,
-}
-
-/// `DELETE /v1/workspaces/{id}`'s error: dropshot's error body, plus the dirty report when
-/// `error_code` is `dirty` (409).
-#[derive(Debug, Serialize, JsonSchema)]
-pub(crate) struct DeleteWorkspaceError {
-    /// What went wrong.
-    message: String,
-    /// A machine-readable code: `dirty`, `not_found`, `unauthorized`, …
-    error_code: Option<String>,
-    /// What deleting would lose; set only with `error_code` `dirty`.
-    dirty: Option<DirtyReport>,
-    #[serde(skip)]
-    status: ErrorStatusCode,
-    #[serde(skip)]
-    internal_message: String,
-}
-
-impl fmt::Display for DeleteWorkspaceError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.internal_message)
-    }
-}
-
-impl From<HttpError> for DeleteWorkspaceError {
-    fn from(err: HttpError) -> Self {
-        DeleteWorkspaceError {
-            message: err.external_message,
-            error_code: err.error_code,
-            dirty: None,
-            status: err.status_code,
-            internal_message: err.internal_message,
-        }
-    }
-}
-
-impl From<db::DbError> for DeleteWorkspaceError {
-    fn from(err: db::DbError) -> Self {
-        HttpError::from(err).into()
-    }
-}
-
-impl HttpResponseError for DeleteWorkspaceError {
-    fn status_code(&self) -> ErrorStatusCode {
-        self.status
-    }
-}
-
-/// Deletes a workspace, and its dir when agentdeck created it. Its Links go, and with them each
-/// Repository nothing else names, with a `repository` change for each Repository it linked.
-/// Without `force`, a dir holding uncommitted or unpushed work is a 409 `dirty` carrying the
-/// dirty report.
+/// Deletes a workspace with its tabs and panes, stopping their processes. Its Links go, and
+/// with them each Repository nothing else names, with a `repository` change for each
+/// Repository it linked. It deletes no folder: a workspace has none.
 #[endpoint { method = DELETE, path = "/v1/workspaces/{id}" }]
 pub(crate) async fn workspace_delete(
     rqctx: RequestContext<ApiContext>,
     _auth: Authorized,
     path: Path<IdPath<WorkspaceId>>,
-    query: Query<DeleteQuery>,
-) -> Result<HttpResponseDeleted, DeleteWorkspaceError> {
+) -> Result<HttpResponseDeleted, HttpError> {
     let id = path.into_inner().id;
-    let force = query.into_inner().force.unwrap_or(false);
-    let db = &rqctx.context().db;
-    let workspace = db.call(move |c| db::workspaces::get(c, id)).await?;
-
-    if !force {
-        let report = dirty_report(workspace.dir.clone()).await?;
-        if !report.repos.is_empty() {
-            let message = format!(
-                "{} holds uncommitted or unpushed work; delete with force to lose it",
-                workspace.dir
-            );
-            return Err(DeleteWorkspaceError {
-                message: message.clone(),
-                error_code: Some("dirty".into()),
-                dirty: Some(report),
-                status: ClientErrorStatusCode::CONFLICT.into(),
-                internal_message: message,
-            });
-        }
-    }
-
-    if workspace.dir_owned {
-        let dir = PathBuf::from(&workspace.dir);
-        tokio::task::spawn_blocking(move || match std::fs::remove_dir_all(&dir) {
-            Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err),
-            _ => Ok(()),
-        })
-        .await
-        .map_err(|err| HttpError::for_internal_error(err.to_string()))?
-        .map_err(|err| HttpError::for_internal_error(format!("removing the dir: {err}")))?;
-    }
-    let unlinked = db.call(move |c| db::workspaces::delete(c, id)).await?;
+    let unlinked = (rqctx.context().db)
+        .call(move |c| db::workspaces::delete(c, id))
+        .await?;
     // Its panes went with it: stop their processes.
     rqctx.context().terminals.reap().await?;
     let events = &rqctx.context().events;

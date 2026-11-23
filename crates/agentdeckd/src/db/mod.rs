@@ -22,7 +22,12 @@ use uuid::Uuid;
 /// The migrations, in order. Embedded, and run to the latest at start. The domain reset
 /// squashed every earlier one into the first; a database from before it is moved aside
 /// ([`move_aside_pre_reset`]) rather than migrated.
-const MIGRATION_LIST: &[M<'static>] = &[M::up(include_str!("migrations/0001_init.sql"))];
+const MIGRATION_LIST: &[M<'static>] = &[
+    M::up(include_str!("migrations/0001_init.sql")),
+    M::up(include_str!(
+        "migrations/0002_workspaces_lose_their_folder.sql"
+    )),
+];
 const MIGRATIONS: Migrations<'static> = Migrations::from_slice(MIGRATION_LIST);
 
 /// A failed query, as a handler needs to tell them apart.
@@ -48,8 +53,6 @@ pub enum DbError {
     },
     /// SQLite failed.
     Sql(rusqlite::Error),
-    /// Something outside SQLite failed, such as creating a scratch dir.
-    Io(std::io::Error),
     /// The actor has stopped.
     Closed,
 }
@@ -63,7 +66,6 @@ impl fmt::Display for DbError {
                 f.write_str(message)
             }
             DbError::Sql(err) => write!(f, "database error: {err}"),
-            DbError::Io(err) => write!(f, "io error: {err}"),
             DbError::Closed => f.write_str("the database actor has stopped"),
         }
     }
@@ -72,12 +74,6 @@ impl fmt::Display for DbError {
 impl From<rusqlite::Error> for DbError {
     fn from(err: rusqlite::Error) -> Self {
         DbError::Sql(err)
-    }
-}
-
-impl From<std::io::Error> for DbError {
-    fn from(err: std::io::Error) -> Self {
-        DbError::Io(err)
     }
 }
 
@@ -146,7 +142,7 @@ const SIDECARS: [&str; 2] = ["-wal", "-shm"];
 /// `<name>.pre-domain-reset` beside it, so the daemon starts with an empty database and the
 /// old one stays on disk. A name already taken gets `.2`, `.3`, … after it, so nothing is
 /// overwritten. Returns where it went; `None` when there is no database or it is a current
-/// one. Nothing else (scratch folders) is touched.
+/// one. Nothing else (old scratch folders) is touched.
 pub fn move_aside_pre_reset(path: &Path) -> anyhow::Result<Option<PathBuf>> {
     if !path.exists() || !has_tasks_table(path)? {
         return Ok(None);

@@ -102,7 +102,6 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
         db,
         token: token.clone(),
         started: Instant::now(),
-        scratch_root: paths.scratch_workspaces(),
         prs,
         github: credentials,
         github_api: github,

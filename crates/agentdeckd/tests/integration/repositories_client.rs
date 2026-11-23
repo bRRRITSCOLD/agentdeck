@@ -28,10 +28,7 @@ mod list {
         let daemon = TestDaemon::start_with_github(dirs, &github.url("/graphql")).await;
         daemon.client.prs_sync().send().await.expect("sync");
         let web = (daemon.client.workspace_create())
-            .body(NewWorkspace {
-                name: "web".into(),
-                dir: None,
-            })
+            .body(NewWorkspace { name: "web".into() })
             .send()
             .await
             .expect("create a workspace")

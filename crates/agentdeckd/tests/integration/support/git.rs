@@ -1,4 +1,4 @@
-//! Temp git repos for the dirty report. Commits use a fixed identity, so the tests don't
+//! Temp git repos. Commits use a fixed identity, so the tests don't
 //! depend on the machine's git config.
 
 use std::path::Path;
@@ -37,25 +37,4 @@ pub fn init_with_commit(dir: &Path) {
     std::fs::write(dir.join("README.md"), "hello\n").expect("writing a file");
     git(dir, &["add", "README.md"]);
     git(dir, &["commit", "--quiet", "-m", "first"]);
-}
-
-/// A bare repo at `remote` and a clone of it at `dir` with one commit pushed to `main`.
-pub fn clone_with_pushed_commit(remote: &Path, dir: &Path) {
-    std::fs::create_dir_all(remote).expect("creating the remote dir");
-    git(remote, &["init", "--quiet", "--bare"]);
-    let parent = dir.parent().expect("the clone has a parent");
-    std::fs::create_dir_all(parent).expect("creating the clone's parent");
-    git(
-        parent,
-        &[
-            "clone",
-            "--quiet",
-            remote.to_str().expect("a UTF-8 path"),
-            dir.to_str().expect("a UTF-8 path"),
-        ],
-    );
-    std::fs::write(dir.join("README.md"), "hello\n").expect("writing a file");
-    git(dir, &["add", "README.md"]);
-    git(dir, &["commit", "--quiet", "-m", "first"]);
-    git(dir, &["push", "--quiet", "origin", "main"]);
 }

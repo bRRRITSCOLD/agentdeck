@@ -112,6 +112,11 @@ impl TestDaemon {
         self.root().join("run/agentdeck")
     }
 
+    /// The daemon's `$HOME`.
+    pub fn home(&self) -> PathBuf {
+        self.root().join("home")
+    }
+
     /// `$XDG_DATA_HOME/agentdeck`.
     pub fn data_dir(&self) -> PathBuf {
         self.root().join("data/agentdeck")
@@ -122,7 +127,7 @@ impl TestDaemon {
         self.root().join("state/agentdeck")
     }
 
-    /// A fresh directory under the temp root, for attaching as a workspace dir.
+    /// A fresh directory under the temp root, for panes to start in.
     pub fn new_dir(&self, name: &str) -> PathBuf {
         let dir = self.root().join("dirs").join(name);
         std::fs::create_dir_all(&dir).expect("creating a dir");

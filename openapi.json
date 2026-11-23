@@ -1,16 +1,6 @@
 {
   "components": {
     "responses": {
-      "DeleteWorkspaceError": {
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/DeleteWorkspaceError"
-            }
-          }
-        },
-        "description": "DeleteWorkspaceError"
-      },
       "Error": {
         "content": {
           "application/json": {
@@ -82,33 +72,6 @@
         ],
         "type": "string"
       },
-      "DeleteWorkspaceError": {
-        "description": "`DELETE /v1/workspaces/{id}`'s error: dropshot's error body, plus the dirty report when `error_code` is `dirty` (409).",
-        "properties": {
-          "dirty": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/DirtyReport"
-              }
-            ],
-            "description": "What deleting would lose; set only with `error_code` `dirty`.",
-            "nullable": true
-          },
-          "error_code": {
-            "description": "A machine-readable code: `dirty`, `not_found`, `unauthorized`, …",
-            "nullable": true,
-            "type": "string"
-          },
-          "message": {
-            "description": "What went wrong.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "message"
-        ],
-        "type": "object"
-      },
       "DeviceSignIn": {
         "description": "`POST /v1/github/device`: the code the user enters on GitHub to sign in.",
         "properties": {
@@ -129,51 +92,6 @@
           "expires_at",
           "user_code",
           "verification_uri"
-        ],
-        "type": "object"
-      },
-      "DirtyRepo": {
-        "description": "One dirty git repo.",
-        "properties": {
-          "path": {
-            "description": "The repo's absolute path.",
-            "type": "string"
-          },
-          "uncommitted": {
-            "description": "Changed, staged and untracked files, as `git status --porcelain` prints them.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "unpushed_branches": {
-            "description": "Local branches with commits that are on no remote, by name.",
-            "items": {
-              "$ref": "#/components/schemas/UnpushedBranch"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "path",
-          "uncommitted",
-          "unpushed_branches"
-        ],
-        "type": "object"
-      },
-      "DirtyReport": {
-        "description": "The git repos under a workspace's dir that hold work not on any remote.",
-        "properties": {
-          "repos": {
-            "description": "Only the dirty repos; an empty list means deleting loses nothing git knows about.",
-            "items": {
-              "$ref": "#/components/schemas/DirtyRepo"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "repos"
         ],
         "type": "object"
       },
@@ -527,11 +445,6 @@
       "NewWorkspace": {
         "description": "`POST /v1/workspaces`.",
         "properties": {
-          "dir": {
-            "description": "An existing absolute directory to attach. Without it, agentdeck creates a scratch dir.",
-            "nullable": true,
-            "type": "string"
-          },
           "name": {
             "description": "The display name.",
             "type": "string"
@@ -1410,28 +1323,8 @@
           }
         ]
       },
-      "UnpushedBranch": {
-        "description": "A local branch holding commits that are on no remote.",
-        "properties": {
-          "commits": {
-            "description": "How many of its commits are on no remote branch, whether or not it has an upstream.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "name": {
-            "description": "The branch's short name, e.g. `feat/tabs`.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "commits",
-          "name"
-        ],
-        "type": "object"
-      },
       "Workspace": {
-        "description": "A free-form unit of work with its own directory.",
+        "description": "A long-lived area of work: a name, the Repositories it links and its Panes. It has no folder: its Panes work wherever they go.",
         "properties": {
           "archived_at": {
             "description": "When the workspace was archived; archived workspaces keep their data.",
@@ -1441,14 +1334,6 @@
           "created_at": {
             "description": "When the workspace was created.",
             "type": "string"
-          },
-          "dir": {
-            "description": "The absolute path of the workspace's directory.",
-            "type": "string"
-          },
-          "dir_owned": {
-            "description": "True when agentdeck created `dir` as a scratch dir, so deleting the workspace removes it.",
-            "type": "boolean"
           },
           "id": {
             "allOf": [
@@ -1467,14 +1352,12 @@
             "type": "string"
           },
           "slug": {
-            "description": "Unique, derived from the name at creation; names a scratch dir.",
+            "description": "Unique, derived from the name at creation; the CLI finds a workspace by it.",
             "type": "string"
           }
         },
         "required": [
           "created_at",
-          "dir",
-          "dir_owned",
           "id",
           "muted",
           "name",
@@ -1495,7 +1378,7 @@
             "type": "boolean"
           },
           "name": {
-            "description": "A new display name. The slug and the dir stay as they are.",
+            "description": "A new display name. The slug stays as it is.",
             "nullable": true,
             "type": "string"
           }
@@ -2389,12 +2272,12 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Creates a workspace on an existing dir, or on a new scratch dir when `dir` is absent."
+        "summary": "Creates a workspace. It has no folder, so nothing is made on disk."
       }
     },
     "/v1/workspaces/{id}": {
       "delete": {
-        "description": "Repository nothing else names, with a `repository` change for each Repository it linked. Without `force`, a dir holding uncommitted or unpushed work is a 409 `dirty` carrying the dirty report.",
+        "description": "with them each Repository nothing else names, with a `repository` change for each Repository it linked. It deletes no folder: a workspace has none.",
         "operationId": "workspace_delete",
         "parameters": [
           {
@@ -2405,15 +2288,6 @@
             "schema": {
               "$ref": "#/components/schemas/WorkspaceId"
             }
-          },
-          {
-            "description": "Delete even when the dir holds uncommitted or unpushed work.",
-            "in": "query",
-            "name": "force",
-            "schema": {
-              "nullable": true,
-              "type": "boolean"
-            }
           }
         ],
         "responses": {
@@ -2421,13 +2295,13 @@
             "description": "successful deletion"
           },
           "4XX": {
-            "$ref": "#/components/responses/DeleteWorkspaceError"
+            "$ref": "#/components/responses/Error"
           },
           "5XX": {
-            "$ref": "#/components/responses/DeleteWorkspaceError"
+            "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Deletes a workspace, and its dir when agentdeck created it. Its Links go, and with them each"
+        "summary": "Deletes a workspace with its tabs and panes, stopping their processes. Its Links go, and"
       },
       "get": {
         "operationId": "workspace_get",
@@ -2539,42 +2413,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Archives a workspace; its dir is kept. Refused (409 `panes_running`) while"
-      }
-    },
-    "/v1/workspaces/{id}/dirty": {
-      "get": {
-        "operationId": "workspace_dirty",
-        "parameters": [
-          {
-            "description": "The entity's id.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "$ref": "#/components/schemas/WorkspaceId"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DirtyReport"
-                }
-              }
-            },
-            "description": "successful operation"
-          },
-          "4XX": {
-            "$ref": "#/components/responses/Error"
-          },
-          "5XX": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "Each git repo under the workspace's dir with uncommitted files or unpushed branches."
+        "summary": "Archives a workspace; its panes and Links are kept. Refused (409 `panes_running`) while"
       }
     },
     "/v1/workspaces/{id}/links": {

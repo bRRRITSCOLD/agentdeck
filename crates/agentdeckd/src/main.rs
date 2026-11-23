@@ -12,7 +12,6 @@ mod config;
 mod daemon;
 mod db;
 mod events;
-mod git;
 mod github_auth;
 mod instance;
 mod logging;

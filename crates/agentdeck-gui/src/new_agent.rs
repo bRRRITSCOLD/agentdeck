@@ -1,6 +1,7 @@
 //! The new agent dialog (spec §6, §11), Penpot "Screens" → "New agent": an agent CLI and the
-//! folder it runs in (the focused pane's current folder, the workspace root or a repo inside
-//! it). The agent starts with no prompt. Enter starts, as Start agent does, unless a select
+//! folder it runs in: where a new pane starts (the focused pane's current folder, else `~`),
+//! another pane's folder, or `~`. A workspace has no folder of its own to offer. The agent
+//! starts with no prompt. Enter starts, as Start agent does, unless a select
 //! has it.
 //!
 //! The top bar's "New agent" button asks the window for it with [`NewAgent`]. Once the
@@ -26,7 +27,6 @@ use gpui::{
 
 use crate::api::Api;
 use crate::keymap::{self, ConfirmDialog};
-use crate::top_bar::shown_dir;
 use crate::workspace::failed;
 
 actions!(
@@ -69,56 +69,55 @@ pub fn agent_name(agent: Agent) -> &'static str {
         .map_or("Agent", |(_, name)| name)
 }
 
+/// The folder field's description.
+pub const FOLDER_HINT: &str =
+    "Where the focused pane is, another pane's folder, or your home folder.";
+
 /// One folder to run in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Folder {
-    /// What the picker shows.
+    /// What the picker shows: its path, with `~` for the home folder.
     pub label: SharedString,
-    /// The absolute dir.
+    /// The absolute folder.
     pub path: SharedString,
-    /// Whether it is the focused pane's folder, outside the root and its repos.
-    pub here: bool,
 }
 
-/// The folders under `root` to offer: `here`, where a new pane starts (spec §11), first when
-/// it is neither the root nor one of its repos, shown with `~` for `home`; then the root, then
-/// each repo in `repos` (names of `root`'s child dirs that hold a git repo) in name order.
-pub fn folders(root: &str, mut repos: Vec<String>, here: &str, home: Option<&Path>) -> Vec<Folder> {
-    repos.sort();
-    let root_path = Path::new(root);
-    let offered: Vec<Folder> = std::iter::once(Folder {
-        label: "Workspace root".into(),
-        path: root.to_owned().into(),
-        here: false,
-    })
-    .chain(repos.into_iter().map(|name| Folder {
-        path: root_path.join(&name).display().to_string().into(),
-        label: name.into(),
-        here: false,
-    }))
-    .collect();
-    let elsewhere = !offered
-        .iter()
-        .any(|folder| Path::new(folder.path.as_ref()) == Path::new(here));
-    let here = elsewhere.then(|| Folder {
-        label: shown_dir(here, home).into(),
-        path: here.to_owned().into(),
-        here: true,
-    });
-    here.into_iter().chain(offered).collect()
+/// `folder` as the dialog shows it: under `home`, with `~` for `home`.
+pub fn shown_folder(folder: &str, home: Option<&Path>) -> String {
+    let under_home = home.and_then(|home| Path::new(folder).strip_prefix(home).ok());
+    match under_home {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => folder.to_owned(),
+    }
 }
 
-/// The names of `root`'s child dirs that hold a git repo (a `.git` dir or file); none if it
-/// can't be read.
-pub fn repos_in(root: &str) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter(|entry| entry.path().join(".git").exists())
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .collect()
+/// The user's home folder, `~`: where a new pane starts when its workspace has no pane to
+/// start beside (spec §11); `/` when there is none.
+pub fn home_folder() -> String {
+    std::env::home_dir().map_or_else(|| "/".to_owned(), |home| home.display().to_string())
+}
+
+/// The folders to offer, each once: `here`, where a new pane starts (spec §11), first; then
+/// each folder in `panes` (the workspace's panes' current folders), in order; then `home`.
+pub fn folders(here: &str, panes: &[String], home: Option<&Path>) -> Vec<Folder> {
+    let home_folder = home.map(|home| home.display().to_string());
+    let mut offered: Vec<Folder> = Vec::new();
+    let candidates = (std::iter::once(here))
+        .chain(panes.iter().map(String::as_str))
+        .chain(home_folder.as_deref());
+    for path in candidates {
+        if !offered
+            .iter()
+            .any(|f| Path::new(f.path.as_ref()) == Path::new(path))
+        {
+            offered.push(Folder {
+                label: shown_folder(path, home).into(),
+                path: path.to_owned().into(),
+            });
+        }
+    }
+    offered
 }
 
 /// The workspace the dialog is open on.
@@ -245,15 +244,6 @@ impl NewAgentDialog {
     }
 }
 
-/// The folder field's description: what `folders` holds.
-fn folder_hint(folders: &[Folder]) -> &'static str {
-    if folders.iter().any(|folder| folder.here) {
-        "The focused pane's folder, the workspace root or a repo inside it."
-    } else {
-        "The workspace root or a repo inside it."
-    }
-}
-
 /// `err`; an agent that can't start as the daemon's message alone, which says what to do
 /// when it isn't on the daemon's `PATH`.
 fn refusal(err: anyhow::Error) -> anyhow::Error {
@@ -312,7 +302,7 @@ impl Render for NewAgentDialog {
                             .child(Self::field(
                                 "Folder",
                                 folder_select,
-                                Some(folder_hint(&self.folders).to_owned()),
+                                Some(FOLDER_HINT.to_owned()),
                             )),
                     )
                     .footer(
@@ -360,7 +350,8 @@ mod tests {
         _launched: gpui::Subscription,
     }
 
-    /// A dialog opened on workspace 1 (`/w/tabs`, with repo `ts-packages`).
+    /// A dialog opened on workspace 1, its focused pane in `/w/tabs`, another in
+    /// `/w/tabs/ts-packages`.
     fn open(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
         cx.update(brrritscold_core_gpui::init);
         cx.update(crate::keymap::init);
@@ -390,7 +381,7 @@ mod tests {
             dialog.update(cx, |d, cx| {
                 d.open(
                     target,
-                    folders("/w/tabs", vec!["ts-packages".into()], "/w/tabs", None),
+                    folders("/w/tabs", &["/w/tabs/ts-packages".into()], None),
                     window,
                     cx,
                 );
@@ -423,7 +414,7 @@ mod tests {
         use super::*;
 
         #[gpui::test]
-        fn should_start_claude_in_the_workspace_root(cx: &mut TestAppContext) {
+        fn should_start_claude_where_a_new_pane_starts(cx: &mut TestAppContext) {
             let (harness, cx) = open(cx);
 
             start(&harness, cx);
@@ -513,46 +504,99 @@ mod tests {
             offered.iter().map(|f| f.path.to_string()).collect()
         }
 
-        #[test]
-        fn should_offer_the_root_first_then_its_repos_by_name() {
-            let repos = vec!["ts-packages".into(), "agentdeck".into()];
+        fn labels(offered: &[Folder]) -> Vec<String> {
+            offered.iter().map(|f| f.label.to_string()).collect()
+        }
 
-            let offered = folders("/w/tabs", repos, "/w/tabs", None);
+        fn home() -> Option<&'static Path> {
+            Some(Path::new("/home/ada"))
+        }
+
+        #[test]
+        fn should_offer_where_a_new_pane_starts_then_the_other_panes_folders_then_home() {
+            let panes = ["/srv/web".into(), "/home/ada/Code/api".into()];
+
+            let offered = folders("/home/ada/Code/agentdeck", &panes, home());
 
             assert_eq!(
                 paths(&offered),
-                ["/w/tabs", "/w/tabs/agentdeck", "/w/tabs/ts-packages"]
+                [
+                    "/home/ada/Code/agentdeck",
+                    "/srv/web",
+                    "/home/ada/Code/api",
+                    "/home/ada"
+                ]
             );
-            assert_eq!(offered[0].label, "Workspace root");
-            assert_eq!(offered[2].label, "ts-packages");
             assert_eq!(
-                folder_hint(&offered),
-                "The workspace root or a repo inside it."
+                labels(&offered),
+                ["~/Code/agentdeck", "/srv/web", "~/Code/api", "~"]
             );
         }
 
         #[test]
-        fn should_offer_the_focused_panes_folder_first_when_it_is_elsewhere() {
-            let home = Path::new("/home/me");
+        fn should_offer_each_folder_once() {
+            let panes = [
+                "/srv/web".into(),
+                "/home/ada".into(),
+                "/srv/web".into(),
+                "/srv/web/".into(),
+            ];
 
-            let offered = folders("/w/tabs", vec!["web".into()], "/home/me/notes", Some(home));
+            let offered = folders("/srv/web", &panes, home());
 
-            assert_eq!(
-                paths(&offered),
-                ["/home/me/notes", "/w/tabs", "/w/tabs/web"]
-            );
-            assert_eq!(offered[0].label, "~/notes");
-            assert_eq!(
-                folder_hint(&offered),
-                "The focused pane's folder, the workspace root or a repo inside it."
-            );
+            assert_eq!(paths(&offered), ["/srv/web", "/home/ada"]);
         }
 
         #[test]
-        fn should_not_offer_a_repo_twice_when_the_focused_pane_is_in_it() {
-            let offered = folders("/w/tabs", vec!["web".into()], "/w/tabs/web", None);
+        fn should_offer_only_home_in_a_workspace_with_no_panes() {
+            let offered = folders("/home/ada", &[], home());
 
-            assert_eq!(paths(&offered), ["/w/tabs", "/w/tabs/web"]);
+            assert_eq!(paths(&offered), ["/home/ada"]);
+            assert_eq!(labels(&offered), ["~"]);
+        }
+
+        #[test]
+        fn should_offer_no_home_when_it_is_unknown() {
+            let offered = folders("/srv/web", &[], None);
+
+            assert_eq!(paths(&offered), ["/srv/web"]);
+        }
+
+        #[test]
+        fn should_say_where_its_folders_come_from() {
+            assert_eq!(
+                FOLDER_HINT,
+                "Where the focused pane is, another pane's folder, or your home folder."
+            );
+        }
+    }
+
+    mod shown_folder {
+        use super::*;
+
+        fn home() -> Option<&'static Path> {
+            Some(Path::new("/home/ada"))
+        }
+
+        #[test]
+        fn should_put_a_tilde_for_the_home_folder() {
+            assert_eq!(shown_folder("/home/ada/Code/x", home()), "~/Code/x");
+            assert_eq!(shown_folder("/home/ada", home()), "~");
+        }
+
+        #[test]
+        fn should_keep_a_folder_outside_home_as_it_is() {
+            assert_eq!(shown_folder("/srv/x", home()), "/srv/x");
+        }
+
+        #[test]
+        fn should_not_abbreviate_a_sibling_that_shares_homes_prefix() {
+            assert_eq!(shown_folder("/home/adam/x", home()), "/home/adam/x");
+        }
+
+        #[test]
+        fn should_keep_the_folder_when_home_is_unknown() {
+            assert_eq!(shown_folder("/home/ada/x", None), "/home/ada/x");
         }
     }
 }

@@ -17,19 +17,16 @@ pub struct Health {
     pub uptime_secs: u64,
 }
 
-/// A free-form unit of work with its own directory.
+/// A long-lived area of work: a name, the Repositories it links and its Panes. It has no
+/// folder: its Panes work wherever they go.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Workspace {
     /// The workspace's id.
     pub id: WorkspaceId,
-    /// Unique, derived from the name at creation; names a scratch dir.
+    /// Unique, derived from the name at creation; the CLI finds a workspace by it.
     pub slug: String,
     /// The display name.
     pub name: String,
-    /// The absolute path of the workspace's directory.
-    pub dir: String,
-    /// True when agentdeck created `dir` as a scratch dir, so deleting the workspace removes it.
-    pub dir_owned: bool,
     /// Notifications are muted.
     pub muted: bool,
     /// When the workspace was archived; archived workspaces keep their data.
@@ -43,44 +40,15 @@ pub struct Workspace {
 pub struct NewWorkspace {
     /// The display name.
     pub name: String,
-    /// An existing absolute directory to attach. Without it, agentdeck creates a scratch dir.
-    pub dir: Option<String>,
 }
 
 /// `PATCH /v1/workspaces/{id}`: the fields to change.
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct WorkspacePatch {
-    /// A new display name. The slug and the dir stay as they are.
+    /// A new display name. The slug stays as it is.
     pub name: Option<String>,
     /// Mute or unmute notifications.
     pub muted: Option<bool>,
-}
-
-/// The git repos under a workspace's dir that hold work not on any remote.
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct DirtyReport {
-    /// Only the dirty repos; an empty list means deleting loses nothing git knows about.
-    pub repos: Vec<DirtyRepo>,
-}
-
-/// One dirty git repo.
-#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct DirtyRepo {
-    /// The repo's absolute path.
-    pub path: String,
-    /// Changed, staged and untracked files, as `git status --porcelain` prints them.
-    pub uncommitted: Vec<String>,
-    /// Local branches with commits that are on no remote, by name.
-    pub unpushed_branches: Vec<UnpushedBranch>,
-}
-
-/// A local branch holding commits that are on no remote.
-#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct UnpushedBranch {
-    /// The branch's short name, e.g. `feat/tabs`.
-    pub name: String,
-    /// How many of its commits are on no remote branch, whether or not it has an upstream.
-    pub commits: u32,
 }
 
 /// A tab in a workspace, holding a split tree of panes.

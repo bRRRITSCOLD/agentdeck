@@ -15,7 +15,6 @@ mod workspaces;
 mod ws;
 
 use std::any::Any;
-use std::path::PathBuf;
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -46,8 +45,6 @@ pub struct ApiContext {
     pub token: String,
     /// When the daemon started, for `/v1/health`.
     pub started: Instant,
-    /// Where scratch workspace dirs are created.
-    pub scratch_root: PathBuf,
     /// PR sync, for `/v1/prs`.
     pub prs: PrSync,
     /// The GitHub credentials, for `/v1/github`, and for reading Repositories from GitHub.
@@ -73,7 +70,6 @@ pub fn api() -> ApiDescription<ApiContext> {
         api.register(workspaces::workspace_update),
         api.register(workspaces::workspace_archive),
         api.register(workspaces::workspace_unarchive),
-        api.register(workspaces::workspace_dirty),
         api.register(workspaces::workspace_delete),
         api.register(tabs::tab_list),
         api.register(tabs::tab_create),
@@ -211,9 +207,7 @@ impl From<DbError> for HttpError {
             DbError::Conflict { code, .. } => {
                 client_error(ClientErrorStatusCode::CONFLICT, code, message)
             }
-            DbError::Sql(_) | DbError::Io(_) | DbError::Closed => {
-                HttpError::for_internal_error(message)
-            }
+            DbError::Sql(_) | DbError::Closed => HttpError::for_internal_error(message),
         }
     }
 }
@@ -237,7 +231,7 @@ mod tests {
         /// `openapi.json`'s fingerprint when [`agentdeck_core::API_VERSION`] was last set,
         /// and that version. Clients tell an older daemon by its API version, so a route or
         /// field added without a bump would go unnoticed: they would call it and get a 404.
-        const FINGERPRINT_AT_API_VERSION: (u64, u32) = (0xc50e_9a03_29ee_a360, 22);
+        const FINGERPRINT_AT_API_VERSION: (u64, u32) = (0x2825_f12f_d70d_8c7e, 23);
 
         /// FNV-1a: stable across Rust releases, unlike `DefaultHasher`.
         fn fingerprint(text: &str) -> u64 {

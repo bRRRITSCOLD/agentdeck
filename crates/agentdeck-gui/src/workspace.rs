@@ -15,7 +15,7 @@
 //!
 //! A new pane starts where the user is ([`WorkspaceView::new_pane_folder`], spec §11): a split
 //! in the current folder of the pane it splits, a new tab or agent in the focused pane's, or
-//! the last pane here that had the keyboard, else in the workspace's dir.
+//! the last pane here that had the keyboard, else in `~`: a workspace has no folder.
 //!
 //! An archived workspace shows only its top bar over a note saying so: it reads no tabs and
 //! attaches no terminals. The window opens a fresh view when that changes.
@@ -48,7 +48,7 @@ use crate::keymap::{
     self, ClosePane, NewTab, NextPane, NextTab, PreviousPane, PreviousTab, SelectTab, SplitDown,
     SplitRight,
 };
-use crate::new_agent::agent_name;
+use crate::new_agent::{agent_name, home_folder};
 use crate::notice::Notice;
 use crate::pane::{PaneRequest, PaneView};
 use crate::rereads::Rereads;
@@ -181,18 +181,26 @@ impl WorkspaceView {
     }
 
     /// Where a new pane here starts (spec §11): the current folder of the pane with the
-    /// keyboard, else of the pane here that last had it; the workspace's dir when neither is
-    /// still here.
+    /// keyboard, else of the pane here that last had it; `~` when neither is still here.
     pub fn new_pane_folder(&self, window: &Window, cx: &App) -> String {
         let focused = (self.shown().into_iter())
             .find(|pane| pane.focus_handle(cx).contains_focused(window, cx))
             .map(|pane| pane.read(cx).id());
         (focused.or(self.last_focused))
             .and_then(|id| self.read.panes.iter().find(|pane| pane.id == id))
-            .map_or_else(
-                || self.top_bar.dir().to_string(),
-                |pane| pane.folder.clone(),
-            )
+            .map_or_else(home_folder, |pane| pane.folder.clone())
+    }
+
+    /// The current folders of the panes here, as last read, each once, in tab and layout
+    /// order: what New agent offers beside where a new pane starts.
+    pub fn pane_folders(&self) -> Vec<String> {
+        let mut folders: Vec<String> = Vec::new();
+        for pane in &self.read.panes {
+            if !folders.contains(&pane.folder) {
+                folders.push(pane.folder.clone());
+            }
+        }
+        folders
     }
 
     /// Opens a tab with a shell where a new pane starts ([`WorkspaceView::new_pane_folder`]),
@@ -825,7 +833,7 @@ mod tests {
             panes: Vec<Pane>,
             cx: &mut TestAppContext,
         ) -> (Harness, &mut VisualTestContext) {
-            Harness::open_with(TopBar::new("agentdeck", "/w/agentdeck"), tabs, panes, cx)
+            Harness::open_with(TopBar::new("agentdeck"), tabs, panes, cx)
         }
 
         /// [`Harness::open`], headed by `top_bar`.
@@ -977,7 +985,7 @@ mod tests {
         use super::*;
 
         fn archived(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
-            let top_bar = TopBar::new("old", "/w/old").archived(true);
+            let top_bar = TopBar::new("old").archived(true);
             let tabs = vec![tab(1, id(1), 0, Some(id(11)))];
             let (harness, cx) = Harness::open_with(top_bar, tabs, vec![shell_pane(11, id(1))], cx);
             harness.draw(cx);
@@ -1497,14 +1505,21 @@ mod tests {
         }
 
         #[gpui::test]
-        fn should_open_one_in_the_workspaces_dir_when_the_workspace_has_none(
-            cx: &mut TestAppContext,
-        ) {
+        fn should_open_one_in_home_when_the_workspace_has_none(cx: &mut TestAppContext) {
             let (harness, cx) = Harness::open(vec![], vec![], cx);
 
             assert_eq!(harness.selected(cx), Some(id(101)));
             assert_eq!(harness.shown(cx), [id(102)]);
-            assert_eq!(started_in(&harness, cx), "/w/agentdeck");
+            assert_eq!(started_in(&harness, cx), home_folder());
+        }
+
+        #[gpui::test]
+        fn should_know_each_panes_folder_once_in_layout_order(cx: &mut TestAppContext) {
+            let (harness, cx) = two_panes(cx);
+
+            let folders = harness.view.read_with(cx, |view, _| view.pane_folders());
+
+            assert_eq!(folders, ["/w/web", "/srv/notes"]);
         }
 
         #[gpui::test]

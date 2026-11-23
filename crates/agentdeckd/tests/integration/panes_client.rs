@@ -13,10 +13,7 @@ use crate::support::TestDaemon;
 async fn workspace(client: &Client) -> Workspace {
     client
         .workspace_create()
-        .body(NewWorkspace {
-            name: "ws".into(),
-            dir: None,
-        })
+        .body(NewWorkspace { name: "ws".into() })
         .send()
         .await
         .expect("create a workspace")
@@ -52,10 +49,16 @@ async fn named_panes(client: &Client, workspace: &Workspace) -> Vec<(PaneId, boo
     named
 }
 
-/// A workspace with one shell tab: the tab and its pane.
-async fn shell_tab(client: &Client) -> (Workspace, TabId, PaneId) {
+/// The daemon's `$HOME`, where the GUI starts the first pane of a workspace with none.
+fn home(daemon: &TestDaemon) -> String {
+    daemon.home().to_str().expect("a UTF-8 path").to_owned()
+}
+
+/// A workspace with one shell tab, in `$HOME`: the tab and its pane.
+async fn shell_tab(daemon: &TestDaemon) -> (Workspace, TabId, PaneId) {
+    let client = &daemon.client;
     let ws = workspace(client).await;
-    let tab = new_shell_tab(client, ws.id, ws.dir.clone())
+    let tab = new_shell_tab(client, ws.id, home(daemon))
         .await
         .expect("open a shell tab");
     let Some(Layout::Pane { pane }) = layout(client, &ws, tab).await else {
@@ -76,16 +79,17 @@ mod new_shell_tab {
     use super::*;
 
     #[tokio::test]
-    async fn should_open_a_tab_whose_layout_is_one_shell_in_the_dir() {
+    async fn should_open_the_first_tab_of_a_workspace_with_no_panes_in_home() {
         let daemon = TestDaemon::start().await;
 
-        let (ws, _, pane) = shell_tab(&daemon.client).await;
+        let (_, _, pane) = shell_tab(&daemon).await;
 
         let pane = pane_if_any(&daemon.client, pane)
             .await
             .expect("read the pane")
             .expect("the pane exists");
-        assert_eq!((pane.kind, pane.cwd), (PaneKind::Shell, ws.dir));
+        assert_eq!(pane.kind, PaneKind::Shell);
+        assert_eq!((pane.cwd, pane.folder), (home(&daemon), home(&daemon)));
     }
 
     #[tokio::test]
@@ -111,13 +115,13 @@ mod split_pane {
     #[tokio::test]
     async fn should_put_a_new_shell_on_the_second_side() {
         let daemon = TestDaemon::start().await;
-        let (ws, tab, first) = shell_tab(&daemon.client).await;
+        let (ws, tab, first) = shell_tab(&daemon).await;
 
         let new = split_pane(
             &daemon.client,
             at(&ws, tab, first),
             SplitDirection::Vertical,
-            ws.dir.clone(),
+            home(&daemon),
         )
         .await
         .expect("split");
@@ -142,14 +146,14 @@ mod split_pane {
     #[tokio::test]
     async fn should_keep_the_layout_when_the_pane_is_no_longer_in_it() {
         let daemon = TestDaemon::start().await;
-        let (ws, tab, first) = shell_tab(&daemon.client).await;
+        let (ws, tab, first) = shell_tab(&daemon).await;
         let gone = PaneId::from(uuid::Uuid::now_v7());
 
         let err = split_pane(
             &daemon.client,
             at(&ws, tab, gone),
             SplitDirection::Horizontal,
-            ws.dir.clone(),
+            home(&daemon),
         )
         .await
         .unwrap_err();
@@ -168,12 +172,12 @@ mod close_pane {
     #[tokio::test]
     async fn should_give_the_sibling_the_space_and_delete_the_pane() {
         let daemon = TestDaemon::start().await;
-        let (ws, tab, first) = shell_tab(&daemon.client).await;
+        let (ws, tab, first) = shell_tab(&daemon).await;
         let second = split_pane(
             &daemon.client,
             at(&ws, tab, first),
             SplitDirection::Horizontal,
-            ws.dir.clone(),
+            home(&daemon),
         )
         .await
         .expect("split");
@@ -194,12 +198,12 @@ mod close_pane {
     #[tokio::test]
     async fn should_be_done_when_the_pane_is_already_closed() {
         let daemon = TestDaemon::start().await;
-        let (ws, tab, first) = shell_tab(&daemon.client).await;
+        let (ws, tab, first) = shell_tab(&daemon).await;
         let second = split_pane(
             &daemon.client,
             at(&ws, tab, first),
             SplitDirection::Horizontal,
-            ws.dir.clone(),
+            home(&daemon),
         )
         .await
         .expect("split");
@@ -217,7 +221,7 @@ mod close_pane {
     #[tokio::test]
     async fn should_be_done_when_the_tab_went_with_the_last_pane() {
         let daemon = TestDaemon::start().await;
-        let (ws, tab, pane) = shell_tab(&daemon.client).await;
+        let (ws, tab, pane) = shell_tab(&daemon).await;
         close_pane(&daemon.client, at(&ws, tab, pane))
             .await
             .expect("close");
@@ -230,7 +234,7 @@ mod close_pane {
     #[tokio::test]
     async fn should_delete_the_tab_with_its_last_pane() {
         let daemon = TestDaemon::start().await;
-        let (ws, tab, pane) = shell_tab(&daemon.client).await;
+        let (ws, tab, pane) = shell_tab(&daemon).await;
 
         close_pane(&daemon.client, at(&ws, tab, pane))
             .await
@@ -267,7 +271,7 @@ mod respawn {
     #[tokio::test]
     async fn should_start_an_exited_pane_again_as_a_shell() {
         let daemon = TestDaemon::start().await;
-        let (ws, tab, _) = shell_tab(&daemon.client).await;
+        let (_, tab, _) = shell_tab(&daemon).await;
         let done = daemon
             .client
             .pane_create()
@@ -276,7 +280,7 @@ mod respawn {
                 kind: PaneKind::Shell,
                 agent: None,
                 argv: Some(vec!["true".into()]),
-                cwd: ws.dir.clone(),
+                cwd: home(&daemon),
             })
             .send()
             .await
@@ -295,7 +299,7 @@ mod respawn {
     #[tokio::test]
     async fn should_carry_the_daemons_refusal() {
         let daemon = TestDaemon::start().await;
-        let (_, _, pane) = shell_tab(&daemon.client).await;
+        let (_, _, pane) = shell_tab(&daemon).await;
 
         let err = respawn(&daemon.client, pane, PaneRun::Shell)
             .await

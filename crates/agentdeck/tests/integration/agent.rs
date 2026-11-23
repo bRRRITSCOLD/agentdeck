@@ -4,7 +4,8 @@
 use agentdeck_core::Layout;
 
 use crate::support::{
-    TestEnv, agent_argv, agent_typed, eventually, shell_pane, shell_pane_in, short, tabs, text,
+    TestEnv, agent_argv, agent_typed, eventually, folder, shell_pane, shell_pane_in, short, tabs,
+    text,
 };
 
 mod agent_ls {
@@ -48,14 +49,18 @@ mod agent_ls {
             .unwrap_or_else(|| panic!("no row for the shell: {stdout}"));
         let cells: Vec<&str> = shell_row.split_whitespace().collect();
         assert_eq!(cells[1..4], ["api", "build", "shell"], "{stdout}");
-        assert_eq!(cells[5..], [text(&api, "dir")], "{stdout}");
+        assert_eq!(
+            cells[5..],
+            [folder(&env, &api).to_str().unwrap()],
+            "{stdout}"
+        );
     }
 
     #[test]
     fn should_print_the_folder_a_pane_moved_to() {
         let env = TestEnv::new();
         let ws = env.workspace("web");
-        let app = std::path::Path::new(text(&ws, "dir")).join("app");
+        let app = folder(&env, &ws).join("app");
         std::fs::create_dir(&app).unwrap();
         let pane = shell_pane(&env, &ws, "cd app && exec sleep 60");
 
@@ -186,7 +191,7 @@ mod agent_send {
             !env.ok(&["tail", &pane]).contains("hello"),
             "typed while busy"
         );
-        std::fs::write(std::path::Path::new(text(&ws, "dir")).join("go"), "").unwrap();
+        std::fs::write(folder(&env, &ws).join("go"), "").unwrap();
         eventually("the pane to echo the line once idle", || {
             env.ok(&["tail", &pane]).contains("got:hello").then_some(())
         });
@@ -432,12 +437,12 @@ mod agent_new {
     fn should_run_in_a_cwd_given_relative_to_the_shell() {
         let env = TestEnv::new();
         let ws = env.workspace("web");
-        let sub = std::path::Path::new(text(&ws, "dir")).join("app");
+        let sub = folder(&env, &ws).join("app");
         std::fs::create_dir(&sub).unwrap();
 
         let output = env
             .command()
-            .current_dir(text(&ws, "dir"))
+            .current_dir(folder(&env, &ws))
             .args(["agent", "new", "--ws", "web", "--cwd", "app", "--json"])
             .output()
             .expect("running agentdeck");

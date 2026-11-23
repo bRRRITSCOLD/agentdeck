@@ -2,7 +2,7 @@
 //! and on their state. Every wait polls a condition against a deadline; none sleeps a guess.
 
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use agentdeck_client::Client;
@@ -15,10 +15,13 @@ use super::TestDaemon;
 /// How long a pane gets to print or change state.
 pub const DEADLINE: Duration = Duration::from_secs(30);
 
-/// A workspace (attached to a fresh dir) and a tab in it, for panes to go in.
+/// A workspace and a tab in it, for panes to go in, and a fresh folder for them to start in:
+/// a workspace has none of its own.
 pub struct Place {
     pub workspace: Workspace,
     pub tab: Tab,
+    /// The folder its panes start in.
+    pub dir: PathBuf,
 }
 
 impl Place {
@@ -27,10 +30,7 @@ impl Place {
         let workspace = daemon
             .client
             .workspace_create()
-            .body(NewWorkspace {
-                name: "ws".into(),
-                dir: Some(dir.to_str().expect("a UTF-8 path").into()),
-            })
+            .body(NewWorkspace { name: "ws".into() })
             .send()
             .await
             .expect("create a workspace")
@@ -47,28 +47,37 @@ impl Place {
             .await
             .expect("create a tab")
             .into_inner();
-        Place { workspace, tab }
+        Place {
+            workspace,
+            tab,
+            dir,
+        }
     }
 
-    /// A shell pane running `argv` in the workspace's dir.
+    /// The folder its panes start in, as the API takes it.
+    pub fn folder(&self) -> String {
+        self.dir.to_str().expect("a UTF-8 path").to_owned()
+    }
+
+    /// A shell pane running `argv` in [`Place::dir`].
     pub fn new_pane(&self, argv: &[&str]) -> NewPane {
         NewPane {
             tab_id: self.tab.id,
             kind: PaneKind::Shell,
             agent: None,
             argv: Some(argv.iter().map(|arg| (*arg).to_owned()).collect()),
-            cwd: self.workspace.dir.clone(),
+            cwd: self.folder(),
         }
     }
 
-    /// An agent pane of `agent` in the workspace's dir.
+    /// An agent pane of `agent` in [`Place::dir`].
     pub fn new_agent(&self, agent: Agent) -> NewPane {
         NewPane {
             tab_id: self.tab.id,
             kind: PaneKind::Agent,
             agent: Some(agent),
             argv: None,
-            cwd: self.workspace.dir.clone(),
+            cwd: self.folder(),
         }
     }
 

@@ -1,50 +1,45 @@
-//! `agentdeck ws ls | new | rename | archive | mute | unmute | rm`.
+//! `agentdeck ws ls | new | rename | archive | mute | unmute | rm`. A workspace has no
+//! folder: none of them makes or removes one.
 
-use std::process::Command;
+use httpmock::MockServer;
+use serde_json::json;
 
-use crate::support::{TestEnv, text};
+use crate::support::github::mock_repo;
+use crate::support::{TestEnv, folder, shell_pane, text};
+
+const TOKEN: &str = "gho_test";
+const WIDGETS: &str = "acme/widgets";
+const GADGETS: &str = "acme/gadgets";
+
+/// A world whose `gh` is signed in, where GitHub shows `repos`, so they can be linked.
+fn showing(github: &MockServer, repos: &[&str]) -> TestEnv {
+    for repo in repos {
+        mock_repo(github, TOKEN, repo);
+    }
+    TestEnv::with_github(&github.url("/graphql"), TOKEN)
+}
 
 mod ws_new {
     use super::*;
 
     #[test]
-    fn should_attach_an_existing_dir_given_relative_to_the_cwd() {
+    fn should_create_a_workspace_with_no_folder() {
         let env = TestEnv::new();
-        env.new_dir("web");
 
-        let output = env
-            .command()
-            .current_dir(env.root().join("dirs"))
-            .args(["ws", "new", "Web app", "--dir", "web", "--json"])
-            .output()
-            .expect("running agentdeck");
+        let ws = env.json(&["ws", "new", "Web app"]);
 
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let ws: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(text(&ws, "name"), "Web app");
-        assert_eq!(
-            std::path::Path::new(text(&ws, "dir")),
-            env.root().join("dirs/web")
+        assert_eq!(text(&ws, "slug"), "web-app");
+        assert_eq!(ws.get("dir"), None, "{ws}");
+        assert_eq!(ws.get("dir_owned"), None, "{ws}");
+        assert!(
+            !env.root().join("data/agentdeck/workspaces").exists(),
+            "no scratch folder"
         );
-        assert_eq!(ws["dir_owned"], false);
     }
 
     #[test]
-    fn should_create_a_scratch_dir_without_one() {
-        let env = TestEnv::new();
-
-        let ws = env.json(&["ws", "new", "Scratch"]);
-
-        assert_eq!(ws["dir_owned"], true);
-        assert!(std::path::Path::new(text(&ws, "dir")).is_dir());
-    }
-
-    #[test]
-    fn should_print_the_id_slug_and_dir() {
+    fn should_print_the_id_and_slug() {
         let env = TestEnv::new();
 
         let stdout = env.ok(&["ws", "new", "Scratch"]);
@@ -52,13 +47,21 @@ mod ws_new {
         let ws = &env.json(&["ws", "ls"])[0];
         assert_eq!(
             stdout,
-            format!(
-                "{}  {}  {}\n",
-                text(ws, "id"),
-                text(ws, "slug"),
-                text(ws, "dir")
-            )
+            format!("{}  {}\n", text(ws, "id"), text(ws, "slug"))
         );
+    }
+
+    #[test]
+    fn should_take_no_dir_or_repo() {
+        let env = TestEnv::new();
+        let dir = env.new_dir("web");
+
+        for flag in [["--dir", dir.to_str().unwrap()], ["--repo", WIDGETS]] {
+            let stderr = env.fails(&["ws", "new", "web", flag[0], flag[1]]);
+
+            assert!(stderr.contains(flag[0]), "{stderr}");
+        }
+        assert_eq!(env.json(&["ws", "ls"]), json!([]));
     }
 }
 
@@ -66,17 +69,44 @@ mod ws_ls {
     use super::*;
 
     #[test]
-    fn should_list_workspaces_under_a_header() {
-        let env = TestEnv::new();
-        env.workspace("web");
-        env.workspace("api");
+    fn should_list_workspaces_with_their_repositories() {
+        let github = MockServer::start();
+        let env = showing(&github, &[WIDGETS, GADGETS]);
+        let web = env.workspace("web");
+        let api = env.workspace("api");
+        env.ok(&["repo", "link", WIDGETS, "--ws", "web"]);
+        env.ok(&["repo", "link", GADGETS, "--ws", "web"]);
 
         let stdout = env.ok(&["ws", "ls"]);
 
-        let lines: Vec<&str> = stdout.lines().collect();
-        assert!(lines[0].starts_with("ID"), "{stdout}");
-        assert_eq!(lines.len(), 3, "{stdout}");
-        assert!(stdout.contains("web") && stdout.contains("api"), "{stdout}");
+        let pad = " ".repeat(text(&web, "id").len() - 2);
+        assert_eq!(
+            stdout,
+            format!(
+                "ID{pad}  SLUG  NAME  REPOSITORIES\n\
+                 {}  web   web   acme/gadgets, acme/widgets\n\
+                 {}  api   api   -\n",
+                text(&web, "id"),
+                text(&api, "id"),
+            )
+        );
+    }
+
+    #[test]
+    fn should_print_each_workspace_with_its_repositories_as_an_array_with_json() {
+        let github = MockServer::start();
+        let env = showing(&github, &[WIDGETS]);
+        let web = env.workspace("web");
+        env.workspace("api");
+        env.ok(&["repo", "link", WIDGETS, "--ws", "web"]);
+
+        let listed = env.json(&["ws", "ls"]);
+
+        assert_eq!(listed[0]["id"], web["id"]);
+        assert_eq!(listed[0]["slug"], "web");
+        assert_eq!(listed[0]["repositories"], json!([WIDGETS]));
+        assert_eq!(listed[1]["repositories"], json!([]));
+        assert_eq!(listed[0].get("dir"), None, "{listed}");
     }
 
     #[test]
@@ -102,7 +132,20 @@ mod ws_rename {
     }
 
     #[test]
-    fn should_keep_the_slug_and_dir_so_the_old_slug_still_finds_it() {
+    fn should_print_its_repositories_as_ws_ls_does() {
+        let github = MockServer::start();
+        let env = showing(&github, &[WIDGETS]);
+        env.workspace("web");
+        env.ok(&["repo", "link", WIDGETS, "--ws", "web"]);
+
+        let stdout = env.ok(&["ws", "rename", "web", "Web app"]);
+
+        assert_eq!(stdout, env.ok(&["ws", "ls"]));
+        assert!(stdout.contains("Web app  acme/widgets\n"), "{stdout}");
+    }
+
+    #[test]
+    fn should_keep_the_slug_so_the_old_slug_still_finds_it() {
         let env = TestEnv::new();
         let ws = env.workspace("web");
 
@@ -111,8 +154,16 @@ mod ws_rename {
         assert_eq!(renamed["id"], ws["id"]);
         assert_eq!(text(&renamed, "name"), "Web app");
         assert_eq!(renamed["slug"], ws["slug"]);
-        assert_eq!(renamed["dir"], ws["dir"]);
         env.ok(&["ws", "mute", text(&ws, "slug")]);
+    }
+
+    #[test]
+    fn should_say_nothing_of_a_dir_in_its_help() {
+        let env = TestEnv::new();
+
+        let help = env.ok(&["ws", "rename", "--help"]);
+
+        assert!(!help.contains("dir"), "{help}");
     }
 
     #[test]
@@ -214,21 +265,6 @@ mod ws_unmute {
 mod ws_rm {
     use super::*;
 
-    /// A workspace whose dir is a git repo with an untracked file.
-    fn dirty_workspace(env: &TestEnv) -> serde_json::Value {
-        let ws = env.workspace("dirty");
-        let dir = text(&ws, "dir");
-        let status = Command::new("git")
-            .args(["init", "--quiet", dir])
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("HOME", env.root().join("home"))
-            .status()
-            .expect("running git");
-        assert!(status.success());
-        std::fs::write(std::path::Path::new(dir).join("notes.txt"), "wip").unwrap();
-        ws
-    }
-
     #[test]
     fn should_delete_by_name() {
         let env = TestEnv::new();
@@ -237,29 +273,60 @@ mod ws_rm {
         let stdout = env.ok(&["ws", "rm", "web"]);
 
         assert_eq!(stdout, "deleted web\n");
-        assert_eq!(env.json(&["ws", "ls"]), serde_json::json!([]));
+        assert_eq!(env.json(&["ws", "ls"]), json!([]));
     }
 
     #[test]
-    fn should_refuse_a_dirty_dir_and_show_what_it_holds() {
+    fn should_print_what_it_deleted_with_json() {
         let env = TestEnv::new();
-        let ws = dirty_workspace(&env);
+        let ws = env.workspace("web");
 
-        let stderr = env.fails(&["ws", "rm", text(&ws, "slug")]);
+        let deleted = env.json(&["ws", "rm", "web"]);
+
+        assert_eq!(deleted, json!({"id": ws["id"], "deleted": true}));
+    }
+
+    #[test]
+    fn should_delete_no_folder_its_panes_work_in() {
+        let env = TestEnv::new();
+        let ws = env.workspace("web");
+        let dir = folder(&env, &ws);
+        std::fs::write(dir.join("notes.txt"), "wip").unwrap();
+        shell_pane(&env, &ws, "exec sleep 60");
+
+        env.ok(&["ws", "rm", "web"]);
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join("notes.txt")).unwrap(),
+            "wip"
+        );
+    }
+
+    #[test]
+    fn should_unlink_its_repositories() {
+        let github = MockServer::start();
+        let env = showing(&github, &[WIDGETS]);
+        env.workspace("web");
+        env.workspace("api");
+        env.ok(&["repo", "link", WIDGETS, "--ws", "web"]);
+        env.ok(&["repo", "link", WIDGETS, "--ws", "api"]);
+
+        env.ok(&["ws", "rm", "web"]);
+
+        assert_eq!(
+            env.ok(&["repo", "ls"]),
+            "REPOSITORY    WORKSPACES\nacme/widgets  api\n"
+        );
+    }
+
+    #[test]
+    fn should_take_no_force() {
+        let env = TestEnv::new();
+        env.workspace("web");
+
+        let stderr = env.fails(&["ws", "rm", "web", "--force"]);
 
         assert!(stderr.contains("--force"), "{stderr}");
-        assert!(stderr.contains("notes.txt"), "{stderr}");
         assert_eq!(env.json(&["ws", "ls"]).as_array().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn should_delete_a_dirty_dir_with_force() {
-        let env = TestEnv::new();
-        let ws = dirty_workspace(&env);
-
-        let deleted = env.json(&["ws", "rm", text(&ws, "slug"), "--force"]);
-
-        assert_eq!(deleted["deleted"], true);
-        assert_eq!(env.json(&["ws", "ls"]), serde_json::json!([]));
     }
 }

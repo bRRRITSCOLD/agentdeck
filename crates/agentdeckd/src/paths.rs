@@ -10,7 +10,7 @@ use anyhow::{Context, bail};
 pub struct Paths {
     /// `$XDG_RUNTIME_DIR/agentdeck`: the lock and `daemon.json`.
     pub runtime: PathBuf,
-    /// `$XDG_DATA_HOME/agentdeck`: the database and scratch workspaces.
+    /// `$XDG_DATA_HOME/agentdeck`: the database.
     pub data: PathBuf,
     /// `$XDG_STATE_HOME/agentdeck`: the log.
     pub state: PathBuf,
@@ -70,11 +70,6 @@ impl Paths {
     /// The SQLite database.
     pub fn database(&self) -> PathBuf {
         self.data.join("agentdeck.db")
-    }
-
-    /// The parent of every scratch workspace dir.
-    pub fn scratch_workspaces(&self) -> PathBuf {
-        self.data.join("workspaces")
     }
 
     /// Where `<agent>.toml` state rule files override the embedded ones (spec §7).
@@ -183,10 +178,6 @@ mod tests {
             assert_eq!(
                 paths.database(),
                 PathBuf::from("/data/agentdeck/agentdeck.db")
-            );
-            assert_eq!(
-                paths.scratch_workspaces(),
-                PathBuf::from("/data/agentdeck/workspaces")
             );
             assert_eq!(
                 paths.log_file(),

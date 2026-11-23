@@ -9,10 +9,7 @@ use crate::support::{TestDaemon, error_response};
 async fn workspace(client: &Client) -> Workspace {
     client
         .workspace_create()
-        .body(NewWorkspace {
-            name: "ws".into(),
-            dir: None,
-        })
+        .body(NewWorkspace { name: "ws".into() })
         .send()
         .await
         .expect("create a workspace")

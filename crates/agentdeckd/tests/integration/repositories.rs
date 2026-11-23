@@ -36,10 +36,7 @@ async fn synced(github: &MockServer, prs: &[Pr]) -> TestDaemon {
 async fn workspace(client: &Client, name: &str) -> Workspace {
     client
         .workspace_create()
-        .body(NewWorkspace {
-            name: name.into(),
-            dir: None,
-        })
+        .body(NewWorkspace { name: name.into() })
         .send()
         .await
         .expect("create a workspace")
