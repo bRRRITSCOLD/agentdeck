@@ -12,6 +12,7 @@ use serde::Deserialize;
 
 use super::{ApiContext, Authorized, IdPath, client_error, server_error};
 use crate::db;
+use crate::db::workspaces::Linking;
 use crate::github_auth::NoToken;
 use crate::model::{NewLink, Repository, RepositoryFilter, RepositoryLinks};
 use crate::prsync::github::{GithubError, RemoteRepository};
@@ -153,6 +154,33 @@ pub(crate) async fn link_delete(
     context.events.changed(Entity::Repository, repository);
     context.events.changed(Entity::Workspace, id);
     Ok(HttpResponseDeleted())
+}
+
+/// What linking each of `names` takes, in order: a Repository agentdeck keeps by that name
+/// now, ignoring case, or else the one GitHub shows by it, looked up as
+/// `GET /v1/repositories/resolve` does. The first that fails fails them all, before anything is
+/// linked.
+pub(crate) async fn linkings(
+    context: &ApiContext,
+    names: Vec<RepositoryName>,
+) -> Result<Vec<Linking>, HttpError> {
+    let wanted = names.clone();
+    let known = context
+        .db
+        .call(move |c| {
+            (wanted.iter())
+                .map(|name| db::repositories::by_name(c, name))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .await?;
+    let mut links = Vec::with_capacity(names.len());
+    for (name, known) in names.iter().zip(known) {
+        links.push(match known {
+            Some(id) => Linking::Known(id),
+            None => Linking::Found(look_up(context, name).await?),
+        });
+    }
+    Ok(links)
 }
 
 /// The Repository GitHub calls `name` now, read with the sign-in's token. A 401 reads the

@@ -57,10 +57,11 @@ use gpui_base::actions::Confirm;
 use crate::api::Api;
 use crate::connection::{Connection, Status};
 use crate::delete_workspace::{DeleteEvent, DeleteTarget, DeleteWorkspaceDialog};
-use crate::edit_workspace::{EditTarget, EditWorkspaceDialog, Renamed};
+use crate::edit_workspace::{EditTarget, EditWorkspaceDialog, Saved};
 use crate::frame;
 use crate::gui_state::{self, Side};
 use crate::keymap::ToggleSide;
+use crate::link_picker::Offer;
 use crate::new_agent::{self, Launched, NewAgent, NewAgentDialog, Target, home_folder};
 use crate::new_workspace::{Created, NewWorkspaceDialog};
 use crate::notice::{self, Notice, NoticeAction};
@@ -72,8 +73,8 @@ use crate::sidebar::{Alerts, Selection, SidebarEvent, SidebarView};
 use crate::sync_parts::OpenSettings;
 use crate::title_bar::{Close, Minimize, TitleBar, ToggleMaximize};
 use crate::top_bar::{
-    ArchiveWorkspace, DeleteWorkspace, EditWorkspace, MuteWorkspace, ShowPanes, ShowPullRequests,
-    TopBar, UnarchiveWorkspace, UnmuteWorkspace,
+    ArchiveWorkspace, DeleteWorkspace, EditWorkspace, LinkRepository, MuteWorkspace, ShowPanes,
+    ShowPullRequests, TopBar, UnarchiveWorkspace, UnmuteWorkspace,
 };
 use crate::workspace::{WorkspaceView, failed};
 
@@ -397,14 +398,15 @@ impl Shell {
                     self._selection = Some(cx.subscribe_in(
                         &sidebar,
                         window,
-                        |shell, _, event: &SidebarEvent, window, cx| match event {
+                        |shell, sidebar, event: &SidebarEvent, window, cx| match event {
                             SidebarEvent::Changed => {
                                 shell.follow_selection(window, cx);
                                 shell.withdraw_seen(window, cx);
                             }
                             SidebarEvent::NewWorkspace => {
+                                let offer = Offer::read(sidebar.read(cx).snapshot(), None);
                                 if let Some(dialog) = &shell.new_workspace {
-                                    dialog.update(cx, |dialog, cx| dialog.open(window, cx));
+                                    dialog.update(cx, |d, cx| d.open(offer, window, cx));
                                 }
                             }
                         },
@@ -443,9 +445,9 @@ impl Shell {
                                 shell.show_launched(*launched, window, cx);
                             },
                         ),
-                        // The rename also comes back through `changed`; reading now shows it
+                        // The changes also come back through `changed`; reading now shows them
                         // at once.
-                        cx.subscribe(&edit, |shell, _, _: &Renamed, cx| shell.refresh(cx)),
+                        cx.subscribe(&edit, |shell, _, _: &Saved, cx| shell.refresh(cx)),
                         cx.subscribe_in(&delete, window, |shell, _, event, window, cx| {
                             match event {
                                 DeleteEvent::ArchiveInstead(_) => shell.archive(window, cx),
@@ -836,15 +838,21 @@ impl Shell {
         .detach();
     }
 
-    /// Opens the Edit workspace dialog on the selected workspace, archived or not.
-    fn edit_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some((id, name, _)), Some(dialog)) =
-            (self.selected_workspace(cx), self.edit_workspace.clone())
-        else {
+    /// Opens the Edit workspace dialog on the selected workspace, archived or not, with its
+    /// picker focused when `link`.
+    fn edit_workspace(&mut self, link: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some((id, name, _)), Some(dialog), Some(sidebar)) = (
+            self.selected_workspace(cx),
+            self.edit_workspace.clone(),
+            self.sidebar.clone(),
+        ) else {
             return;
         };
         let target = EditTarget { id, name };
-        dialog.update(cx, |dialog, cx| dialog.open(target, window, cx));
+        let offer = Offer::read(sidebar.read(cx).snapshot(), Some(id));
+        dialog.update(cx, |dialog, cx| {
+            dialog.open(target, offer, link, window, cx)
+        });
     }
 
     /// Opens the Delete workspace dialog on the selected workspace.
@@ -1034,7 +1042,10 @@ impl Render for Shell {
                 this.set_muted(false, window, cx);
             }))
             .on_action(cx.listener(|this, _: &EditWorkspace, window, cx| {
-                this.edit_workspace(window, cx);
+                this.edit_workspace(false, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &LinkRepository, window, cx| {
+                this.edit_workspace(true, window, cx);
             }))
             .on_action(cx.listener(|this, _: &DeleteWorkspace, window, cx| {
                 this.delete_workspace(window, cx);
@@ -1902,18 +1913,26 @@ mod tests {
         }
 
         #[gpui::test]
-        fn should_show_link_repository_for_a_workspace_linking_nothing(cx: &mut TestAppContext) {
+        fn should_open_edit_workspace_with_its_picker_focused_from_link_repository(
+            cx: &mut TestAppContext,
+        ) {
             let (harness, cx) = open(cx);
+            cx.update(|window, _| window.activate_window());
             harness.select(2, cx);
             click_side(&harness, Side::PullRequests, cx);
 
             click(&harness, "link repository", cx);
+            harness.settle(cx);
 
             let dialog: Entity<EditWorkspaceDialog> = harness
                 .shell
                 .read_with(cx, |shell, _| shell.edit_workspace.clone().unwrap());
             assert!(dialog.read_with(cx, |d, _| d.is_open()));
             assert_eq!(cx.update(|_, cx| dialog.read(cx).name(cx)), "docs");
+            let picker = dialog.read_with(cx, |d, _| d.picker().clone());
+            assert!(picker.read_with(cx, |p, _| p.is_open()));
+            // docs links nothing, so the Repository of your PRs is offered.
+            assert!(shows("pick acme/widgets", cx));
         }
 
         #[gpui::test]
@@ -2083,10 +2102,7 @@ mod tests {
             cx.simulate_keystrokes("enter");
             harness.settle(cx);
 
-            assert_eq!(
-                *harness.api.renamed.lock().unwrap(),
-                [(id(1), "deck".into())]
-            );
+            assert_eq!(harness.api.renames(), [(id(1), "deck".into())]);
             assert!(!is_open(&harness, cx));
             assert_eq!(shown_name(&harness, 1, cx), "deck");
         }

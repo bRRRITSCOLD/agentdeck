@@ -179,14 +179,39 @@ fn insert_link(
     id: RepositoryId,
     stored: bool,
 ) -> Result<Linked, DbError> {
+    let added = add_link(conn, workspace, id)?;
+    Ok(Linked {
+        repository: get(conn, id)?,
+        changed: added || stored,
+    })
+}
+
+/// Adds the Link between `workspace` and Repository `id`, both stored, unless it's there;
+/// whether it was added.
+pub fn add_link(
+    conn: &Connection,
+    workspace: WorkspaceId,
+    id: RepositoryId,
+) -> Result<bool, DbError> {
     let added = conn.execute(
         "INSERT OR IGNORE INTO links (workspace_id, repository_id) VALUES (?1, ?2)",
         params![workspace.to_string(), id.get()],
     )?;
-    Ok(Linked {
-        repository: get(conn, id)?,
-        changed: added > 0 || stored,
-    })
+    Ok(added > 0)
+}
+
+/// Removes the Link between `workspace` and Repository `id`, if there is one, keeping the
+/// Repository; whether there was one.
+pub fn remove_link(
+    conn: &Connection,
+    workspace: WorkspaceId,
+    id: RepositoryId,
+) -> Result<bool, DbError> {
+    let removed = conn.execute(
+        "DELETE FROM links WHERE workspace_id = ?1 AND repository_id = ?2",
+        params![workspace.to_string(), id.get()],
+    )?;
+    Ok(removed > 0)
 }
 
 /// Unlinks Workspace `workspace` from Repository `id`, then deletes the Repository when no
@@ -202,11 +227,7 @@ pub fn unlink(
     if !super::exists(&tx, "workspaces", workspace)? {
         return Err(DbError::NotFound("workspace"));
     }
-    let removed = tx.execute(
-        "DELETE FROM links WHERE workspace_id = ?1 AND repository_id = ?2",
-        params![workspace.to_string(), id.get()],
-    )?;
-    if removed == 0 {
+    if !remove_link(&tx, workspace, id)? {
         return Err(DbError::NotFound("link"));
     }
     let deleted = forget_if_unreferenced(&tx, id)?;

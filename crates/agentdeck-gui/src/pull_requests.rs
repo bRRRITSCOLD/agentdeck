@@ -31,7 +31,7 @@
 //!
 //! A Workspace's Pull requests has no sync controls: its header ends in Select, Show finished
 //! and **Edit workspace**. With no Repository linked it says so, with **Link repository**,
-//! which opens Edit workspace too.
+//! which opens Edit workspace with its "Link a repository…" picker focused.
 //!
 //! The Pull requests view's header ends in Select, Show finished, when PRs last synced and
 //! **Sync now**, which runs a full sync and emits
@@ -71,7 +71,7 @@ use crate::overview::Snapshot;
 use crate::pr_table::{self, Linker};
 use crate::sync_parts::{self, OpenSettings, SETTINGS_TAIL, cutoff, logged_out_title};
 use crate::table::{self, Header, RowParts, SelectCell};
-use crate::top_bar::EditWorkspace;
+use crate::top_bar::{EditWorkspace, LinkRepository};
 use crate::workspace::failed;
 
 /// How often "Synced N min ago" is redrawn.
@@ -754,10 +754,14 @@ impl PullRequestsView {
             .map(|header| match self.scope {
                 Scope::All => header.children(self.sync_controls(cx)),
                 Scope::Workspace(_) if linked => {
-                    header.child(edit_workspace("edit workspace", "Edit workspace"))
+                    header.child(edit_workspace("edit workspace", "Edit workspace", || {
+                        Box::new(EditWorkspace)
+                    }))
                 }
                 Scope::Workspace(_) => {
-                    header.child(edit_workspace("link repository", "Link repository"))
+                    header.child(edit_workspace("link repository", "Link repository", || {
+                        Box::new(LinkRepository)
+                    }))
                 }
             })
     }
@@ -812,14 +816,19 @@ fn show_finished_switch(finished: bool, cx: &mut Context<PullRequestsView>) -> i
         .child(Label::new().child("Show finished").whitespace_nowrap())
 }
 
-/// An outline button reading `label` that opens Edit workspace on the Workspace shown, as its
-/// top bar's menu does; tests find it as `name`.
-fn edit_workspace(name: &'static str, label: &'static str) -> impl IntoElement {
+/// An outline button reading `label` that opens Edit workspace on the Workspace shown with
+/// `action`: as its top bar's menu does, or with the picker focused ([`LinkRepository`]).
+/// Tests find it as `name`.
+fn edit_workspace(
+    name: &'static str,
+    label: &'static str,
+    action: fn() -> Box<dyn gpui::Action>,
+) -> impl IntoElement {
     div().flex_none().debug_selector(move || name.into()).child(
         Button::new(name)
             .variant(ButtonVariant::Outline)
             .label(label)
-            .on_click(|_, window, cx| window.dispatch_action(Box::new(EditWorkspace), cx)),
+            .on_click(move |_, window, cx| window.dispatch_action(action(), cx)),
     )
 }
 
@@ -1489,14 +1498,19 @@ mod tests {
             }
 
             #[gpui::test]
-            fn should_open_edit_workspace_from_link_repository(cx: &mut TestAppContext) {
+            fn should_open_edit_workspace_to_link_from_link_repository(cx: &mut TestAppContext) {
                 let (scope, snapshot) = c();
                 let (_harness, cx) = Harness::open_in(scope, snapshot, cx);
-                let asked = edit_workspace_asked(cx);
+                let edit = edit_workspace_asked(cx);
+                let link = Rc::new(RefCell::new(0));
+                let seen = link.clone();
+                cx.update(|_, cx| {
+                    cx.on_action(move |_: &LinkRepository, _| *seen.borrow_mut() += 1);
+                });
 
                 click("link repository".into(), cx);
 
-                assert_eq!(*asked.borrow(), 1);
+                assert_eq!((*link.borrow(), *edit.borrow()), (1, 0));
             }
         }
     }

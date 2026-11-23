@@ -148,7 +148,10 @@ async fn ws(client: &Client, command: WsCommand) -> anyhow::Result<Output> {
         WsCommand::New { name } => {
             let ws = client
                 .workspace_create()
-                .body(NewWorkspace { name })
+                .body(NewWorkspace {
+                    name,
+                    link: Vec::new(),
+                })
                 .send()
                 .await
                 .map_err(ApiError::from)?;

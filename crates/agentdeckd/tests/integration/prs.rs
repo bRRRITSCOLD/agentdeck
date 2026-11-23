@@ -1491,7 +1491,10 @@ mod get_v1_prs {
         let web = daemon
             .client
             .workspace_create()
-            .body(NewWorkspace { name: "web".into() })
+            .body(NewWorkspace {
+                name: "web".into(),
+                link: Vec::new(),
+            })
             .send()
             .await
             .expect("create a workspace")
@@ -2320,7 +2323,10 @@ mod finished {
             TestDaemon::start_with_github(dirs_keeping_for("0"), &github.url("/graphql")).await;
         sync(&daemon.client).await;
         let web = (daemon.client.workspace_create())
-            .body(NewWorkspace { name: "web".into() })
+            .body(NewWorkspace {
+                name: "web".into(),
+                link: Vec::new(),
+            })
             .send()
             .await
             .expect("create a workspace")

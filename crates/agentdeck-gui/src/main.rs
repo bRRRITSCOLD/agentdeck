@@ -13,6 +13,7 @@ mod frame;
 mod github;
 mod gui_state;
 mod keymap;
+mod link_picker;
 mod logging;
 mod new_agent;
 mod new_workspace;

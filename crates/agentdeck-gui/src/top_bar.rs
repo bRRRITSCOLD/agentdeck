@@ -28,6 +28,9 @@ actions!(
     [
         /// Opens the Edit workspace dialog on the workspace shown.
         EditWorkspace,
+        /// Opens the Edit workspace dialog on the workspace shown, its "Link a repository…"
+        /// picker focused: the no-Repositories state's Link repository.
+        LinkRepository,
         /// Archives the workspace shown.
         ArchiveWorkspace,
         /// Brings the archived workspace shown back.

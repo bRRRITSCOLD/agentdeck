@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// fails when `openapi.json` changes without a bump.
 ///
 /// `0` is every daemon from before it existed, whose `daemon.json` has no `api_version`.
-pub const API_VERSION: u32 = 23;
+pub const API_VERSION: u32 = 24;
 
 /// What `$XDG_RUNTIME_DIR/agentdeck/daemon.json` holds. The daemon writes it once it serves;
 /// the GUI and the CLI read it to reach the daemon.

@@ -5,11 +5,12 @@
 use agentdeck_client::daemon::Daemon;
 use agentdeck_client::panes::{self, pane_if_any};
 use agentdeck_client::types::{
-    DeviceSignIn, GithubAuthInfo, GithubClientIdBody, GithubTokenBody, NewWorkspace, Pane, PaneRun,
-    PrClose, PrCloseResult, Settings, SettingsPatch, Tab,
+    DeviceSignIn, GithubAuthInfo, GithubClientIdBody, GithubTokenBody, Pane, PaneRun, PrClose,
+    PrCloseResult, Repository, Settings, SettingsPatch, Tab,
 };
+pub use agentdeck_client::workspaces::Change;
 use agentdeck_client::{ApiError, Client};
-use agentdeck_core::{PaneId, PrRef, SplitDirection, TabId, WorkspaceId};
+use agentdeck_core::{PaneId, PrRef, RepositoryName, SplitDirection, TabId, WorkspaceId};
 use gpui::{App, Task};
 
 use crate::new_agent::{Launch, Launched};
@@ -75,14 +76,25 @@ pub trait Api: Send + Sync {
     /// Brings the archived `workspace` back.
     fn unarchive_workspace(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<()>>;
 
-    /// Renames `workspace` to `name`, keeping its slug. A refusal is an [`ApiError`];
-    /// `invalid_name` means the name is blank.
-    fn rename_workspace(
+    /// Applies Edit workspace's `change` to `workspace` in one request: a new name (its slug
+    /// kept) and the Repositories to link and unlink, all or nothing. A refusal is an
+    /// [`ApiError`]: `invalid_name` means the name is blank, `unknown_repository` that GitHub
+    /// can't see a Repository to link.
+    fn edit_workspace(
         &self,
         workspace: WorkspaceId,
-        name: String,
+        change: Change,
         cx: &App,
     ) -> Task<anyhow::Result<()>>;
+
+    /// The Repository GitHub shows by `name` now: the picker's typed row. One GitHub can't
+    /// see is an [`ApiError`] `unknown_repository` whose message says so; signed out it is
+    /// `not_signed_in`.
+    fn resolve_repository(
+        &self,
+        name: RepositoryName,
+        cx: &App,
+    ) -> Task<anyhow::Result<Repository>>;
 
     /// Mutes `workspace`'s notifications, or unmutes them.
     fn set_muted(&self, workspace: WorkspaceId, muted: bool, cx: &App) -> Task<anyhow::Result<()>>;
@@ -197,14 +209,9 @@ impl Api for Daemon {
 
     fn new_workspace(&self, request: Request, cx: &App) -> Task<anyhow::Result<WorkspaceId>> {
         let client = self.client.clone();
-        let Request { name } = request;
+        let Request { name, link } = request;
         runtime::spawn(cx, async move {
-            let made = client
-                .workspace_create()
-                .body(NewWorkspace { name })
-                .send()
-                .await
-                .map_err(ApiError::from)?;
+            let made = agentdeck_client::workspaces::create(&client, name, link).await?;
             Ok(made.id)
         })
     }
@@ -260,18 +267,27 @@ impl Api for Daemon {
         })
     }
 
-    fn rename_workspace(
+    fn edit_workspace(
         &self,
         workspace: WorkspaceId,
-        name: String,
+        change: Change,
         cx: &App,
     ) -> Task<anyhow::Result<()>> {
         let client = self.client.clone();
         runtime::spawn(cx, async move {
-            let patch = client.workspace_update().id(workspace);
-            let patch = patch.body_map(|patch| patch.name(Some(name)));
-            patch.send().await.map_err(ApiError::from)?;
+            agentdeck_client::workspaces::update(&client, workspace, change).await?;
             Ok(())
+        })
+    }
+
+    fn resolve_repository(
+        &self,
+        name: RepositoryName,
+        cx: &App,
+    ) -> Task<anyhow::Result<Repository>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            Ok(agentdeck_client::repositories::resolve(&client, &name).await?)
         })
     }
 
@@ -443,6 +459,7 @@ pub(crate) mod fake {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
+    use agentdeck_client::types::RepositoryLinks;
     use agentdeck_core::{AgentState, Layout, PaneId, PaneKind};
 
     use super::*;
@@ -513,8 +530,13 @@ pub(crate) mod fake {
         pub unarchived: Mutex<Vec<WorkspaceId>>,
         /// The mutes and unmutes asked for: the workspace and whether to mute it, in order.
         pub muted: Mutex<Vec<(WorkspaceId, bool)>>,
-        /// The renames asked for: the workspace and its new name, in order.
-        pub renamed: Mutex<Vec<(WorkspaceId, String)>>,
+        /// The edits asked for: the workspace and what to change, in order.
+        pub edits: Mutex<Vec<(WorkspaceId, Change)>>,
+        /// The Repositories GitHub shows, by `owner/name` in lower case: what a typed name
+        /// resolves to and what linking a Repository the snapshot doesn't hold finds.
+        github_repositories: Mutex<HashMap<String, Repository>>,
+        /// The names looked up on GitHub, in order.
+        pub resolved: Mutex<Vec<RepositoryName>>,
         /// The workspaces deleted, in order.
         pub deleted: Mutex<Vec<WorkspaceId>>,
         /// The settings; the daemon's defaults when unset.
@@ -664,6 +686,91 @@ pub(crate) mod fake {
         /// Answers later reads of the GitHub auth with `auth`.
         pub fn set_github(&self, auth: GithubAuthInfo) {
             *self.github.lock().unwrap() = Some(auth);
+        }
+
+        /// Makes GitHub show `repository`: a typed name resolves to it, and linking it by
+        /// name stores it.
+        pub fn on_github(&self, repository: Repository) {
+            let key = repository.name.to_string().to_lowercase();
+            self.github_repositories
+                .lock()
+                .unwrap()
+                .insert(key, repository);
+        }
+
+        /// The renames asked for: the workspace and its new name, in order.
+        pub fn renames(&self) -> Vec<(WorkspaceId, String)> {
+            let edits = self.edits.lock().unwrap();
+            (edits.iter())
+                .filter_map(|(w, change)| Some((*w, change.name.clone()?)))
+                .collect()
+        }
+
+        /// The Repository GitHub shows by `name`, or the daemon's `unknown_repository`.
+        fn github(&self, name: &RepositoryName) -> anyhow::Result<Repository> {
+            let key = name.to_string().to_lowercase();
+            let found = self.github_repositories.lock().unwrap().get(&key).cloned();
+            found.ok_or_else(|| {
+                ApiError {
+                    message: format!(
+                        "GitHub can't see {name}. Check the name or your token's access."
+                    ),
+                    code: Some("unknown_repository".into()),
+                }
+                .into()
+            })
+        }
+
+        /// Links `workspace` to each of `link` and unlinks it from each of `unlink`, as the
+        /// daemon does: a Repository the snapshot doesn't hold by name is found on GitHub, and
+        /// one nothing names any more goes. Nothing changes when one can't be found.
+        fn relink(
+            &self,
+            workspace: WorkspaceId,
+            link: &[RepositoryName],
+            unlink: &[agentdeck_core::RepositoryId],
+        ) -> anyhow::Result<()> {
+            let mut found = Vec::new();
+            for name in link {
+                let known = (self.snapshot.lock().unwrap().repositories.iter())
+                    .any(|r| r.name.to_string().eq_ignore_ascii_case(&name.to_string()));
+                if !known {
+                    found.push(self.github(name)?);
+                }
+            }
+            let mut snapshot = self.snapshot.lock().unwrap();
+            for repository in found {
+                snapshot.repositories.push(RepositoryLinks {
+                    id: repository.id,
+                    name: repository.name,
+                    url: repository.url,
+                    private: repository.private,
+                    archived: repository.archived,
+                    unreachable: false,
+                    workspaces: Vec::new(),
+                });
+            }
+            for repository in &mut snapshot.repositories {
+                let named = link.iter().any(|n| {
+                    n.to_string()
+                        .eq_ignore_ascii_case(&repository.name.to_string())
+                });
+                if named && !repository.workspaces.contains(&workspace) {
+                    repository.workspaces.push(workspace);
+                }
+                if unlink.contains(&repository.id) {
+                    repository.workspaces.retain(|w| *w != workspace);
+                }
+            }
+            let prs = snapshot.prs.clone();
+            snapshot.repositories.retain(|repository| {
+                !repository.workspaces.is_empty()
+                    || prs.iter().any(|pr| pr.repository.id == repository.id)
+            });
+            snapshot
+                .repositories
+                .sort_by_key(|r| r.name.to_string().to_lowercase());
+            Ok(())
         }
 
         /// Stamps or clears `workspace`'s `archived_at`, as the daemon does.
@@ -836,6 +943,14 @@ pub(crate) mod fake {
                 ..crate::overview::fixtures::workspace(0, &request.name)
             };
             self.snapshot.lock().unwrap().workspaces.push(made);
+            if let Err(err) = self.relink(id, &request.link, &[]) {
+                self.snapshot
+                    .lock()
+                    .unwrap()
+                    .workspaces
+                    .retain(|w| w.id != id);
+                return Task::ready(Err(err));
+            }
             self.made_workspaces.lock().unwrap().push(request);
             Task::ready(Ok(id))
         }
@@ -935,21 +1050,38 @@ pub(crate) mod fake {
             Task::ready(Ok(()))
         }
 
-        fn rename_workspace(
+        fn edit_workspace(
             &self,
             workspace: WorkspaceId,
-            name: String,
+            change: Change,
             _cx: &App,
         ) -> Task<anyhow::Result<()>> {
             if let Some(err) = self.failure() {
                 return Task::ready(Err(err));
             }
-            let mut snapshot = self.snapshot.lock().unwrap();
-            if let Some(w) = snapshot.workspaces.iter_mut().find(|w| w.id == workspace) {
-                w.name = name.clone();
+            if let Err(err) = self.relink(workspace, &change.link, &change.unlink) {
+                return Task::ready(Err(err));
             }
-            self.renamed.lock().unwrap().push((workspace, name));
+            if let Some(name) = &change.name {
+                let mut snapshot = self.snapshot.lock().unwrap();
+                if let Some(w) = snapshot.workspaces.iter_mut().find(|w| w.id == workspace) {
+                    w.name = name.clone();
+                }
+            }
+            self.edits.lock().unwrap().push((workspace, change));
             Task::ready(Ok(()))
+        }
+
+        fn resolve_repository(
+            &self,
+            name: RepositoryName,
+            _cx: &App,
+        ) -> Task<anyhow::Result<Repository>> {
+            self.resolved.lock().unwrap().push(name.clone());
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            Task::ready(self.github(&name))
         }
 
         fn set_muted(

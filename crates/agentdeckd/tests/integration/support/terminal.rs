@@ -30,7 +30,10 @@ impl Place {
         let workspace = daemon
             .client
             .workspace_create()
-            .body(NewWorkspace { name: "ws".into() })
+            .body(NewWorkspace {
+                name: "ws".into(),
+                link: Vec::new(),
+            })
             .send()
             .await
             .expect("create a workspace")
