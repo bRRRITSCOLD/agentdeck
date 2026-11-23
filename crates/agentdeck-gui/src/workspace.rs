@@ -1994,13 +1994,8 @@ mod tests {
         }
 
         #[gpui::test]
-        fn should_show_no_task_for_a_pane_linked_to_one(cx: &mut TestAppContext) {
-            // The daemon still links panes to tasks until tasks go; the header shows none.
-            let pane = Pane {
-                task_id: Some(id(3)),
-                ..shell_pane(7, id(1))
-            };
-            let (harness, cx) = one_pane(pane, cx);
+        fn should_show_a_shell_panes_state_title_badge_and_menu(cx: &mut TestAppContext) {
+            let (harness, cx) = one_pane(shell_pane(7, id(1)), cx);
 
             let parts = harness
                 .pane(0, cx)

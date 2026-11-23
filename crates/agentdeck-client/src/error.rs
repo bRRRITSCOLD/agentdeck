@@ -80,11 +80,11 @@ mod tests {
         #[test]
         fn should_end_with_the_error_code() {
             let err = ApiError {
-                message: "no such task".into(),
+                message: "no such pane".into(),
                 code: Some("not_found".into()),
             };
 
-            assert_eq!(err.to_string(), "no such task (not_found)");
+            assert_eq!(err.to_string(), "no such pane (not_found)");
         }
 
         fn error_response(status: u16, code: Option<&str>, message: &str) -> ApiError {
@@ -115,9 +115,9 @@ mod tests {
 
         #[test]
         fn should_keep_the_daemons_words_for_a_missing_entity_404() {
-            let err = error_response(404, Some("not_found"), "no task t");
+            let err = error_response(404, Some("not_found"), "no pane p");
 
-            assert_eq!(err.to_string(), "no task t (not_found)");
+            assert_eq!(err.to_string(), "no pane p (not_found)");
         }
 
         #[test]

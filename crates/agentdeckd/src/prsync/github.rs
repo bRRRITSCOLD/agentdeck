@@ -76,11 +76,8 @@ const STATE_QUERY: &str = "query($id: ID!) { node(id: $id) { ... on PullRequest 
 /// A pull request as GitHub reports it, or as PR sync last stored it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemotePr {
-    /// `owner/name` of the repo the PR targets.
-    pub repo: String,
-    /// Its Repository. `None` only for a PR stored before PR sync read Repositories, which it
-    /// hasn't read again since.
-    pub repository: Option<RemoteRepository>,
+    /// Its Repository: with the number, what names the PR for good (spec §3).
+    pub repository: RemoteRepository,
     /// The PR's number in that repo.
     pub number: i64,
     /// The PR's title.
@@ -93,10 +90,9 @@ pub struct RemotePr {
     pub draft: bool,
     /// The branch the PR merges from.
     pub head_ref: String,
-    /// The branch the PR merges into; `None` as [`RemotePr::repository`] is.
-    pub base_ref: Option<String>,
-    /// The login of who opened it; `None` when that account is gone, or as
-    /// [`RemotePr::repository`] is.
+    /// The branch the PR merges into.
+    pub base_ref: String,
+    /// The login of who opened it; `None` when that account is gone.
     pub author: Option<String>,
     /// The head commit's rolled-up checks; `None` when it has none.
     pub checks: Option<ChecksState>,
@@ -104,6 +100,39 @@ pub struct RemotePr {
     pub review: Option<ReviewState>,
     /// When the PR last changed on GitHub.
     pub updated_at: String,
+}
+
+impl RemotePr {
+    /// What names it for good: its Repository's id and its number.
+    pub fn key(&self) -> PrKey {
+        PrKey {
+            repository: self.repository.id,
+            number: self.number,
+        }
+    }
+
+    /// `(owner/name, number)` as GitHub calls it now, or as last stored: what a fetch by
+    /// number asks for.
+    pub fn wanted(&self) -> (String, i64) {
+        (self.repository.name.to_string(), self.number)
+    }
+}
+
+/// What names a pull request for good (spec §3): its Repository's GitHub id and its number, so
+/// a rename or a transfer, or another Repository taking the old name, never mixes two up.
+/// Displays as `<Repository id>#<number>`, the id of its `changed` event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PrKey {
+    /// Its Repository's GitHub id.
+    pub repository: RepositoryId,
+    /// Its number in that Repository.
+    pub number: i64,
+}
+
+impl std::fmt::Display for PrKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}#{}", self.repository, self.number)
+    }
 }
 
 /// A Repository as GitHub reports it with one of its pull requests.
@@ -746,7 +775,11 @@ fn parse_list(data: Value) -> Result<ListPage, GithubError> {
 
     let list = serde_json::from_value::<Data>(data)?.viewer.pull_requests;
     Ok(ListPage {
-        prs: list.nodes.into_iter().map(RemotePr::from).collect(),
+        prs: list
+            .nodes
+            .into_iter()
+            .filter_map(LightNode::remote)
+            .collect(),
         next: list
             .page_info
             .end_cursor
@@ -789,7 +822,7 @@ fn parse_search(data: Value) -> Result<SearchPage, GithubError> {
         .nodes
         .into_iter()
         .filter_map(|node| match node {
-            SearchNode::Pr(pr) => Some(RemotePr::from(*pr)),
+            SearchNode::Pr(pr) => pr.remote(),
             SearchNode::Other(_) => None,
         })
         .collect();
@@ -845,7 +878,7 @@ fn parse_batch(data: Value, len: usize) -> Result<Vec<Option<RemotePr>>, GithubE
                 serde_json::from_value(data.remove(&format!("p{i}")).unwrap_or(Value::Null))?;
             Ok(repository
                 .and_then(|repo| repo.pull_request)
-                .map(RemotePr::from))
+                .and_then(PrNode::remote))
         })
         .collect()
 }
@@ -866,23 +899,24 @@ struct LightNode {
     repository: RepositoryNode,
 }
 
-impl From<LightNode> for RemotePr {
-    fn from(node: LightNode) -> RemotePr {
-        RemotePr {
-            repo: node.repository.name_with_owner.to_string(),
-            repository: node.repository.remote(),
+impl LightNode {
+    /// The PR, unless GitHub gave no id for its Repository, which then can't be stored.
+    fn remote(self) -> Option<RemotePr> {
+        let node = self;
+        Some(RemotePr {
+            repository: node.repository.remote()?,
             number: node.number,
             title: node.title,
             url: node.url,
             state: node.state.into(),
             draft: node.is_draft,
             head_ref: node.head_ref_name,
-            base_ref: Some(node.base_ref_name),
+            base_ref: node.base_ref_name,
             author: node.author.map(|author| author.login),
             checks: None,
             review: None,
             updated_at: node.updated_at,
-        }
+        })
     }
 }
 
@@ -1008,8 +1042,11 @@ enum GqlRollup {
     Expected,
 }
 
-impl From<PrNode> for RemotePr {
-    fn from(node: PrNode) -> RemotePr {
+impl PrNode {
+    /// The PR, unless GitHub gave no id for its Repository, which then can't be stored.
+    fn remote(self) -> Option<RemotePr> {
+        let node = self;
+        let repository = node.repository.remote()?;
         let checks = node
             .commits
             .nodes
@@ -1021,16 +1058,15 @@ impl From<PrNode> for RemotePr {
                 GqlRollup::Failure | GqlRollup::Error => ChecksState::Failure,
                 GqlRollup::Pending | GqlRollup::Expected => ChecksState::Pending,
             });
-        RemotePr {
-            repo: node.repository.name_with_owner.to_string(),
-            repository: node.repository.remote(),
+        Some(RemotePr {
+            repository,
             number: node.number,
             title: node.title,
             url: node.url,
             state: node.state.into(),
             draft: node.is_draft,
             head_ref: node.head_ref_name,
-            base_ref: Some(node.base_ref_name),
+            base_ref: node.base_ref_name,
             author: node.author.map(|author| author.login),
             checks,
             review: node.review_decision.map(|review| match review {
@@ -1039,7 +1075,7 @@ impl From<PrNode> for RemotePr {
                 GqlReview::ReviewRequired => ReviewState::ReviewRequired,
             }),
             updated_at: node.updated_at,
-        }
+        })
     }
 }
 
@@ -1227,21 +1263,20 @@ mod tests {
             assert_eq!(
                 page.prs,
                 vec![RemotePr {
-                    repo: "acme/widgets".into(),
-                    repository: Some(RemoteRepository {
+                    repository: RemoteRepository {
                         id: RepositoryId::from(1_296_269),
                         name: "acme/widgets".parse().unwrap(),
                         url: "https://github.com/acme/widgets".into(),
                         private: true,
                         archived: false,
-                    }),
+                    },
                     number: 7,
                     title: "Add PR sync".into(),
                     url: "https://github.com/acme/widgets/pull/7".into(),
                     state: PrState::Open,
                     draft: false,
                     head_ref: "feat/sync".into(),
-                    base_ref: Some("main".into()),
+                    base_ref: "main".into(),
                     author: Some("octocat".into()),
                     checks: Some(ChecksState::Success),
                     review: Some(ReviewState::Approved),
@@ -1356,12 +1391,11 @@ mod tests {
             assert_eq!(page.next.as_deref(), Some("c1"));
             assert_eq!(page.prs.len(), 1);
             let pr = &page.prs[0];
-            assert_eq!((pr.repo.as_str(), pr.number), ("acme/widgets", 7));
+            assert_eq!(pr.wanted(), ("acme/widgets".to_owned(), 7));
             assert_eq!((pr.checks, pr.review), (None, None));
-            assert_eq!(pr.base_ref.as_deref(), Some("main"));
+            assert_eq!(pr.base_ref, "main");
             assert_eq!(pr.author.as_deref(), Some("octocat"));
-            let repository = pr.repository.as_ref().expect("its Repository");
-            assert_eq!(repository.id, RepositoryId::from(1_296_269));
+            assert_eq!(pr.repository.id, RepositoryId::from(1_296_269));
         }
     }
 
@@ -1370,7 +1404,7 @@ mod tests {
 
         fn repository(node: Value) -> Option<RemoteRepository> {
             let page = parse_search(search(vec![node], None)).unwrap();
-            page.prs[0].repository.clone()
+            page.prs.first().map(|pr| pr.repository.clone())
         }
 
         #[test]
@@ -1389,7 +1423,7 @@ mod tests {
         }
 
         #[test]
-        fn should_have_no_repository_when_github_gives_no_id() {
+        fn should_leave_out_a_pr_whose_repository_github_gives_no_id_for() {
             let mut pr = node("OPEN", Value::Null, Value::Null);
             pr["repository"]["fullDatabaseId"] = Value::Null;
 

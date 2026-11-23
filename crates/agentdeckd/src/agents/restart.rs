@@ -143,7 +143,7 @@ impl Restarter {
     ) -> Result<(), RestartError> {
         let id = pane.id;
         let codex_agent = agent.filter(|_| fresh);
-        let launch = Launch::pane(id, workspace, pane.task_id, argv, cwd);
+        let launch = Launch::pane(id, workspace, argv, cwd);
         let codex_sessions = codex::sessions_before(codex_agent, &launch);
         let spawned = match agent {
             Some(agent) => self.terminals.spawn(id, launch, agent.as_str()),

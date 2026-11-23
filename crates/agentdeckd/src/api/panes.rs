@@ -16,7 +16,7 @@ use crate::agents::restart::{Respawn, RestartError, Restarter};
 use crate::agents::{self, codex};
 use crate::db;
 use crate::model::{
-    InputAccepted, InputWhen, NewPane, Pane, PaneInput, PanePatch, PaneRespawn, PaneRun, TailQuery,
+    InputAccepted, InputWhen, NewPane, Pane, PaneInput, PaneRespawn, PaneRun, TailQuery,
 };
 use crate::terminal::env::default_shell;
 use crate::terminal::pane::{Launch, NothingToStop, SpawnError, When};
@@ -141,7 +141,7 @@ pub(crate) async fn pane_create(
         })
         .await?;
 
-    let launch = Launch::pane(pane.id, workspace, pane.task_id, pane.argv.clone(), cwd);
+    let launch = Launch::pane(pane.id, workspace, pane.argv.clone(), cwd);
     let codex_sessions = codex::sessions_before(pane.agent, &launch);
     let spawned = match pane.agent {
         Some(agent) => context.terminals.spawn(pane.id, launch, agent.as_str()),
@@ -202,33 +202,8 @@ pub(crate) async fn pane_get(
     Ok(HttpResponseOk(with_live_status(context, pane)))
 }
 
-/// Links the pane to a task in its workspace that isn't done, or unlinks it (`task_id`
-/// null). Nothing is typed into the pane (spec §9).
-#[endpoint { method = PATCH, path = "/v1/panes/{id}" }]
-pub(crate) async fn pane_update(
-    rqctx: RequestContext<ApiContext>,
-    _auth: Authorized,
-    path: Path<IdPath<PaneId>>,
-    body: TypedBody<PanePatch>,
-) -> Result<HttpResponseOk<Pane>, HttpError> {
-    let context = rqctx.context();
-    let id = path.into_inner().id;
-    let task = body.into_inner().task_id;
-    let (pane, before) = context
-        .db
-        .call(move |c| db::panes::set_task(c, id, task))
-        .await?;
-    context.events.changed(Entity::Pane, id);
-    if before != task {
-        for linked in [before, task].into_iter().flatten() {
-            context.events.changed(Entity::Task, linked);
-        }
-    }
-    Ok(HttpResponseOk(with_live_status(context, pane)))
-}
-
-/// Starts an exited pane again in place, keeping its id, its place in the tab's layout, its
-/// `cwd` and its task link (spec §4). `run: "agent"`, for an agent pane only
+/// Starts an exited pane again in place, keeping its id, its place in the tab's layout and
+/// its `cwd` (spec §4). `run: "agent"`, for an agent pane only
 /// (`unsupported_kind`), runs its agent again: claude and codex resume their session when it
 /// is known, else start fresh with a new session; an `other` agent runs its argv again.
 /// A resume that exits non-zero within 10 s, as one of a session the agent can no longer
@@ -306,8 +281,8 @@ pub(crate) async fn pane_delete(
     Ok(HttpResponseDeleted())
 }
 
-/// Stops the pane's agent and keeps the pane, with its place in the layout, its session and
-/// its task link: SIGHUP, then SIGKILL after 3 s, as `DELETE` does. An agent pane's process
+/// Stops the pane's agent and keeps the pane, with its place in the layout and its session:
+/// SIGHUP, then SIGKILL after 3 s, as `DELETE` does. An agent pane's process
 /// is stopped, and the pane reads as exited once it has, so `POST /v1/panes/{id}/respawn`
 /// (Restart agent) resumes the session later and a restarted daemon doesn't resume it. A
 /// shell pane's hosted agent is stopped, its process group alone, and the shell keeps

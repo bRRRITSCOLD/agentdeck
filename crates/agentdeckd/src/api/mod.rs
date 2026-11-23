@@ -11,7 +11,6 @@ mod prs;
 mod repositories;
 mod settings;
 mod tabs;
-mod tasks;
 mod workspaces;
 mod ws;
 
@@ -80,11 +79,6 @@ pub fn api() -> ApiDescription<ApiContext> {
         api.register(tabs::tab_create),
         api.register(tabs::tab_update),
         api.register(tabs::tab_delete),
-        api.register(tasks::task_list),
-        api.register(tasks::task_create),
-        api.register(tasks::task_get),
-        api.register(tasks::task_update),
-        api.register(tasks::task_delete),
         api.register(prs::pr_list),
         api.register(prs::prs_sync),
         api.register(prs::prs_status),
@@ -104,7 +98,6 @@ pub fn api() -> ApiDescription<ApiContext> {
         api.register(settings::settings_update),
         api.register(panes::pane_create),
         api.register(panes::pane_get),
-        api.register(panes::pane_update),
         api.register(panes::pane_delete),
         api.register(panes::pane_respawn),
         api.register(panes::pane_stop),
@@ -244,7 +237,7 @@ mod tests {
         /// `openapi.json`'s fingerprint when [`agentdeck_core::API_VERSION`] was last set,
         /// and that version. Clients tell an older daemon by its API version, so a route or
         /// field added without a bump would go unnoticed: they would call it and get a 404.
-        const FINGERPRINT_AT_API_VERSION: (u64, u32) = (0x4b7e_8b2f_7d03_4654, 21);
+        const FINGERPRINT_AT_API_VERSION: (u64, u32) = (0xc50e_9a03_29ee_a360, 22);
 
         /// FNV-1a: stable across Rust releases, unlike `DefaultHasher`.
         fn fingerprint(text: &str) -> u64 {

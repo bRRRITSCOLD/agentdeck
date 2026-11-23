@@ -212,7 +212,7 @@ mod pr_close {
         number: 9,
     };
 
-    /// A world whose daemon has synced `prs` into PR tasks.
+    /// A world whose daemon has synced `prs`.
     fn synced(github: &MockServer, prs: &[Pr]) -> TestEnv {
         mock_open_prs(github, TOKEN, prs);
         let env = TestEnv::with_github(&github.url("/graphql"), TOKEN);

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use agentdeck_client::types::{
     DirtyReport, Pane, PrCloseResult, PrSyncStage, PrSyncStatus, PullRequest, RepositoryLinks,
-    Settings, Task, Workspace,
+    Settings, Workspace,
 };
 use agentdeck_core::{PaneKind, PrState, WorkspaceId};
 use serde::Serialize;
@@ -62,57 +62,6 @@ pub fn workspace(ws: &Workspace) -> String {
     format!("{}  {}  {}\n", ws.id, ws.slug, ws.dir)
 }
 
-/// The PR behind a task as `owner/repo#number`, or nothing.
-fn pr_label(task: &Task) -> Option<String> {
-    task.pr
-        .as_ref()
-        .map(|pr| format!("{}#{}", pr.repo, pr.number))
-}
-
-/// `agentdeck task ls`.
-pub fn tasks(tasks: &[Task]) -> String {
-    let rows: Vec<[String; 3]> = tasks
-        .iter()
-        .map(|task| {
-            let title = match pr_label(task) {
-                Some(pr) => format!("{pr} {}", task.title),
-                None => task.title.clone(),
-            };
-            [task.id.to_string(), task.status.to_string(), title]
-        })
-        .collect();
-    table(["ID", "STATUS", "TITLE"], &rows, "no tasks")
-}
-
-/// `agentdeck task show`, and a task after `task add` or `task set`.
-pub fn task(task: &Task) -> String {
-    let mut out = format!(
-        "{}\n  id:        {}\n  status:    {}\n  workspace: {}\n",
-        task.title,
-        task.id,
-        task.status,
-        task.workspace_id
-            .map_or_else(|| "inbox".to_owned(), |id| id.to_string()),
-    );
-    if let Some(pr) = &task.pr {
-        // A PR the GitHub sign-in can't see is shown as it was last synced (spec §8).
-        let reach = if pr.unreachable { ", unreachable" } else { "" };
-        out.push_str(&format!(
-            "  pr:        {} ({}{reach}, checks {}, review {})\n",
-            pr.url,
-            pr.state,
-            pr.checks.map_or("none", |checks| checks.as_str()),
-            pr.review.map_or("none", |review| review.as_str()),
-        ));
-    }
-    if !task.body.is_empty() {
-        out.push('\n');
-        out.push_str(&task.body);
-        out.push('\n');
-    }
-    out
-}
-
 /// A pane after `agent new`: its id, agent and dir, and its session once it has one. The
 /// argv is in `--json`.
 pub fn pane(pane: &Pane) -> String {
@@ -124,9 +73,9 @@ pub fn pane(pane: &Pane) -> String {
     out
 }
 
-/// One pane as `agent ls` lists it: the pane, and the workspace, tab and task it is in. With
+/// One pane as `agent ls` lists it: the pane, and the workspace and tab it is in. With
 /// `--json` it is the pane's own object, its current `folder` included, plus `workspace_id`,
-/// `workspace` (the slug), `tab` (its title) and `task_title`.
+/// `workspace` (the slug) and `tab` (its title).
 #[derive(Debug, Serialize)]
 pub struct ListedPane {
     /// The pane, as the API gives it.
@@ -138,8 +87,6 @@ pub struct ListedPane {
     pub workspace: String,
     /// Its tab's title.
     pub tab: String,
-    /// Its linked task's title, when it has one the daemon still lists.
-    pub task_title: Option<String>,
 }
 
 /// What runs in `pane`: its agent; for a shell pane, `hosting <agent>` while it hosts one,
@@ -153,18 +100,12 @@ fn pane_agent(pane: &Pane) -> String {
     }
 }
 
-/// `agentdeck agent ls`: a pane a line, with its current folder, and its linked task by title,
-/// or by id when the title isn't known.
+/// `agentdeck agent ls`: a pane a line, with its current folder.
 pub fn panes(panes: &[ListedPane]) -> String {
-    let rows: Vec<[String; 7]> = panes
+    let rows: Vec<[String; 6]> = panes
         .iter()
         .map(|listed| {
             let pane = &listed.pane;
-            let task = match (&listed.task_title, pane.task_id) {
-                (Some(title), _) => title.clone(),
-                (None, Some(id)) => id.to_string(),
-                (None, None) => String::new(),
-            };
             [
                 pane.id.to_string(),
                 listed.workspace.clone(),
@@ -172,12 +113,11 @@ pub fn panes(panes: &[ListedPane]) -> String {
                 pane_agent(pane),
                 pane.state.to_string(),
                 pane.folder.clone(),
-                task,
             ]
         })
         .collect();
     table(
-        ["ID", "WORKSPACE", "TAB", "AGENT", "STATE", "FOLDER", "TASK"],
+        ["ID", "WORKSPACE", "TAB", "AGENT", "STATE", "FOLDER"],
         &rows,
         "no panes",
     )
@@ -219,7 +159,7 @@ fn prs(n: usize) -> String {
 }
 
 /// What `pr close` asks before closing `n` PRs, whose repos are `repos` (one entry per PR
-/// task named): the question, a line per repo with its count, then `[y/N]`.
+/// named): the question, a line per repo with its count, then `[y/N]`.
 pub fn close_prompt(n: usize, repos: &[&str]) -> String {
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for repo in repos {
@@ -372,7 +312,7 @@ pub fn dirty(report: &DirtyReport) -> String {
 #[cfg(test)]
 mod tests {
     use agentdeck_client::types::{DirtyRepo, GhLogin, UnpushedBranch};
-    use agentdeck_core::{Agent, TaskKind, TaskStatus};
+    use agentdeck_core::Agent;
 
     use super::*;
 
@@ -386,21 +326,6 @@ mod tests {
             muted: false,
             name: name.into(),
             slug: slug.into(),
-        }
-    }
-
-    fn a_task(title: &str, body: &str) -> Task {
-        Task {
-            body: body.into(),
-            created_at: "2026-01-01T00:00:00Z".into(),
-            done_at: None,
-            id: "0190a1b2-c3d4-7e5f-8a9b-000000000002".parse().unwrap(),
-            kind: TaskKind::Plain,
-            pr: None,
-            status: TaskStatus::Doing,
-            title: title.into(),
-            updated_at: "2026-01-01T00:00:00Z".into(),
-            workspace_id: None,
         }
     }
 
@@ -443,7 +368,6 @@ mod tests {
         const PANE_1: &str = "0190a1b2-c3d4-7e5f-8a9b-000000000011";
         const PANE_2: &str = "0190a1b2-c3d4-7e5f-8a9b-000000000012";
         const PANE_3: &str = "0190a1b2-c3d4-7e5f-8a9b-000000000013";
-        const TASK: &str = "0190a1b2-c3d4-7e5f-8a9b-000000000020";
 
         fn listed(id: &str, kind: PaneKind, tab: &str) -> ListedPane {
             ListedPane {
@@ -460,40 +384,35 @@ mod tests {
                     session_id: None,
                     state: AgentState::Idle,
                     tab_id: "0190a1b2-c3d4-7e5f-8a9b-000000000030".parse().unwrap(),
-                    task_id: None,
                     title: String::new(),
                 },
                 workspace_id: "0190a1b2-c3d4-7e5f-8a9b-000000000001".parse().unwrap(),
                 workspace: "web".into(),
                 tab: tab.into(),
-                task_title: None,
             }
         }
 
         #[test]
-        fn should_list_id_workspace_tab_agent_state_folder_and_task() {
+        fn should_list_id_workspace_tab_agent_state_and_folder() {
             let mut agent = listed(PANE_1, PaneKind::Agent, "agents");
             agent.pane.agent = Some(Agent::Claude);
             agent.pane.state = AgentState::Blocked;
-            agent.pane.task_id = Some(TASK.parse().unwrap());
-            agent.task_title = Some("Fix the flaky test".into());
             let mut hosting = listed(PANE_2, PaneKind::Shell, "shell");
             hosting.pane.folder = "/work/web/app".into();
             hosting.pane.hosted_agent = Some(Agent::Codex);
             hosting.pane.state = AgentState::Working;
             let mut exited = listed(PANE_3, PaneKind::Shell, "shell");
             exited.pane.state = AgentState::Exited;
-            exited.pane.task_id = Some(TASK.parse().unwrap());
 
             let out = panes(&[agent, hosting, exited]);
 
             assert_eq!(
                 out,
                 format!(
-                    "ID{pad}  WORKSPACE  TAB     AGENT          STATE    FOLDER         TASK\n\
-                     {PANE_1}  web        agents  claude         blocked  /work/web      Fix the flaky test\n\
+                    "ID{pad}  WORKSPACE  TAB     AGENT          STATE    FOLDER\n\
+                     {PANE_1}  web        agents  claude         blocked  /work/web\n\
                      {PANE_2}  web        shell   hosting codex  working  /work/web/app\n\
-                     {PANE_3}  web        shell   shell          exited   /work/web      {TASK}\n",
+                     {PANE_3}  web        shell   shell          exited   /work/web\n",
                     pad = " ".repeat(PANE_1.len() - 2)
                 )
             );
@@ -502,52 +421,6 @@ mod tests {
         #[test]
         fn should_say_so_when_no_pane_runs() {
             assert_eq!(panes(&[]), "no panes\n");
-        }
-    }
-
-    mod task {
-        use super::*;
-
-        #[test]
-        fn should_put_a_task_without_a_workspace_in_the_inbox() {
-            let out = super::task(&a_task("Fix it", ""));
-
-            assert!(out.contains("workspace: inbox"), "{out}");
-        }
-
-        #[test]
-        fn should_end_with_the_body() {
-            let out = super::task(&a_task("Fix it", "Steps:\n1. look"));
-
-            assert!(out.ends_with("\nSteps:\n1. look\n"), "{out}");
-        }
-
-        #[test]
-        fn should_say_the_sign_in_cannot_see_an_unreachable_pr() {
-            let out = super::task(&Task {
-                pr: Some(agentdeck_client::types::TaskPr {
-                    checks: None,
-                    draft: false,
-                    head_ref: "feat".into(),
-                    number: 8,
-                    repo: "acme/secret".into(),
-                    review: None,
-                    state: agentdeck_core::PrState::Open,
-                    synced_at: String::new(),
-                    unreachable: true,
-                    updated_at: String::new(),
-                    url: "https://github.com/acme/secret/pull/8".into(),
-                }),
-                ..a_task("Fix it", "")
-            });
-
-            assert!(
-                out.contains(
-                    "  pr:        https://github.com/acme/secret/pull/8 (open, unreachable, \
-                     checks none, review none)\n"
-                ),
-                "{out}"
-            );
         }
     }
 

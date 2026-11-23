@@ -3,7 +3,7 @@
 
 use agentdeck_core::{
     Agent, AgentState, ChecksState, Layout, PaneId, PaneKind, PrRef, PrState, RepositoryId,
-    RepositoryName, ReviewState, TabId, TaskId, TaskKind, TaskPlace, TaskStatus, WorkspaceId,
+    RepositoryName, ReviewState, TabId, WorkspaceId,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -118,31 +118,6 @@ pub struct TabPatch {
     pub layout: Option<Layout>,
 }
 
-/// An item in the one global task list.
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct Task {
-    /// The task's id.
-    pub id: TaskId,
-    /// The title.
-    pub title: String,
-    /// The body, possibly empty.
-    pub body: String,
-    /// The status.
-    pub status: TaskStatus,
-    /// Plain or PR.
-    pub kind: TaskKind,
-    /// The linked workspace; `None` puts the task in the inbox.
-    pub workspace_id: Option<WorkspaceId>,
-    /// When the task was created.
-    pub created_at: String,
-    /// When the task last changed.
-    pub updated_at: String,
-    /// When the task last moved to done; `None` while it isn't done.
-    pub done_at: Option<String>,
-    /// The pull request behind a PR task; `None` for a plain task.
-    pub pr: Option<TaskPr>,
-}
-
 /// A GitHub Repository a pull request belongs to (spec §3): what GitHub says of it, as PR sync
 /// last read it with one of its pull requests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -243,92 +218,6 @@ pub struct NewLink {
     /// The Repository's `owner/name` (or its GitHub URL). One agentdeck doesn't know by that
     /// name is looked up on GitHub first.
     pub repository: RepositoryName,
-}
-
-/// The GitHub pull request behind a PR task, as PR sync last saw it (spec §8).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct TaskPr {
-    /// `owner/name` of the repo the PR targets.
-    pub repo: String,
-    /// The PR's number in that repo.
-    pub number: i64,
-    /// The PR's web URL.
-    pub url: String,
-    /// Open, merged or closed.
-    pub state: PrState,
-    /// A draft PR.
-    pub draft: bool,
-    /// The branch the PR merges from.
-    pub head_ref: String,
-    /// The head commit's rolled-up checks; `None` when it has none.
-    pub checks: Option<ChecksState>,
-    /// The review decision; `None` when the repo requires no review.
-    pub review: Option<ReviewState>,
-    /// When the PR last changed on GitHub.
-    pub updated_at: String,
-    /// When PR sync last saw the PR.
-    pub synced_at: String,
-    /// Whether the GitHub sign-in can't see the PR: the last full sync fetched it by number
-    /// and GitHub didn't show it to the token (not found, or no access). It is shown as it was
-    /// last synced. Absent from an older daemon, which reads as false.
-    #[serde(default)]
-    pub unreachable: bool,
-}
-
-/// `POST /v1/tasks`.
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct NewTask {
-    /// The title.
-    pub title: String,
-    /// The body; empty when absent.
-    pub body: Option<String>,
-    /// The status; `todo` when absent.
-    pub status: Option<TaskStatus>,
-    /// The workspace to link; the inbox when absent.
-    pub workspace_id: Option<WorkspaceId>,
-}
-
-/// `PATCH /v1/tasks/{id}`: the fields to change.
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
-pub struct TaskPatch {
-    /// A new title. A PR task's title is GitHub's: only its own title is accepted.
-    pub title: Option<String>,
-    /// A new body.
-    pub body: Option<String>,
-    /// A new status.
-    pub status: Option<TaskStatus>,
-    /// Where to move it: a workspace that isn't archived, or null for the inbox. Absent
-    /// leaves it where it is.
-    #[serde(
-        default,
-        deserialize_with = "present",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub workspace_id: Option<TaskPlace>,
-}
-
-/// A field whose value may be null, read as present: `Some(..)` whatever its value, while
-/// `#[serde(default)]` gives `None` for a field left out. Serde's own `Option` reads null as
-/// `None`, which would make `"workspace_id": null` the same as leaving it out.
-fn present<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    T: Deserialize<'de>,
-    D: serde::Deserializer<'de>,
-{
-    T::deserialize(deserializer).map(Some)
-}
-
-/// `GET /v1/tasks` filters; they combine with AND.
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
-pub struct TaskFilter {
-    /// Only tasks with this status.
-    pub status: Option<TaskStatus>,
-    /// Only tasks linked to this workspace.
-    pub workspace: Option<WorkspaceId>,
-    /// Only tasks of this kind.
-    pub kind: Option<TaskKind>,
-    /// `true`: only tasks with no workspace; `false`: only tasks with one.
-    pub inbox: Option<bool>,
 }
 
 /// Whether the daemon has a GitHub token GitHub accepts (spec §8).
@@ -556,8 +445,6 @@ pub struct Pane {
     /// The agent's session id: chosen at launch for `claude`, found after launch for `codex`
     /// (null until Codex has written its session file).
     pub session_id: Option<String>,
-    /// The linked task, if any.
-    pub task_id: Option<TaskId>,
     /// The agent state; a shell is `working` while it prints and `unknown` otherwise.
     pub state: AgentState,
     /// The title the program set, or empty.
@@ -582,22 +469,6 @@ pub struct NewPane {
     pub argv: Option<Vec<String>>,
     /// The absolute working directory, which must exist.
     pub cwd: String,
-}
-
-/// `PATCH /v1/panes/{id}`: the task to link the pane to, or null to unlink it. `task_id` is
-/// required, so an empty body can't unlink a pane by accident.
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct PanePatch {
-    /// A task in the pane's workspace that isn't done, or null.
-    #[serde(deserialize_with = "Option::deserialize")]
-    #[schemars(schema_with = "nullable_task_id")]
-    pub task_id: Option<TaskId>,
-}
-
-/// A task id or null, as a required property: schemars leaves an `Option` field out of
-/// `required` on its own.
-fn nullable_task_id(generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
-    generator.subschema_for::<Option<TaskId>>()
 }
 
 /// What `POST /v1/panes/{id}/respawn` runs in an exited pane.

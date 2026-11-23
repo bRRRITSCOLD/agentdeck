@@ -55,7 +55,7 @@ pub async fn resume_panes(restarter: &Restarter) -> Result<(), DbError> {
             db.call(move |c| db::panes::set_folder(c, id, Some(&folder)))
                 .await?;
         }
-        let launch = Launch::pane(pane.id, workspace, pane.task_id, argv, cwd.clone());
+        let launch = Launch::pane(pane.id, workspace, argv, cwd.clone());
         let feed = restarter.events.subscribe();
         let spawned = match agent {
             Some(agent) => terminals.spawn(pane.id, launch, agent.as_str()),

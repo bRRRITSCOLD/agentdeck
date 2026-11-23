@@ -1,6 +1,6 @@
 //! Stub `claude` and `codex` CLIs on the daemon's `PATH`, ahead of any real one, so no test
-//! ever runs a real agent. Each records what it was launched with (argv and
-//! `$AGENTDECK_TASK`) and what is typed into it under `<root>/agents/<pane id>/`.
+//! ever runs a real agent. Each records what it was launched with (its argv) and what is
+//! typed into it under `<root>/agents/<pane id>/`.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -9,7 +9,7 @@ use agentdeck_core::PaneId;
 
 use super::TestDaemon;
 
-/// Records its argv and `$AGENTDECK_TASK`; then sets the idle title and reads what is typed as
+/// Records its argv; then sets the idle title and reads what is typed as
 /// [`READ_LIKE_A_TUI`] does. It stays in the foreground (no `exec`), so the pane's foreground
 /// process is `claude` and the claude rules apply.
 ///
@@ -19,7 +19,6 @@ use super::TestDaemon;
 const STUB_CLAUDE: &str = r#"#!/bin/sh
 log="$(dirname "$0")/../agents/$AGENTDECK_PANE"
 mkdir -p "$log"
-printf '%s' "${AGENTDECK_TASK-unset}" > "$log/task"
 { for arg in "$@"; do printf '%s\0' "$arg"; done; printf '\036'; } >> "$log/argv"
 session=; previous=
 for arg in "$@"; do [ "$previous" = --resume ] && session=$arg; previous=$arg; done
@@ -31,7 +30,7 @@ stty raw -echo
 printf '\033[?2004h\033]0;\342\234\263 Claude Code\007> '
 "#;
 
-/// Records its argv and `$AGENTDECK_TASK`; unless resuming (a `resume` argument), writes a
+/// Records its argv; unless resuming (a `resume` argument), writes a
 /// session file as Codex does, under `$CODEX_HOME/sessions` (default `$HOME/.codex/sessions`),
 /// and records the id in `session`; then reads what is typed as [`READ_LIKE_A_TUI`] does.
 ///
@@ -41,7 +40,6 @@ printf '\033[?2004h\033]0;\342\234\263 Claude Code\007> '
 const STUB_CODEX: &str = r#"#!/bin/sh
 log="$(dirname "$0")/../agents/$AGENTDECK_PANE"
 mkdir -p "$log"
-printf '%s' "${AGENTDECK_TASK-unset}" > "$log/task"
 { for arg in "$@"; do printf '%s\0' "$arg"; done; printf '\036'; } >> "$log/argv"
 resuming=; session=; previous=
 for arg in "$@"; do
@@ -121,13 +119,6 @@ fn argv_records(text: &str) -> Vec<Vec<String>> {
 /// Every prompt the pane's stub agent submitted, each ended by `\n`.
 pub fn typed(daemon: &TestDaemon, pane: PaneId) -> String {
     std::fs::read_to_string(log(daemon, pane).join("stdin")).unwrap_or_default()
-}
-
-/// `$AGENTDECK_TASK` as the pane's stub agent last started with it: `unset` when it wasn't
-/// set; `None` before the stub has started. Each stub writes it before its argv, so it is
-/// there once [`launches`] has the launch.
-pub fn task_var(daemon: &TestDaemon, pane: PaneId) -> Option<String> {
-    std::fs::read_to_string(log(daemon, pane).join("task")).ok()
 }
 
 /// An argv as the stub agents record it, program name left out.

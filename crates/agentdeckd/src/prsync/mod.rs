@@ -1,13 +1,13 @@
-//! PR sync (spec §8): the viewer's open GitHub PRs become PR tasks, every 120 s and on demand.
-//! Each PR's Repository is stored by GitHub's id, so a rename or a transfer keeps it.
+//! PR sync (spec §8): the viewer's open GitHub PRs are kept, every 120 s and on demand. Each
+//! PR's Repository is stored by GitHub's id, and each PR by that id and its number, so a rename
+//! or a transfer keeps both.
 //!
 //! The first sync, and one every [`FULL_SYNC_VAR`] seconds (an hour by default), is full: it
 //! lists the open PRs, most recently updated first, down to the age cutoff (`[pr_sync]
 //! max_age_days`, see [`crate::config`]), and fetches the stored ones that left the list; a
 //! stored one older than the cutoff is Finished instead. The rest are incremental: they
 //! search only the PRs updated since the last good sync began, in any state, then refresh the
-//! [`unsettled`] ones (a finished check run doesn't update a PR) and match inbox PRs to
-//! workspaces again from what's stored.
+//! [`unsettled`] ones (a finished check run doesn't update a PR).
 //!
 //! A PR is **Finished** from when a sync sees it merged or closed, a close from agentdeck
 //! closes it, or a full sync finds it open but older than the cutoff; GitHub showing it open
@@ -18,30 +18,26 @@
 //!
 //! - [`crate::github_auth`]: the token, from the first source that gives one.
 //! - [`github`]: the GraphQL search and the fetch by number.
-//! - [`matching`]: which workspace holds a clone of a PR's repo with its branch.
-//! - `db::pull_requests`: storing the PRs and moving their tasks; `db::repositories`: storing
-//!   their Repositories.
+//! - `db::pull_requests`: storing the PRs; `db::repositories`: storing their Repositories.
 //!
 //! `POST /v1/prs/sync?full=true` (Sync now) is full whatever sync is due, and so is the first
 //! sync with another token than the last good one ran with, or after one found none.
 //!
 //! A stored PR GitHub doesn't show to the token, fetched by number, is marked unreachable: it
-//! keeps its state and its task its status, and the next full sync fetches it again.
+//! keeps its state, and the next full sync fetches it again.
 //!
 //! One sync runs at a time: the timer and `POST /v1/prs/sync` queue behind each other.
 //! Closing PRs (`POST /v1/prs/close`) queues behind them too, so a sync that read a PR as
 //! open before the close never stores it open again after.
 
 pub mod github;
-pub mod matching;
 
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use agentdeck_core::ws::Entity;
-use agentdeck_core::{ChecksState, PrRef, PrState, ReviewState, WorkspaceId};
+use agentdeck_core::{ChecksState, PrRef, PrState, ReviewState};
 use chrono::{DateTime, SecondsFormat, Utc};
 use tokio::time::MissedTickBehavior;
 
@@ -50,8 +46,7 @@ use crate::db::{self, Db};
 use crate::events::Events;
 use crate::github_auth::GithubAuth;
 use crate::model::{GhLogin, PrCloseResult, PrSyncProgress, PrSyncStage, PrSyncStatus};
-use github::{Github, GithubError, RemotePr};
-use matching::Clones;
+use github::{Github, GithubError, PrKey, RemotePr};
 
 /// How often the timer syncs.
 const INTERVAL: Duration = Duration::from_secs(120);
@@ -101,7 +96,7 @@ pub struct PrSync {
 
 struct Inner {
     db: Db,
-    /// Gets a `changed` event for each task and Repository a sync creates or changes.
+    /// Gets a `changed` event for each PR and Repository a sync creates, changes or deletes.
     events: Events,
     github: Github,
     /// The token, and whether GitHub accepts it.
@@ -155,8 +150,6 @@ enum SyncError {
     Github(#[from] GithubError),
     #[error("{0}")]
     Db(db::DbError),
-    #[error("matching PRs to workspaces: {0}")]
-    Matching(#[from] tokio::task::JoinError),
 }
 
 impl From<db::DbError> for SyncError {
@@ -341,8 +334,8 @@ impl PrSync {
     /// result per reference in the order asked (spec §8). A PR that isn't stored open, or that
     /// the GitHub sign-in can't see, fails without reaching GitHub; with no token, every one
     /// fails. The node ids are looked up 25 to a request, then each PR is closed on its own,
-    /// one at a time; one GitHub closes is stored closed and its task moves to done at once,
-    /// with a `changed` event. A failure is that PR's alone.
+    /// one at a time; one GitHub closes is stored closed, and so Finished, at once, with a
+    /// `changed` event. A failure is that PR's alone.
     pub async fn close(&self, prs: Vec<PrRef>) -> Vec<PrCloseResult> {
         let _running = self.inner.running.lock().await;
         let asked = prs.clone();
@@ -419,17 +412,17 @@ impl PrSync {
         results
     }
 
-    /// Stores `pr`, which GitHub just closed, as closed and Finished, and tells clients its task
+    /// Stores `pr`, which GitHub just closed, as closed and Finished, and tells clients it
     /// changed. A failure only logs: GitHub closed it, and the next full sync reads it closed.
     async fn closed(&self, pr: &db::pull_requests::Closable) {
-        let task_id = pr.task;
+        let key = pr.key;
         match self
             .inner
             .db
-            .call(move |conn| db::pull_requests::close(conn, task_id))
+            .call(move |conn| db::pull_requests::close(conn, key))
             .await
         {
-            Ok(true) => self.inner.events.changed(Entity::Task, task_id),
+            Ok(true) => self.inner.events.changed(Entity::PullRequest, key),
             Ok(false) => {}
             Err(err) => tracing::warn!("storing {}#{} as closed: {err}", pr.repo, pr.number),
         }
@@ -487,9 +480,6 @@ impl PrSync {
         since: Option<DateTime<Utc>>,
     ) -> Result<Synced, SyncError> {
         let auth = &self.inner.auth;
-        let workspaces = self.workspace_dirs().await?;
-        let clones =
-            Arc::new(tokio::task::spawn_blocking(move || Clones::scan(&workspaces)).await?);
         let mut read = Read {
             since,
             // A cutoff before the earliest time chrono holds is no cutoff.
@@ -498,7 +488,6 @@ impl PrSync {
                 .config
                 .max_age()
                 .and_then(|max_age| began.checked_sub_signed(max_age)),
-            clones,
         };
         let token = match self.read(&token, &read).await {
             Err(SyncError::Github(GithubError::Unauthorized)) => {
@@ -536,11 +525,8 @@ impl PrSync {
     /// incremental one.
     async fn read(&self, token: &str, read: &Read) -> Result<(), SyncError> {
         match read.since {
-            None => self.read_full(token, read.cutoff, &read.clones).await,
-            Some(since) => {
-                self.read_since(token, since, read.cutoff, &read.clones)
-                    .await
-            }
+            None => self.read_full(token, read.cutoff).await,
+            Some(since) => self.read_since(token, since, read.cutoff).await,
         }
     }
 
@@ -553,23 +539,18 @@ impl PrSync {
     ///    updated since they were stored, and [`unsettled`] ones.
     ///
     /// Then the PRs stored as open that left the list are fetched by number, so a merge or
-    /// close reaches its task; one GitHub doesn't show to the token is marked unreachable,
-    /// keeping its state and its task's status. One last updated before `cutoff` isn't
-    /// fetched: it is Finished, its task moving to done once, unless it is unreachable.
-    async fn read_full(
-        &self,
-        token: &str,
-        cutoff: Option<DateTime<Utc>>,
-        clones: &Arc<Clones>,
-    ) -> Result<(), SyncError> {
+    /// close is seen; one GitHub doesn't show to the token is marked unreachable, keeping its
+    /// state. One last updated before `cutoff` isn't fetched: it is Finished, unless it is
+    /// unreachable.
+    async fn read_full(&self, token: &str, cutoff: Option<DateTime<Utc>>) -> Result<(), SyncError> {
         let github = &self.inner.github;
         let stored = self
             .inner
             .db
             .call(|conn| db::pull_requests::open_prs(conn))
             .await?;
-        let mut seen: Vec<(String, i64)> = Vec::new();
-        let mut stale: Vec<(String, i64)> = Vec::new();
+        let mut seen: Vec<PrKey> = Vec::new();
+        let mut stale: Vec<RemotePr> = Vec::new();
         let mut after: Option<String> = None;
         for _ in 0..github::MAX_LIST_PAGES {
             let page = github.list_page(token, after.as_deref()).await?;
@@ -580,14 +561,11 @@ impl PrSync {
                     past_cutoff = true;
                     break;
                 }
-                let key = (pr.repo.clone(), pr.number);
-                match stored
-                    .iter()
-                    .find(|old| old.repo == pr.repo && old.number == pr.number)
-                {
+                seen.push(pr.key());
+                match stored.iter().find(|old| old.key() == pr.key()) {
                     Some(old) => {
                         if old.updated_at != pr.updated_at || unsettled(old) {
-                            stale.push(key.clone());
+                            stale.push(pr.clone());
                         }
                         prs.push(RemotePr {
                             checks: old.checks,
@@ -596,13 +574,12 @@ impl PrSync {
                         });
                     }
                     None => {
-                        stale.push(key.clone());
+                        stale.push(pr.clone());
                         prs.push(pr);
                     }
                 }
-                seen.push(key);
             }
-            self.store(prs, Vec::new(), clones).await?;
+            self.store(prs, Vec::new()).await?;
             let prs_done = u32::try_from(seen.len()).unwrap_or(u32::MAX);
             self.set_progress(Some(PrSyncProgress {
                 prs_done,
@@ -621,52 +598,35 @@ impl PrSync {
         }
 
         self.details_stage();
-        let details: Vec<RemotePr> = github
-            .prs(token, &stale)
-            .await?
-            .into_iter()
-            .flatten()
-            .collect();
-        self.store(details, Vec::new(), clones).await?;
+        let details = self.fetch(token, &stale).await?;
+        self.store(details.found, Vec::new()).await?;
 
-        // Read again, now the list is stored: a PR whose Repository GitHub renamed is stored
-        // under its new name, which the list showed, so it didn't leave it.
+        // Read again, now the list is stored, with each Repository's name GitHub gives it now.
         let stored = self
             .inner
             .db
             .call(|conn| db::pull_requests::open_prs(conn))
             .await?;
-        let (aged, stored): (Vec<RemotePr>, Vec<RemotePr>) = stored
+        let (aged, left): (Vec<RemotePr>, Vec<RemotePr>) = stored
             .into_iter()
+            .filter(|pr| !seen.contains(&pr.key()))
             .partition(|pr| older_than(&pr.updated_at, cutoff));
-        let aged: Vec<(String, i64)> = aged.into_iter().map(|pr| (pr.repo, pr.number)).collect();
-        self.finish_aged(missing(&aged, &seen)).await?;
-        let stored: Vec<(String, i64)> =
-            stored.into_iter().map(|pr| (pr.repo, pr.number)).collect();
-        let left = missing(&stored, &seen);
-        let found = github.prs(token, &left).await?;
-        let mut prs = Vec::new();
-        let mut unreachable = Vec::new();
-        for (wanted, found) in left.into_iter().zip(found) {
-            match found {
-                Some(pr) => prs.push(pr),
-                None => unreachable.push(wanted),
-            }
-        }
-        self.store(prs, unreachable, clones).await
+        self.finish_aged(aged.iter().map(RemotePr::key).collect())
+            .await?;
+        let left = self.fetch(token, &left).await?;
+        self.store(left.found, left.missing).await
     }
 
     /// An incremental read: the PRs updated at or after `since`, in any state, keeping a
     /// merged or closed one only if it's stored as open, and none last updated before
     /// `cutoff`; then the stored open PRs the search left out that are [`unsettled`] and
-    /// GitHub updated within `cutoff`, fetched by number, and the inbox PRs it left out,
-    /// matched to a workspace again as stored. Nothing is gone: only a full read says so.
+    /// GitHub updated within `cutoff`, fetched by number. Nothing is gone: only a full read
+    /// says so.
     async fn read_since(
         &self,
         token: &str,
         since: DateTime<Utc>,
         cutoff: Option<DateTime<Utc>>,
-        clones: &Arc<Clones>,
     ) -> Result<(), SyncError> {
         let github = &self.inner.github;
         let stored = self
@@ -675,18 +635,18 @@ impl PrSync {
             .call(|conn| db::pull_requests::open(conn))
             .await?;
         let q = github::updated_search(&since.to_rfc3339_opts(SecondsFormat::Secs, true));
-        let mut seen: Vec<(String, i64)> = Vec::new();
+        let mut seen: Vec<PrKey> = Vec::new();
         let mut after: Option<String> = None;
         for _ in 0..github::MAX_PAGES {
             let page = github.search_page(token, &q, after.as_deref()).await?;
-            seen.extend(page.prs.iter().map(|pr| (pr.repo.clone(), pr.number)));
+            seen.extend(page.prs.iter().map(RemotePr::key));
             let prs: Vec<RemotePr> = page
                 .prs
                 .into_iter()
-                .filter(|pr| pr.state == PrState::Open || stored.iter().any(|open| open.is(pr)))
+                .filter(|pr| pr.state == PrState::Open || stored.contains(&pr.key()))
                 .filter(|pr| !older_than(&pr.updated_at, cutoff))
                 .collect();
-            self.store(prs, Vec::new(), clones).await?;
+            self.store(prs, Vec::new()).await?;
             let prs_done = u32::try_from(seen.len()).unwrap_or(u32::MAX);
             self.set_progress(Some(PrSyncProgress {
                 prs_done,
@@ -699,77 +659,62 @@ impl PrSync {
             }
         }
 
-        let unsettled: Vec<(String, i64)> = self
+        let unsettled: Vec<RemotePr> = self
             .inner
             .db
             .call(|conn| db::pull_requests::open_current(conn))
             .await?
             .into_iter()
-            .filter(|pr| unsettled(pr) && !older_than(&pr.updated_at, cutoff))
-            .map(|pr| (pr.repo, pr.number))
+            .filter(|pr| {
+                unsettled(pr) && !older_than(&pr.updated_at, cutoff) && !seen.contains(&pr.key())
+            })
             .collect();
-        let unsettled = missing(&unsettled, &seen);
         if !unsettled.is_empty() {
             self.details_stage();
         }
-        let mut prs: Vec<RemotePr> = github
-            .prs(token, &unsettled)
-            .await?
-            .into_iter()
-            .flatten()
-            .collect();
-        seen.extend(prs.iter().map(|pr| (pr.repo.clone(), pr.number)));
-        let inbox = self
-            .inner
-            .db
-            .call(|conn| db::pull_requests::inbox_open(conn))
-            .await?;
-        prs.extend(
-            inbox
-                .into_iter()
-                .filter(|pr| !seen.contains(&(pr.repo.clone(), pr.number))),
-        );
-        self.store(prs, Vec::new(), clones).await
+        let fetched = self.fetch(token, &unsettled).await?;
+        self.store(fetched.found, Vec::new()).await
     }
 
-    /// Matches `prs` to workspaces, stores them with their Repositories, marks the
-    /// `unreachable` ones, and tells clients which tasks and Repositories changed.
-    async fn store(
-        &self,
-        prs: Vec<RemotePr>,
-        unreachable: Vec<(String, i64)>,
-        clones: &Arc<Clones>,
-    ) -> Result<(), SyncError> {
+    /// Fetches each of `asked` by number, by the name its Repository goes by as last read.
+    /// A PR GitHub doesn't show the token, or one it shows under another Repository (the name
+    /// was taken by another after a rename agentdeck hasn't seen), is missing.
+    async fn fetch(&self, token: &str, asked: &[RemotePr]) -> Result<Fetched, SyncError> {
+        let wanted: Vec<(String, i64)> = asked.iter().map(RemotePr::wanted).collect();
+        let found = self.inner.github.prs(token, &wanted).await?;
+        let mut fetched = Fetched::default();
+        for (asked, found) in asked.iter().zip(found) {
+            match found {
+                Some(pr) if pr.key() == asked.key() => fetched.found.push(pr),
+                _ => fetched.missing.push(asked.key()),
+            }
+        }
+        Ok(fetched)
+    }
+
+    /// Stores `prs` with their Repositories, marks the `unreachable` ones, and tells clients
+    /// which PRs and Repositories changed.
+    async fn store(&self, prs: Vec<RemotePr>, unreachable: Vec<PrKey>) -> Result<(), SyncError> {
         if prs.is_empty() && unreachable.is_empty() {
             return Ok(());
         }
-        let clones = Arc::clone(clones);
-        let matched = tokio::task::spawn_blocking(move || {
-            prs.into_iter()
-                .map(|pr| {
-                    let workspace = clones.workspace_for(&pr.repo, &pr.head_ref);
-                    (pr, workspace)
-                })
-                .collect::<Vec<_>>()
-        })
-        .await?;
         let changed = self
             .inner
             .db
-            .call(move |conn| db::pull_requests::store(conn, &matched, &unreachable))
+            .call(move |conn| db::pull_requests::store(conn, &prs, &unreachable))
             .await?;
         for repository in changed.repositories {
             self.inner.events.changed(Entity::Repository, repository);
         }
-        for task in changed.tasks {
-            self.inner.events.changed(Entity::Task, task);
+        for pr in changed.prs {
+            self.inner.events.changed(Entity::PullRequest, pr);
         }
         Ok(())
     }
 
     /// Finishes the stored open PRs `prs`, which GitHub hasn't updated within the cutoff, and
-    /// tells clients which tasks changed.
-    async fn finish_aged(&self, prs: Vec<(String, i64)>) -> Result<(), SyncError> {
+    /// tells clients which changed.
+    async fn finish_aged(&self, prs: Vec<PrKey>) -> Result<(), SyncError> {
         if prs.is_empty() {
             return Ok(());
         }
@@ -778,14 +723,14 @@ impl PrSync {
             .db
             .call(move |conn| db::pull_requests::finish_aged(conn, &prs))
             .await?;
-        for task in changed {
-            self.inner.events.changed(Entity::Task, task);
+        for pr in changed {
+            self.inner.events.changed(Entity::PullRequest, pr);
         }
         Ok(())
     }
 
     /// Deletes the PRs Finished `keep_finished` ago or longer, then the Repositories nothing
-    /// references any more, and tells clients which tasks and Repositories went.
+    /// references any more, and tells clients which PRs and Repositories went.
     async fn prune(&self) -> Result<(), SyncError> {
         let keep =
             chrono::TimeDelta::from_std(self.inner.keep_finished).unwrap_or(chrono::TimeDelta::MAX);
@@ -798,27 +743,13 @@ impl PrSync {
             .db
             .call(move |conn| db::pull_requests::prune(conn, before))
             .await?;
-        for task in pruned.tasks {
-            self.inner.events.changed(Entity::Task, task);
+        for pr in pruned.prs {
+            self.inner.events.changed(Entity::PullRequest, pr);
         }
         for repository in pruned.repositories {
             self.inner.events.changed(Entity::Repository, repository);
         }
         Ok(())
-    }
-
-    /// `(id, dir)` of each workspace that isn't archived, oldest first.
-    async fn workspace_dirs(&self) -> Result<Vec<(WorkspaceId, PathBuf)>, db::DbError> {
-        let workspaces = self
-            .inner
-            .db
-            .call(|conn| db::workspaces::list(conn))
-            .await?;
-        Ok(workspaces
-            .into_iter()
-            .filter(|ws| ws.archived_at.is_none())
-            .map(|ws| (ws.id, PathBuf::from(ws.dir)))
-            .collect())
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -836,8 +767,15 @@ struct Read {
     since: Option<DateTime<Utc>>,
     /// Open PRs last updated before this aren't synced; `None` for no cutoff.
     cutoff: Option<DateTime<Utc>>,
-    /// The clones in the workspaces, for matching.
-    clones: Arc<Clones>,
+}
+
+/// What fetching PRs by number found.
+#[derive(Default)]
+struct Fetched {
+    /// The PRs GitHub showed, each as asked for.
+    found: Vec<RemotePr>,
+    /// The PRs it didn't show the token, by key.
+    missing: Vec<PrKey>,
 }
 
 /// A hash of `token`, to tell whether a sync runs with the same token as the last good one
@@ -869,15 +807,6 @@ fn older_than(updated_at: &str, cutoff: Option<DateTime<Utc>>) -> bool {
         return false;
     };
     DateTime::parse_from_rfc3339(updated_at).is_ok_and(|updated| updated < cutoff)
-}
-
-/// Each of `wanted` (`(repo, number)`) that isn't among `seen`.
-fn missing(wanted: &[(String, i64)], seen: &[(String, i64)]) -> Vec<(String, i64)> {
-    wanted
-        .iter()
-        .filter(|pr| !seen.contains(pr))
-        .cloned()
-        .collect()
 }
 
 /// Whether an age cutoff of `after` days lets in open PRs one of `before` days left out: it is
@@ -946,15 +875,20 @@ mod tests {
 
         fn pr(checks: Option<ChecksState>, review: Option<ReviewState>) -> RemotePr {
             RemotePr {
-                repo: "acme/widgets".into(),
-                repository: None,
+                repository: github::RemoteRepository {
+                    id: agentdeck_core::RepositoryId::from(1_296_269),
+                    name: "acme/widgets".parse().unwrap(),
+                    url: "https://github.com/acme/widgets".into(),
+                    private: false,
+                    archived: false,
+                },
                 number: 7,
                 title: "Add PR sync".into(),
                 url: "https://github.com/acme/widgets/pull/7".into(),
                 state: PrState::Open,
                 draft: false,
                 head_ref: "feat/sync".into(),
-                base_ref: None,
+                base_ref: "main".into(),
                 author: None,
                 checks,
                 review,

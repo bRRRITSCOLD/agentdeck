@@ -347,26 +347,6 @@ pub mod types {
             Default::default()
         }
     }
-    ///`POST /v1/tasks`.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
-    pub struct NewTask {
-        ///The body; empty when absent.
-        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub body: ::std::option::Option<::std::string::String>,
-        ///The status; `todo` when absent.
-        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub status: ::std::option::Option<agentdeck_core::TaskStatus>,
-        ///The title.
-        pub title: ::std::string::String,
-        ///The workspace to link; the inbox when absent.
-        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub workspace_id: ::std::option::Option<agentdeck_core::WorkspaceId>,
-    }
-    impl NewTask {
-        pub fn builder() -> builder::NewTask {
-            Default::default()
-        }
-    }
     ///`POST /v1/workspaces`.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct NewWorkspace {
@@ -412,9 +392,6 @@ pub mod types {
         pub state: agentdeck_core::AgentState,
         ///The tab it belongs to.
         pub tab_id: agentdeck_core::TabId,
-        ///The linked task, if any.
-        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub task_id: ::std::option::Option<agentdeck_core::TaskId>,
         ///The title the program set, or empty.
         pub title: ::std::string::String,
     }
@@ -437,18 +414,6 @@ pub mod types {
     }
     impl PaneInput {
         pub fn builder() -> builder::PaneInput {
-            Default::default()
-        }
-    }
-    ///`PATCH /v1/panes/{id}`: the task to link the pane to, or null to unlink it. `task_id` is required, so an empty body can't unlink a pane by accident.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
-    pub struct PanePatch {
-        ///A task in the pane's workspace that isn't done, or null.
-        #[serde(deserialize_with = "::std::option::Option::deserialize")]
-        pub task_id: ::std::option::Option<agentdeck_core::TaskId>,
-    }
-    impl PanePatch {
-        pub fn builder() -> builder::PanePatch {
             Default::default()
         }
     }
@@ -832,93 +797,6 @@ pub mod types {
     }
     impl TabPatch {
         pub fn builder() -> builder::TabPatch {
-            Default::default()
-        }
-    }
-    ///An item in the one global task list.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
-    pub struct Task {
-        ///The body, possibly empty.
-        pub body: ::std::string::String,
-        ///When the task was created.
-        pub created_at: ::std::string::String,
-        ///When the task last moved to done; `None` while it isn't done.
-        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub done_at: ::std::option::Option<::std::string::String>,
-        ///The task's id.
-        pub id: agentdeck_core::TaskId,
-        ///Plain or PR.
-        pub kind: agentdeck_core::TaskKind,
-        ///The pull request behind a PR task; `None` for a plain task.
-        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub pr: ::std::option::Option<TaskPr>,
-        ///The status.
-        pub status: agentdeck_core::TaskStatus,
-        ///The title.
-        pub title: ::std::string::String,
-        ///When the task last changed.
-        pub updated_at: ::std::string::String,
-        ///The linked workspace; `None` puts the task in the inbox.
-        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub workspace_id: ::std::option::Option<agentdeck_core::WorkspaceId>,
-    }
-    impl Task {
-        pub fn builder() -> builder::Task {
-            Default::default()
-        }
-    }
-    ///`PATCH /v1/tasks/{id}`: the fields to change.
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
-    pub struct TaskPatch {
-        ///A new body.
-        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub body: ::std::option::Option<::std::string::String>,
-        ///A new status.
-        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub status: ::std::option::Option<agentdeck_core::TaskStatus>,
-        ///A new title. A PR task's title is GitHub's: only its own title is accepted.
-        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub title: ::std::option::Option<::std::string::String>,
-        ///Where to move it: a workspace that isn't archived, or null for the inbox. Absent leaves it where it is.
-        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub workspace_id: ::std::option::Option<agentdeck_core::TaskPlace>,
-    }
-    impl TaskPatch {
-        pub fn builder() -> builder::TaskPatch {
-            Default::default()
-        }
-    }
-    ///The GitHub pull request behind a PR task, as PR sync last saw it (spec §8).
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
-    pub struct TaskPr {
-        ///The head commit's rolled-up checks; `None` when it has none.
-        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub checks: ::std::option::Option<agentdeck_core::ChecksState>,
-        ///A draft PR.
-        pub draft: bool,
-        ///The branch the PR merges from.
-        pub head_ref: ::std::string::String,
-        ///The PR's number in that repo.
-        pub number: i64,
-        ///`owner/name` of the repo the PR targets.
-        pub repo: ::std::string::String,
-        ///The review decision; `None` when the repo requires no review.
-        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
-        pub review: ::std::option::Option<agentdeck_core::ReviewState>,
-        ///Open, merged or closed.
-        pub state: agentdeck_core::PrState,
-        ///When PR sync last saw the PR.
-        pub synced_at: ::std::string::String,
-        ///Whether the GitHub sign-in can't see the PR: the last full sync fetched it by number and GitHub didn't show it to the token (not found, or no access). It is shown as it was last synced. Absent from an older daemon, which reads as false.
-        #[serde(default)]
-        pub unreachable: bool,
-        ///When the PR last changed on GitHub.
-        pub updated_at: ::std::string::String,
-        ///The PR's web URL.
-        pub url: ::std::string::String,
-    }
-    impl TaskPr {
-        pub fn builder() -> builder::TaskPr {
             Default::default()
         }
     }
@@ -2163,97 +2041,6 @@ pub mod types {
             }
         }
         #[derive(Clone, Debug)]
-        pub struct NewTask {
-            body: ::std::result::Result<
-                ::std::option::Option<::std::string::String>,
-                ::std::string::String,
-            >,
-            status: ::std::result::Result<
-                ::std::option::Option<agentdeck_core::TaskStatus>,
-                ::std::string::String,
-            >,
-            title: ::std::result::Result<::std::string::String, ::std::string::String>,
-            workspace_id: ::std::result::Result<
-                ::std::option::Option<agentdeck_core::WorkspaceId>,
-                ::std::string::String,
-            >,
-        }
-        impl ::std::default::Default for NewTask {
-            fn default() -> Self {
-                Self {
-                    body: Ok(Default::default()),
-                    status: Ok(Default::default()),
-                    title: Err("no value supplied for title".to_string()),
-                    workspace_id: Ok(Default::default()),
-                }
-            }
-        }
-        impl NewTask {
-            pub fn body<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::option::Option<::std::string::String>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.body = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for body: {e}"));
-                self
-            }
-            pub fn status<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::TaskStatus>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.status = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for status: {e}"));
-                self
-            }
-            pub fn title<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::string::String>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.title = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for title: {e}"));
-                self
-            }
-            pub fn workspace_id<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::WorkspaceId>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.workspace_id = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for workspace_id: {e}"));
-                self
-            }
-        }
-        impl ::std::convert::TryFrom<NewTask> for super::NewTask {
-            type Error = super::error::ConversionError;
-            fn try_from(
-                value: NewTask,
-            ) -> ::std::result::Result<Self, super::error::ConversionError> {
-                Ok(Self {
-                    body: value.body?,
-                    status: value.status?,
-                    title: value.title?,
-                    workspace_id: value.workspace_id?,
-                })
-            }
-        }
-        impl ::std::convert::From<super::NewTask> for NewTask {
-            fn from(value: super::NewTask) -> Self {
-                Self {
-                    body: Ok(value.body),
-                    status: Ok(value.status),
-                    title: Ok(value.title),
-                    workspace_id: Ok(value.workspace_id),
-                }
-            }
-        }
-        #[derive(Clone, Debug)]
         pub struct NewWorkspace {
             dir: ::std::result::Result<
                 ::std::option::Option<::std::string::String>,
@@ -2336,10 +2123,6 @@ pub mod types {
             >,
             state: ::std::result::Result<agentdeck_core::AgentState, ::std::string::String>,
             tab_id: ::std::result::Result<agentdeck_core::TabId, ::std::string::String>,
-            task_id: ::std::result::Result<
-                ::std::option::Option<agentdeck_core::TaskId>,
-                ::std::string::String,
-            >,
             title: ::std::result::Result<::std::string::String, ::std::string::String>,
         }
         impl ::std::default::Default for Pane {
@@ -2357,7 +2140,6 @@ pub mod types {
                     session_id: Ok(Default::default()),
                     state: Err("no value supplied for state".to_string()),
                     tab_id: Err("no value supplied for tab_id".to_string()),
-                    task_id: Ok(Default::default()),
                     title: Err("no value supplied for title".to_string()),
                 }
             }
@@ -2483,16 +2265,6 @@ pub mod types {
                     .map_err(|e| format!("error converting supplied value for tab_id: {e}"));
                 self
             }
-            pub fn task_id<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::TaskId>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.task_id = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for task_id: {e}"));
-                self
-            }
             pub fn title<T>(mut self, value: T) -> Self
             where
                 T: ::std::convert::TryInto<::std::string::String>,
@@ -2520,7 +2292,6 @@ pub mod types {
                     session_id: value.session_id?,
                     state: value.state?,
                     tab_id: value.tab_id?,
-                    task_id: value.task_id?,
                     title: value.title?,
                 })
             }
@@ -2540,7 +2311,6 @@ pub mod types {
                     session_id: Ok(value.session_id),
                     state: Ok(value.state),
                     tab_id: Ok(value.tab_id),
-                    task_id: Ok(value.task_id),
                     title: Ok(value.title),
                 }
             }
@@ -2610,49 +2380,6 @@ pub mod types {
                     submit: Ok(value.submit),
                     text: Ok(value.text),
                     when: Ok(value.when),
-                }
-            }
-        }
-        #[derive(Clone, Debug)]
-        pub struct PanePatch {
-            task_id: ::std::result::Result<
-                ::std::option::Option<agentdeck_core::TaskId>,
-                ::std::string::String,
-            >,
-        }
-        impl ::std::default::Default for PanePatch {
-            fn default() -> Self {
-                Self {
-                    task_id: Err("no value supplied for task_id".to_string()),
-                }
-            }
-        }
-        impl PanePatch {
-            pub fn task_id<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::TaskId>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.task_id = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for task_id: {e}"));
-                self
-            }
-        }
-        impl ::std::convert::TryFrom<PanePatch> for super::PanePatch {
-            type Error = super::error::ConversionError;
-            fn try_from(
-                value: PanePatch,
-            ) -> ::std::result::Result<Self, super::error::ConversionError> {
-                Ok(Self {
-                    task_id: value.task_id?,
-                })
-            }
-        }
-        impl ::std::convert::From<super::PanePatch> for PanePatch {
-            fn from(value: super::PanePatch) -> Self {
-                Self {
-                    task_id: Ok(value.task_id),
                 }
             }
         }
@@ -3946,456 +3673,6 @@ pub mod types {
             }
         }
         #[derive(Clone, Debug)]
-        pub struct Task {
-            body: ::std::result::Result<::std::string::String, ::std::string::String>,
-            created_at: ::std::result::Result<::std::string::String, ::std::string::String>,
-            done_at: ::std::result::Result<
-                ::std::option::Option<::std::string::String>,
-                ::std::string::String,
-            >,
-            id: ::std::result::Result<agentdeck_core::TaskId, ::std::string::String>,
-            kind: ::std::result::Result<agentdeck_core::TaskKind, ::std::string::String>,
-            pr: ::std::result::Result<::std::option::Option<super::TaskPr>, ::std::string::String>,
-            status: ::std::result::Result<agentdeck_core::TaskStatus, ::std::string::String>,
-            title: ::std::result::Result<::std::string::String, ::std::string::String>,
-            updated_at: ::std::result::Result<::std::string::String, ::std::string::String>,
-            workspace_id: ::std::result::Result<
-                ::std::option::Option<agentdeck_core::WorkspaceId>,
-                ::std::string::String,
-            >,
-        }
-        impl ::std::default::Default for Task {
-            fn default() -> Self {
-                Self {
-                    body: Err("no value supplied for body".to_string()),
-                    created_at: Err("no value supplied for created_at".to_string()),
-                    done_at: Ok(Default::default()),
-                    id: Err("no value supplied for id".to_string()),
-                    kind: Err("no value supplied for kind".to_string()),
-                    pr: Ok(Default::default()),
-                    status: Err("no value supplied for status".to_string()),
-                    title: Err("no value supplied for title".to_string()),
-                    updated_at: Err("no value supplied for updated_at".to_string()),
-                    workspace_id: Ok(Default::default()),
-                }
-            }
-        }
-        impl Task {
-            pub fn body<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::string::String>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.body = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for body: {e}"));
-                self
-            }
-            pub fn created_at<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::string::String>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.created_at = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for created_at: {e}"));
-                self
-            }
-            pub fn done_at<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::option::Option<::std::string::String>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.done_at = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for done_at: {e}"));
-                self
-            }
-            pub fn id<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<agentdeck_core::TaskId>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.id = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for id: {e}"));
-                self
-            }
-            pub fn kind<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<agentdeck_core::TaskKind>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.kind = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for kind: {e}"));
-                self
-            }
-            pub fn pr<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::option::Option<super::TaskPr>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.pr = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for pr: {e}"));
-                self
-            }
-            pub fn status<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<agentdeck_core::TaskStatus>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.status = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for status: {e}"));
-                self
-            }
-            pub fn title<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::string::String>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.title = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for title: {e}"));
-                self
-            }
-            pub fn updated_at<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::string::String>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.updated_at = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for updated_at: {e}"));
-                self
-            }
-            pub fn workspace_id<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::WorkspaceId>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.workspace_id = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for workspace_id: {e}"));
-                self
-            }
-        }
-        impl ::std::convert::TryFrom<Task> for super::Task {
-            type Error = super::error::ConversionError;
-            fn try_from(value: Task) -> ::std::result::Result<Self, super::error::ConversionError> {
-                Ok(Self {
-                    body: value.body?,
-                    created_at: value.created_at?,
-                    done_at: value.done_at?,
-                    id: value.id?,
-                    kind: value.kind?,
-                    pr: value.pr?,
-                    status: value.status?,
-                    title: value.title?,
-                    updated_at: value.updated_at?,
-                    workspace_id: value.workspace_id?,
-                })
-            }
-        }
-        impl ::std::convert::From<super::Task> for Task {
-            fn from(value: super::Task) -> Self {
-                Self {
-                    body: Ok(value.body),
-                    created_at: Ok(value.created_at),
-                    done_at: Ok(value.done_at),
-                    id: Ok(value.id),
-                    kind: Ok(value.kind),
-                    pr: Ok(value.pr),
-                    status: Ok(value.status),
-                    title: Ok(value.title),
-                    updated_at: Ok(value.updated_at),
-                    workspace_id: Ok(value.workspace_id),
-                }
-            }
-        }
-        #[derive(Clone, Debug)]
-        pub struct TaskPatch {
-            body: ::std::result::Result<
-                ::std::option::Option<::std::string::String>,
-                ::std::string::String,
-            >,
-            status: ::std::result::Result<
-                ::std::option::Option<agentdeck_core::TaskStatus>,
-                ::std::string::String,
-            >,
-            title: ::std::result::Result<
-                ::std::option::Option<::std::string::String>,
-                ::std::string::String,
-            >,
-            workspace_id: ::std::result::Result<
-                ::std::option::Option<agentdeck_core::TaskPlace>,
-                ::std::string::String,
-            >,
-        }
-        impl ::std::default::Default for TaskPatch {
-            fn default() -> Self {
-                Self {
-                    body: Ok(Default::default()),
-                    status: Ok(Default::default()),
-                    title: Ok(Default::default()),
-                    workspace_id: Ok(Default::default()),
-                }
-            }
-        }
-        impl TaskPatch {
-            pub fn body<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::option::Option<::std::string::String>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.body = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for body: {e}"));
-                self
-            }
-            pub fn status<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::TaskStatus>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.status = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for status: {e}"));
-                self
-            }
-            pub fn title<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::option::Option<::std::string::String>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.title = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for title: {e}"));
-                self
-            }
-            pub fn workspace_id<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::TaskPlace>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.workspace_id = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for workspace_id: {e}"));
-                self
-            }
-        }
-        impl ::std::convert::TryFrom<TaskPatch> for super::TaskPatch {
-            type Error = super::error::ConversionError;
-            fn try_from(
-                value: TaskPatch,
-            ) -> ::std::result::Result<Self, super::error::ConversionError> {
-                Ok(Self {
-                    body: value.body?,
-                    status: value.status?,
-                    title: value.title?,
-                    workspace_id: value.workspace_id?,
-                })
-            }
-        }
-        impl ::std::convert::From<super::TaskPatch> for TaskPatch {
-            fn from(value: super::TaskPatch) -> Self {
-                Self {
-                    body: Ok(value.body),
-                    status: Ok(value.status),
-                    title: Ok(value.title),
-                    workspace_id: Ok(value.workspace_id),
-                }
-            }
-        }
-        #[derive(Clone, Debug)]
-        pub struct TaskPr {
-            checks: ::std::result::Result<
-                ::std::option::Option<agentdeck_core::ChecksState>,
-                ::std::string::String,
-            >,
-            draft: ::std::result::Result<bool, ::std::string::String>,
-            head_ref: ::std::result::Result<::std::string::String, ::std::string::String>,
-            number: ::std::result::Result<i64, ::std::string::String>,
-            repo: ::std::result::Result<::std::string::String, ::std::string::String>,
-            review: ::std::result::Result<
-                ::std::option::Option<agentdeck_core::ReviewState>,
-                ::std::string::String,
-            >,
-            state: ::std::result::Result<agentdeck_core::PrState, ::std::string::String>,
-            synced_at: ::std::result::Result<::std::string::String, ::std::string::String>,
-            unreachable: ::std::result::Result<bool, ::std::string::String>,
-            updated_at: ::std::result::Result<::std::string::String, ::std::string::String>,
-            url: ::std::result::Result<::std::string::String, ::std::string::String>,
-        }
-        impl ::std::default::Default for TaskPr {
-            fn default() -> Self {
-                Self {
-                    checks: Ok(Default::default()),
-                    draft: Err("no value supplied for draft".to_string()),
-                    head_ref: Err("no value supplied for head_ref".to_string()),
-                    number: Err("no value supplied for number".to_string()),
-                    repo: Err("no value supplied for repo".to_string()),
-                    review: Ok(Default::default()),
-                    state: Err("no value supplied for state".to_string()),
-                    synced_at: Err("no value supplied for synced_at".to_string()),
-                    unreachable: Ok(Default::default()),
-                    updated_at: Err("no value supplied for updated_at".to_string()),
-                    url: Err("no value supplied for url".to_string()),
-                }
-            }
-        }
-        impl TaskPr {
-            pub fn checks<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::ChecksState>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.checks = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for checks: {e}"));
-                self
-            }
-            pub fn draft<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<bool>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.draft = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for draft: {e}"));
-                self
-            }
-            pub fn head_ref<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::string::String>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.head_ref = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for head_ref: {e}"));
-                self
-            }
-            pub fn number<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<i64>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.number = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for number: {e}"));
-                self
-            }
-            pub fn repo<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::string::String>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.repo = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for repo: {e}"));
-                self
-            }
-            pub fn review<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::ReviewState>>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.review = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for review: {e}"));
-                self
-            }
-            pub fn state<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<agentdeck_core::PrState>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.state = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for state: {e}"));
-                self
-            }
-            pub fn synced_at<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::string::String>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.synced_at = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for synced_at: {e}"));
-                self
-            }
-            pub fn unreachable<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<bool>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.unreachable = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for unreachable: {e}"));
-                self
-            }
-            pub fn updated_at<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::string::String>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.updated_at = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for updated_at: {e}"));
-                self
-            }
-            pub fn url<T>(mut self, value: T) -> Self
-            where
-                T: ::std::convert::TryInto<::std::string::String>,
-                T::Error: ::std::fmt::Display,
-            {
-                self.url = value
-                    .try_into()
-                    .map_err(|e| format!("error converting supplied value for url: {e}"));
-                self
-            }
-        }
-        impl ::std::convert::TryFrom<TaskPr> for super::TaskPr {
-            type Error = super::error::ConversionError;
-            fn try_from(
-                value: TaskPr,
-            ) -> ::std::result::Result<Self, super::error::ConversionError> {
-                Ok(Self {
-                    checks: value.checks?,
-                    draft: value.draft?,
-                    head_ref: value.head_ref?,
-                    number: value.number?,
-                    repo: value.repo?,
-                    review: value.review?,
-                    state: value.state?,
-                    synced_at: value.synced_at?,
-                    unreachable: value.unreachable?,
-                    updated_at: value.updated_at?,
-                    url: value.url?,
-                })
-            }
-        }
-        impl ::std::convert::From<super::TaskPr> for TaskPr {
-            fn from(value: super::TaskPr) -> Self {
-                Self {
-                    checks: Ok(value.checks),
-                    draft: Ok(value.draft),
-                    head_ref: Ok(value.head_ref),
-                    number: Ok(value.number),
-                    repo: Ok(value.repo),
-                    review: Ok(value.review),
-                    state: Ok(value.state),
-                    synced_at: Ok(value.synced_at),
-                    unreachable: Ok(value.unreachable),
-                    updated_at: Ok(value.updated_at),
-                    url: Ok(value.url),
-                }
-            }
-        }
-        #[derive(Clone, Debug)]
         pub struct TerminalPatch {
             file_opener: ::std::result::Result<
                 ::std::option::Option<::std::string::String>,
@@ -4978,25 +4255,6 @@ impl Client {
     pub fn pane_delete(&self) -> builder::PaneDelete<'_> {
         builder::PaneDelete::new(self)
     }
-    ///Links the pane to a task in its workspace that isn't done, or unlinks it (`task_id`
-    ///
-    ///null). Nothing is typed into the pane (spec §9).
-    ///
-    ///Sends a `PATCH` request to `/v1/panes/{id}`
-    ///
-    ///Arguments:
-    ///- `id`: The entity's id.
-    ///- `body`
-    ///```ignore
-    ///let response = client.pane_update()
-    ///    .id(id)
-    ///    .body(body)
-    ///    .send()
-    ///    .await;
-    ///```
-    pub fn pane_update(&self) -> builder::PaneUpdate<'_> {
-        builder::PaneUpdate::new(self)
-    }
     ///Types text into the pane, as is or submitted (`submit`), now or once it is idle (`when`)
     ///
     ///Sends a `POST` request to `/v1/panes/{id}/input`
@@ -5014,9 +4272,9 @@ impl Client {
     pub fn pane_input(&self) -> builder::PaneInput<'_> {
         builder::PaneInput::new(self)
     }
-    ///Starts an exited pane again in place, keeping its id, its place in the tab's layout, its
+    ///Starts an exited pane again in place, keeping its id, its place in the tab's layout and
     ///
-    ///`cwd` and its task link (spec §4). `run: "agent"`, for an agent pane only (`unsupported_kind`), runs its agent again: claude and codex resume their session when it is known, else start fresh with a new session; an `other` agent runs its argv again. A resume that exits non-zero within 10 s, as one of a session the agent can no longer find does, is followed by a fresh start, once. `run: "shell"` turns the pane into a shell pane running `$SHELL`, with hosting on. The state starts over. `running` (409) while its process hasn't exited; `invalid_dir` when its `cwd` is gone; `invalid_argv` when the program can't start, and the pane stays exited.
+    ///its `cwd` (spec §4). `run: "agent"`, for an agent pane only (`unsupported_kind`), runs its agent again: claude and codex resume their session when it is known, else start fresh with a new session; an `other` agent runs its argv again. A resume that exits non-zero within 10 s, as one of a session the agent can no longer find does, is followed by a fresh start, once. `run: "shell"` turns the pane into a shell pane running `$SHELL`, with hosting on. The state starts over. `running` (409) while its process hasn't exited; `invalid_dir` when its `cwd` is gone; `invalid_argv` when the program can't start, and the pane stays exited.
     ///
     ///Sends a `POST` request to `/v1/panes/{id}/respawn`
     ///
@@ -5033,9 +4291,9 @@ impl Client {
     pub fn pane_respawn(&self) -> builder::PaneRespawn<'_> {
         builder::PaneRespawn::new(self)
     }
-    ///Stops the pane's agent and keeps the pane, with its place in the layout, its session and
+    ///Stops the pane's agent and keeps the pane, with its place in the layout and its session:
     ///
-    ///its task link: SIGHUP, then SIGKILL after 3 s, as `DELETE` does. An agent pane's process is stopped, and the pane reads as exited once it has, so `POST /v1/panes/{id}/respawn` (Restart agent) resumes the session later and a restarted daemon doesn't resume it. A shell pane's hosted agent is stopped, its process group alone, and the shell keeps running. Answers once the signal is sent: the `state` and `exit` events, or `changed` for a hosted agent, follow. `exited` (409) when the process has already exited; `no_agent` (409) for a shell pane hosting no agent.
+    ///SIGHUP, then SIGKILL after 3 s, as `DELETE` does. An agent pane's process is stopped, and the pane reads as exited once it has, so `POST /v1/panes/{id}/respawn` (Restart agent) resumes the session later and a restarted daemon doesn't resume it. A shell pane's hosted agent is stopped, its process group alone, and the shell keeps running. Answers once the signal is sent: the `state` and `exit` events, or `changed` for a hosted agent, follow. `exited` (409) when the process has already exited; `no_agent` (409) for a shell pane hosting no agent.
     ///
     ///Sends a `POST` request to `/v1/panes/{id}/stop`
     ///
@@ -5092,7 +4350,7 @@ impl Client {
     }
     ///Closes PRs on GitHub, named by reference: only closes them, with no comment and no branch
     ///
-    ///delete. Answers one result per reference, in the order asked, once every PR is tried; 200 even when some failed. Only a PR stored open and reachable closes; a closed PR's task moves to done at once.
+    ///delete. Answers one result per reference, in the order asked, once every PR is tried; 200 even when some failed. Only a PR stored open and reachable closes; a closed PR is stored closed, and Finished, at once.
     ///
     ///Sends a `POST` request to `/v1/prs/close`
     ///
@@ -5117,7 +4375,7 @@ impl Client {
     pub fn prs_status(&self) -> builder::PrsStatus<'_> {
         builder::PrsStatus::new(self)
     }
-    ///Syncs PR tasks with GitHub now, after any sync running, and answers with the status the
+    ///Syncs PRs with GitHub now, after any sync running, and answers with the status the
     ///
     ///sync left. Without `full` it is the sync that is due, usually incremental. A sync that fails still answers 200: `last_error` says why, and `login` is `logged_out` when there's no usable `gh` token.
     ///
@@ -5229,89 +4487,6 @@ impl Client {
     pub fn tab_update(&self) -> builder::TabUpdate<'_> {
         builder::TabUpdate::new(self)
     }
-    ///The tasks matching every filter given, oldest first
-    ///
-    ///Sends a `GET` request to `/v1/tasks`
-    ///
-    ///Arguments:
-    ///- `inbox`: `true`: only tasks with no workspace; `false`: only tasks with one.
-    ///- `kind`: Only tasks of this kind.
-    ///- `status`: Only tasks with this status.
-    ///- `workspace`: Only tasks linked to this workspace.
-    ///```ignore
-    ///let response = client.task_list()
-    ///    .inbox(inbox)
-    ///    .kind(kind)
-    ///    .status(status)
-    ///    .workspace(workspace)
-    ///    .send()
-    ///    .await;
-    ///```
-    pub fn task_list(&self) -> builder::TaskList<'_> {
-        builder::TaskList::new(self)
-    }
-    ///Creates a plain task
-    ///
-    ///Sends a `POST` request to `/v1/tasks`
-    ///
-    ///```ignore
-    ///let response = client.task_create()
-    ///    .body(body)
-    ///    .send()
-    ///    .await;
-    ///```
-    pub fn task_create(&self) -> builder::TaskCreate<'_> {
-        builder::TaskCreate::new(self)
-    }
-    ///One task
-    ///
-    ///Sends a `GET` request to `/v1/tasks/{id}`
-    ///
-    ///Arguments:
-    ///- `id`: The entity's id.
-    ///```ignore
-    ///let response = client.task_get()
-    ///    .id(id)
-    ///    .send()
-    ///    .await;
-    ///```
-    pub fn task_get(&self) -> builder::TaskGet<'_> {
-        builder::TaskGet::new(self)
-    }
-    ///Deletes a task
-    ///
-    ///Sends a `DELETE` request to `/v1/tasks/{id}`
-    ///
-    ///Arguments:
-    ///- `id`: The entity's id.
-    ///```ignore
-    ///let response = client.task_delete()
-    ///    .id(id)
-    ///    .send()
-    ///    .await;
-    ///```
-    pub fn task_delete(&self) -> builder::TaskDelete<'_> {
-        builder::TaskDelete::new(self)
-    }
-    ///Changes a task's title, body, status or workspace
-    ///
-    ///`"workspace_id": null` moves the task to the inbox. Refuses a blank title, or another title for a PR task, whose title is its PR's (`invalid_title`), and a workspace that doesn't exist or is archived (`unknown_workspace`). A PR task's workspace set here sticks: PR sync never moves it again. Moving a task out of a linked pane's workspace unlinks the pane.
-    ///
-    ///Sends a `PATCH` request to `/v1/tasks/{id}`
-    ///
-    ///Arguments:
-    ///- `id`: The entity's id.
-    ///- `body`
-    ///```ignore
-    ///let response = client.task_update()
-    ///    .id(id)
-    ///    .body(body)
-    ///    .send()
-    ///    .await;
-    ///```
-    pub fn task_update(&self) -> builder::TaskUpdate<'_> {
-        builder::TaskUpdate::new(self)
-    }
     ///Every workspace, archived ones included, oldest first
     ///
     ///Sends a `GET` request to `/v1/workspaces`
@@ -5352,9 +4527,9 @@ impl Client {
     pub fn workspace_get(&self) -> builder::WorkspaceGet<'_> {
         builder::WorkspaceGet::new(self)
     }
-    ///Deletes a workspace, and its dir when agentdeck created it. Its tasks move to the inbox; its
+    ///Deletes a workspace, and its dir when agentdeck created it. Its Links go, and with them each
     ///
-    ///Links go, and with them each Repository nothing else names, with a `repository` change for each Repository it linked. Without `force`, a dir holding uncommitted or unpushed work is a 409 `dirty` carrying the dirty report.
+    ///Repository nothing else names, with a `repository` change for each Repository it linked. Without `force`, a dir holding uncommitted or unpushed work is a 409 `dirty` carrying the dirty report.
     ///
     ///Sends a `DELETE` request to `/v1/workspaces/{id}`
     ///
@@ -5388,7 +4563,7 @@ impl Client {
     pub fn workspace_update(&self) -> builder::WorkspaceUpdate<'_> {
         builder::WorkspaceUpdate::new(self)
     }
-    ///Archives a workspace; its tasks and dir are kept. Refused (409 `panes_running`) while
+    ///Archives a workspace; its dir is kept. Refused (409 `panes_running`) while
     ///
     ///any of its panes runs.
     ///
@@ -6170,97 +5345,6 @@ pub mod builder {
             let response = result?;
             match response.status().as_u16() {
                 204u16 => Ok(ResponseValue::empty(response)),
-                400u16..=499u16 => Err(Error::ErrorResponse(
-                    ResponseValue::from_response(response).await?,
-                )),
-                500u16..=599u16 => Err(Error::ErrorResponse(
-                    ResponseValue::from_response(response).await?,
-                )),
-                _ => Err(Error::UnexpectedResponse(response)),
-            }
-        }
-    }
-    ///Builder for [`Client::pane_update`]
-    ///
-    ///[`Client::pane_update`]: super::Client::pane_update
-    #[derive(Debug, Clone)]
-    pub struct PaneUpdate<'a> {
-        client: &'a super::Client,
-        id: Result<agentdeck_core::PaneId, String>,
-        body: Result<types::builder::PanePatch, String>,
-    }
-    impl<'a> PaneUpdate<'a> {
-        pub fn new(client: &'a super::Client) -> Self {
-            Self {
-                client: client,
-                id: Err("id was not initialized".to_string()),
-                body: Ok(::std::default::Default::default()),
-            }
-        }
-        pub fn id<V>(mut self, value: V) -> Self
-        where
-            V: std::convert::TryInto<agentdeck_core::PaneId>,
-        {
-            self.id = value
-                .try_into()
-                .map_err(|_| "conversion to `agentdeck_core :: PaneId` for id failed".to_string());
-            self
-        }
-        pub fn body<V>(mut self, value: V) -> Self
-        where
-            V: std::convert::TryInto<types::PanePatch>,
-            <V as std::convert::TryInto<types::PanePatch>>::Error: std::fmt::Display,
-        {
-            self.body = value
-                .try_into()
-                .map(From::from)
-                .map_err(|s| format!("conversion to `PanePatch` for body failed: {}", s));
-            self
-        }
-        pub fn body_map<F>(mut self, f: F) -> Self
-        where
-            F: std::ops::FnOnce(types::builder::PanePatch) -> types::builder::PanePatch,
-        {
-            self.body = self.body.map(f);
-            self
-        }
-        ///Sends a `PATCH` request to `/v1/panes/{id}`
-        pub async fn send(self) -> Result<ResponseValue<types::Pane>, Error<types::Error>> {
-            let Self { client, id, body } = self;
-            let id = id.map_err(Error::InvalidRequest)?;
-            let body = body
-                .and_then(|v| types::PanePatch::try_from(v).map_err(|e| e.to_string()))
-                .map_err(Error::InvalidRequest)?;
-            let url = format!(
-                "{}/v1/panes/{}",
-                client.baseurl,
-                encode_path(&id.to_string()),
-            );
-            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
-            header_map.append(
-                ::reqwest::header::HeaderName::from_static("api-version"),
-                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
-            );
-            #[allow(unused_mut)]
-            let mut request = client
-                .client
-                .patch(url)
-                .header(
-                    ::reqwest::header::ACCEPT,
-                    ::reqwest::header::HeaderValue::from_static("application/json"),
-                )
-                .json(&body)
-                .headers(header_map)
-                .build()?;
-            let info = OperationInfo {
-                operation_id: "pane_update",
-            };
-            client.pre(&mut request, &info).await?;
-            let result = client.exec(request, &info).await;
-            client.post(&result, &info).await?;
-            let response = result?;
-            match response.status().as_u16() {
-                200u16 => ResponseValue::from_response(response).await,
                 400u16..=499u16 => Err(Error::ErrorResponse(
                     ResponseValue::from_response(response).await?,
                 )),
@@ -7291,418 +6375,6 @@ pub mod builder {
                 .build()?;
             let info = OperationInfo {
                 operation_id: "tab_update",
-            };
-            client.pre(&mut request, &info).await?;
-            let result = client.exec(request, &info).await;
-            client.post(&result, &info).await?;
-            let response = result?;
-            match response.status().as_u16() {
-                200u16 => ResponseValue::from_response(response).await,
-                400u16..=499u16 => Err(Error::ErrorResponse(
-                    ResponseValue::from_response(response).await?,
-                )),
-                500u16..=599u16 => Err(Error::ErrorResponse(
-                    ResponseValue::from_response(response).await?,
-                )),
-                _ => Err(Error::UnexpectedResponse(response)),
-            }
-        }
-    }
-    ///Builder for [`Client::task_list`]
-    ///
-    ///[`Client::task_list`]: super::Client::task_list
-    #[derive(Debug, Clone)]
-    pub struct TaskList<'a> {
-        client: &'a super::Client,
-        inbox: Result<Option<bool>, String>,
-        kind: Result<Option<agentdeck_core::TaskKind>, String>,
-        status: Result<Option<agentdeck_core::TaskStatus>, String>,
-        workspace: Result<Option<agentdeck_core::WorkspaceId>, String>,
-    }
-    impl<'a> TaskList<'a> {
-        pub fn new(client: &'a super::Client) -> Self {
-            Self {
-                client: client,
-                inbox: Ok(None),
-                kind: Ok(None),
-                status: Ok(None),
-                workspace: Ok(None),
-            }
-        }
-        pub fn inbox<V>(mut self, value: V) -> Self
-        where
-            V: std::convert::TryInto<bool>,
-        {
-            self.inbox = value
-                .try_into()
-                .map(Some)
-                .map_err(|_| "conversion to `bool` for inbox failed".to_string());
-            self
-        }
-        pub fn kind<V>(mut self, value: V) -> Self
-        where
-            V: std::convert::TryInto<agentdeck_core::TaskKind>,
-        {
-            self.kind = value.try_into().map(Some).map_err(|_| {
-                "conversion to `agentdeck_core :: TaskKind` for kind failed".to_string()
-            });
-            self
-        }
-        pub fn status<V>(mut self, value: V) -> Self
-        where
-            V: std::convert::TryInto<agentdeck_core::TaskStatus>,
-        {
-            self.status = value.try_into().map(Some).map_err(|_| {
-                "conversion to `agentdeck_core :: TaskStatus` for status failed".to_string()
-            });
-            self
-        }
-        pub fn workspace<V>(mut self, value: V) -> Self
-        where
-            V: std::convert::TryInto<agentdeck_core::WorkspaceId>,
-        {
-            self.workspace = value.try_into().map(Some).map_err(|_| {
-                "conversion to `agentdeck_core :: WorkspaceId` for workspace failed".to_string()
-            });
-            self
-        }
-        ///Sends a `GET` request to `/v1/tasks`
-        pub async fn send(
-            self,
-        ) -> Result<ResponseValue<::std::vec::Vec<types::Task>>, Error<types::Error>> {
-            let Self {
-                client,
-                inbox,
-                kind,
-                status,
-                workspace,
-            } = self;
-            let inbox = inbox.map_err(Error::InvalidRequest)?;
-            let kind = kind.map_err(Error::InvalidRequest)?;
-            let status = status.map_err(Error::InvalidRequest)?;
-            let workspace = workspace.map_err(Error::InvalidRequest)?;
-            let url = format!("{}/v1/tasks", client.baseurl,);
-            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
-            header_map.append(
-                ::reqwest::header::HeaderName::from_static("api-version"),
-                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
-            );
-            #[allow(unused_mut)]
-            let mut request = client
-                .client
-                .get(url)
-                .header(
-                    ::reqwest::header::ACCEPT,
-                    ::reqwest::header::HeaderValue::from_static("application/json"),
-                )
-                .query(&progenitor_client::QueryParam::new("inbox", &inbox))
-                .query(&progenitor_client::QueryParam::new("kind", &kind))
-                .query(&progenitor_client::QueryParam::new("status", &status))
-                .query(&progenitor_client::QueryParam::new("workspace", &workspace))
-                .headers(header_map)
-                .build()?;
-            let info = OperationInfo {
-                operation_id: "task_list",
-            };
-            client.pre(&mut request, &info).await?;
-            let result = client.exec(request, &info).await;
-            client.post(&result, &info).await?;
-            let response = result?;
-            match response.status().as_u16() {
-                200u16 => ResponseValue::from_response(response).await,
-                400u16..=499u16 => Err(Error::ErrorResponse(
-                    ResponseValue::from_response(response).await?,
-                )),
-                500u16..=599u16 => Err(Error::ErrorResponse(
-                    ResponseValue::from_response(response).await?,
-                )),
-                _ => Err(Error::UnexpectedResponse(response)),
-            }
-        }
-    }
-    ///Builder for [`Client::task_create`]
-    ///
-    ///[`Client::task_create`]: super::Client::task_create
-    #[derive(Debug, Clone)]
-    pub struct TaskCreate<'a> {
-        client: &'a super::Client,
-        body: Result<types::builder::NewTask, String>,
-    }
-    impl<'a> TaskCreate<'a> {
-        pub fn new(client: &'a super::Client) -> Self {
-            Self {
-                client: client,
-                body: Ok(::std::default::Default::default()),
-            }
-        }
-        pub fn body<V>(mut self, value: V) -> Self
-        where
-            V: std::convert::TryInto<types::NewTask>,
-            <V as std::convert::TryInto<types::NewTask>>::Error: std::fmt::Display,
-        {
-            self.body = value
-                .try_into()
-                .map(From::from)
-                .map_err(|s| format!("conversion to `NewTask` for body failed: {}", s));
-            self
-        }
-        pub fn body_map<F>(mut self, f: F) -> Self
-        where
-            F: std::ops::FnOnce(types::builder::NewTask) -> types::builder::NewTask,
-        {
-            self.body = self.body.map(f);
-            self
-        }
-        ///Sends a `POST` request to `/v1/tasks`
-        pub async fn send(self) -> Result<ResponseValue<types::Task>, Error<types::Error>> {
-            let Self { client, body } = self;
-            let body = body
-                .and_then(|v| types::NewTask::try_from(v).map_err(|e| e.to_string()))
-                .map_err(Error::InvalidRequest)?;
-            let url = format!("{}/v1/tasks", client.baseurl,);
-            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
-            header_map.append(
-                ::reqwest::header::HeaderName::from_static("api-version"),
-                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
-            );
-            #[allow(unused_mut)]
-            let mut request = client
-                .client
-                .post(url)
-                .header(
-                    ::reqwest::header::ACCEPT,
-                    ::reqwest::header::HeaderValue::from_static("application/json"),
-                )
-                .json(&body)
-                .headers(header_map)
-                .build()?;
-            let info = OperationInfo {
-                operation_id: "task_create",
-            };
-            client.pre(&mut request, &info).await?;
-            let result = client.exec(request, &info).await;
-            client.post(&result, &info).await?;
-            let response = result?;
-            match response.status().as_u16() {
-                201u16 => ResponseValue::from_response(response).await,
-                400u16..=499u16 => Err(Error::ErrorResponse(
-                    ResponseValue::from_response(response).await?,
-                )),
-                500u16..=599u16 => Err(Error::ErrorResponse(
-                    ResponseValue::from_response(response).await?,
-                )),
-                _ => Err(Error::UnexpectedResponse(response)),
-            }
-        }
-    }
-    ///Builder for [`Client::task_get`]
-    ///
-    ///[`Client::task_get`]: super::Client::task_get
-    #[derive(Debug, Clone)]
-    pub struct TaskGet<'a> {
-        client: &'a super::Client,
-        id: Result<agentdeck_core::TaskId, String>,
-    }
-    impl<'a> TaskGet<'a> {
-        pub fn new(client: &'a super::Client) -> Self {
-            Self {
-                client: client,
-                id: Err("id was not initialized".to_string()),
-            }
-        }
-        pub fn id<V>(mut self, value: V) -> Self
-        where
-            V: std::convert::TryInto<agentdeck_core::TaskId>,
-        {
-            self.id = value
-                .try_into()
-                .map_err(|_| "conversion to `agentdeck_core :: TaskId` for id failed".to_string());
-            self
-        }
-        ///Sends a `GET` request to `/v1/tasks/{id}`
-        pub async fn send(self) -> Result<ResponseValue<types::Task>, Error<types::Error>> {
-            let Self { client, id } = self;
-            let id = id.map_err(Error::InvalidRequest)?;
-            let url = format!(
-                "{}/v1/tasks/{}",
-                client.baseurl,
-                encode_path(&id.to_string()),
-            );
-            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
-            header_map.append(
-                ::reqwest::header::HeaderName::from_static("api-version"),
-                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
-            );
-            #[allow(unused_mut)]
-            let mut request = client
-                .client
-                .get(url)
-                .header(
-                    ::reqwest::header::ACCEPT,
-                    ::reqwest::header::HeaderValue::from_static("application/json"),
-                )
-                .headers(header_map)
-                .build()?;
-            let info = OperationInfo {
-                operation_id: "task_get",
-            };
-            client.pre(&mut request, &info).await?;
-            let result = client.exec(request, &info).await;
-            client.post(&result, &info).await?;
-            let response = result?;
-            match response.status().as_u16() {
-                200u16 => ResponseValue::from_response(response).await,
-                400u16..=499u16 => Err(Error::ErrorResponse(
-                    ResponseValue::from_response(response).await?,
-                )),
-                500u16..=599u16 => Err(Error::ErrorResponse(
-                    ResponseValue::from_response(response).await?,
-                )),
-                _ => Err(Error::UnexpectedResponse(response)),
-            }
-        }
-    }
-    ///Builder for [`Client::task_delete`]
-    ///
-    ///[`Client::task_delete`]: super::Client::task_delete
-    #[derive(Debug, Clone)]
-    pub struct TaskDelete<'a> {
-        client: &'a super::Client,
-        id: Result<agentdeck_core::TaskId, String>,
-    }
-    impl<'a> TaskDelete<'a> {
-        pub fn new(client: &'a super::Client) -> Self {
-            Self {
-                client: client,
-                id: Err("id was not initialized".to_string()),
-            }
-        }
-        pub fn id<V>(mut self, value: V) -> Self
-        where
-            V: std::convert::TryInto<agentdeck_core::TaskId>,
-        {
-            self.id = value
-                .try_into()
-                .map_err(|_| "conversion to `agentdeck_core :: TaskId` for id failed".to_string());
-            self
-        }
-        ///Sends a `DELETE` request to `/v1/tasks/{id}`
-        pub async fn send(self) -> Result<ResponseValue<()>, Error<types::Error>> {
-            let Self { client, id } = self;
-            let id = id.map_err(Error::InvalidRequest)?;
-            let url = format!(
-                "{}/v1/tasks/{}",
-                client.baseurl,
-                encode_path(&id.to_string()),
-            );
-            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
-            header_map.append(
-                ::reqwest::header::HeaderName::from_static("api-version"),
-                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
-            );
-            #[allow(unused_mut)]
-            let mut request = client
-                .client
-                .delete(url)
-                .header(
-                    ::reqwest::header::ACCEPT,
-                    ::reqwest::header::HeaderValue::from_static("application/json"),
-                )
-                .headers(header_map)
-                .build()?;
-            let info = OperationInfo {
-                operation_id: "task_delete",
-            };
-            client.pre(&mut request, &info).await?;
-            let result = client.exec(request, &info).await;
-            client.post(&result, &info).await?;
-            let response = result?;
-            match response.status().as_u16() {
-                204u16 => Ok(ResponseValue::empty(response)),
-                400u16..=499u16 => Err(Error::ErrorResponse(
-                    ResponseValue::from_response(response).await?,
-                )),
-                500u16..=599u16 => Err(Error::ErrorResponse(
-                    ResponseValue::from_response(response).await?,
-                )),
-                _ => Err(Error::UnexpectedResponse(response)),
-            }
-        }
-    }
-    ///Builder for [`Client::task_update`]
-    ///
-    ///[`Client::task_update`]: super::Client::task_update
-    #[derive(Debug, Clone)]
-    pub struct TaskUpdate<'a> {
-        client: &'a super::Client,
-        id: Result<agentdeck_core::TaskId, String>,
-        body: Result<types::builder::TaskPatch, String>,
-    }
-    impl<'a> TaskUpdate<'a> {
-        pub fn new(client: &'a super::Client) -> Self {
-            Self {
-                client: client,
-                id: Err("id was not initialized".to_string()),
-                body: Ok(::std::default::Default::default()),
-            }
-        }
-        pub fn id<V>(mut self, value: V) -> Self
-        where
-            V: std::convert::TryInto<agentdeck_core::TaskId>,
-        {
-            self.id = value
-                .try_into()
-                .map_err(|_| "conversion to `agentdeck_core :: TaskId` for id failed".to_string());
-            self
-        }
-        pub fn body<V>(mut self, value: V) -> Self
-        where
-            V: std::convert::TryInto<types::TaskPatch>,
-            <V as std::convert::TryInto<types::TaskPatch>>::Error: std::fmt::Display,
-        {
-            self.body = value
-                .try_into()
-                .map(From::from)
-                .map_err(|s| format!("conversion to `TaskPatch` for body failed: {}", s));
-            self
-        }
-        pub fn body_map<F>(mut self, f: F) -> Self
-        where
-            F: std::ops::FnOnce(types::builder::TaskPatch) -> types::builder::TaskPatch,
-        {
-            self.body = self.body.map(f);
-            self
-        }
-        ///Sends a `PATCH` request to `/v1/tasks/{id}`
-        pub async fn send(self) -> Result<ResponseValue<types::Task>, Error<types::Error>> {
-            let Self { client, id, body } = self;
-            let id = id.map_err(Error::InvalidRequest)?;
-            let body = body
-                .and_then(|v| types::TaskPatch::try_from(v).map_err(|e| e.to_string()))
-                .map_err(Error::InvalidRequest)?;
-            let url = format!(
-                "{}/v1/tasks/{}",
-                client.baseurl,
-                encode_path(&id.to_string()),
-            );
-            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
-            header_map.append(
-                ::reqwest::header::HeaderName::from_static("api-version"),
-                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
-            );
-            #[allow(unused_mut)]
-            let mut request = client
-                .client
-                .patch(url)
-                .header(
-                    ::reqwest::header::ACCEPT,
-                    ::reqwest::header::HeaderValue::from_static("application/json"),
-                )
-                .json(&body)
-                .headers(header_map)
-                .build()?;
-            let info = OperationInfo {
-                operation_id: "task_update",
             };
             client.pre(&mut request, &info).await?;
             let result = client.exec(request, &info).await;

@@ -1,4 +1,4 @@
-//! `agentdeck agent ls | new | send | link | stop` and `agentdeck tail`, against `sh` panes and the
+//! `agentdeck agent ls | new | send | stop` and `agentdeck tail`, against `sh` panes and the
 //! stub `claude` and `codex`; never a real agent.
 
 use agentdeck_core::Layout;
@@ -20,18 +20,10 @@ mod agent_ls {
     }
 
     #[test]
-    fn should_print_each_panes_id_workspace_tab_agent_state_folder_and_task() {
+    fn should_print_each_panes_id_workspace_tab_agent_state_and_folder() {
         let env = TestEnv::new();
         env.workspace("web");
-        let task = env.json(&["task", "add", "Fix the flaky test", "--ws", "web"]);
         let agent = env.json(&["agent", "new", "--ws", "web"]);
-        env.ok(&[
-            "agent",
-            "link",
-            text(&agent, "id"),
-            "--task",
-            text(&task, "id"),
-        ]);
         let api = env.workspace("api");
         let shell = shell_pane_in(&env, &api, "build", "sleep 60");
 
@@ -42,7 +34,7 @@ mod agent_ls {
         let header: Vec<&str> = lines[0].split_whitespace().collect();
         assert_eq!(
             header,
-            ["ID", "WORKSPACE", "TAB", "AGENT", "STATE", "FOLDER", "TASK"],
+            ["ID", "WORKSPACE", "TAB", "AGENT", "STATE", "FOLDER"],
             "{stdout}"
         );
         let agent_row = (lines.iter())
@@ -50,14 +42,13 @@ mod agent_ls {
             .unwrap_or_else(|| panic!("no row for the agent: {stdout}"));
         let cells: Vec<&str> = agent_row.split_whitespace().collect();
         assert_eq!(cells[1..4], ["web", "claude", "claude"], "{stdout}");
-        assert_eq!(cells[5], text(&agent, "cwd"), "{stdout}");
-        assert!(agent_row.ends_with("  Fix the flaky test"), "{stdout}");
+        assert_eq!(cells[5..], [text(&agent, "cwd")], "{stdout}");
         let shell_row = (lines.iter())
             .find(|line| line.starts_with(&shell))
             .unwrap_or_else(|| panic!("no row for the shell: {stdout}"));
         let cells: Vec<&str> = shell_row.split_whitespace().collect();
         assert_eq!(cells[1..4], ["api", "build", "shell"], "{stdout}");
-        assert_eq!(cells[5], text(&api, "dir"), "{stdout}");
+        assert_eq!(cells[5..], [text(&api, "dir")], "{stdout}");
     }
 
     #[test]
@@ -83,15 +74,7 @@ mod agent_ls {
     fn should_print_the_panes_with_where_they_are_as_json() {
         let env = TestEnv::new();
         let ws = env.workspace("web");
-        let task = env.json(&["task", "add", "Fix the flaky test", "--ws", "web"]);
         let agent = env.json(&["agent", "new", "--ws", "web"]);
-        env.ok(&[
-            "agent",
-            "link",
-            text(&agent, "id"),
-            "--task",
-            text(&task, "id"),
-        ]);
 
         let list = env.json(&["agent", "ls"]);
 
@@ -99,12 +82,12 @@ mod agent_ls {
         assert_eq!(pane["kind"], "agent");
         assert_eq!(pane["agent"], "claude");
         assert_eq!(pane["tab_id"], agent["tab_id"]);
-        assert_eq!(pane["task_id"], task["id"]);
         assert_eq!(pane["workspace_id"], ws["id"]);
         assert_eq!(pane["workspace"], "web");
         assert_eq!(pane["tab"], "claude");
-        assert_eq!(pane["task_title"], "Fix the flaky test");
         assert_eq!(pane["folder"], agent["cwd"]);
+        assert!(pane.get("task_id").is_none(), "{pane}");
+        assert!(pane.get("task_title").is_none(), "{pane}");
     }
 
     #[test]
@@ -236,66 +219,6 @@ mod agent_send {
         assert!(stderr.contains("(ambiguous_id)"), "{stderr}");
         assert!(stderr.contains(&format!("{first}  web · one")), "{stderr}");
         assert!(stderr.contains(&format!("{second}  web · two")), "{stderr}");
-    }
-}
-
-mod agent_link {
-    use super::*;
-
-    #[test]
-    fn should_link_the_pane_to_the_task_then_unlink_it() {
-        let env = TestEnv::new();
-        let ws = env.workspace("web");
-        let pane = shell_pane(&env, &ws, "sleep 60");
-        let task = env.json(&["task", "add", "Fix it", "--ws", "web"]);
-
-        let linked = env.json(&["agent", "link", &pane, "--task", text(&task, "id")]);
-        assert_eq!(linked["task_id"], task["id"]);
-        assert_eq!(
-            env.ok(&["agent", "link", &pane, "--task", text(&task, "id")]),
-            format!("linked {pane} to {}\n", text(&task, "id"))
-        );
-
-        assert_eq!(
-            env.ok(&["agent", "link", &pane, "--none"]),
-            format!("unlinked {pane}\n")
-        );
-        let unlinked = env.json(&["agent", "link", &pane, "--none"]);
-        assert!(
-            unlinked.get("task_id").is_none_or(|id| id.is_null()),
-            "{unlinked}"
-        );
-    }
-
-    #[test]
-    fn should_link_a_pane_and_task_named_by_their_short_ids() {
-        let env = TestEnv::new();
-        let ws = env.workspace("web");
-        let pane = shell_pane(&env, &ws, "sleep 60");
-        let task = env.json(&["task", "add", "Fix it", "--ws", "web"]);
-
-        let stdout = env.ok(&[
-            "agent",
-            "link",
-            short(&pane),
-            "--task",
-            short(text(&task, "id")),
-        ]);
-
-        assert_eq!(stdout, format!("linked {pane} to {}\n", text(&task, "id")));
-    }
-
-    #[test]
-    fn should_fail_for_a_done_task() {
-        let env = TestEnv::new();
-        let ws = env.workspace("web");
-        let pane = shell_pane(&env, &ws, "sleep 60");
-        let task = env.json(&["task", "add", "Fix it", "--ws", "web"]);
-        env.ok(&["task", "set", text(&task, "id"), "--status", "done"]);
-
-        let stderr = env.fails(&["agent", "link", &pane, "--task", text(&task, "id")]);
-
-        assert!(stderr.contains("(invalid_task)"), "{stderr}");
     }
 }
 
@@ -462,14 +385,12 @@ mod agent_new {
     }
 
     #[test]
-    fn should_start_the_agent_with_no_prompt_or_task() {
+    fn should_start_the_agent_with_no_prompt() {
         let env = TestEnv::new();
         env.workspace("web");
-        env.ok(&["task", "add", "Fix the flaky test", "--ws", "web"]);
 
         let pane = env.json(&["agent", "new", "--ws", "web"]);
 
-        assert!(pane.get("task_id").is_none(), "{pane}");
         let argv = started(&env, text(&pane, "id"));
         assert_eq!(argv, ["--session-id", text(&pane, "session_id")]);
     }
@@ -478,9 +399,8 @@ mod agent_new {
     fn should_refuse_a_task() {
         let env = TestEnv::new();
         env.workspace("web");
-        let task = env.json(&["task", "add", "Fix it", "--ws", "web"]);
 
-        let stderr = env.fails(&["agent", "new", "--ws", "web", "--task", text(&task, "id")]);
+        let stderr = env.fails(&["agent", "new", "--ws", "web", "--task", "Fix it"]);
 
         assert!(stderr.contains("--task"), "{stderr}");
     }

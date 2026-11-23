@@ -6,9 +6,9 @@
 use std::time::Duration;
 
 use agentdeck_client::Client;
-use agentdeck_client::types::{InputWhen, NewTask, Pane, PaneInput, PanePatch, Task};
+use agentdeck_client::types::{InputWhen, Pane, PaneInput};
 use agentdeck_core::ws::{Entity, ServerMessage};
-use agentdeck_core::{Agent, AgentState, PaneId, PaneKind, TaskId};
+use agentdeck_core::{Agent, AgentState, PaneId, PaneKind};
 
 use crate::support::TestDaemon;
 use crate::support::agents::{launches, typed};
@@ -64,33 +64,6 @@ async fn hosting(client: &Client, pane: PaneId, agent: Option<Agent>) -> Pane {
         (read.hosted_agent == agent).then_some(read)
     })
     .await
-}
-
-async fn task(client: &Client, place: &Place, title: &str) -> Task {
-    client
-        .task_create()
-        .body(NewTask {
-            title: title.into(),
-            body: None,
-            status: None,
-            workspace_id: Some(place.workspace.id),
-        })
-        .send()
-        .await
-        .expect("create a task")
-        .into_inner()
-}
-
-async fn link(client: &Client, pane: PaneId, task: TaskId) {
-    client
-        .pane_update()
-        .id(pane)
-        .body(PanePatch {
-            task_id: Some(task),
-        })
-        .send()
-        .await
-        .expect("link the pane");
 }
 
 /// Waits until the stub agents in `pane` have submitted exactly `prompts`.
@@ -240,33 +213,6 @@ mod input {
         .await;
 
         submitted(&daemon, pane.id, "Use the staging DB\nthen test\n").await;
-    }
-}
-
-mod unlink {
-    use super::*;
-
-    #[tokio::test]
-    async fn should_unlink_the_shell_once_its_hosted_agent_exited_200() {
-        let daemon = TestDaemon::start().await;
-        let place = Place::new(&daemon).await;
-        let pane = shell(&daemon, &place).await;
-        let task = task(&daemon.client, &place, "Fix it").await;
-        link(&daemon.client, pane.id, task.id).await;
-        run(&daemon.client, pane.id, "claude").await;
-        hosting(&daemon.client, pane.id, Some(Agent::Claude)).await;
-        exit_agent(&daemon.client, pane.id).await;
-        hosting(&daemon.client, pane.id, None).await;
-
-        let response = (daemon.client.pane_update().id(pane.id))
-            .body(PanePatch { task_id: None })
-            .send()
-            .await
-            .expect("unlink");
-
-        assert_eq!(response.status().as_u16(), 200);
-        assert_eq!(response.into_inner().task_id, None);
-        assert_eq!(read(&daemon.client, pane.id).await.task_id, None);
     }
 }
 

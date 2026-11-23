@@ -6,7 +6,7 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("unknown {kind} `{value}`")]
 pub struct UnknownValue {
-    /// The enum's name, e.g. `task status`.
+    /// The enum's name, e.g. `pane kind`.
     pub kind: &'static str,
     /// The string that was given.
     pub value: String,

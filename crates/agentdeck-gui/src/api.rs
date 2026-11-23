@@ -17,8 +17,7 @@ use crate::new_workspace::Request;
 use crate::overview::{PaneState, Snapshot};
 use crate::runtime;
 
-/// The daemon's API, as the GUI uses it. It calls no task route: the GUI shows no tasks
-/// (spec §11).
+/// The daemon's API, as the GUI uses it.
 pub trait Api: Send + Sync {
     /// Everything the sidebar shows, read fresh.
     fn snapshot(&self, cx: &App) -> Task<anyhow::Result<Snapshot>>;
@@ -1122,29 +1121,6 @@ pub(crate) mod fake {
         fn cancel_sign_in(&self, _cx: &App) -> Task<anyhow::Result<()>> {
             *self.cancelled_sign_ins.lock().unwrap() += 1;
             Task::ready(Ok(()))
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    mod daemon {
-        /// This file: the only one in the GUI that calls the daemon's client.
-        const SOURCE: &str = include_str!("api.rs");
-
-        #[test]
-        fn should_call_no_task_route() {
-            // Built from parts, so this test's own text doesn't match.
-            let calls = ["list", "get", "create", "update", "delete"]
-                .map(|op| format!(".{}_{op}()", "task"))
-                .into_iter()
-                .chain([
-                    format!("panes::link_{}", "task"),
-                    format!(".pane_{}()", "update"),
-                ]);
-            for call in calls {
-                assert!(!SOURCE.contains(&call), "the GUI calls {call}");
-            }
         }
     }
 }

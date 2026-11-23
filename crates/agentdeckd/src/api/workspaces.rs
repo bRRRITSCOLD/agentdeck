@@ -122,7 +122,7 @@ pub(crate) async fn workspace_update(
     Ok(HttpResponseOk(workspace))
 }
 
-/// Archives a workspace; its tasks and dir are kept. Refused (409 `panes_running`) while
+/// Archives a workspace; its dir is kept. Refused (409 `panes_running`) while
 /// any of its panes runs.
 #[endpoint { method = POST, path = "/v1/workspaces/{id}/archive" }]
 pub(crate) async fn workspace_archive(
@@ -232,9 +232,8 @@ impl HttpResponseError for DeleteWorkspaceError {
     }
 }
 
-/// Deletes a workspace, and its dir when agentdeck created it. Its tasks move to the inbox; its
-/// Links go, and with them each Repository nothing else names, with a `repository` change
-/// for each Repository it linked.
+/// Deletes a workspace, and its dir when agentdeck created it. Its Links go, and with them each
+/// Repository nothing else names, with a `repository` change for each Repository it linked.
 /// Without `force`, a dir holding uncommitted or unpushed work is a 409 `dirty` carrying the
 /// dirty report.
 #[endpoint { method = DELETE, path = "/v1/workspaces/{id}" }]

@@ -2,14 +2,14 @@
 
 use std::collections::HashSet;
 
-use agentdeck_core::{Agent, AgentState, PaneId, TaskId, TaskStatus, WorkspaceId};
+use agentdeck_core::{Agent, AgentState, PaneId, WorkspaceId};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::{DbError, new_id, now, opt_text, text};
 use crate::model::{NewPane, Pane};
 
 const COLUMNS: &str = "id, tab_id, kind, agent, hosted_agent, argv, cwd, folder, session_id, \
-                       task_id, state, title, exit_code, created_at";
+                       state, title, exit_code, created_at";
 
 fn from_row(row: &Row<'_>) -> rusqlite::Result<Pane> {
     let argv: String = row.get("argv")?;
@@ -29,7 +29,6 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Pane> {
         folder: folder.unwrap_or_else(|| cwd.clone()),
         cwd,
         session_id: row.get("session_id")?,
-        task_id: opt_text(row, "task_id")?,
         state: text(row, "state")?,
         title: row.get("title")?,
         exit_code: row.get("exit_code")?,
@@ -115,49 +114,6 @@ pub fn resumable(conn: &Connection) -> Result<Vec<(Pane, WorkspaceId)>, DbError>
     )?;
     let rows = stmt.query_map([], |row| Ok((from_row(row)?, text(row, "workspace_id")?)))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
-}
-
-/// Links pane `id` to `task`, or unlinks it with `None`. The task must exist
-/// (`unknown_task`), be in the pane's workspace and not be done (`invalid_task`). Returns the
-/// pane as it is now and the task it was linked to before.
-pub fn set_task(
-    conn: &Connection,
-    id: PaneId,
-    task: Option<TaskId>,
-) -> Result<(Pane, Option<TaskId>), DbError> {
-    let before = get(conn, id)?;
-    if let Some(task) = task {
-        let found: Option<(Option<WorkspaceId>, TaskStatus)> = conn
-            .query_row(
-                "SELECT workspace_id, status FROM tasks WHERE id = ?1",
-                [task.to_string()],
-                |row| Ok((opt_text(row, "workspace_id")?, text(row, "status")?)),
-            )
-            .optional()?;
-        let (workspace, status) = found.ok_or(DbError::UnknownReference("task"))?;
-        let pane_workspace: WorkspaceId = conn.query_row(
-            "SELECT workspace_id FROM tabs WHERE id = ?1",
-            [before.tab_id.to_string()],
-            |row| text(row, "workspace_id"),
-        )?;
-        let invalid = |message: String| DbError::Invalid {
-            code: "invalid_task",
-            message,
-        };
-        if workspace != Some(pane_workspace) {
-            return Err(invalid(format!(
-                "task {task} isn't in the pane's workspace"
-            )));
-        }
-        if status == TaskStatus::Done {
-            return Err(invalid(format!("task {task} is done")));
-        }
-    }
-    conn.execute(
-        "UPDATE panes SET task_id = ?2 WHERE id = ?1",
-        params![id.to_string(), task.map(|task| task.to_string())],
-    )?;
-    Ok((get(conn, id)?, before.task_id))
 }
 
 /// Every session id a pane has.

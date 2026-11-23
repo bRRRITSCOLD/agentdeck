@@ -1,5 +1,5 @@
 //! Naming a workspace the way a person or an agent would: its id, its slug or its name; and a
-//! pane or task by its id or a short id (spec §10).
+//! pane by its id or a short id (spec §10).
 
 use std::fmt::Display;
 use std::str::FromStr;
@@ -37,7 +37,7 @@ pub fn workspace(workspaces: &[Workspace], reference: &str) -> anyhow::Result<Wo
 /// The fewest hex digits a short id may have.
 pub const SHORT_ID_DIGITS: usize = 6;
 
-/// What a pane or task reference is: a whole id, or the hex digits of a short one.
+/// What a pane reference is: a whole id, or the hex digits of a short one.
 #[derive(Debug, PartialEq, Eq)]
 pub enum IdRef<I> {
     /// A whole id, sent to the daemon as it is.
@@ -171,14 +171,14 @@ mod tests {
 
     mod id_ref {
         use super::*;
-        use agentdeck_core::TaskId;
+        use agentdeck_core::PaneId;
 
         const ID: &str = "01a1e67e-90c9-73fc-8a9b-0c1d2e3f4a5b";
 
         #[test]
         fn should_take_a_whole_id_as_it_is() {
             assert_eq!(
-                id_ref::<TaskId>("task", ID).unwrap(),
+                id_ref::<PaneId>("pane", ID).unwrap(),
                 IdRef::Whole(ID.parse().unwrap())
             );
         }
@@ -186,7 +186,7 @@ mod tests {
         #[test]
         fn should_take_six_or_more_hex_digits_as_a_short_id() {
             assert_eq!(
-                id_ref::<TaskId>("task", "2E3F4A5B").unwrap(),
+                id_ref::<PaneId>("pane", "2E3F4A5B").unwrap(),
                 IdRef::Short("2e3f4a5b".into())
             );
         }
@@ -194,22 +194,22 @@ mod tests {
         #[test]
         fn should_ignore_dashes_in_a_short_id() {
             assert_eq!(
-                id_ref::<TaskId>("task", "8a9b-0c1d").unwrap(),
+                id_ref::<PaneId>("pane", "8a9b-0c1d").unwrap(),
                 IdRef::Short("8a9b0c1d".into())
             );
         }
 
         #[test]
         fn should_reject_fewer_than_six_digits() {
-            let err = id_ref::<TaskId>("task", "4a5b").unwrap_err().to_string();
+            let err = id_ref::<PaneId>("pane", "4a5b").unwrap_err().to_string();
 
             assert!(err.contains("invalid_id"), "{err}");
-            assert!(err.contains("`4a5b` isn't a task id"), "{err}");
+            assert!(err.contains("`4a5b` isn't a pane id"), "{err}");
         }
 
         #[test]
         fn should_reject_what_isnt_hex() {
-            let err = id_ref::<TaskId>("pane", "pane-one")
+            let err = id_ref::<PaneId>("pane", "pane-one")
                 .unwrap_err()
                 .to_string();
 
@@ -219,23 +219,23 @@ mod tests {
 
     mod by_short_id {
         use super::*;
-        use agentdeck_core::{PaneId, TaskId};
+        use agentdeck_core::PaneId;
 
         // Made a second apart: the same leading digits, as UUIDv7s made close together have.
         const FIRST: &str = "01a1e67e-90c9-73fc-8a9b-0c1d2e3f4a5b";
         const SECOND: &str = "01a1e67e-9102-748e-9f00-77aa2e3f4a5c";
 
-        fn tasks() -> Vec<(TaskId, String)> {
+        fn panes() -> Vec<(PaneId, String)> {
             vec![
-                (FIRST.parse().unwrap(), "Fix the build".into()),
-                (SECOND.parse().unwrap(), "Ship it".into()),
+                (FIRST.parse().unwrap(), "web · build".into()),
+                (SECOND.parse().unwrap(), "web · ship".into()),
             ]
         }
 
         #[test]
         fn should_find_the_one_id_that_ends_with_the_digits() {
             assert_eq!(
-                by_short_id("task", tasks(), "2e3f4a5b", "2e3f4a5b").unwrap(),
+                by_short_id("pane", panes(), "2e3f4a5b", "2e3f4a5b").unwrap(),
                 FIRST.parse().unwrap()
             );
         }
@@ -243,41 +243,36 @@ mod tests {
         #[test]
         fn should_find_digits_anywhere_in_the_id() {
             assert_eq!(
-                by_short_id("task", tasks(), "9102748e", "9102748e").unwrap(),
+                by_short_id("pane", panes(), "9102748e", "9102748e").unwrap(),
                 SECOND.parse().unwrap()
             );
         }
 
         #[test]
         fn should_list_every_id_when_the_digits_are_in_several() {
-            let err = by_short_id("task", tasks(), "01a1e67e", "01a1e67e")
+            let err = by_short_id("pane", panes(), "01a1e67e", "01a1e67e")
                 .unwrap_err()
                 .to_string();
 
             assert!(err.contains("ambiguous_id"), "{err}");
-            assert!(err.contains(&format!("{FIRST}  Fix the build")), "{err}");
-            assert!(err.contains(&format!("{SECOND}  Ship it")), "{err}");
+            assert!(err.contains(&format!("{FIRST}  web · build")), "{err}");
+            assert!(err.contains(&format!("{SECOND}  web · ship")), "{err}");
         }
 
         #[test]
         fn should_say_when_no_id_holds_the_digits() {
-            let err = by_short_id("task", tasks(), "abcdef", "abcdef")
+            let err = by_short_id("pane", panes(), "abcdef", "abcdef")
                 .unwrap_err()
                 .to_string();
 
-            assert!(err.contains("no task id holds `abcdef`"), "{err}");
+            assert!(err.contains("no pane id holds `abcdef`"), "{err}");
             assert!(err.contains("not_found"), "{err}");
         }
 
         #[test]
-        fn should_find_a_pane_by_its_short_id() {
-            let panes: Vec<(PaneId, String)> = vec![
-                (FIRST.parse().unwrap(), "web · tab".into()),
-                (SECOND.parse().unwrap(), "web · tab".into()),
-            ];
-
+        fn should_find_digits_across_a_dash() {
             assert_eq!(
-                by_short_id("pane", panes, "a2e3f4a5c", "a2e3f4a5c").unwrap(),
+                by_short_id("pane", panes(), "a2e3f4a5c", "a2e3f4a5c").unwrap(),
                 SECOND.parse().unwrap()
             );
         }

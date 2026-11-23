@@ -3,10 +3,10 @@
 //! the layout and the panes in step, and undoes its first step when a later one fails.
 
 use agentdeck_core::{
-    Agent, Layout, LayoutError, PaneId, PaneKind, SplitDirection, TabId, TaskId, WorkspaceId,
+    Agent, Layout, LayoutError, PaneId, PaneKind, SplitDirection, TabId, WorkspaceId,
 };
 
-use crate::types::{NewPane, NewTab, Pane, PanePatch, PaneRespawn, PaneRun, Tab, TabPatch};
+use crate::types::{NewPane, NewTab, Pane, PaneRespawn, PaneRun, Tab, TabPatch};
 use crate::{ApiError, Client};
 
 /// Why a pane operation failed.
@@ -48,21 +48,6 @@ pub async fn pane_if_any(client: &Client, pane: PaneId) -> Result<Option<Pane>, 
         Err(err) if err.code.as_deref() == Some("not_found") => Ok(None),
         Err(err) => Err(err),
     }
-}
-
-/// Links `pane` to `task`, or unlinks it with `None` (spec §4); the pane as it is now.
-pub async fn link_task(
-    client: &Client,
-    pane: PaneId,
-    task: Option<TaskId>,
-) -> Result<Pane, ApiError> {
-    let linked = client
-        .pane_update()
-        .id(pane)
-        .body(PanePatch { task_id: task })
-        .send()
-        .await?;
-    Ok(linked.into_inner())
 }
 
 /// Starts exited `pane` again in place, running what `run` says: its agent again, or a shell

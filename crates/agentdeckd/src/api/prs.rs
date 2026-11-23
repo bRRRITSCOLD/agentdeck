@@ -34,7 +34,7 @@ pub(crate) struct SyncQuery {
     full: Option<bool>,
 }
 
-/// Syncs PR tasks with GitHub now, after any sync running, and answers with the status the
+/// Syncs PRs with GitHub now, after any sync running, and answers with the status the
 /// sync left. Without `full` it is the sync that is due, usually incremental. A sync that
 /// fails still answers 200: `last_error` says why, and `login` is `logged_out` when there's
 /// no usable `gh` token.
@@ -59,8 +59,8 @@ pub(crate) async fn prs_status(
 
 /// Closes PRs on GitHub, named by reference: only closes them, with no comment and no branch
 /// delete. Answers one result per reference, in the order asked, once every PR is tried; 200
-/// even when some failed. Only a PR stored open and reachable closes; a closed PR's task moves
-/// to done at once.
+/// even when some failed. Only a PR stored open and reachable closes; a closed PR is stored
+/// closed, and Finished, at once.
 #[endpoint { method = POST, path = "/v1/prs/close" }]
 pub(crate) async fn prs_close(
     rqctx: RequestContext<ApiContext>,

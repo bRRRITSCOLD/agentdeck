@@ -2,22 +2,17 @@
 
 use std::path::Path;
 
-use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
 
-use agentdeck_client::types::{
-    InputWhen, NewLink, NewTask, NewWorkspace, PaneInput, PrClose, TaskPatch,
-};
+use agentdeck_client::types::{InputWhen, NewLink, NewWorkspace, PaneInput, PrClose};
 use agentdeck_client::{Client, panes};
-use agentdeck_core::{Layout, PaneId, PrRef, RepositoryName, TaskId, TaskPlace, WorkspaceId};
+use agentdeck_core::{Layout, PaneId, PrRef, RepositoryName, WorkspaceId};
 use anyhow::Context;
 use futures_util::TryStreamExt;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::cli::{
-    AgentCommand, Command, ConfigCommand, PrCommand, RepoCommand, TaskCommand, WsCommand,
-};
+use crate::cli::{AgentCommand, Command, ConfigCommand, PrCommand, RepoCommand, WsCommand};
 use crate::resolve::IdRef;
 use crate::{launch, render, resolve};
 use agentdeck_client::ApiError;
@@ -46,7 +41,6 @@ impl Output {
 pub async fn run(client: &Client, command: Command) -> anyhow::Result<Output> {
     match command {
         Command::Ws(command) => ws(client, command).await,
-        Command::Task(command) => task(client, command).await,
         Command::Agent(command) => agent(client, command).await,
         Command::Repo(command) => repo(client, command).await,
         Command::Pr(command) => pr(client, command).await,
@@ -68,43 +62,6 @@ pub async fn workspace_id(client: &Client, reference: &str) -> anyhow::Result<Wo
         .map_err(ApiError::from)?
         .into_inner();
     resolve::workspace(&workspaces, reference)
-}
-
-/// The task `reference` names: its id, or a short id (spec §10).
-pub async fn task_id(client: &Client, reference: &str) -> anyhow::Result<TaskId> {
-    let mut ids = task_ids(client, std::slice::from_ref(&reference)).await?;
-    Ok(ids.remove(0))
-}
-
-/// [`task_id`] for each of `references`, listing the tasks at most once.
-async fn task_ids(client: &Client, references: &[impl AsRef<str>]) -> anyhow::Result<Vec<TaskId>> {
-    let mut tasks = None;
-    let mut ids = Vec::with_capacity(references.len());
-    for reference in references.iter().map(AsRef::as_ref) {
-        let digits = match resolve::id_ref("task", reference)? {
-            IdRef::Whole(id) => {
-                ids.push(id);
-                continue;
-            }
-            IdRef::Short(digits) => digits,
-        };
-        if tasks.is_none() {
-            let list = client.task_list().send().await.map_err(ApiError::from)?;
-            tasks = Some(list.into_inner());
-        }
-        let candidates = (tasks.iter().flatten()).map(|task| (task.id, task.title.clone()));
-        ids.push(resolve::by_short_id(
-            "task", candidates, reference, &digits,
-        )?);
-    }
-    Ok(ids)
-}
-
-async fn optional_task(client: &Client, reference: Option<&str>) -> anyhow::Result<Option<TaskId>> {
-    match reference {
-        Some(reference) => Ok(Some(task_id(client, reference).await?)),
-        None => Ok(None),
-    }
 }
 
 /// The pane `reference` names: its id, or a short id matched against the panes in every
@@ -138,16 +95,6 @@ pub async fn pane_id(client: &Client, reference: &str) -> anyhow::Result<PaneId>
         }
     }
     resolve::by_short_id("pane", candidates, reference, &digits)
-}
-
-async fn optional_workspace(
-    client: &Client,
-    reference: Option<&str>,
-) -> anyhow::Result<Option<WorkspaceId>> {
-    match reference {
-        Some(reference) => Ok(Some(workspace_id(client, reference).await?)),
-        None => Ok(None),
-    }
 }
 
 /// An absolute form of `dir`, since the daemon takes only absolute dirs.
@@ -242,91 +189,6 @@ async fn ws(client: &Client, command: WsCommand) -> anyhow::Result<Output> {
     }
 }
 
-async fn task(client: &Client, command: TaskCommand) -> anyhow::Result<Output> {
-    match command {
-        TaskCommand::Ls { status, ws, inbox } => {
-            let mut request = client.task_list();
-            if let Some(status) = status {
-                request = request.status(status);
-            }
-            if let Some(ws) = optional_workspace(client, ws.as_deref()).await? {
-                request = request.workspace(ws);
-            }
-            if inbox {
-                request = request.inbox(true);
-            }
-            let tasks = request.send().await.map_err(ApiError::from)?;
-            Output::new(&*tasks, render::tasks(&tasks))
-        }
-        TaskCommand::Add { title, ws, body } => {
-            let workspace_id = optional_workspace(client, ws.as_deref()).await?;
-            let task = client
-                .task_create()
-                .body(NewTask {
-                    body,
-                    status: None,
-                    title,
-                    workspace_id,
-                })
-                .send()
-                .await
-                .map_err(ApiError::from)?;
-            Output::new(&*task, render::task(&task))
-        }
-        TaskCommand::Set { id, status } => {
-            let id = task_id(client, &id).await?;
-            let task = client
-                .task_update()
-                .id(id)
-                .body(TaskPatch {
-                    status: Some(status),
-                    ..TaskPatch::default()
-                })
-                .send()
-                .await
-                .map_err(ApiError::from)?;
-            Output::new(&*task, render::task(&task))
-        }
-        TaskCommand::Edit {
-            id,
-            title,
-            body,
-            ws,
-            inbox,
-        } => {
-            let id = task_id(client, &id).await?;
-            let workspace_id = match (ws, inbox) {
-                (Some(ws), _) => Some(TaskPlace::Workspace(workspace_id(client, &ws).await?)),
-                (None, true) => Some(TaskPlace::Inbox),
-                (None, false) => None,
-            };
-            let task = client
-                .task_update()
-                .id(id)
-                .body(TaskPatch {
-                    title,
-                    body,
-                    status: None,
-                    workspace_id,
-                })
-                .send()
-                .await
-                .map_err(ApiError::from)?;
-            Output::new(&*task, render::task(&task))
-        }
-        TaskCommand::Show { id } => {
-            let id = task_id(client, &id).await?;
-            let task = client
-                .task_get()
-                .id(id)
-                .send()
-                .await
-                .map_err(ApiError::from)?;
-            Output::new(&*task, render::task(&task))
-        }
-    }
-}
-
 /// `agent ls`: every pane in the layouts of the tabs of the workspace `ws` names, else of
 /// every workspace, in workspace, tab and layout order; exited panes too, until closed.
 async fn agent_ls(client: &Client, ws: Option<&str>) -> anyhow::Result<Output> {
@@ -339,15 +201,6 @@ async fn agent_ls(client: &Client, ws: Option<&str>) -> anyhow::Result<Output> {
     let only = ws
         .map(|reference| resolve::workspace(&workspaces, reference))
         .transpose()?;
-    let titles: HashMap<TaskId, String> = client
-        .task_list()
-        .send()
-        .await
-        .map_err(ApiError::from)?
-        .into_inner()
-        .into_iter()
-        .map(|task| (task.id, task.title))
-        .collect();
     let mut listed = Vec::new();
     for ws in (workspaces.iter()).filter(|ws| only.is_none_or(|id| ws.id == id)) {
         let tabs = client
@@ -365,7 +218,6 @@ async fn agent_ls(client: &Client, ws: Option<&str>) -> anyhow::Result<Output> {
                     continue;
                 };
                 listed.push(render::ListedPane {
-                    task_title: pane.task_id.and_then(|task| titles.get(&task).cloned()),
                     workspace_id: ws.id,
                     workspace: ws.slug.clone(),
                     tab: tab.title.clone(),
@@ -391,16 +243,6 @@ async fn agent(client: &Client, command: AgentCommand) -> anyhow::Result<Output>
             )
             .await?;
             Output::new(&pane, render::pane(&pane))
-        }
-        AgentCommand::Link { pane, task, .. } => {
-            let pane = pane_id(client, &pane).await?;
-            let task = optional_task(client, task.as_deref()).await?;
-            let linked = panes::link_task(client, pane, task).await?;
-            let human = match task {
-                Some(task) => format!("linked {pane} to {task}\n"),
-                None => format!("unlinked {pane}\n"),
-            };
-            Output::new(&linked, human)
         }
         AgentCommand::Stop { pane } => {
             let pane = pane_id(client, &pane).await?;

@@ -153,7 +153,7 @@ pub fn set_archived(
 }
 
 /// Deletes the row. Its tabs, panes and Links go with it, and so does each
-/// Repository it linked that nothing else names now (spec §3); its tasks move to the inbox.
+/// Repository it linked that nothing else names now (spec §3).
 /// Returns the Repositories it linked.
 pub fn delete(conn: &mut Connection, id: WorkspaceId) -> Result<Vec<RepositoryId>, DbError> {
     let tx = conn.transaction()?;

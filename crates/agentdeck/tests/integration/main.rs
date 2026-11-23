@@ -8,6 +8,5 @@ mod daemon;
 mod pr;
 mod repo;
 mod support;
-mod task;
 mod version;
 mod ws;

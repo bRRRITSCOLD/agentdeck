@@ -1,4 +1,4 @@
-//! Entity ids (spec §3): one newtype per entity, so a pane id can't be passed where a task id
+//! Entity ids (spec §3): one newtype per entity, so a pane id can't be passed where a tab id
 //! is expected. Each is a UUID written as its hyphenated string. Core never generates ids,
 //! since that needs a clock and randomness; the daemon makes UUIDv7s and wraps them.
 
@@ -66,10 +66,6 @@ id!(
 id!(
     /// A pane's id (`panes.id`), also the leaf of a tab's [`Layout`](crate::Layout).
     PaneId
-);
-id!(
-    /// A task's id (`tasks.id`), also a pull request's key.
-    TaskId
 );
 
 #[cfg(test)]

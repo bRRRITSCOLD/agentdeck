@@ -385,7 +385,7 @@ fn kill_left_running(root: &Path) {
     }
 }
 
-/// The short id of `id`, a pane's or task's: its last 8 hex digits (spec §10).
+/// The short id of `id`, a pane's: its last 8 hex digits (spec §10).
 pub fn short(id: &str) -> &str {
     &id[id.len() - 8..]
 }

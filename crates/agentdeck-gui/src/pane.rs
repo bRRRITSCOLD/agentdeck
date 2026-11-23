@@ -359,7 +359,6 @@ pub(crate) mod fixtures {
             session_id: None,
             state: AgentState::Idle,
             tab_id: tab,
-            task_id: None,
             title: String::new(),
         }
     }

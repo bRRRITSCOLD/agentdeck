@@ -196,8 +196,6 @@ pub enum Entity {
     Tab,
     /// `/v1/panes/{id}`.
     Pane,
-    /// `/v1/tasks/{id}`.
-    Task,
     /// `/v1/prs/status`: a PR sync began, read a page or ended, or the age cutoff changed.
     /// Its id is always `status`.
     PrSync,
@@ -209,6 +207,11 @@ pub enum Entity {
     /// GitHub's repository id. It came with `API_VERSION` 16; an older client skips the
     /// message.
     Repository,
+    /// A pull request PR sync keeps was stored, changed or deleted, or a close from agentdeck
+    /// closed it: `GET /v1/prs` lists it as it is now. Its id is its Repository's GitHub id and
+    /// its number, `1296269#7`, so a rename keeps it. It came with `API_VERSION` 22, when the
+    /// `task` it replaces went; an older client skips the message.
+    PullRequest,
 }
 
 #[cfg(test)]
@@ -342,10 +345,10 @@ mod tests {
                 ),
                 (
                     ServerMessage::Changed {
-                        entity: Entity::Task,
-                        id: "abc".into(),
+                        entity: Entity::PullRequest,
+                        id: "1296269#7".into(),
                     },
-                    json!({"t": "changed", "entity": "task", "id": "abc"}),
+                    json!({"t": "changed", "entity": "pull_request", "id": "1296269#7"}),
                 ),
                 (
                     ServerMessage::GithubAuth {
