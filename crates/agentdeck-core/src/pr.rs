@@ -179,6 +179,14 @@ pub fn pr_details(reference: &PrRef, title: &str, url: &str, head: &str, base: &
     format!("{reference}: {title}\n{url}\n{head} → {base}")
 }
 
+/// What **Copy PR details** puts on the clipboard for several pull requests at once, from Select
+/// mode (spec §11): each one's [`pr_details`], in the order given, a blank line between them.
+pub fn prs_details<S: AsRef<str>>(blocks: impl IntoIterator<Item = S>) -> String {
+    let blocks: Vec<S> = blocks.into_iter().collect();
+    let blocks: Vec<&str> = blocks.iter().map(AsRef::as_ref).collect();
+    blocks.join("\n\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,6 +293,28 @@ mod tests {
                  https://github.com/bRRRITSCOLD/agentdeck/pull/352\n\
                  fix/pane-restore → main"
             );
+        }
+    }
+
+    mod prs_details {
+        use super::*;
+
+        #[test]
+        fn should_join_each_prs_three_lines_with_a_blank_line() {
+            let blocks = [
+                "a#1: One\nhttps://x/1\nb → main",
+                "a#2: Two\nhttps://x/2\nc → main",
+            ];
+
+            assert_eq!(
+                prs_details(blocks),
+                "a#1: One\nhttps://x/1\nb → main\n\na#2: Two\nhttps://x/2\nc → main"
+            );
+        }
+
+        #[test]
+        fn should_give_one_prs_lines_alone() {
+            assert_eq!(prs_details(["a#1: One"]), "a#1: One");
         }
     }
 

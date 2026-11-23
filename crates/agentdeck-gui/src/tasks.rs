@@ -300,7 +300,7 @@ impl TasksView {
             )
             .child(div().flex_1())
             .child(div().w(px(FILTER_WIDTH)).child(Input::new(&self.filter)))
-            .child(close_prs::select_toggle(&self.close, cx))
+            .child(close_prs::select_toggle(&self.close, true, cx))
             .child(
                 div()
                     .flex()
@@ -342,6 +342,7 @@ impl Render for TasksView {
         let bar = close_prs::selection_bar(
             &self.close,
             close_prs::picked(&self.close, &all_rows, cx),
+            None,
             cx,
         );
         let layout = self.layout(cx);
