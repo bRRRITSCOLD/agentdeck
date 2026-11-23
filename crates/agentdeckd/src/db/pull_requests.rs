@@ -1,22 +1,110 @@
-//! `pull_requests` queries: storing what PR sync saw, and the PR tasks it moves (spec §8).
+//! `pull_requests` queries: storing what PR sync saw, with each PR's Repository, and the PR
+//! tasks it moves (spec §8); listing the PRs, and finding them by reference (spec §4).
 
 use agentdeck_core::{
-    PrState, TaskId, TaskKind, TaskPlace, TaskStatus, WorkspaceId, pr_task_status,
+    PrRef, PrState, RepositoryId, TaskId, TaskKind, TaskPlace, TaskStatus, WorkspaceId,
+    pr_task_status,
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::types::Value;
+use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 
-use super::{DbError, now, tasks, text};
-use crate::model::{NewTask, PullRequest, TaskPatch};
-use crate::prsync::github::RemotePr;
+use super::{DbError, now, opt_text, repositories, tasks, text};
+use crate::model::{NewTask, PrFilter, PullRequest, Repository, TaskPatch, TaskPr};
+use crate::prsync::github::{RemotePr, RemoteRepository};
 
-/// `(repo, number)` of every PR stored as open.
-pub fn open(conn: &Connection) -> Result<Vec<(String, i64)>, DbError> {
-    let mut stmt = conn
-        .prepare("SELECT repo, number FROM pull_requests WHERE state = ?1 ORDER BY repo, number")?;
+/// A PR stored as open, by what names it: its Repository's id, once PR sync has read it, and
+/// `owner/name` and number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenPr {
+    /// Its Repository's id; `None` for a PR stored before PR sync read Repositories.
+    pub repository: Option<RepositoryId>,
+    /// `owner/name`, as last synced.
+    pub repo: String,
+    /// Its number.
+    pub number: i64,
+}
+
+impl OpenPr {
+    /// Whether `pr`, as GitHub shows it now, is this PR: the same number in the same
+    /// Repository, by id, so a renamed Repository's PR still is; or by name, for a PR whose
+    /// Repository isn't known yet.
+    pub fn is(&self, pr: &RemotePr) -> bool {
+        let same_repository = match (self.repository, &pr.repository) {
+            (Some(id), Some(repository)) => id == repository.id,
+            _ => self.repo.eq_ignore_ascii_case(&pr.repo),
+        };
+        self.number == pr.number && same_repository
+    }
+}
+
+/// Every PR stored as open.
+pub fn open(conn: &Connection) -> Result<Vec<OpenPr>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT repository_id, repo, number FROM pull_requests WHERE state = ?1
+         ORDER BY repo, number",
+    )?;
     let rows = stmt.query_map([PrState::Open.as_str()], |row| {
-        Ok((row.get(0)?, row.get(1)?))
+        Ok(OpenPr {
+            repository: row.get::<_, Option<u64>>(0)?.map(RepositoryId::from),
+            repo: row.get(1)?,
+            number: row.get(2)?,
+        })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// The kept PRs whose Repository PR sync has read, by Repository name, ignoring case, then
+/// number; only those of `filter.repository`, by the name GitHub gives it now, when it's set.
+pub fn list(conn: &Connection, filter: &PrFilter) -> Result<Vec<PullRequest>, DbError> {
+    let mut sql = String::from(
+        "SELECT p.number, p.url, p.state, p.draft, p.head_ref, p.base_ref, p.author, p.checks,
+           p.review, p.updated_at, p.unreachable_at IS NOT NULL AS unreachable, t.title,
+           r.id AS repository_id, r.full_name, r.url AS repository_url, r.private, r.archived
+         FROM pull_requests p
+         JOIN tasks t ON t.id = p.task_id
+         JOIN repositories r ON r.id = p.repository_id
+         WHERE p.base_ref IS NOT NULL",
+    );
+    let mut values: Vec<Value> = Vec::new();
+    if let Some(repository) = &filter.repository {
+        values.push(Value::Text(repository.to_string()));
+        sql.push_str(&format!(
+            " AND r.full_name = ?{} COLLATE NOCASE",
+            values.len()
+        ));
+    }
+    sql.push_str(" ORDER BY r.full_name COLLATE NOCASE, r.id, p.number");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(values), listed)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// One row of [`list`].
+fn listed(row: &Row<'_>) -> rusqlite::Result<PullRequest> {
+    let repository = Repository {
+        id: RepositoryId::from(row.get::<_, u64>("repository_id")?),
+        name: text(row, "full_name")?,
+        url: row.get("repository_url")?,
+        private: row.get("private")?,
+        archived: row.get("archived")?,
+    };
+    let number: u32 = row.get("number")?;
+    Ok(PullRequest {
+        reference: PrRef::new(repository.name.clone(), number),
+        number,
+        repository,
+        title: row.get("title")?,
+        url: row.get("url")?,
+        state: text(row, "state")?,
+        draft: row.get("draft")?,
+        head_ref: row.get("head_ref")?,
+        base_ref: row.get("base_ref")?,
+        author: row.get("author")?,
+        checks: opt_text(row, "checks")?,
+        review: opt_text(row, "review")?,
+        updated_at: row.get("updated_at")?,
+        unreachable: row.get("unreachable")?,
+    })
 }
 
 /// Every PR stored as open, as last synced, but for those aged out or unreachable.
@@ -94,21 +182,43 @@ pub fn age_out(conn: &mut Connection, prs: &[(String, i64)]) -> Result<Vec<TaskI
     Ok(changed)
 }
 
-/// `(repo, number)` of each of `ids`' PR, in order, while it is a PR task whose PR is stored
-/// open, aged out or not, and the GitHub sign-in can see it; `None` for any other task, or no
-/// task.
-pub fn closable(conn: &Connection, ids: &[TaskId]) -> Result<Vec<Option<(String, i64)>>, DbError> {
+/// A stored PR that can be closed: its task, and `owner/name` and number as last synced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Closable {
+    /// Its PR task.
+    pub task: TaskId,
+    /// `owner/name`, as GitHub called its Repository when last synced.
+    pub repo: String,
+    /// Its number.
+    pub number: i64,
+}
+
+/// Each of `prs`, in order, while it is stored open, aged out or not, and the GitHub sign-in
+/// can see it; `None` for a PR stored in another state, or not stored. A reference matches by
+/// the name its Repository had when last synced, ignoring case, as GitHub does.
+pub fn closable(conn: &Connection, prs: &[PrRef]) -> Result<Vec<Option<Closable>>, DbError> {
     let mut stmt = conn.prepare(
-        "SELECT repo, number FROM pull_requests
-         WHERE task_id = ?1 AND state = ?2 AND unreachable_at IS NULL",
+        "SELECT task_id, repo, number FROM pull_requests
+         WHERE repo = ?1 COLLATE NOCASE AND number = ?2 AND state = ?3
+           AND unreachable_at IS NULL",
     )?;
-    ids.iter()
-        .map(|id| {
-            Ok(stmt
-                .query_row(params![id.to_string(), PrState::Open.as_str()], |row| {
-                    Ok((row.get(0)?, row.get(1)?))
-                })
-                .optional()?)
+    prs.iter()
+        .map(|pr| {
+            let found = stmt.query_row(
+                params![
+                    pr.repository().to_string(),
+                    pr.number(),
+                    PrState::Open.as_str()
+                ],
+                |row| {
+                    Ok(Closable {
+                        task: text(row, "task_id")?,
+                        repo: row.get("repo")?,
+                        number: row.get("number")?,
+                    })
+                },
+            );
+            Ok(found.optional()?)
         })
         .collect()
 }
@@ -196,42 +306,100 @@ fn stored_where(conn: &Connection, condition: &str) -> Result<Vec<RemotePr>, DbE
 /// Task `id`'s PR as last synced; `None` for a plain task.
 fn stored(conn: &Connection, id: TaskId) -> Result<Option<RemotePr>, DbError> {
     let task = tasks::get(conn, id)?;
-    Ok(task.pr.map(|pr| RemotePr {
+    let Some(pr) = task.pr else {
+        return Ok(None);
+    };
+    let more = more_of(conn, id)?;
+    Ok(Some(RemotePr {
         repo: pr.repo,
+        repository: more.repository,
         number: pr.number,
         title: task.title,
         url: pr.url,
         state: pr.state,
         draft: pr.draft,
         head_ref: pr.head_ref,
+        base_ref: more.base_ref,
+        author: more.author,
         checks: pr.checks,
         review: pr.review,
         updated_at: pr.updated_at,
     }))
 }
 
-/// Stores each PR with the workspace it matched, and marks each `unreachable` PR (`(repo,
-/// number)`: one GitHub doesn't show to the token) as such, in one transaction. Returns the
-/// tasks that changed.
+/// What a PR row holds beyond a task's [`TaskPr`]: its Repository, base branch and author.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct More {
+    repository: Option<RemoteRepository>,
+    base_ref: Option<String>,
+    author: Option<String>,
+}
+
+/// [`More`] of task `id`'s PR.
+fn more_of(conn: &Connection, id: TaskId) -> Result<More, DbError> {
+    Ok(conn.query_row(
+        "SELECT p.base_ref, p.author, r.id, r.full_name, r.url, r.private, r.archived
+         FROM pull_requests p LEFT JOIN repositories r ON r.id = p.repository_id
+         WHERE p.task_id = ?1",
+        [id.to_string()],
+        |row| {
+            let repository = match row.get::<_, Option<u64>>(2)? {
+                Some(repository) => Some(RemoteRepository {
+                    id: RepositoryId::from(repository),
+                    name: text(row, "full_name")?,
+                    url: row.get(4)?,
+                    private: row.get(5)?,
+                    archived: row.get(6)?,
+                }),
+                None => None,
+            };
+            Ok(More {
+                repository,
+                base_ref: row.get(0)?,
+                author: row.get(1)?,
+            })
+        },
+    )?)
+}
+
+/// What [`store`] changed.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Stored {
+    /// The tasks whose task or PR changed.
+    pub tasks: Vec<TaskId>,
+    /// The Repositories created, renamed or otherwise changed, each once.
+    pub repositories: Vec<RepositoryId>,
+}
+
+/// Stores each PR with the workspace it matched, and its Repository, and marks each
+/// `unreachable` PR (`(repo, number)`: one GitHub doesn't show to the token) as such, in one
+/// transaction. Returns what changed.
 ///
-/// A new PR becomes a PR task; a stored one updates its row and its task. A PR task only
-/// gains a workspace while [`sync_places`] it, so a workspace never changes under it.
+/// A new PR becomes a PR task; a stored one, found by its Repository's id so a renamed
+/// Repository's PR is still the same one, updates its row and its task. A PR task only gains
+/// a workspace while [`sync_places`] it, so a workspace never changes under it.
 pub fn store(
     conn: &mut Connection,
     prs: &[(RemotePr, Option<WorkspaceId>)],
     unreachable: &[(String, i64)],
-) -> Result<Vec<TaskId>, DbError> {
+) -> Result<Stored, DbError> {
     let tx = conn.transaction()?;
     let synced_at = now();
-    let mut changed = Vec::new();
+    let mut changed = Stored::default();
     for (pr, workspace) in prs {
+        if let Some(repository) = &pr.repository
+            && repositories::store(&tx, repository)?
+            && !changed.repositories.contains(&repository.id)
+        {
+            changed.repositories.push(repository.id);
+        }
         if let Some(task) = store_one(&tx, pr, *workspace, &synced_at)? {
-            changed.push(task);
+            changed.tasks.push(task);
         }
     }
     for (repo, number) in unreachable {
         if let Some(task) = mark_unreachable(&tx, repo, *number, &synced_at)? {
-            changed.push(task);
+            changed.tasks.push(task);
         }
     }
     tx.commit()?;
@@ -265,7 +433,7 @@ fn store_one(
     workspace: Option<WorkspaceId>,
     synced_at: &str,
 ) -> Result<Option<TaskId>, DbError> {
-    let Some(task_id) = task_for(conn, &pr.repo, pr.number)? else {
+    let Some(task_id) = stored_task(conn, pr)? else {
         let status = pr_task_status(None, pr.state);
         let task = tasks::create_kind(
             conn,
@@ -298,10 +466,17 @@ fn store_one(
     let title = Some(pr.title.clone()).filter(|title| *title != task.title);
     let picked = is_picked(conn, task_id)?;
     let workspace = workspace.filter(|_| sync_places(task.workspace_id, picked));
-    let pr_changed = PullRequest {
-        synced_at: before.synced_at.clone(),
-        ..after
-    } != *before;
+    // A PR re-stored as last synced, with no Repository, leaves these as they are.
+    let more = more_of(conn, task_id)?;
+    let more_changed = pr.repository.is_some()
+        && (more.repository.as_ref().map(|r| r.id) != pr.repository.as_ref().map(|r| r.id)
+            || more.base_ref != pr.base_ref
+            || more.author != pr.author);
+    let pr_changed = more_changed
+        || TaskPr {
+            synced_at: before.synced_at.clone(),
+            ..after
+        } != *before;
 
     write_row(conn, task_id, pr, synced_at)?;
     if status.is_none() && title.is_none() && workspace.is_none() && !pr_changed {
@@ -320,6 +495,32 @@ fn store_one(
     Ok(Some(task_id))
 }
 
+/// The task of `pr`, if it's stored: by its Repository's id and number, so a PR whose
+/// Repository GitHub renamed or transferred is still found; else, for a row stored before PR
+/// sync read Repositories, by `owner/name` and number.
+fn stored_task(conn: &Connection, pr: &RemotePr) -> Result<Option<TaskId>, DbError> {
+    if let Some(repository) = &pr.repository {
+        let by_id = conn
+            .query_row(
+                "SELECT task_id FROM pull_requests WHERE repository_id = ?1 AND number = ?2",
+                params![repository.id.get(), pr.number],
+                |row| text(row, "task_id"),
+            )
+            .optional()?;
+        if by_id.is_some() {
+            return Ok(by_id);
+        }
+    }
+    Ok(conn
+        .query_row(
+            "SELECT task_id FROM pull_requests
+             WHERE repository_id IS NULL AND repo = ?1 AND number = ?2",
+            params![pr.repo, pr.number],
+            |row| text(row, "task_id"),
+        )
+        .optional()?)
+}
+
 /// The task of the stored PR `repo#number`, if it's stored.
 fn task_for(conn: &Connection, repo: &str, number: i64) -> Result<Option<TaskId>, DbError> {
     Ok(conn
@@ -331,8 +532,8 @@ fn task_for(conn: &Connection, repo: &str, number: i64) -> Result<Option<TaskId>
         .optional()?)
 }
 
-fn synced(pr: &RemotePr, synced_at: &str) -> PullRequest {
-    PullRequest {
+fn synced(pr: &RemotePr, synced_at: &str) -> TaskPr {
+    TaskPr {
         repo: pr.repo.clone(),
         number: pr.number,
         url: pr.url.clone(),
@@ -347,22 +548,29 @@ fn synced(pr: &RemotePr, synced_at: &str) -> PullRequest {
     }
 }
 
-/// Inserts or replaces `task`'s PR row, which is no longer aged out or unreachable.
+/// Inserts or replaces `task`'s PR row, which is no longer aged out or unreachable. A PR
+/// GitHub showed with its Repository takes that Repository's name, its base branch and its
+/// author; one re-stored as last synced keeps what its row holds.
 fn write_row(
     conn: &Connection,
     task: TaskId,
     pr: &RemotePr,
     synced_at: &str,
 ) -> Result<(), DbError> {
+    let read = pr.repository.is_some();
     conn.execute(
         "INSERT INTO pull_requests
-           (task_id, repo, number, url, state, draft, head_ref, checks, review, updated_at, synced_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+           (task_id, repo, number, url, state, draft, head_ref, checks, review, updated_at,
+            synced_at, repository_id, base_ref, author)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT (task_id) DO UPDATE SET
-           url = excluded.url, state = excluded.state, draft = excluded.draft,
-           head_ref = excluded.head_ref, checks = excluded.checks, review = excluded.review,
-           updated_at = excluded.updated_at, synced_at = excluded.synced_at,
-           aged_out_at = NULL, unreachable_at = NULL",
+           repo = excluded.repo, url = excluded.url, state = excluded.state,
+           draft = excluded.draft, head_ref = excluded.head_ref, checks = excluded.checks,
+           review = excluded.review, updated_at = excluded.updated_at,
+           synced_at = excluded.synced_at, aged_out_at = NULL, unreachable_at = NULL,
+           repository_id = CASE WHEN ?15 THEN excluded.repository_id ELSE repository_id END,
+           base_ref = CASE WHEN ?15 THEN excluded.base_ref ELSE base_ref END,
+           author = CASE WHEN ?15 THEN excluded.author ELSE author END",
         params![
             task.to_string(),
             pr.repo,
@@ -375,6 +583,10 @@ fn write_row(
             pr.review.map(|review| review.as_str()),
             pr.updated_at,
             synced_at,
+            pr.repository.as_ref().map(|repository| repository.id.get()),
+            pr.base_ref,
+            pr.author,
+            read,
         ],
     )?;
     Ok(())

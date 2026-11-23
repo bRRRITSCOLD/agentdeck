@@ -48,7 +48,8 @@ enum Item {
         /// Its rows whose PR can close, folded or not: what its checkbox picks.
         selectable: Vec<TaskId>,
     },
-    Row(Row),
+    /// Boxed: a row is far larger than a header.
+    Row(Box<Row>),
 }
 
 /// The Tasks view.
@@ -205,7 +206,7 @@ impl TasksView {
                 selectable: close_prs::selectable(&group.rows),
             });
             if !collapsed {
-                items.extend(group.rows.into_iter().map(Item::Row));
+                items.extend(group.rows.into_iter().map(|row| Item::Row(Box::new(row))));
             }
         }
         items
@@ -398,7 +399,7 @@ impl Render for TasksView {
 
 #[cfg(test)]
 mod tests {
-    use agentdeck_client::types::{PullRequest, Task};
+    use agentdeck_client::types::{Task, TaskPr};
     use agentdeck_core::{
         Agent, AgentState, ChecksState, PrState, ReviewState, TaskKind, WorkspaceId,
     };
@@ -472,7 +473,7 @@ mod tests {
     /// and a done task.
     fn board() -> Snapshot {
         let ws = workspace(1, "tabs-a11y");
-        let pr = PullRequest {
+        let pr = TaskPr {
             checks: Some(ChecksState::Pending),
             draft: true,
             head_ref: "feat/x".into(),

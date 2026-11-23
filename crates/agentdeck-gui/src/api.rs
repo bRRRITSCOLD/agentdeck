@@ -14,7 +14,7 @@ use agentdeck_client::types::{
 };
 use agentdeck_client::{ApiError, Client};
 use agentdeck_core::{
-    InstructionId, PaneId, SplitDirection, TabId, TaskId, TaskStatus, WorkspaceId,
+    InstructionId, PaneId, PrRef, SplitDirection, TabId, TaskId, TaskStatus, WorkspaceId,
 };
 use gpui::{App, Task};
 
@@ -84,10 +84,10 @@ pub trait Api: Send + Sync {
     /// for one, spec §8), else the sync that is due.
     fn sync_prs(&self, full: bool, cx: &App) -> Task<anyhow::Result<()>>;
 
-    /// Closes the PRs of the PR tasks `tasks` on GitHub (spec §8): one result per task, in
+    /// Closes the pull requests `prs` names on GitHub (spec §8): one result per reference, in
     /// order, each saying whether it closed and why not. Only a request that fails as a whole
     /// is an error.
-    fn close_prs(&self, tasks: Vec<TaskId>, cx: &App) -> Task<anyhow::Result<Vec<PrCloseResult>>>;
+    fn close_prs(&self, prs: Vec<PrRef>, cx: &App) -> Task<anyhow::Result<Vec<PrCloseResult>>>;
 
     /// Starts an agent as `launch` says and places it in a tab (spec §6): the workspace's
     /// first empty tab, or a new one. A refusal is an [`ApiError`]; `invalid_argv` means the
@@ -341,15 +341,11 @@ impl Api for Daemon {
         })
     }
 
-    fn close_prs(&self, tasks: Vec<TaskId>, cx: &App) -> Task<anyhow::Result<Vec<PrCloseResult>>> {
+    fn close_prs(&self, prs: Vec<PrRef>, cx: &App) -> Task<anyhow::Result<Vec<PrCloseResult>>> {
         let client = self.client.clone();
         runtime::spawn(cx, async move {
-            let closed = (client
-                .prs_close()
-                .body(PrClose { task_ids: tasks })
-                .send()
-                .await)
-                .map_err(ApiError::from)?;
+            let closed =
+                (client.prs_close().body(PrClose { prs }).send().await).map_err(ApiError::from)?;
             Ok(closed.into_inner().results)
         })
     }
@@ -816,9 +812,9 @@ pub(crate) mod fake {
         held_settings_read: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
         /// The settings patches sent, in order.
         pub settings_patches: Mutex<Vec<SettingsPatch>>,
-        /// Each close asked for: the tasks, in order.
-        pub closes: Mutex<Vec<Vec<TaskId>>>,
-        /// The PRs GitHub refuses to close, with its message.
+        /// Each close asked for: the pull requests, in order.
+        pub closes: Mutex<Vec<Vec<PrRef>>>,
+        /// The PRs GitHub refuses to close, by their tasks, with its message.
         refusals: Mutex<HashMap<TaskId, String>>,
         /// Holds the next close's answer until its sender sends or drops.
         held_close: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
@@ -1247,35 +1243,42 @@ pub(crate) mod fake {
             Task::ready(Ok(()))
         }
 
-        fn close_prs(
-            &self,
-            tasks: Vec<TaskId>,
-            cx: &App,
-        ) -> Task<anyhow::Result<Vec<PrCloseResult>>> {
+        fn close_prs(&self, prs: Vec<PrRef>, cx: &App) -> Task<anyhow::Result<Vec<PrCloseResult>>> {
             if let Some(err) = self.failure() {
                 return Task::ready(Err(err));
             }
-            self.closes.lock().unwrap().push(tasks.clone());
+            self.closes.lock().unwrap().push(prs.clone());
             let refusals = self.refusals.lock().unwrap();
             let mut snapshot = self.snapshot.lock().unwrap();
-            let results = (tasks.into_iter())
-                .map(|task_id| {
-                    if let Some(message) = refusals.get(&task_id) {
-                        return PrCloseResult {
-                            task_id,
-                            ok: false,
-                            error: Some(message.clone()),
-                        };
+            let results = (prs.into_iter())
+                .map(|pr| {
+                    let failed = |error: &str| PrCloseResult {
+                        pr: pr.clone(),
+                        ok: false,
+                        error: Some(error.to_owned()),
+                    };
+                    // The daemon finds the PR by its Repository's name, ignoring case.
+                    let Some(task) = snapshot.tasks.iter_mut().find(|task| {
+                        task.pr.as_ref().is_some_and(|stored| {
+                            stored
+                                .repo
+                                .eq_ignore_ascii_case(&pr.repository().to_string())
+                                && stored.number == i64::from(pr.number())
+                                && stored.state == agentdeck_core::PrState::Open
+                        })
+                    }) else {
+                        return failed("Not an open PR");
+                    };
+                    if let Some(message) = refusals.get(&task.id) {
+                        return failed(message);
                     }
                     // GitHub closed it: the daemon stores it closed and its task done.
-                    if let Some(task) = snapshot.tasks.iter_mut().find(|t| t.id == task_id) {
-                        task.status = TaskStatus::Done;
-                        if let Some(pr) = &mut task.pr {
-                            pr.state = agentdeck_core::PrState::Closed;
-                        }
+                    task.status = TaskStatus::Done;
+                    if let Some(stored) = &mut task.pr {
+                        stored.state = agentdeck_core::PrState::Closed;
                     }
                     PrCloseResult {
-                        task_id,
+                        pr,
                         ok: true,
                         error: None,
                     }

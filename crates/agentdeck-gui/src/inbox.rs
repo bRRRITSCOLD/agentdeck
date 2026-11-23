@@ -1041,6 +1041,11 @@ mod tests {
         use crate::close_prs::Target;
         use crate::overview::fixtures::pr_task;
 
+        /// The pull request `text`, `owner/name#123`, names.
+        fn pr_ref(text: &str) -> agentdeck_core::PrRef {
+            text.parse().expect("a PR reference")
+        }
+
         /// Open PRs 1 and 4, merged PR 2 (still in review) and plain task 3, in the inbox.
         fn prs() -> Snapshot {
             Snapshot {
@@ -1178,7 +1183,11 @@ mod tests {
             cx.simulate_keystrokes("enter");
             cx.run_until_parked();
 
-            assert_eq!(*harness.api.closes.lock().unwrap(), [vec![id(1), id(4)]]);
+            // By reference, in the order picked.
+            assert_eq!(
+                *harness.api.closes.lock().unwrap(),
+                [vec![pr_ref("acme/widgets#1"), pr_ref("acme/gadgets#4")]]
+            );
             assert!(!asking(&harness, cx));
             assert_eq!(toasts(cx).last().map(String::as_str), Some("Closed 2 PRs"));
             assert!(!selecting(&harness, cx));
@@ -1706,7 +1715,10 @@ mod tests {
                 cx.simulate_keystrokes("enter");
                 cx.run_until_parked();
 
-                assert_eq!(*harness.api.closes.lock().unwrap(), [vec![id(4)]]);
+                assert_eq!(
+                    *harness.api.closes.lock().unwrap(),
+                    [vec![pr_ref("acme/gadgets#4")]]
+                );
                 assert_eq!(toasts(cx).last().map(String::as_str), Some("Closed 1 PR"));
             }
 

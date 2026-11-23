@@ -1,13 +1,13 @@
 //! Human-readable output. `--json` prints the API's own objects instead.
 
 use agentdeck_client::settings;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use agentdeck_client::types::{
     Comment, DirtyReport, Instruction, McpAgent, McpRegistration, McpState, Pane, PrCloseResult,
     PrSyncStage, PrSyncStatus, PullRequest, Settings, Task, Workspace,
 };
-use agentdeck_core::{CommentAuthor, PaneKind, TaskId, WorkspaceId};
+use agentdeck_core::{CommentAuthor, PaneKind, PrState, WorkspaceId};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -295,15 +295,36 @@ pub fn close_prompt(n: usize, repos: &[&str]) -> String {
     out
 }
 
-/// `pr close`'s results: `closed <repo> #<n>` or `failed <repo> #<n>: <error>` per PR, with
-/// the task's id for one that isn't a PR task, then "Closed 12 of 14" when any failed.
-pub fn close_results(results: &[PrCloseResult], prs: &HashMap<TaskId, &PullRequest>) -> String {
+/// `pr ls`: a line per pull request under `PR  STATE  TITLE`, the PR by its reference; "no
+/// pull requests" when there are none.
+pub fn pull_requests(prs: &[PullRequest]) -> String {
+    let rows: Vec<[String; 3]> = prs
+        .iter()
+        .map(|pr| [pr.reference.to_string(), pr_state(pr), pr.title.clone()])
+        .collect();
+    table(["PR", "STATE", "TITLE"], &rows, "no pull requests")
+}
+
+/// A pull request's state as `pr ls` shows it: `open`, `draft`, `merged` or `closed`, then
+/// `, unreachable` while the GitHub sign-in can't see it, as it is then as last synced.
+fn pr_state(pr: &PullRequest) -> String {
+    let state = match pr.state {
+        PrState::Open if pr.draft => "draft",
+        state => state.as_str(),
+    };
+    if pr.unreachable {
+        format!("{state}, unreachable")
+    } else {
+        state.to_owned()
+    }
+}
+
+/// `pr close`'s results: `closed <pr>` or `failed <pr>: <error>` per PR, by its reference,
+/// then "Closed 12 of 14" when any failed.
+pub fn close_results(results: &[PrCloseResult]) -> String {
     let mut out = String::new();
     for result in results {
-        let name = prs.get(&result.task_id).map_or_else(
-            || result.task_id.to_string(),
-            |pr| format!("{} #{}", pr.repo, pr.number),
-        );
+        let name = &result.pr;
         if result.ok {
             out.push_str(&format!("closed {name}\n"));
         } else {
@@ -616,7 +637,7 @@ mod tests {
         #[test]
         fn should_say_the_sign_in_cannot_see_an_unreachable_pr() {
             let out = super::task(&Task {
-                pr: Some(PullRequest {
+                pr: Some(agentdeck_client::types::TaskPr {
                     checks: None,
                     draft: false,
                     head_ref: "feat".into(),
@@ -825,71 +846,107 @@ mod tests {
     mod close_results {
         use super::*;
 
-        fn pr(number: i64) -> PullRequest {
-            PullRequest {
-                checks: None,
-                draft: false,
-                head_ref: "feat".into(),
-                number,
-                repo: "acme/api".into(),
-                review: None,
-                state: agentdeck_core::PrState::Open,
-                synced_at: String::new(),
-                unreachable: false,
-                updated_at: String::new(),
-                url: String::new(),
+        fn result(pr: &str, error: Option<&str>) -> PrCloseResult {
+            PrCloseResult {
+                pr: pr.parse().expect("a PR reference"),
+                ok: error.is_none(),
+                error: error.map(str::to_owned),
             }
-        }
-
-        fn id(n: u8) -> TaskId {
-            format!("019a1dd1-5b85-75ae-af0b-6d1a8b2110{n:02}")
-                .parse()
-                .expect("a task id")
         }
 
         #[test]
         fn should_say_what_closed_and_what_failed_then_how_many_closed() {
-            let (seven, eight) = (pr(7), pr(8));
-            let prs = HashMap::from([(id(1), &seven), (id(2), &eight)]);
             let results = [
-                PrCloseResult {
-                    task_id: id(1),
-                    ok: true,
-                    error: None,
-                },
-                PrCloseResult {
-                    task_id: id(2),
-                    ok: false,
-                    error: Some("Not allowed".into()),
-                },
-                PrCloseResult {
-                    task_id: id(3),
-                    ok: false,
-                    error: Some("Not an open PR".into()),
-                },
+                result("acme/api#7", None),
+                result("acme/api#8", Some("Not allowed")),
+                result("acme/web#3", Some("Not an open PR")),
             ];
 
             assert_eq!(
-                close_results(&results, &prs),
-                format!(
-                    "closed acme/api #7\nfailed acme/api #8: Not allowed\nfailed {}: Not an \
-                     open PR\nClosed 1 of 3\n",
-                    id(3)
-                )
+                close_results(&results),
+                "closed acme/api#7\nfailed acme/api#8: Not allowed\nfailed acme/web#3: Not an \
+                 open PR\nClosed 1 of 3\n"
             );
         }
 
         #[test]
         fn should_not_count_when_every_pr_closed() {
-            let seven = pr(7);
-            let prs = HashMap::from([(id(1), &seven)]);
-            let results = [PrCloseResult {
-                task_id: id(1),
-                ok: true,
-                error: None,
-            }];
+            let results = [result("acme/api#7", None)];
 
-            assert_eq!(close_results(&results, &prs), "closed acme/api #7\n");
+            assert_eq!(close_results(&results), "closed acme/api#7\n");
+        }
+    }
+
+    mod pull_requests {
+        use agentdeck_client::types::Repository;
+
+        use super::*;
+
+        fn pr(reference: &str, title: &str) -> PullRequest {
+            let reference: agentdeck_core::PrRef = reference.parse().expect("a PR reference");
+            PullRequest {
+                author: Some("octocat".into()),
+                base_ref: "main".into(),
+                checks: None,
+                draft: false,
+                head_ref: "feat".into(),
+                number: reference.number(),
+                reference: reference.clone(),
+                repository: Repository {
+                    archived: false,
+                    id: 1_296_269.into(),
+                    name: reference.repository().clone(),
+                    private: false,
+                    url: format!("https://github.com/{}", reference.repository()),
+                },
+                review: None,
+                state: PrState::Open,
+                title: title.into(),
+                unreachable: false,
+                updated_at: String::new(),
+                url: format!(
+                    "https://github.com/{}/pull/{}",
+                    reference.repository(),
+                    reference.number()
+                ),
+            }
+        }
+
+        #[test]
+        fn should_list_each_pr_by_its_reference_with_its_state_and_title() {
+            let draft = PullRequest {
+                draft: true,
+                ..pr("acme/api#12", "Add the gateway")
+            };
+            let merged = PullRequest {
+                state: PrState::Merged,
+                ..pr("acme/web#3", "Fix the build")
+            };
+
+            assert_eq!(
+                pull_requests(&[pr("acme/api#7", "Sync PRs"), draft, merged]),
+                "PR           STATE   TITLE\n\
+                 acme/api#7   open    Sync PRs\n\
+                 acme/api#12  draft   Add the gateway\n\
+                 acme/web#3   merged  Fix the build\n"
+            );
+        }
+
+        #[test]
+        fn should_mark_a_pr_the_sign_in_cannot_see() {
+            let hidden = PullRequest {
+                unreachable: true,
+                ..pr("acme/secret#8", "Rotate keys")
+            };
+
+            assert!(
+                pull_requests(&[hidden]).contains("acme/secret#8  open, unreachable  Rotate keys"),
+            );
+        }
+
+        #[test]
+        fn should_say_when_there_are_none() {
+            assert_eq!(pull_requests(&[]), "no pull requests\n");
         }
     }
 

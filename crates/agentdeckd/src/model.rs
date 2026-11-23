@@ -3,7 +3,8 @@
 
 use agentdeck_core::{
     Agent, AgentState, ChecksState, CommentAuthor, CommentId, InstructionId, Layout, PaneId,
-    PaneKind, PrState, ReviewState, TabId, TaskId, TaskKind, TaskPlace, TaskStatus, WorkspaceId,
+    PaneKind, PrRef, PrState, RepositoryId, RepositoryName, ReviewState, TabId, TaskId, TaskKind,
+    TaskPlace, TaskStatus, WorkspaceId,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -140,14 +141,71 @@ pub struct Task {
     /// When the task last moved to done; `None` while it isn't done.
     pub done_at: Option<String>,
     /// The pull request behind a PR task; `None` for a plain task.
-    pub pr: Option<PullRequest>,
+    pub pr: Option<TaskPr>,
     /// Agents' comments on the task the user hasn't seen yet.
     pub unseen_agent_comments: u32,
 }
 
-/// The GitHub pull request behind a PR task, as PR sync last saw it (spec §8).
+/// A GitHub Repository a pull request belongs to (spec §3): what GitHub says of it, as PR sync
+/// last read it with one of its pull requests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Repository {
+    /// GitHub's id for it, which a rename or a transfer keeps.
+    pub id: RepositoryId,
+    /// `owner/name`, as GitHub calls it now.
+    pub name: RepositoryName,
+    /// Its GitHub page.
+    pub url: String,
+    /// Only those GitHub lets in can see it.
+    pub private: bool,
+    /// Archived on GitHub: read-only.
+    pub archived: bool,
+}
+
+/// A pull request PR sync keeps (spec §3, §8), as it last saw it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PullRequest {
+    /// `owner/name#123`, by its Repository's name now.
+    pub reference: PrRef,
+    /// Its number in its Repository.
+    pub number: u32,
+    /// The Repository it belongs to.
+    pub repository: Repository,
+    /// Its title.
+    pub title: String,
+    /// Its GitHub page.
+    pub url: String,
+    /// Open, merged or closed.
+    pub state: PrState,
+    /// A draft.
+    pub draft: bool,
+    /// The branch it merges from.
+    pub head_ref: String,
+    /// The branch it merges into.
+    pub base_ref: String,
+    /// The GitHub login of who opened it; `None` when that account is gone.
+    pub author: Option<String>,
+    /// The head commit's rolled-up checks; `None` when it has none.
+    pub checks: Option<ChecksState>,
+    /// The review decision; `None` when the Repository requires no review.
+    pub review: Option<ReviewState>,
+    /// When it last changed on GitHub.
+    pub updated_at: String,
+    /// Whether the GitHub sign-in can't see it: it shows as last synced (spec §8).
+    pub unreachable: bool,
+}
+
+/// `GET /v1/prs` filters.
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct PrFilter {
+    /// Only the pull requests of the Repository GitHub calls this now, `owner/name`, ignoring
+    /// case.
+    pub repository: Option<RepositoryName>,
+}
+
+/// The GitHub pull request behind a PR task, as PR sync last saw it (spec §8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TaskPr {
     /// `owner/name` of the repo the PR targets.
     pub repo: String,
     /// The PR's number in that repo.
@@ -447,25 +505,26 @@ pub enum PrSyncStage {
     Details,
 }
 
-/// `POST /v1/prs/close`: the PR tasks whose PRs to close on GitHub.
+/// `POST /v1/prs/close`: the pull requests to close on GitHub.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PrClose {
-    /// The tasks, each a PR task whose PR is open; the results come back in this order.
-    pub task_ids: Vec<TaskId>,
+    /// Each pull request's reference, `owner/name#123`; each must be stored open and reachable.
+    /// The results come back in this order.
+    pub prs: Vec<PrRef>,
 }
 
-/// `POST /v1/prs/close`'s answer: one result per task asked for, in the order asked.
+/// `POST /v1/prs/close`'s answer: one result per reference asked for, in the order asked.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PrCloseResults {
-    /// Each task's result.
+    /// Each reference's result.
     pub results: Vec<PrCloseResult>,
 }
 
 /// Whether one PR closed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PrCloseResult {
-    /// The PR task.
-    pub task_id: TaskId,
+    /// The pull request, as it was asked for.
+    pub pr: PrRef,
     /// Whether GitHub closed the PR.
     pub ok: bool,
     /// Why it didn't: GitHub's message, why the request failed, "Not an open PR" or "Not
@@ -476,18 +535,18 @@ pub struct PrCloseResult {
 
 impl PrCloseResult {
     /// The result for a PR GitHub closed.
-    pub fn closed(task_id: TaskId) -> PrCloseResult {
+    pub fn closed(pr: PrRef) -> PrCloseResult {
         PrCloseResult {
-            task_id,
+            pr,
             ok: true,
             error: None,
         }
     }
 
     /// The result for a PR that didn't close, and why.
-    pub fn failed(task_id: TaskId, error: impl Into<String>) -> PrCloseResult {
+    pub fn failed(pr: PrRef, error: impl Into<String>) -> PrCloseResult {
         PrCloseResult {
-            task_id,
+            pr,
             ok: false,
             error: Some(error.into()),
         }

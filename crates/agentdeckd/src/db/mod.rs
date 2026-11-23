@@ -7,6 +7,7 @@ pub mod comments;
 pub mod instructions;
 pub mod panes;
 pub mod pull_requests;
+pub mod repositories;
 pub mod tabs;
 pub mod tasks;
 pub mod workspaces;
@@ -31,6 +32,7 @@ const MIGRATION_LIST: &[M<'static>] = &[
     M::up(include_str!("migrations/0004_pr_workspace_picked.sql")),
     M::up(include_str!("migrations/0005_pane_hosted_agent.sql")),
     M::up(include_str!("migrations/0006_pr_unreachable.sql")),
+    M::up(include_str!("migrations/0007_repositories.sql")),
 ];
 const MIGRATIONS: Migrations<'static> = Migrations::from_slice(MIGRATION_LIST);
 

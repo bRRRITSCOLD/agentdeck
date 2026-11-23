@@ -251,9 +251,7 @@ impl Snapshot {
 /// Builders for snapshots in tests.
 #[cfg(test)]
 pub(crate) mod fixtures {
-    use agentdeck_client::types::{
-        Comment, Instruction, PrSyncStatus, PullRequest, Task, Workspace,
-    };
+    use agentdeck_client::types::{Comment, Instruction, PrSyncStatus, Task, TaskPr, Workspace};
     use agentdeck_core::{
         AgentState, CommentAuthor, PaneId, PrState, TaskId, TaskKind, TaskStatus, WorkspaceId,
     };
@@ -347,7 +345,7 @@ pub(crate) mod fixtures {
     pub fn pr_task(n: u32, repo: &str, state: PrState, workspace: Option<WorkspaceId>) -> Task {
         Task {
             status: TaskStatus::Review,
-            pr: Some(PullRequest {
+            pr: Some(TaskPr {
                 checks: None,
                 draft: false,
                 head_ref: "feat/x".into(),

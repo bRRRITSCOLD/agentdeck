@@ -954,6 +954,7 @@ mod tests {
             PrCell {
                 repo: "widgets".into(),
                 reference: "widgets #1".into(),
+                full_reference: Some("acme/widgets#1".parse().unwrap()),
                 state,
                 draft,
                 checks: None,
