@@ -103,12 +103,12 @@ pub fn open_prs(snapshot: &Snapshot, repository: RepositoryId) -> usize {
         .count()
 }
 
-/// The toast after a link: "Linked owner/name to <workspace>".
+/// The toast after a link: `Linked owner/name to <workspace>`.
 pub fn linked_title(repository: &str, workspace: &str) -> String {
     format!("Linked {repository} to {workspace}")
 }
 
-/// The toast after an unlink: its title, "Unlinked owner/name from <workspace>", and what it
+/// The toast after an unlink: its title, `Unlinked owner/name from <workspace>`, and what it
 /// says of the Repository's `open` PRs: they no longer show here, and, when no other Workspace
 /// links it (`elsewhere` false), where they are now. With no open PR it says only the title.
 pub fn unlinked(
