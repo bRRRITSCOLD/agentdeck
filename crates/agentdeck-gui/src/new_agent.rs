@@ -62,6 +62,13 @@ pub struct Launch {
 /// The agents the dialog offers, with their names.
 pub const AGENTS: [(Agent, &str); 2] = [(Agent::Claude, "Claude Code"), (Agent::Codex, "Codex")];
 
+/// The agent's name: `Claude Code`, or `Agent` for another CLI.
+pub fn agent_name(agent: Agent) -> &'static str {
+    (AGENTS.iter())
+        .find(|(a, _)| *a == agent)
+        .map_or("Agent", |(_, name)| name)
+}
+
 /// One folder to run in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Folder {

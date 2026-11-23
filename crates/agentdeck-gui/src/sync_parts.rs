@@ -1,4 +1,4 @@
-//! The PR sync parts the Pull requests view and the Inbox share (spec §11): the line saying
+//! The PR sync parts of the Pull requests view (spec §11): the line saying
 //! which PRs the age cutoff leaves out, its "Settings" link, and the banner shown while no
 //! GitHub token works, with **Open Settings**. Each asks its view for Settings with
 //! [`OpenSettings`].
@@ -33,7 +33,7 @@ pub fn cutoff(days: u32) -> String {
 pub const LOGGED_OUT: &str = "Not signed in to GitHub, so PRs don't sync.";
 
 /// The banner's title while no GitHub token works: whose PRs it shows once a sync ran as
-/// `synced_as` (Penpot "Inbox · logged out · synced before"), else [`LOGGED_OUT`].
+/// `synced_as` (Penpot "Pull requests · logged out · synced before"), else [`LOGGED_OUT`].
 pub fn logged_out_title(synced_as: Option<&str>) -> SharedString {
     match synced_as {
         Some(login) => format!("Synced as {login}. Sign in to refresh.").into(),
@@ -59,7 +59,7 @@ pub fn settings_link<V: EventEmitter<OpenSettings>>(
 }
 
 /// The banner while no GitHub token works: what's wrong, or whose PRs show, and **Open
-/// Settings** to fix it (Penpot "Inbox · logged out", "Pull requests · logged out"). `key`
+/// Settings** to fix it (Penpot "Pull requests · logged out"). `key`
 /// keys its button. Tests find it as `logged out banner`, its button as `open settings`.
 pub fn logged_out_banner<V: EventEmitter<OpenSettings>>(
     key: &'static str,

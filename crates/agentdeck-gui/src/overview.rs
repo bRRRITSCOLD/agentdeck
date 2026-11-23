@@ -1,19 +1,17 @@
 //! What the sidebar shows (spec §11): the Pull requests view's count, every workspace with its
-//! rolled-up state and open PRs, the archived ones apart, the inbox's counts, and where PR sync
-//! stands for the Pull requests view's header.
+//! rolled-up state, the archived ones apart, and where PR sync stands for the Pull requests
+//! view's header.
 //!
 //! A [`Snapshot`] is the daemon's data as read over REST; [`Snapshot::overview`] sums it up,
 //! a pure function the views render. Live `state` and `exit` messages patch the snapshot's
 //! pane states in place; anything else that changes is read again.
 
-use agentdeck_client::types::{PrSyncStatus, PullRequest, RepositoryLinks, Task, Workspace};
-use agentdeck_core::{
-    Agent, AgentState, PaneId, PrState, TaskId, TaskKind, TaskStatus, WorkspaceId,
-};
+use agentdeck_client::types::{PrSyncStatus, PullRequest, RepositoryLinks, Workspace};
+use agentdeck_core::{Agent, AgentState, PaneId, PrState, WorkspaceId};
 use chrono::{DateTime, Utc};
 use gpui::SharedString;
 
-/// One pane's state, the workspace whose tab holds it, and the task it links.
+/// One pane's state, and the workspace and tab that hold it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PaneState {
     /// The pane.
@@ -25,8 +23,6 @@ pub struct PaneState {
     /// The agent it runs, or the one a shell pane hosts (spec §3); `None` for a shell
     /// hosting none.
     pub agent: Option<Agent>,
-    /// The task it links.
-    pub task: Option<TaskId>,
     /// The title of the tab it sits in.
     pub tab: String,
 }
@@ -38,8 +34,6 @@ pub struct Snapshot {
     pub workspaces: Vec<Workspace>,
     /// Every pane placed in a tab's layout.
     pub panes: Vec<PaneState>,
-    /// Every task.
-    pub tasks: Vec<Task>,
     /// PR sync's last run and its settings; `None` until read.
     pub pr_sync: Option<PrSyncStatus>,
     /// Every pull request PR sync keeps, by Repository name, then number (spec §4).
@@ -52,7 +46,8 @@ pub struct Snapshot {
 /// A row's counts; a zero hides its count.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Counts {
-    /// PR tasks that aren't done, but for those whose PR the GitHub sign-in can't see.
+    /// Open pull requests, drafts included, but for those the GitHub sign-in can't see and
+    /// Finished ones.
     pub prs: usize,
 }
 
@@ -67,8 +62,6 @@ pub struct WorkspaceRow {
     pub dir: SharedString,
     /// Its panes' states, rolled up.
     pub state: AgentState,
-    /// Its counts; none while archived.
-    pub counts: Counts,
     /// Whether it is archived.
     pub archived: bool,
     /// Whether its notifications are muted.
@@ -140,8 +133,6 @@ pub struct Overview {
     /// The Pull requests view's counts: open pull requests, drafts included, but for those the
     /// GitHub sign-in can't see and Finished ones (spec §11).
     pub pull_requests: Counts,
-    /// The inbox's counts: open PRs among tasks with no workspace.
-    pub inbox: Counts,
     /// The workspaces that aren't archived, oldest first.
     pub workspaces: Vec<WorkspaceRow>,
     /// The archived workspaces, oldest first.
@@ -170,18 +161,6 @@ impl Snapshot {
 
     /// The sidebar's content.
     pub fn overview(&self) -> Overview {
-        let counts = |workspace: Option<WorkspaceId>| Counts {
-            prs: self
-                .tasks
-                .iter()
-                .filter(|task| {
-                    task.kind == TaskKind::Pr
-                        && task.status != TaskStatus::Done
-                        && task.workspace_id == workspace
-                        && !task.pr.as_ref().is_some_and(|pr| pr.unreachable)
-                })
-                .count(),
-        };
         let row = |workspace: &Workspace| {
             let archived = workspace.archived_at.is_some();
             WorkspaceRow {
@@ -194,11 +173,6 @@ impl Snapshot {
                         .filter(|pane| pane.workspace == workspace.id)
                         .map(|pane| pane.state),
                 ),
-                counts: if archived {
-                    Counts::default()
-                } else {
-                    counts(Some(workspace.id))
-                },
                 archived,
                 muted: workspace.muted,
             }
@@ -216,7 +190,6 @@ impl Snapshot {
         let Some(status) = &self.pr_sync else {
             return Overview {
                 pull_requests,
-                inbox: counts(None),
                 workspaces,
                 archived,
                 pr_sync: PrSync::NotYet,
@@ -242,7 +215,6 @@ impl Snapshot {
         };
         Overview {
             pull_requests,
-            inbox: counts(None),
             workspaces,
             archived,
             pr_sync,
@@ -254,11 +226,10 @@ impl Snapshot {
 #[cfg(test)]
 pub(crate) mod fixtures {
     use agentdeck_client::types::{
-        PrSyncStatus, PullRequest, Repository, RepositoryLinks, Task, TaskPr, Workspace,
+        PrSyncStatus, PullRequest, Repository, RepositoryLinks, Workspace,
     };
     use agentdeck_core::{
-        AgentState, PaneId, PrRef, PrState, RepositoryId, RepositoryName, TaskKind, TaskStatus,
-        WorkspaceId,
+        AgentState, PaneId, PrRef, PrState, RepositoryId, RepositoryName, WorkspaceId,
     };
 
     use super::{PaneState, Snapshot};
@@ -324,55 +295,8 @@ pub(crate) mod fixtures {
             workspace,
             state,
             agent: None,
-            task: None,
             tab: format!("tab {n}"),
         }
-    }
-
-    /// A task of `kind` in `workspace`, or the inbox.
-    pub fn task(n: u32, kind: TaskKind, workspace: Option<WorkspaceId>) -> Task {
-        Task {
-            body: String::new(),
-            created_at: CREATED.into(),
-            done_at: None,
-            id: id(n),
-            kind,
-            pr: None,
-            status: TaskStatus::Todo,
-            title: format!("task {n}"),
-            updated_at: CREATED.into(),
-            workspace_id: workspace,
-        }
-    }
-
-    /// A PR task in review for PR `n` of `repo` (`owner/name`), stored as `state`.
-    pub fn pr_task(n: u32, repo: &str, state: PrState, workspace: Option<WorkspaceId>) -> Task {
-        Task {
-            status: TaskStatus::Review,
-            pr: Some(TaskPr {
-                checks: None,
-                draft: false,
-                head_ref: "feat/x".into(),
-                number: i64::from(n),
-                repo: repo.into(),
-                review: None,
-                state,
-                synced_at: CREATED.into(),
-                unreachable: false,
-                updated_at: CREATED.into(),
-                url: format!("https://github.com/{repo}/pull/{n}"),
-            }),
-            ..task(n, TaskKind::Pr, workspace)
-        }
-    }
-
-    /// [`pr_task`] whose open PR the GitHub sign-in can't see.
-    pub fn unreachable_pr_task(n: u32, repo: &str, workspace: Option<WorkspaceId>) -> Task {
-        let mut task = pr_task(n, repo, PrState::Open, workspace);
-        if let Some(pr) = &mut task.pr {
-            pr.unreachable = true;
-        }
-        task
     }
 
     /// The id GitHub gives Repository `repo` in these tests: the same for the same name.
@@ -430,7 +354,6 @@ pub(crate) mod fixtures {
 #[cfg(test)]
 mod tests {
     use agentdeck_core::AgentState::*;
-    use agentdeck_core::{TaskKind, TaskStatus};
 
     use super::fixtures::*;
     use super::*;
@@ -545,30 +468,22 @@ mod tests {
             }
 
             #[test]
-            fn should_list_archived_workspaces_apart_oldest_first_with_no_counts() {
+            fn should_list_archived_workspaces_apart_oldest_first() {
                 let archived = |n, name| Workspace {
                     archived_at: Some("2026-11-12T01:00:00Z".into()),
                     ..workspace(n, name)
                 };
-                let old = archived(2, "old");
                 let snapshot = Snapshot {
-                    tasks: vec![task(30, TaskKind::Pr, Some(old.id))],
-                    workspaces: vec![workspace(1, "a"), old, archived(3, "older")],
+                    workspaces: vec![workspace(1, "a"), archived(2, "old"), archived(3, "older")],
                     ..Snapshot::default()
                 };
 
                 let overview = snapshot.overview();
                 let rows: Vec<_> = (overview.archived.iter())
-                    .map(|row| (row.name.to_string(), row.archived, row.counts))
+                    .map(|row| (row.name.to_string(), row.archived))
                     .collect();
 
-                assert_eq!(
-                    rows,
-                    [
-                        ("old".into(), true, Counts::default()),
-                        ("older".into(), true, Counts::default())
-                    ]
-                );
+                assert_eq!(rows, [("old".into(), true), ("older".into(), true)]);
                 assert!(!overview.workspaces[0].archived);
             }
 
@@ -591,62 +506,6 @@ mod tests {
                 assert_eq!(name(1).as_deref(), Some("a"));
                 assert_eq!(name(2).as_deref(), Some("old"));
                 assert_eq!(name(3), None);
-            }
-        }
-
-        mod counts {
-            use super::*;
-
-            #[test]
-            fn should_count_pr_tasks_that_are_not_done() {
-                let a = workspace(1, "a");
-                let done = Task {
-                    status: TaskStatus::Done,
-                    ..task(22, TaskKind::Pr, Some(a.id))
-                };
-                let snapshot = Snapshot {
-                    tasks: vec![
-                        task(20, TaskKind::Pr, Some(a.id)),
-                        task(21, TaskKind::Plain, Some(a.id)),
-                        done,
-                    ],
-                    workspaces: vec![a],
-                    ..Snapshot::default()
-                };
-
-                assert_eq!(snapshot.overview().workspaces[0].counts.prs, 1);
-            }
-
-            #[test]
-            fn should_count_the_inbox_from_tasks_with_no_workspace() {
-                let a = workspace(1, "a");
-                let inbox_pr = task(20, TaskKind::Pr, None);
-                let snapshot = Snapshot {
-                    tasks: vec![inbox_pr, task(21, TaskKind::Pr, Some(a.id))],
-                    workspaces: vec![a],
-                    ..Snapshot::default()
-                };
-
-                assert_eq!(snapshot.overview().inbox, Counts { prs: 1 });
-            }
-
-            #[test]
-            fn should_leave_out_prs_the_sign_in_cannot_see() {
-                let a = workspace(1, "a");
-                let snapshot = Snapshot {
-                    tasks: vec![
-                        task(20, TaskKind::Pr, None),
-                        unreachable_pr_task(21, "acme/secret", None),
-                        task(22, TaskKind::Pr, Some(a.id)),
-                        unreachable_pr_task(23, "acme/secret", Some(a.id)),
-                    ],
-                    workspaces: vec![a],
-                    ..Snapshot::default()
-                };
-                let overview = snapshot.overview();
-
-                assert_eq!(overview.inbox, Counts { prs: 1 });
-                assert_eq!(overview.workspaces[0].counts, Counts { prs: 1 });
             }
         }
 

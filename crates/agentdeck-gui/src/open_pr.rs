@@ -1,5 +1,5 @@
-//! Opening a PR's GitHub page in the default browser (spec §11, Opening PRs): the task sheet's
-//! PR line and a PR row's **Open on GitHub** both call [`open()`] with the PR's stored `url`.
+//! Opening a PR's GitHub page in the default browser (spec §11, Opening PRs): a PR row's
+//! reference and its **Open on GitHub** both call [`open()`] with the PR's stored `url`.
 //!
 //! It adds no opener of its own: the URL goes to the OS's handler through
 //! [`open::open_url`], as the default `terminal.file_opener` (`xdg-open`) with the URL as its

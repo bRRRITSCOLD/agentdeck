@@ -1,7 +1,6 @@
 //! The main window's sidebar (spec §11), the `Sidebar` board of Penpot's "Main window": the
-//! brand, Pull requests with its count of open PRs, Inbox and Tasks, then the Workspaces header
-//! with its new workspace `+`, every workspace with its rolled-up state, open PRs and a
-//! `BellOff` while muted, the archived ones in a foldable Archived group, and at the bottom a
+//! brand, Pull requests with its count of open PRs, then the Workspaces header with its new
+//! workspace `+`, every workspace with its rolled-up state and a `BellOff` while muted, the archived ones in a foldable Archived group, and at the bottom a
 //! gear that selects Settings. The `+` asks the window for the dialog with a [`SidebarEvent`].
 //!
 //! It reads a [`Snapshot`] through the session's [`Api`] when it opens and again whenever the
@@ -36,7 +35,7 @@ use crate::overview::{Counts, Overview, Snapshot};
 use crate::rereads::Rereads;
 use crate::scrollbar;
 use crate::state_dot;
-use crate::task_row;
+use crate::table;
 
 /// The sidebar's width. Raw in Penpot too: no sizing token is 260px.
 pub const WIDTH: gpui::Pixels = px(260.);
@@ -46,10 +45,6 @@ pub const WIDTH: gpui::Pixels = px(260.);
 pub enum Selection {
     /// Every pull request, by Repository.
     PullRequests,
-    /// Tasks with no workspace.
-    Inbox,
-    /// Every task.
-    Tasks,
     /// One workspace.
     Workspace(WorkspaceId),
     /// The settings, from the footer's gear; no row is highlighted.
@@ -123,7 +118,7 @@ impl SidebarView {
             _events: events,
             // Every item measured once, after each change to the items, so the scrollbar's
             // thumb is right from the first frame; a redraw then renders the rows in view.
-            list: task_row::list_state().measure_all(),
+            list: table::list_state().measure_all(),
             listed: Items::default(),
             #[cfg(test)]
             items_rendered: std::cell::Cell::new(0),
@@ -133,19 +128,17 @@ impl SidebarView {
     }
 
     /// What is selected: the user's pick while it still exists, archived or not, else the
-    /// first workspace, else the inbox.
+    /// first workspace, else Pull requests.
     pub fn selection(&self) -> Selection {
         let exists = |picked: &Selection| match picked {
             Selection::Workspace(id) => self.overview.workspace(*id).is_some(),
-            Selection::PullRequests | Selection::Inbox | Selection::Tasks | Selection::Settings => {
-                true
-            }
+            Selection::PullRequests | Selection::Settings => true,
         };
         self.picked.filter(exists).unwrap_or_else(|| {
             self.overview
                 .workspaces
                 .first()
-                .map_or(Selection::Inbox, |w| Selection::Workspace(w.id))
+                .map_or(Selection::PullRequests, |w| Selection::Workspace(w.id))
         })
     }
 
@@ -153,9 +146,7 @@ impl SidebarView {
     fn archived_shown(&self) -> bool {
         let selected_archived = match self.selection() {
             Selection::Workspace(id) => self.overview.workspace(id).is_some_and(|w| w.archived),
-            Selection::PullRequests | Selection::Inbox | Selection::Tasks | Selection::Settings => {
-                false
-            }
+            Selection::PullRequests | Selection::Settings => false,
         };
         self.archived_open || selected_archived
     }
@@ -334,9 +325,7 @@ impl SidebarView {
         let (archived, muted) = match selection {
             Selection::Workspace(id) => (self.overview.workspace(id))
                 .map_or((false, false), |w| (w.archived, w.muted && !w.archived)),
-            Selection::PullRequests | Selection::Inbox | Selection::Tasks | Selection::Settings => {
-                (false, false)
-            }
+            Selection::PullRequests | Selection::Settings => (false, false),
         };
         // A muted row's bell sits with its counts, so it holds the label short of them too.
         let has_counts = counts != Counts::default() || muted;
@@ -407,8 +396,6 @@ impl SidebarView {
     fn debug_name(&self, selection: Selection) -> String {
         match selection {
             Selection::PullRequests => "pull requests".into(),
-            Selection::Inbox => "inbox".into(),
-            Selection::Tasks => "tasks".into(),
             Selection::Settings => "settings".into(),
             Selection::Workspace(id) => {
                 (self.overview.workspace(id)).map_or_else(|| id.to_string(), |w| w.name.to_string())
@@ -439,12 +426,12 @@ impl SidebarView {
         let rows = &self.overview.workspaces;
         let item = if header == Some(ix) {
             // Penpot "Archived": a `GroupHeader` below the workspace rows, folded at first.
-            task_row::group_header(
+            table::group_header(
                 "archived",
                 "Archived",
                 self.overview.archived.len(),
                 !self.archived_shown(),
-                task_row::SelectCell::Off,
+                table::SelectCell::Off,
                 cx.listener(|this, _, _, cx| {
                     this.archived_open = !this.archived_open;
                     cx.notify();
@@ -464,7 +451,7 @@ impl SidebarView {
                 Selection::Workspace(w.id),
                 w.name,
                 Lead::Dot(state_dot::of(w.state, None)),
-                w.counts,
+                Counts::default(),
                 cx,
             )
         };
@@ -516,26 +503,10 @@ impl Render for SidebarView {
             self.overview.pull_requests,
             cx,
         );
-        let inbox = self.row(
-            "inbox",
-            Selection::Inbox,
-            "Inbox".into(),
-            Lead::Icon(IconName::Inbox),
-            self.overview.inbox,
-            cx,
-        );
-        let tasks = self.row(
-            "tasks",
-            Selection::Tasks,
-            "Tasks".into(),
-            Lead::Icon(IconName::ListTodo),
-            Counts::default(),
-            cx,
-        );
         let items = self.items();
         let relisted = items != self.listed;
         if relisted {
-            task_row::relist(&self.list, items.count);
+            table::relist(&self.list, items.count);
             self.listed = items;
         }
         self.reveal_picked(relisted, window);
@@ -561,12 +532,10 @@ impl Render for SidebarView {
                     .child("agentdeck"),
             )
             .child(pull_requests)
-            .child(inbox)
-            .child(tasks)
             // Penpot gives the separator 8px above and below, on top of the 4px row gap.
             .child(Separator::new().my(space::S2))
-            // Penpot `Section`: 32px, the label, a spacer, then `NewWorkspace`, the same ghost
-            // icon-xs `Plus` as the right panel's Tasks & PRs header.
+            // Penpot `Section`: 32px, the label, a spacer, then `NewWorkspace`, a ghost icon-xs
+            // `Plus`.
             .child(
                 small()
                     .debug_selector(|| "workspaces header".into())
@@ -589,7 +558,7 @@ impl Render for SidebarView {
             )
             // Penpot `Workspaces` takes the room down to the footer and scrolls. It reaches the
             // sidebar's right edge, over its padding, and pads its rows back in by the
-            // scrollbar's gutter: the rows stay as wide as Inbox and Tasks, and the scrollbar
+            // scrollbar's gutter: the rows stay as wide as Pull requests, and the scrollbar
             // sits in the gutter, clear of them.
             .child(
                 div()
@@ -648,7 +617,6 @@ mod tests {
     use std::time::Duration;
 
     use agentdeck_client::ws::{self, Remote};
-    use agentdeck_core::TaskKind;
     use agentdeck_core::ws::Entity as Changed;
     use brrritscold_core_gpui::Root;
     use gpui::{AppContext as _, Modifiers, TestAppContext, VisualTestContext};
@@ -795,20 +763,28 @@ mod tests {
         use crate::overview::fixtures::pull_request;
 
         #[gpui::test]
-        fn should_list_the_workspaces_below_pull_requests_inbox_and_tasks(cx: &mut TestAppContext) {
+        fn should_list_the_workspaces_below_pull_requests(cx: &mut TestAppContext) {
             let mut open = open(two_workspaces(), cx);
 
             let top = |open: &mut Open, selector| open.cx.debug_bounds(selector).unwrap().top();
             let tops = [
                 top(&mut open, "brand"),
                 top(&mut open, "row pull requests"),
-                top(&mut open, "row inbox"),
-                top(&mut open, "row tasks"),
+                top(&mut open, "workspaces header"),
                 top(&mut open, "row a"),
                 top(&mut open, "row b"),
             ];
 
             assert!(tops.is_sorted_by(|x, y| x < y), "{tops:?}");
+        }
+
+        #[gpui::test]
+        fn should_show_no_inbox_or_tasks_entry(cx: &mut TestAppContext) {
+            let mut open = open(two_workspaces(), cx);
+
+            assert!(open.shows("row pull requests"));
+            assert!(!open.shows("row inbox"));
+            assert!(!open.shows("row tasks"));
         }
 
         #[gpui::test]
@@ -855,15 +831,17 @@ mod tests {
         }
 
         #[gpui::test]
-        fn should_show_counts_only_on_rows_that_have_some(cx: &mut TestAppContext) {
-            let mut snapshot = two_workspaces();
-            let a = snapshot.workspaces[0].id;
-            snapshot.tasks = vec![task(20, TaskKind::Pr, Some(a))];
+        fn should_show_no_count_on_a_workspace_row(cx: &mut TestAppContext) {
+            // A Workspace's count comes with its Links' Pull requests.
+            let snapshot = Snapshot {
+                prs: vec![pull_request(1, "acme/widgets")],
+                ..two_workspaces()
+            };
             let mut open = open(snapshot, cx);
 
-            assert!(open.shows("counts a"));
+            assert!(open.shows("counts pull requests"));
+            assert!(!open.shows("counts a"));
             assert!(!open.shows("counts b"));
-            assert!(!open.shows("counts inbox"));
         }
     }
 
@@ -945,12 +923,10 @@ mod tests {
 
         use super::*;
 
-        /// [`two_workspaces`] with `a` muted and holding an open PR.
+        /// [`two_workspaces`] with `a` muted.
         fn a_muted() -> Snapshot {
             let mut snapshot = two_workspaces();
             snapshot.workspaces[0].muted = true;
-            let a = snapshot.workspaces[0].id;
-            snapshot.tasks = vec![task(20, TaskKind::Pr, Some(a))];
             snapshot
         }
 
@@ -964,22 +940,16 @@ mod tests {
         }
 
         #[gpui::test]
-        fn should_put_the_bell_before_the_counts(cx: &mut TestAppContext) {
+        fn should_put_the_bell_at_the_rows_end(cx: &mut TestAppContext) {
             let open = open(a_muted(), cx);
 
             let bell = open.cx.debug_bounds("muted a").expect("a's bell shows");
-            let counts = open.cx.debug_bounds("counts a").expect("a's counts show");
-            assert!(counts.contains(&bell.center()), "{bell:?} in {counts:?}");
-            assert_eq!(bell.left(), counts.left(), "first in the row's end");
-        }
-
-        #[gpui::test]
-        fn should_show_the_bell_on_a_muted_row_with_no_counts(cx: &mut TestAppContext) {
-            let mut snapshot = two_workspaces();
-            snapshot.workspaces[1].muted = true;
-            let mut open = open(snapshot, cx);
-
-            assert!(open.shows("muted b"));
+            let row = open.cx.debug_bounds("row a").expect("a's row");
+            assert!(row.contains(&bell.center()), "{bell:?} in {row:?}");
+            assert!(
+                row.right() - bell.right() <= space::S2,
+                "{bell:?} at the end of {row:?}"
+            );
         }
 
         #[gpui::test]
@@ -1009,10 +979,10 @@ mod tests {
         }
 
         #[gpui::test]
-        fn should_select_the_inbox_when_there_are_no_workspaces(cx: &mut TestAppContext) {
+        fn should_fall_back_to_pull_requests_when_there_are_no_workspaces(cx: &mut TestAppContext) {
             let mut open = open(Snapshot::default(), cx);
 
-            assert_eq!(open.selection(), Selection::Inbox);
+            assert_eq!(open.selection(), Selection::PullRequests);
         }
 
         #[gpui::test]
@@ -1021,9 +991,6 @@ mod tests {
 
             open.click("row b");
             assert_eq!(open.selection(), Selection::Workspace(id(2)));
-
-            open.click("row tasks");
-            assert_eq!(open.selection(), Selection::Tasks);
 
             open.click("row pull requests");
             assert_eq!(open.selection(), Selection::PullRequests);
@@ -1698,12 +1665,12 @@ mod tests {
         }
 
         #[gpui::test]
-        fn should_keep_the_rows_as_wide_as_inbox_and_tasks(cx: &mut TestAppContext) {
+        fn should_keep_the_rows_as_wide_as_pull_requests(cx: &mut TestAppContext) {
             let open = open(two_workspaces(), cx);
 
-            let inbox = open.cx.debug_bounds("row inbox").expect("the Inbox row");
+            let prs = (open.cx.debug_bounds("row pull requests")).expect("the Pull requests row");
             let row = open.cx.debug_bounds("row a").expect("workspace a's row");
-            assert_eq!(row.right(), inbox.right());
+            assert_eq!(row.right(), prs.right());
         }
     }
 }

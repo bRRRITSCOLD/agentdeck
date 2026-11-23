@@ -29,8 +29,8 @@
 //! logged-out banner sits over the list, its **Open Settings** asking for Settings with
 //! [`OpenSettings`], as the cutoff line's "Settings" link does.
 //!
-//! Like the Inbox it shows the sidebar's [`Snapshot`], passed on by the window, and draws only
-//! the rows in view.
+//! It shows the sidebar's [`Snapshot`], passed on by the window, and draws only the rows in
+//! view.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -58,7 +58,7 @@ use crate::open_pr;
 use crate::overview::Snapshot;
 use crate::pr_table;
 use crate::sync_parts::{self, OpenSettings, SETTINGS_TAIL, cutoff, logged_out_title};
-use crate::task_row::{self, Header, RowParts, SelectCell};
+use crate::table::{self, Header, RowParts, SelectCell};
 use crate::workspace::failed;
 
 /// How often "Synced N min ago" is redrawn.
@@ -274,7 +274,7 @@ impl PullRequestsView {
             snapshot: Snapshot::default(),
             syncing: false,
             shown: Vec::new(),
-            list: task_row::list_state(),
+            list: table::list_state(),
             close,
             _close,
             revealed: None,
@@ -516,11 +516,13 @@ impl PullRequestsView {
             }
             None => return div().into_any_element(),
         };
-        task_row::spaced(item)
+        table::spaced(item)
     }
 
     /// Penpot `Header`: heading and description, a spacer, Select (disabled with no PR to
-    /// show), Show finished, when PRs last synced, "Sync now", `space.3` apart.
+    /// show), Show finished, when PRs last synced, "Sync now", `space.3` apart. The heading and
+    /// description take what the rest leave, the description wrapping, so the header fits the
+    /// narrowest window (spec §11, Window).
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
         let synced = self.sync_label(chrono::Utc::now());
@@ -534,9 +536,19 @@ impl PullRequestsView {
                     .text_size(font_size::SM)
                     .text_color(s.muted_foreground);
                 match line.strip_suffix(SETTINGS_TAIL) {
+                    // The lead wraps in what the header leaves it, "Settings." after its last
+                    // line.
                     Some(lead) => line_div
                         .flex()
-                        .child(SharedString::from(lead.to_owned()))
+                        .items_end()
+                        .child(
+                            div()
+                                .debug_selector(move || {
+                                    format!("pull requests description {ix} lead")
+                                })
+                                .min_w_0()
+                                .child(SharedString::from(lead.to_owned())),
+                        )
                         .child(sync_parts::settings_link("pull-requests", cx))
                         .child(".")
                         .into_any_element(),
@@ -551,6 +563,8 @@ impl PullRequestsView {
             .gap(space::S3)
             .child(
                 div()
+                    .flex_1()
+                    .min_w_0()
                     .flex()
                     .flex_col()
                     .gap(space::S1)
@@ -564,7 +578,6 @@ impl PullRequestsView {
                     // Penpot's `Description` is one text of two lines: no gap between them.
                     .child(div().flex().flex_col().children(lines)),
             )
-            .child(div().flex_1())
             .child(close_prs::select_toggle(
                 &self.close,
                 !self.shown.is_empty(),
@@ -573,6 +586,7 @@ impl PullRequestsView {
             // Penpot `ShowFinished`: a Switch and its Label, `space.2` apart.
             .child(
                 div()
+                    .flex_none()
                     .flex()
                     .items_center()
                     .gap(space::S2)
@@ -586,23 +600,28 @@ impl PullRequestsView {
                                 }),
                         ),
                     )
-                    .child(Label::new().child("Show finished")),
+                    .child(Label::new().child("Show finished").whitespace_nowrap()),
             )
             .child(
                 div()
                     .debug_selector(|| "pull requests synced".into())
+                    .flex_none()
+                    .whitespace_nowrap()
                     .text_size(font_size::SM)
                     .text_color(s.muted_foreground)
                     .child(synced),
             )
             .child(
-                div().debug_selector(|| "sync now".into()).child(
-                    Button::new("sync-now")
-                        .variant(ButtonVariant::Outline)
-                        .label("Sync now")
-                        .disabled(self.syncing)
-                        .on_click(cx.listener(|this, _, window, cx| this.sync(window, cx))),
-                ),
+                div()
+                    .flex_none()
+                    .debug_selector(|| "sync now".into())
+                    .child(
+                        Button::new("sync-now")
+                            .variant(ButtonVariant::Outline)
+                            .label("Sync now")
+                            .disabled(self.syncing)
+                            .on_click(cx.listener(|this, _, window, cx| this.sync(window, cx))),
+                    ),
             )
     }
 }
@@ -730,7 +749,7 @@ impl Render for PullRequestsView {
             .collect();
         let keys: Vec<PrKey> = pickable.iter().map(|pr| PrKey::of(pr)).collect();
         if relisted {
-            task_row::relist(&self.list, items.len());
+            table::relist(&self.list, items.len());
             self.shown = items;
             self.close.update(cx, |close, cx| close.retain(&keys, cx));
         }
@@ -808,7 +827,7 @@ impl Render for PullRequestsView {
                     ghost: pr_table::columns(ghost, cx),
                     min_width: pr_table::min_width(select),
                 };
-                content.child(task_row::table_of(
+                content.child(table::table_of(
                     "pull-requests-table",
                     "pull requests table",
                     header,
@@ -1546,6 +1565,58 @@ mod tests {
                 .find(|g| g.label == "widgets")
                 .expect("widgets");
             assert_eq!(widgets.prs.len(), 3);
+        }
+    }
+
+    mod narrowest_window {
+        use gpui::size;
+
+        use super::*;
+
+        /// The view at the width the narrowest window leaves it beside the sidebar, in Select
+        /// mode, its widest.
+        fn narrowest(cx: &mut TestAppContext) -> &mut VisualTestContext {
+            let (_harness, cx) = Harness::open(prs(), cx);
+            let (width, height) = crate::window_state::MIN_SIZE;
+            let width = px(width) - crate::sidebar::WIDTH - px(1.);
+            cx.simulate_resize(size(width, px(height)));
+            click("pull-requests select".into(), cx);
+            cx
+        }
+
+        #[gpui::test]
+        fn should_fit_the_header_whole(cx: &mut TestAppContext) {
+            let cx = narrowest(cx);
+            let width = cx.update(|window, _| window.viewport_size().width);
+
+            let description = bounds("pull requests description 1".into(), cx);
+            let select = bounds("pull-requests select".into(), cx);
+            let synced = bounds("pull requests synced".into(), cx);
+            let sync_now = bounds("sync now".into(), cx);
+
+            let lead = bounds("pull requests description 1 lead".into(), cx);
+            assert!(
+                description.right() <= select.left(),
+                "{description:?} {select:?}"
+            );
+            assert!(lead.right() <= select.left(), "{lead:?} {select:?}");
+            assert!(synced.right() < sync_now.left(), "{synced:?} {sync_now:?}");
+            assert!(
+                sync_now.right() <= width - space::S6,
+                "{sync_now:?} in {width:?}"
+            );
+        }
+
+        #[gpui::test]
+        fn should_fit_the_table_whole(cx: &mut TestAppContext) {
+            let cx = narrowest(cx);
+            let width = cx.update(|window, _| window.viewport_size().width);
+
+            let review = bounds("pr column Review".into(), cx);
+            let table = bounds("pull requests table".into(), cx);
+
+            assert!(table.right() <= width - space::S6, "{table:?} in {width:?}");
+            assert!(review.right() <= table.right(), "{review:?} in {table:?}");
         }
     }
 

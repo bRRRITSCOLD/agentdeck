@@ -25,10 +25,10 @@ pub struct SavedWindow {
 }
 
 /// The least size the window shrinks to (spec §11, Window): the narrowest layout that fits
-/// without clipping. 1200 is the sidebar and its separator, the Tasks view's padding and its
-/// narrowest table in Select mode, 1197, rounded up; 600 holds the tallest dialog, Delete
-/// workspace (520), under the title bar.
-pub const MIN_SIZE: (f32, f32) = (1200., 600.);
+/// without clipping. 1030 is the sidebar and its separator, the Pull requests view's padding
+/// and its table in Select mode, its narrowest PR table, 1025, rounded up; 600 holds the
+/// tallest dialog, Delete workspace (520), under the title bar.
+pub const MIN_SIZE: (f32, f32) = (1030., 600.);
 
 /// [`MIN_SIZE`] as a size.
 pub fn min_size() -> Size<Pixels> {
@@ -318,7 +318,7 @@ mod tests {
                 maximized: false,
             };
             let bounds = windowed(initial_bounds(Some(saved), &[full_hd()], Some(full_hd())));
-            assert_eq!(bounds, display(100., 50., 1200., 600.));
+            assert_eq!(bounds, display(100., 50., 1030., 600.));
         }
 
         #[test]
@@ -340,7 +340,7 @@ mod tests {
         fn should_open_no_smaller_than_the_minimum_on_a_small_display() {
             let small = display(0., 0., 1024., 576.);
             let bounds = windowed(initial_bounds(None, &[small], Some(small)));
-            assert_eq!(bounds.size, size(px(1200.), px(600.)));
+            assert_eq!(bounds.size, size(px(1030.), px(600.)));
         }
 
         #[test]
@@ -363,13 +363,13 @@ mod tests {
         use brrritscold_core_gpui_tokens::primitive::space;
 
         use super::*;
-        use crate::task_row::Table;
 
         #[test]
-        fn should_fit_the_narrowest_tasks_table_beside_the_sidebar() {
-            // The sidebar and its separator, the Tasks view's `space.6` padding either side,
-            // and the table's narrowest layout in Select mode, its widest narrowest.
-            let narrowest = Table::Tasks.fit(px(0.), true).min_width();
+        fn should_fit_the_narrowest_pr_table_in_select_mode_beside_the_sidebar() {
+            // The sidebar and its separator, the Pull requests view's `space.6` padding either
+            // side, and its table at its least in Select mode, which is wider than out of it.
+            let narrowest = crate::pr_table::min_width(true);
+            assert!(narrowest > crate::pr_table::min_width(false));
             let needed = crate::sidebar::WIDTH + px(1.) + space::S6 * 2. + narrowest;
             let min = min_size();
             assert!(min.width >= needed, "{min:?} < {needed:?}");
@@ -378,13 +378,9 @@ mod tests {
         }
 
         #[test]
-        fn should_fit_a_pane_header_beside_the_sidebar_and_the_right_panel() {
+        fn should_fit_a_pane_header_beside_the_sidebar() {
             // Penpot's PaneHeader is 560 wide, and the panes sit `space.2` in.
-            let centre = min_size().width
-                - crate::sidebar::WIDTH
-                - px(1.)
-                - px(crate::right_panel::WIDTH)
-                - px(1.);
+            let centre = min_size().width - crate::sidebar::WIDTH - px(1.);
             assert!(centre >= px(560.) + space::S2 * 2., "{centre:?}");
         }
 
