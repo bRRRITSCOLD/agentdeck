@@ -4,7 +4,6 @@
 //! bearer token gets 401 before anything else about it is looked at. An expected domain
 //! failure is its own status with an `error_code`; see [`client_error`].
 
-mod agents;
 mod comments;
 mod github;
 mod health;
@@ -107,8 +106,6 @@ pub fn api() -> ApiDescription<ApiContext> {
         api.register(github::github_device_cancel),
         api.register(settings::settings_get),
         api.register(settings::settings_update),
-        api.register(agents::agents_mcp_get),
-        api.register(agents::agents_mcp_install),
         api.register(panes::pane_create),
         api.register(panes::pane_get),
         api.register(panes::pane_update),
@@ -239,7 +236,7 @@ mod tests {
         /// `openapi.json`'s fingerprint when [`agentdeck_core::API_VERSION`] was last set,
         /// and that version. Clients tell an older daemon by its API version, so a route or
         /// field added without a bump would go unnoticed: they would call it and get a 404.
-        const FINGERPRINT_AT_API_VERSION: (u64, u32) = (0x72ad_7356_0027_8097, 16);
+        const FINGERPRINT_AT_API_VERSION: (u64, u32) = (0x180b_b7cb_5e39_bdbb, 17);
 
         /// FNV-1a: stable across Rust releases, unlike `DefaultHasher`.
         fn fingerprint(text: &str) -> u64 {

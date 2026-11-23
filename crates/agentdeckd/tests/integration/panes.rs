@@ -9,7 +9,7 @@ use agentdeck_core::{Agent, AgentState, PaneKind};
 use crate::support::terminal::{
     Place, alive, daemon_with_shell_rules, in_state, printed, reader_threads, sh, tail,
 };
-use crate::support::{TestDaemon, error_response, eventually_within, set_daemon_env};
+use crate::support::{TestDaemon, cli_binary, error_response, eventually_within, set_daemon_env};
 
 /// Types `text` into the pane, as is.
 async fn input(
@@ -275,6 +275,39 @@ mod post_v1_panes {
             );
             let workspace = place.workspace.id.to_string();
             assert_eq!(env.get("AGENTDECK_WORKSPACE"), Some(&workspace.as_str()));
+        }
+
+        /// The daemon's own `PATH`, read from its environment.
+        fn daemon_path(daemon: &TestDaemon) -> String {
+            let environ = std::fs::read(format!("/proc/{}/environ", daemon.info.pid))
+                .expect("reading the daemon's environment");
+            environ
+                .split(|&byte| byte == 0)
+                .find_map(|var| var.strip_prefix(b"PATH="))
+                .map(|path| String::from_utf8(path.to_vec()).expect("a UTF-8 PATH"))
+                .expect("the daemon has PATH")
+        }
+
+        #[tokio::test]
+        async fn should_end_path_with_the_folder_holding_agentdeckd_201() {
+            let daemon = TestDaemon::start().await;
+            let place = Place::new(&daemon).await;
+
+            let pane = place
+                .spawn(
+                    &daemon.client,
+                    &sh(r#"printf 'path=%s\n' "$PATH"; echo path-done"#),
+                )
+                .await;
+            let text = printed(&daemon.client, pane.id, "path-done").await;
+
+            let path = text
+                .lines()
+                .find_map(|line| line.trim_end_matches('\r').strip_prefix("path="))
+                .expect("the pane's PATH");
+            let cli = cli_binary();
+            let folder = cli.parent().expect("agentdeck's folder").to_str().unwrap();
+            assert_eq!(path, format!("{}:{folder}", daemon_path(&daemon)));
         }
     }
 }

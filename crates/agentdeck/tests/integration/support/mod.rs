@@ -4,8 +4,8 @@
 //! points it at httpmock with [`TestEnv::with_github`]. `claude` and `codex` are stubs first
 //! on `PATH`, so no test runs a real agent.
 
+pub mod client;
 pub mod github;
-pub mod mcp;
 pub mod pty;
 
 use std::ffi::OsString;
@@ -74,29 +74,6 @@ stty sane 2>/dev/null
 printf '\033[?2004l\033]0;\007' 2>/dev/null
 "#;
 
-/// `claude mcp add` and `claude mcp remove` as Claude Code 2.1.328 does them, run before the
-/// rest of [`STUB_CLAUDE`]: each call's argv is appended to `<root>/claude-mcp`, and the user
-/// config, `$HOME/.claude.json`, gets or loses `mcpServers.agentdeck`. It refuses a `HOME`
-/// outside the test's root, so no test can reach the real config. Its twin, with the details,
-/// is in `agentdeckd/tests/integration/support/agents.rs`.
-const STUB_CLAUDE_MCP: &str = r#"
-if [ "$1" = mcp ]; then
-  root=$(cd "$(dirname "$0")/.." && pwd)
-  case "$HOME" in "$root"/*) ;; *) echo "stub claude: HOME=$HOME is outside $root" >&2; exit 3 ;; esac
-  { for arg in "$@"; do printf '%s\0' "$arg"; done; printf '\036'; } >> "$root/claude-mcp"
-  config="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
-  case "$2" in
-    add)
-      if grep -q '"agentdeck"' "$config" 2>/dev/null; then
-        echo 'MCP server agentdeck already exists in user config' >&2; exit 1
-      fi
-      printf '{"mcpServers":{"agentdeck":{"type":"stdio","command":"%s","args":["%s"],"env":{}}}}\n' "$7" "$8" > "$config" ;;
-    remove) printf '{"mcpServers":{}}\n' > "$config" ;;
-  esac
-  exit 0
-fi
-"#;
-
 /// A `gh` that is never logged in.
 const STUB_GH: &str = "#!/bin/sh\necho \"no oauth token found for github.com\" >&2\nexit 1\n";
 
@@ -156,10 +133,6 @@ impl TestEnv {
             let path = bin.join(name);
             let script = match name {
                 "gh" => script.to_owned(),
-                "claude" => format!(
-                    "{}{READ_LIKE_A_TUI}",
-                    script.replacen("#!/bin/sh\n", &format!("#!/bin/sh{STUB_CLAUDE_MCP}"), 1)
-                ),
                 _ => format!("{script}{READ_LIKE_A_TUI}"),
             };
             std::fs::write(&path, script).expect("writing a stub");
@@ -432,18 +405,6 @@ pub fn text<'a>(value: &'a Value, field: &str) -> &'a str {
 pub fn agent_argv(env: &TestEnv, pane: &str) -> Option<Vec<String>> {
     let bytes = std::fs::read(env.root().join("agents").join(pane).join("argv")).ok()?;
     argv_record(&String::from_utf8(bytes).expect("UTF-8 argv"))
-}
-
-/// `argv` less the flags registering agentdeck's MCP server, which the daemon puts first:
-/// Claude Code's `--mcp-config <json>` and Codex's `-c <key=value>` pairs.
-pub fn without_mcp_flags(argv: &[String]) -> Vec<String> {
-    let mut rest = argv;
-    while let [flag, _, after @ ..] = rest
-        && (flag == "--mcp-config" || flag == "-c")
-    {
-        rest = after;
-    }
-    rest.to_vec()
 }
 
 /// The arguments in a stub's argv file, or `None` until the stub has written its terminator:

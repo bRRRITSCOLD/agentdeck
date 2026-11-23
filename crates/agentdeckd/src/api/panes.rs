@@ -112,10 +112,10 @@ fn with_live_status(context: &ApiContext, mut pane: Pane) -> Pane {
 /// Spawns a pane in a tab and starts its process (spec §6). The caller places the pane in
 /// the tab's layout.
 ///
-/// `claude` and `codex` panes get agentdeck's MCP server (`agentdeck mcp`) and start with a
-/// launch prompt: the linked task's title, its `Task id:` and how to report back on it with
-/// the MCP tools, and its body; then every instruction for the pane's workspace and the task's
-/// comments no agent has had yet, which are then marked delivered to the pane. Claude Code
+/// `claude` and `codex` panes start with a launch prompt: the linked task's title, its
+/// `Task id:` and how to report back on it with the `agentdeck` CLI, and its body; then every
+/// instruction for the pane's workspace and the task's comments no agent has had yet, which
+/// are then marked delivered to the pane. Claude Code
 /// starts on a session id agentdeck chooses; a Codex pane's is found once Codex writes its
 /// session file, and `session_id` is set then.
 #[endpoint { method = POST, path = "/v1/panes" }]
@@ -143,8 +143,7 @@ pub(crate) async fn pane_create(
                         None => Vec::new(),
                     };
                     let prompt = agents::launch_prompt(task.as_ref(), &instructions, &comments);
-                    let launch = agents::launch(agent, prompt, &agents::cli())
-                        .expect("claude and codex launch");
+                    let launch = agents::launch(agent, prompt).expect("claude and codex launch");
                     (launch.argv, launch.session_id, comments)
                 }
             };
@@ -294,7 +293,7 @@ pub(crate) async fn pane_respawn(
     let respawn = match (run, row.kind, row.agent) {
         (PaneRun::Shell, ..) => Respawn::Shell,
         (PaneRun::Agent, PaneKind::Agent, Some(agent)) => {
-            match agents::resume_argv(Some(agent), row.session_id.as_deref(), &agents::cli()) {
+            match agents::resume_argv(Some(agent), row.session_id.as_deref()) {
                 Some(argv) => Respawn::Again(agent, argv),
                 None if agent == Agent::Other => Respawn::Again(agent, row.argv.clone()),
                 None => Respawn::Fresh(agent),

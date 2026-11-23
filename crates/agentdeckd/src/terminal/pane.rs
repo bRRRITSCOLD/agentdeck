@@ -47,7 +47,7 @@ use nix::unistd::Pid;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::sync::oneshot;
 
-use super::env::pane_env;
+use super::env::{daemon_dir, pane_env};
 use super::fanout::{Fanout, Outbox, Outgoing, ResizeDecision, Size, SubscriberId};
 use super::tail::{TAIL_CAPACITY, Tail};
 use super::{palette, snapshot};
@@ -75,8 +75,9 @@ const INITIAL_SIZE: Size = Size { cols: 80, rows: 24 };
 
 impl Launch {
     /// Pane `id`, in `workspace`, linked to `task`, running `argv` in `cwd` at 80×24. Its
-    /// environment is the allowlisted part of the daemon's, plus `AGENTDECK_PANE`,
-    /// `AGENTDECK_WORKSPACE` and, with a task, `AGENTDECK_TASK`.
+    /// environment is the allowlisted part of the daemon's, its `PATH` ending with the folder
+    /// holding `agentdeckd`, plus `AGENTDECK_PANE`, `AGENTDECK_WORKSPACE` and, with a task,
+    /// `AGENTDECK_TASK`.
     pub fn pane(
         id: PaneId,
         workspace: WorkspaceId,
@@ -92,7 +93,7 @@ impl Launch {
         Launch {
             argv,
             cwd,
-            env: pane_env(std::env::vars_os(), &extra),
+            env: pane_env(std::env::vars_os(), daemon_dir().as_deref(), &extra),
             size: INITIAL_SIZE,
             task,
         }

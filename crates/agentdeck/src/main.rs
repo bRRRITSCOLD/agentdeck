@@ -1,14 +1,14 @@
-//! `agentdeck`: the CLI, and `agentdeck mcp`, an MCP server over stdio (spec §10). No GPUI.
+//! `agentdeck`: the CLI (spec §10). No GPUI. Every pane finds it at the end of its `PATH`,
+//! so agents run it like any other command.
 //!
 //! Every command reads `daemon.json` and starts `agentdeckd` when nothing answers there,
 //! warning on stderr when that daemon is older than the CLI; `agentdeck daemon restart`
-//! replaces it. The HTTP client and the MCP server are async, so `main` drives them on a
-//! current-thread tokio runtime.
+//! replaces it. The HTTP client is async, so `main` drives it on a current-thread tokio
+//! runtime.
 
 mod cli;
 mod commands;
 mod launch;
-mod mcp;
 mod render;
 mod resolve;
 
@@ -52,10 +52,6 @@ fn main() -> ExitCode {
 
 /// Runs the command and prints its output; `false` when it failed after printing.
 async fn run(cli: Cli) -> anyhow::Result<bool> {
-    if let Command::Mcp { command: None } = cli.command {
-        mcp::serve().await?;
-        return Ok(true);
-    }
     let daemon = daemon::connect().await?;
     let output = match cli.command {
         Command::Daemon(DaemonCommand::Restart) => restart(&daemon.info).await?,

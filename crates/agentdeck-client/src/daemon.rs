@@ -1,7 +1,7 @@
 //! Reaching the daemon (spec §2): read `daemon.json`, and start `agentdeckd` detached when
 //! no daemon runs there. A live daemon this process can't connect to, as from inside a
-//! sandbox with no network, is an error rather than a reason to start another. The CLI, its
-//! MCP server and the GUI all connect through [`connect`], and
+//! sandbox with no network, is an error rather than a reason to start another. The CLI and
+//! the GUI both connect through [`connect`], and
 //! [`restart`] replaces a daemon older than them. A daemon a client starts is its child, so a
 //! thread waits on it and reaps it whenever it exits: a long-lived client such as the GUI
 //! never keeps it as a zombie.
@@ -111,8 +111,8 @@ pub enum DaemonError {
     /// Another daemon couldn't start beside it, so none is started.
     #[error(
         "agentdeckd is running (pid {pid}) but this process can't connect to 127.0.0.1:{port} \
-         ({why}). A sandbox may block local network; in an agent, use agentdeck's MCP tools \
-         instead"
+         ({why}). A sandbox may block local network: let it reach 127.0.0.1, or run agentdeck \
+         outside it"
     )]
     Unreachable {
         /// The running daemon's pid.

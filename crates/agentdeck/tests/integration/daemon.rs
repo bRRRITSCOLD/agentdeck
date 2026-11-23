@@ -8,12 +8,9 @@ use std::time::{Duration, Instant};
 
 use agentdeck_core::DaemonInfo;
 
-use serde_json::json;
-
-use crate::support::mcp::McpClient;
+use crate::support::client::{LongLivedClient, ran_as_client_side};
 use crate::support::{
     Run, TestEnv, agent_argv, alive, eventually, parent_pid, process_state, shell_pane, text,
-    without_mcp_flags,
 };
 
 /// A port nothing listens on: bound, then released.
@@ -123,7 +120,13 @@ mod starting_the_daemon {
             "{}",
             run.stderr
         );
-        assert!(run.stderr.contains("MCP tools"), "{}", run.stderr);
+        assert!(
+            run.stderr
+                .contains("let it reach 127.0.0.1, or run agentdeck outside it"),
+            "{}",
+            run.stderr
+        );
+        assert!(!run.stderr.contains("MCP"), "{}", run.stderr);
         assert_eq!(info, Some(unreachable), "daemon.json was rewritten");
         assert_eq!(env.daemon_log(), "", "another agentdeckd was started");
     }
@@ -429,7 +432,7 @@ mod daemon_restart {
         env.ok(&["daemon", "restart"]);
 
         eventually("the agent to resume", || {
-            agent_argv(&env, id).filter(|argv| without_mcp_flags(argv) == ["--resume", session])
+            agent_argv(&env, id).filter(|argv| argv == &["--resume", session])
         });
     }
 
@@ -445,23 +448,27 @@ mod daemon_restart {
     }
 }
 
-/// A client that outlives the daemon it started, as the GUI does: `agentdeck mcp` connects on
-/// every tool call, so the daemon its first call starts is its child for as long as it runs.
+/// A client that outlives the daemon it started, as the GUI does: it connects again each time
+/// it needs the daemon, so the daemon its first connect starts is its child for as long as it
+/// runs.
 mod daemon_started_by_a_long_lived_client {
     use super::*;
 
-    /// Starts `agentdeck mcp` and has it start the daemon; returns the client and that daemon.
-    fn started(env: &TestEnv) -> (McpClient, DaemonInfo) {
-        let mut mcp = McpClient::start(env, &[]);
-        mcp.initialize();
-        mcp.call_ok("prs_status", json!({}));
-        let info = env.daemon_info().expect("daemon.json after the tool call");
+    const TEST: &str = "daemon::daemon_started_by_a_long_lived_client::";
+
+    /// Starts `test`'s client side and has it start the daemon; returns the client and that
+    /// daemon.
+    fn started(env: &TestEnv, test: &str) -> (LongLivedClient, DaemonInfo) {
+        let mut client = LongLivedClient::start(env, &format!("{TEST}{test}"));
+        let pid = client.connect();
+        let info = env.daemon_info().expect("daemon.json after the connect");
+        assert_eq!(info.pid, pid);
         assert_eq!(
             parent_pid(info.pid),
-            Some(mcp.pid()),
+            Some(client.pid()),
             "the daemon isn't the client's child, so the test proves nothing"
         );
-        (mcp, info)
+        (client, info)
     }
 
     /// SIGKILL to a daemon this test's client started, as a crash would end it.
@@ -475,8 +482,11 @@ mod daemon_started_by_a_long_lived_client {
 
     #[test]
     fn should_reap_it_once_it_exits() {
+        if ran_as_client_side() {
+            return;
+        }
         let env = TestEnv::new();
-        let (_mcp, info) = started(&env);
+        let (_client, info) = started(&env, "should_reap_it_once_it_exits");
 
         kill(info.pid);
 
@@ -488,17 +498,20 @@ mod daemon_started_by_a_long_lived_client {
 
     #[test]
     fn should_start_a_fresh_daemon_on_the_next_connect() {
+        if ran_as_client_side() {
+            return;
+        }
         let env = TestEnv::new();
-        let (mut mcp, old) = started(&env);
+        let (mut client, old) = started(&env, "should_start_a_fresh_daemon_on_the_next_connect");
         // Connecting at once, while the killed daemon may still hold its lock: the daemon
-        // the call starts waits for it.
+        // the connect starts waits for it.
         kill(old.pid);
 
-        mcp.call_ok("prs_status", json!({}));
+        let new = client.connect();
 
-        let new = env.daemon_info().expect("daemon.json after the next call");
-        assert_ne!(new.pid, old.pid);
-        assert!(alive(new.pid), "the fresh daemon isn't running");
+        assert_ne!(new, old.pid);
+        assert_eq!(env.daemon_info().map(|info| info.pid), Some(new));
+        assert!(alive(new), "the fresh daemon isn't running");
     }
 }
 

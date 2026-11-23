@@ -3,7 +3,6 @@
 //! [`support::TestDaemon::start`].
 
 mod agents;
-mod agents_mcp;
 mod auth;
 mod comments;
 mod daemon;

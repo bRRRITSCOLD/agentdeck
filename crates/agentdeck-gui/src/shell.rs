@@ -577,11 +577,6 @@ impl Shell {
             let sidebar = sidebar.read(cx);
             (sidebar.selection(), sidebar.snapshot().clone())
         };
-        let opened_settings =
-            selection == Selection::Settings && self.selection != Some(Selection::Settings);
-        if let (true, Some(settings)) = (opened_settings, &self.settings) {
-            settings.update(cx, |settings, cx| settings.reread_agents(window, cx));
-        }
         self.selection = Some(selection);
         if let (Some(panel), Selection::Workspace(workspace)) = (&self.panel, selection) {
             let snapshot = snapshot.clone();

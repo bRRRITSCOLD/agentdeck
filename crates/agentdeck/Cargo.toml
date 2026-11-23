@@ -1,6 +1,6 @@
 [package]
 name = "agentdeck"
-description = "The agentdeck CLI and MCP server (agentdeck mcp)."
+description = "The agentdeck CLI."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,12 +14,10 @@ agentdeck-core.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 futures-util.workspace = true
-rmcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# A current-thread runtime drives the async client and the MCP server; `io-std` is the MCP
-# server's stdin and stdout.
-tokio = { workspace = true, features = ["io-std"] }
+# A current-thread runtime drives the async client.
+tokio.workspace = true
 
 [dev-dependencies]
 # `pr close` asks only on a terminal; its tests run it on one.

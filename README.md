@@ -6,7 +6,7 @@ It is three programs in one Cargo workspace:
 
 - `agentdeckd`, a local daemon that owns the terminals and the data;
 - `agentdeck-gui`, a GPUI window that attaches to the daemon;
-- `agentdeck`, a CLI (and MCP server) that agents and scripts use.
+- `agentdeck`, a CLI that agents and scripts use; every Pane finds it on its `PATH`.
 
 The decisions are in [the v1 map](https://github.com/bRRRITSCOLD/agentdeck/issues/1), and the spec is [`docs/spec.md`](docs/spec.md).
 
@@ -37,7 +37,7 @@ agentdeck task ls --ws <ws>   # task ids
 
 Or install them: `for c in agentdeck agentdeckd agentdeck-gui; do cargo install --path crates/$c; done`.
 
-- **Agents you start yourself:** agent panes agentdeck launches get its MCP tools from their launch flags. For a `claude` or `codex` you start in a shell pane, add the server to their own config once: `agentdeck mcp install` (or Settings → Agents). Undo it with `claude mcp remove --scope user agentdeck` and by deleting `[mcp_servers.agentdeck]` from `~/.codex/config.toml`.
+- **Agents use the CLI:** every Pane's `PATH` ends with the folder holding `agentdeckd`, so an agent in any Pane, launched by agentdeck or started in a shell, can run `agentdeck` as long as it is installed beside `agentdeckd`. agentdeck no longer has an MCP server: if you added one to your agents' config with an older `agentdeck mcp install`, remove it with `claude mcp remove --scope user agentdeck` and by deleting `[mcp_servers.agentdeck]` from `~/.codex/config.toml`.
 - **After a pull:** a GUI newer than the running daemon shows an "older daemon" banner; press **Restart** (or `agentdeck daemon restart`). Running agents resume.
 - **Stop everything:** closing the window leaves agents running in `agentdeckd` (spec §2). `pkill -TERM agentdeckd` stops it and every pane.
 - **A daemon by hand:** with the GUI closed, `pkill -TERM agentdeckd`, then start one yourself, e.g. `GH_TOKEN=… agentdeckd &`, before `agentdeck-gui`. A second `agentdeckd` while one is healthy exits 1 with "another agentdeckd is running".
