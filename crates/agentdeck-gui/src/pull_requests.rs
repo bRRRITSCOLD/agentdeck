@@ -38,9 +38,9 @@ use brrritscold_core_gpui::{
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
-    IntoElement, ListState, ParentElement as _, Render, SharedString, Styled as _, Task, Window,
-    div, list,
+    Animation, AnimationExt as _, AnyElement, App, AppContext as _, Context, Entity, EventEmitter,
+    InteractiveElement as _, IntoElement, ListOffset, ListState, ParentElement as _, Render,
+    SharedString, Styled as _, Task, Window, div, list, px,
 };
 
 use crate::api::Api;
@@ -62,8 +62,34 @@ const ABOUT: &str = "Your open PRs, by repository.";
 /// The description's first line while Show finished is on.
 const ABOUT_FINISHED: &str = "Your open and finished PRs, by repository.";
 
+/// How long a row a PR alert's click landed on stays highlighted before it fades.
+pub const HIGHLIGHT_HOLD: Duration = Duration::from_secs(2);
+
+/// How long the highlight takes to fade.
+pub const HIGHLIGHT_FADE: Duration = Duration::from_millis(400);
+
 /// What the view says with no PR to show (Penpot "Pull requests · empty").
 pub const EMPTY: &str = "No open PRs. PRs you open on GitHub show here.";
+
+/// A pull request, by its Repository's GitHub id and its number: the row a PR alert's click
+/// lands on, the same PR through a rename of its Repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PrKey {
+    /// Its Repository, by GitHub's id.
+    pub repository: RepositoryId,
+    /// Its number in the Repository.
+    pub number: u32,
+}
+
+impl PrKey {
+    /// `pr`'s key.
+    pub fn of(pr: &PullRequest) -> PrKey {
+        PrKey {
+            repository: pr.repository.id,
+            number: pr.number,
+        }
+    }
+}
 
 /// A sync asked for on the Pull requests view has finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,9 +111,14 @@ pub struct Group {
 
 /// The groups of `prs` the view shows: one per Repository with a PR to show, alphabetical by
 /// the Repository's name (without the owner, ignoring case, then by owner), its PRs by number.
-/// Finished PRs are shown only with `show_finished`; merged and closed ones are Finished.
-pub fn groups(prs: &[PullRequest], show_finished: bool) -> Vec<Group> {
-    let shown = |pr: &&PullRequest| show_finished || (pr.state == PrState::Open && !pr.finished);
+/// Finished PRs are shown only with `show_finished`, or the one `revealed` by a PR alert's
+/// click; merged and closed ones are Finished.
+pub fn groups(prs: &[PullRequest], show_finished: bool, revealed: Option<PrKey>) -> Vec<Group> {
+    let shown = |pr: &&PullRequest| {
+        show_finished
+            || (pr.state == PrState::Open && !pr.finished)
+            || revealed == Some(PrKey::of(pr))
+    };
     let mut groups: Vec<Group> = Vec::new();
     for pr in prs.iter().filter(shown) {
         match groups.iter_mut().find(|g| g.repository == pr.repository.id) {
@@ -162,6 +193,15 @@ pub struct PullRequestsView {
     list: ListState,
     /// Close PR's confirm dialog.
     close: Entity<ClosePrs>,
+    /// The row a PR alert's click landed on: shown even when Finished with Show finished off,
+    /// until the view is left or another alert lands.
+    revealed: Option<PrKey>,
+    /// Whether the list still has to scroll `revealed`'s row into view.
+    reveal_pending: bool,
+    /// The highlighted row, and whether its highlight is fading.
+    highlight: Option<(PrKey, bool)>,
+    /// Fades the highlight, then takes it off.
+    _highlighting: Option<Task<()>>,
     /// Redraws "Synced N min ago" as time passes.
     _tick: Task<()>,
 }
@@ -189,7 +229,95 @@ impl PullRequestsView {
             shown: Vec::new(),
             list: task_row::list_state(),
             close,
+            revealed: None,
+            reveal_pending: false,
+            highlight: None,
+            _highlighting: None,
             _tick: tick,
+        }
+    }
+
+    /// Lands on `pr`'s row, as a PR alert's click asks: opens its group, shows it even when
+    /// Finished with Show finished off (the preference stays as it is), scrolls it into view and
+    /// highlights it for [`HIGHLIGHT_HOLD`], then fades the highlight over [`HIGHLIGHT_FADE`].
+    pub fn reveal(&mut self, pr: PrKey, cx: &mut Context<Self>) {
+        let collapsed = gui_state::read(cx, |state| {
+            state.collapsed.pull_requests.contains(&pr.repository)
+        });
+        if collapsed {
+            gui_state::update(cx, |state| {
+                state.collapsed.set_pull_requests(pr.repository, false);
+            });
+        }
+        self.revealed = Some(pr);
+        self.reveal_pending = true;
+        self.highlight = Some((pr, false));
+        self._highlighting = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(HIGHLIGHT_HOLD).await;
+            let fading = this.update(cx, |this, cx| {
+                this.highlight = this.highlight.map(|(pr, _)| (pr, true));
+                cx.notify();
+            });
+            if fading.is_err() {
+                return;
+            }
+            cx.background_executor().timer(HIGHLIGHT_FADE).await;
+            let _ = this.update(cx, |this, cx| {
+                this.highlight = None;
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    /// Forgets the row a PR alert's click landed on, once the view is left: a Finished one
+    /// hides again while Show finished is off.
+    pub fn forget_revealed(&mut self, cx: &mut Context<Self>) {
+        if self.revealed.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The highlighted row, while it is.
+    #[cfg(test)]
+    pub fn highlighted(&self) -> Option<PrKey> {
+        self.highlight.map(|(pr, _)| pr)
+    }
+
+    /// Scrolls the revealed row into view once the list holds it, waiting a frame after
+    /// `relisted` for the list to measure the rows it gained.
+    fn scroll_to_revealed(&mut self, relisted: bool, window: &mut Window) {
+        if !self.reveal_pending {
+            return;
+        }
+        let Some(revealed) = self.revealed else {
+            self.reveal_pending = false;
+            return;
+        };
+        let row = (self.shown.iter()).position(|item| match item {
+            Item::Row(pr) => PrKey::of(pr) == revealed,
+            Item::Header { .. } => false,
+        });
+        let Some(ix) = row else {
+            // Not read yet: it lands with the next snapshot.
+            return;
+        };
+        if relisted {
+            window.request_animation_frame();
+            return;
+        }
+        self.reveal_pending = false;
+        let view = self.list.viewport_bounds();
+        let in_view = (self.list.bounds_for_item(ix))
+            .is_some_and(|row| row.top() >= view.top() && row.bottom() <= view.bottom());
+        if !in_view {
+            // Rows out of view aren't measured, so `scroll_to_reveal_item` can't place one:
+            // put it at the top, under its group's header when that is just above it.
+            let header_above = ix > 0 && matches!(self.shown[ix - 1], Item::Header { .. });
+            self.list.scroll_to(ListOffset {
+                item_ix: if header_above { ix - 1 } else { ix },
+                offset_in_item: px(0.),
+            });
         }
     }
 
@@ -201,7 +329,7 @@ impl PullRequestsView {
 
     /// The groups shown.
     pub fn groups(&self, cx: &App) -> Vec<Group> {
-        groups(&self.snapshot.prs, show_finished(cx))
+        groups(&self.snapshot.prs, show_finished(cx), self.revealed)
     }
 
     /// Close PR's confirm dialog.
@@ -294,12 +422,18 @@ impl PullRequestsView {
             Some(Item::Row(pr)) => {
                 let url = pr.url.clone();
                 let menu = row_menu(&self.close, pr);
-                pr_table::row(
+                let row = pr_table::row(
                     pr,
                     menu,
                     move |_, window, cx| open_pr::open(&url, window, cx),
                     cx,
-                )
+                );
+                match self.highlight {
+                    Some((key, fading)) if key == PrKey::of(pr) => {
+                        highlighted(row, &pr.reference.to_string(), fading, cx)
+                    }
+                    _ => row,
+                }
             }
             None => return div().into_any_element(),
         };
@@ -387,6 +521,30 @@ impl PullRequestsView {
                 ),
             )
     }
+}
+
+/// `row` highlighted after a PR alert's click (Penpot "Pull requests · highlighted row"): an
+/// `accent` fill behind it, at its `radius-md`, fading out over [`HIGHLIGHT_FADE`] once
+/// `fading`. Tests find it as `highlight <reference>`.
+fn highlighted(row: AnyElement, reference: &str, fading: bool, cx: &App) -> AnyElement {
+    let s = cx.theme().semantic();
+    let accent = s.accent;
+    let selector = reference.to_owned();
+    let highlight = div()
+        .debug_selector(move || format!("highlight {selector}"))
+        .rounded(s.radius_md)
+        .bg(accent)
+        .child(row);
+    if !fading {
+        return highlight.into_any_element();
+    }
+    highlight
+        .with_animation(
+            SharedString::from(format!("highlight-fade-{reference}")),
+            Animation::new(HIGHLIGHT_FADE),
+            move |highlight, delta| highlight.bg(accent.opacity(1. - delta)),
+        )
+        .into_any_element()
 }
 
 /// Whether Show finished is on.
@@ -487,15 +645,17 @@ fn row_menu(close: &Entity<ClosePrs>, pr: &PullRequest) -> AnyElement {
 }
 
 impl Render for PullRequestsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
         let groups = self.groups(cx);
         let collapsed = gui_state::read(cx, |state| state.collapsed.pull_requests.clone());
         let items = items(&groups, &collapsed);
-        if items != self.shown {
+        let relisted = items != self.shown;
+        if relisted {
             task_row::relist(&self.list, items.len());
             self.shown = items;
         }
+        self.scroll_to_revealed(relisted, window);
         let banner = (self.snapshot.pr_sync.as_ref())
             .filter(|status| status.login == GhLogin::LoggedOut)
             .map(|status| logged_out_title(status.synced_as.as_deref()));
@@ -697,7 +857,7 @@ mod tests {
 
         #[test]
         fn should_put_each_pr_under_its_repository_alphabetically_by_name() {
-            let groups = groups(&prs().prs, false);
+            let groups = groups(&prs().prs, false, None);
 
             assert_eq!(names(&groups), ["gadgets", "widgets"]);
             let numbers: Vec<u32> = groups[1].prs.iter().map(|pr| pr.number).collect();
@@ -712,12 +872,15 @@ mod tests {
                 pull_request(3, "bee/alpha"),
             ];
 
-            assert_eq!(names(&groups(&prs, false)), ["alpha", "Beta", "gamma"]);
+            assert_eq!(
+                names(&groups(&prs, false, None)),
+                ["alpha", "Beta", "gamma"]
+            );
         }
 
         #[test]
         fn should_leave_out_a_repository_with_no_open_pr() {
-            let groups = groups(&prs().prs, false);
+            let groups = groups(&prs().prs, false, None);
 
             assert!(!names(&groups).contains(&"gizmos".to_owned()));
         }
@@ -747,8 +910,8 @@ mod tests {
                     .collect()
             };
 
-            assert_eq!(numbers(groups(&prs, false)), [1]);
-            assert_eq!(numbers(groups(&prs, true)), [3, 1, 2, 5]);
+            assert_eq!(numbers(groups(&prs, false, None)), [1]);
+            assert_eq!(numbers(groups(&prs, true, None)), [3, 1, 2, 5]);
         }
 
         #[test]
@@ -759,7 +922,7 @@ mod tests {
             ];
 
             assert_eq!(
-                names(&groups(&prs, false)),
+                names(&groups(&prs, false, None)),
                 ["me/agentdeck", "upstream/agentdeck"]
             );
         }
@@ -777,7 +940,7 @@ mod tests {
                 },
             ];
 
-            assert_eq!(groups(&prs, false)[0].prs.len(), 2);
+            assert_eq!(groups(&prs, false, None)[0].prs.len(), 2);
         }
     }
 
@@ -1407,6 +1570,106 @@ mod tests {
             );
             click("pull-requests settings link".into(), cx);
             assert_eq!(*harness.settings.borrow(), 1);
+        }
+    }
+
+    /// Landing on a row, as a PR alert's click asks (spec §11).
+    mod reveal {
+        use super::*;
+
+        fn key(n: u32, repo: &str) -> PrKey {
+            PrKey {
+                repository: repository_id(repo),
+                number: n,
+            }
+        }
+
+        fn reveal(harness: &Harness, pr: PrKey, cx: &mut VisualTestContext) {
+            cx.update(|_, cx| harness.view.update(cx, |view, cx| view.reveal(pr, cx)));
+            cx.run_until_parked();
+            harness.draw(cx);
+            // A list that gained rows measures them in the frame after.
+            harness.draw(cx);
+        }
+
+        fn numbers(harness: &Harness, cx: &mut VisualTestContext) -> Vec<u32> {
+            let groups = harness.view.read_with(cx, |view, cx| view.groups(cx));
+            (groups.iter().flat_map(|g| &g.prs))
+                .map(|pr| pr.number)
+                .collect()
+        }
+
+        #[gpui::test]
+        fn should_open_the_rows_collapsed_group(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            let widgets = repository_id("acme/widgets");
+            cx.update(|_, cx| harness.view.update(cx, |view, cx| view.toggle(widgets, cx)));
+            assert!(!shows("pr acme/widgets#4".into(), cx));
+
+            reveal(&harness, key(4, "acme/widgets"), cx);
+
+            assert!(shows("pr acme/widgets#4".into(), cx));
+            let collapsed =
+                cx.update(|_, cx| gui_state::read(cx, |s| s.collapsed.pull_requests.clone()));
+            assert!(!collapsed.contains(&widgets));
+        }
+
+        #[gpui::test]
+        fn should_show_a_finished_row_and_leave_show_finished_off(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+
+            reveal(&harness, key(3, "acme/gizmos"), cx);
+
+            assert!(shows("pr acme/gizmos#3".into(), cx));
+            assert_eq!(numbers(&harness, cx), [2, 3, 1, 4]);
+            assert!(!cx.update(|_, cx| show_finished(cx)));
+        }
+
+        #[gpui::test]
+        fn should_hide_the_finished_row_again_once_forgotten(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            reveal(&harness, key(3, "acme/gizmos"), cx);
+
+            cx.update(|_, cx| harness.view.update(cx, |view, cx| view.forget_revealed(cx)));
+
+            assert!(!shows("pr acme/gizmos#3".into(), cx));
+        }
+
+        #[gpui::test]
+        fn should_scroll_the_row_into_view(cx: &mut TestAppContext) {
+            let snapshot = Snapshot {
+                prs: (1..=80).map(|n| pull_request(n, "acme/widgets")).collect(),
+                pr_sync: Some(pr_status()),
+                ..Snapshot::default()
+            };
+            let (harness, cx) = Harness::open(snapshot, cx);
+            assert!(!shows("pr acme/widgets#80".into(), cx));
+
+            reveal(&harness, key(80, "acme/widgets"), cx);
+
+            assert!(shows("pr acme/widgets#80".into(), cx));
+        }
+
+        #[gpui::test]
+        fn should_highlight_the_row_then_fade_it_after_about_two_seconds(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            let pr = key(4, "acme/widgets");
+
+            reveal(&harness, pr, cx);
+            assert!(shows("highlight acme/widgets#4".into(), cx));
+            assert!(!shows("highlight acme/widgets#1".into(), cx));
+
+            cx.executor()
+                .advance_clock(HIGHLIGHT_HOLD - Duration::from_millis(100));
+            cx.run_until_parked();
+            assert_eq!(harness.view.read_with(cx, |v, _| v.highlighted()), Some(pr));
+
+            cx.executor()
+                .advance_clock(Duration::from_millis(100) + HIGHLIGHT_FADE);
+            cx.run_until_parked();
+            assert_eq!(harness.view.read_with(cx, |v, _| v.highlighted()), None);
+            assert!(!shows("highlight acme/widgets#4".into(), cx));
+            assert!(shows("pr acme/widgets#4".into(), cx));
         }
     }
 }

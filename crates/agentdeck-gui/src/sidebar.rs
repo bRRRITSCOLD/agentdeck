@@ -1304,23 +1304,30 @@ mod tests {
         fn should_alert_on_resync_for_a_pr_whose_checks_failed_while_events_were_missed(
             cx: &mut TestAppContext,
         ) {
-            use agentdeck_core::{ChecksState, PrState};
+            use crate::notifications::pr_tag;
+            use crate::overview::fixtures::{pr_status, pull_request};
+            use crate::pull_requests::PrKey;
+            use agentdeck_core::ChecksState;
 
             let mut before = two_workspaces();
-            before.tasks = vec![
-                pr_task(20, "acme/widgets", PrState::Open, Some(id(1))),
-                pr_task(21, "acme/widgets", PrState::Open, Some(id(1))),
+            let mut status = pr_status();
+            status.synced_as = Some("octocat".into());
+            before.pr_sync = Some(status);
+            before.prs = vec![
+                pull_request(20, "acme/widgets"),
+                pull_request(21, "acme/widgets"),
             ];
             let mut open = open(before.clone(), cx);
             let (heard, _subscription) = heard(&mut open);
             let mut after = before;
-            after.tasks[0].pr.as_mut().unwrap().checks = Some(ChecksState::Failure);
+            after.prs[0].checks = Some(ChecksState::Failure);
+            let failed = PrKey::of(&after.prs[0]);
             open.api.set(after);
 
             open.send(ServerMessage::Resync);
 
             let tags: Vec<_> = heard.borrow().iter().map(|a| a.tag.clone()).collect();
-            assert_eq!(tags, [format!("task:{}", id::<agentdeck_core::TaskId>(20))]);
+            assert_eq!(tags, [pr_tag(failed)]);
         }
 
         mod reattach {

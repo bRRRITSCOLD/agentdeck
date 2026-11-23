@@ -36,7 +36,7 @@ pub use id::{CommentId, InstructionId, PaneId, TabId, TaskId, WorkspaceId};
 pub use layout::{Layout, LayoutError, Ratio, SplitDirection};
 pub use pane::{Agent, PaneKind};
 pub use pr::{ChecksState, NotAPr, PrRef, PrState, ReviewState, pr_details, pr_task_status};
-pub use repository::{NotARepository, RepositoryId, RepositoryName};
+pub use repository::{Linking, NotARepository, RepositoryId, RepositoryName, pr_alerts_muted};
 pub use state::AgentState;
 pub use task::{TaskKind, TaskPlace, TaskStatus};
 pub use text_enum::UnknownValue;

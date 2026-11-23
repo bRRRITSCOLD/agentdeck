@@ -22,10 +22,10 @@
 //! workspace view's [`LinkPane`] and opens the Link to task dialog on that pane.
 //!
 //! It shows the sidebar's [`Alerts`] as OS notifications (spec §11), leaving out one while the
-//! user can see what it is about in the focused window: the pane's tab, the task sheet on the
-//! PR task, the Tasks view. Clicking one focuses the window and shows what it is about. One
-//! still open is withdrawn once the user can see what it is about: the window focused, the
-//! workspace, tab or task sheet shown.
+//! user can see what it is about in the focused window: the pane's tab, or, for a PR, the Pull
+//! requests view. Clicking one focuses the window and shows what it is about: a PR alert lands
+//! on the PR's row ([`PullRequestsView::reveal`]). One still open is withdrawn once the user can
+//! see what it is about: the window focused, the workspace, tab or Pull requests view shown.
 //!
 //! Closing the window (its own close button or the compositor's) and Quit ask first while an
 //! agent runs, unless `gui.confirm_quit` is off (spec §11): "Quit agentdeck?", Penpot "Screens"
@@ -592,7 +592,12 @@ impl Shell {
         }
         if let Some(view) = &self.pull_requests {
             let snapshot = snapshot.clone();
-            view.update(cx, |view, cx| view.set_snapshot(snapshot, cx));
+            view.update(cx, |view, cx| {
+                view.set_snapshot(snapshot, cx);
+                if selection != Selection::PullRequests {
+                    view.forget_revealed(cx);
+                }
+            });
         }
         if let Some(sheet) = &self.task_sheet {
             let snapshot = snapshot.clone();
@@ -751,7 +756,7 @@ impl Shell {
     }
 
     /// Whether the user can see what `target` is about in the focused window: the pane in the
-    /// tab shown, the task sheet open on the task, the Tasks view.
+    /// tab shown; for a PR, or several, the Pull requests view.
     fn in_view(&self, target: notifications::Target, window: &Window, cx: &App) -> bool {
         if !window.is_window_active() {
             return false;
@@ -762,11 +767,9 @@ impl Shell {
                     (view.read(cx).shown().iter()).any(|shown| shown.read(cx).id() == pane)
                 })
             }
-            notifications::Target::Task(task) => (self.task_sheet.as_ref()).is_some_and(|sheet| {
-                let sheet = sheet.read(cx);
-                sheet.is_open() && sheet.task() == Some(task)
-            }),
-            notifications::Target::Tasks => self.selection == Some(Selection::Tasks),
+            notifications::Target::Pr(_) | notifications::Target::PullRequests => {
+                self.selection == Some(Selection::PullRequests)
+            }
         }
     }
 
@@ -808,12 +811,22 @@ impl Shell {
                     view.update(cx, |view, cx| view.reveal_pane(pane, window, cx));
                 }
             }
-            notifications::Target::Task(task) => self.open_task(OpenTask(task), window, cx),
-            notifications::Target::Tasks => {
-                if let Some(sidebar) = &self.sidebar {
-                    sidebar.update(cx, |sidebar, cx| sidebar.select(Selection::Tasks, cx));
+            notifications::Target::Pr(pr) => {
+                self.show_pull_requests(cx);
+                if let Some(view) = &self.pull_requests {
+                    view.update(cx, |view, cx| view.reveal(pr, cx));
                 }
             }
+            notifications::Target::PullRequests => self.show_pull_requests(cx),
+        }
+    }
+
+    /// Selects the Pull requests view.
+    fn show_pull_requests(&mut self, cx: &mut Context<Self>) {
+        if let Some(sidebar) = &self.sidebar {
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.select(Selection::PullRequests, cx)
+            });
         }
     }
 
@@ -2568,14 +2581,14 @@ mod tests {
     }
 
     mod notifications {
-        use agentdeck_client::types::{Pane, TaskPr};
+        use agentdeck_client::types::Pane;
         use agentdeck_client::ws::{Event, Remote};
         use agentdeck_core::ws::{Entity as Changed, ServerMessage};
-        use agentdeck_core::{Agent, AgentState, ChecksState, PaneId, PaneKind, PrState, TaskKind};
+        use agentdeck_core::{Agent, AgentState, ChecksState, PaneId, PaneKind};
 
         use super::*;
         use crate::overview::PaneState;
-        use crate::overview::fixtures::{pane, tab, task};
+        use crate::overview::fixtures::{pane, tab};
         use crate::pane::fixtures::shell_pane;
 
         /// A shell over a fake daemon, in a window of its own.
@@ -2859,66 +2872,6 @@ mod tests {
 
                 assert_eq!(open.notifier.open(), Vec::<SharedString>::new());
             }
-
-            #[gpui::test]
-            fn should_withdraw_a_prs_notification_once_its_task_sheet_shows(
-                cx: &mut TestAppContext,
-            ) {
-                let mut open = failing_checks(cx);
-                assert_eq!(open.notifier.open().len(), 1);
-
-                let shell = open.shell.clone();
-                open.cx.update(|window, cx| {
-                    shell.update(cx, |shell, cx| {
-                        shell.open_task(OpenTask(id(20)), window, cx)
-                    });
-                });
-                open.settle();
-
-                assert_eq!(open.notifier.open(), Vec::<SharedString>::new());
-            }
-
-            #[gpui::test]
-            fn should_not_notify_for_a_pr_whose_task_sheet_is_in_view(cx: &mut TestAppContext) {
-                let api = daemon();
-                let mut snapshot = api.snapshot_now();
-                snapshot.tasks = vec![click::task_with_checks(20, ChecksState::Pending)];
-                api.set(snapshot.clone());
-                let mut open = Open::new(api, cx);
-                let shell = open.shell.clone();
-                open.cx.update(|window, cx| {
-                    shell.update(cx, |shell, cx| {
-                        shell.open_task(OpenTask(id(20)), window, cx)
-                    });
-                });
-                open.settle();
-
-                snapshot.tasks = vec![click::task_with_checks(20, ChecksState::Failure)];
-                open.api.set(snapshot);
-                open.send(ServerMessage::Changed {
-                    entity: Changed::Task,
-                    id: id::<agentdeck_core::TaskId>(20).to_string(),
-                });
-
-                assert_eq!(open.shown(), []);
-            }
-        }
-
-        /// A shell whose PR task 20's checks just failed, notified.
-        fn failing_checks(cx: &mut TestAppContext) -> Open {
-            let checks = |checks| click::task_with_checks(20, checks);
-            let api = daemon();
-            let mut snapshot = api.snapshot_now();
-            snapshot.tasks = vec![checks(ChecksState::Pending)];
-            api.set(snapshot.clone());
-            let mut open = Open::new(api, cx);
-            snapshot.tasks = vec![checks(ChecksState::Failure)];
-            open.api.set(snapshot);
-            open.send(ServerMessage::Changed {
-                entity: Changed::Task,
-                id: id::<agentdeck_core::TaskId>(20).to_string(),
-            });
-            open
         }
 
         mod click {
@@ -2947,44 +2900,366 @@ mod tests {
 
                 assert_eq!(open.showing(), Some((id(1), Some(id(3)))));
             }
+        }
 
-            #[gpui::test]
-            fn should_open_the_task_sheet_for_a_pr(cx: &mut TestAppContext) {
-                let mut open = failing_checks(cx);
+        /// PR alerts (spec §11): only PRs you authored, one per PR, a click landing on its row
+        /// in the Pull requests view, muted by the Workspaces linking its Repository.
+        mod pr_alerts {
+            use agentdeck_client::types::PullRequest;
+            use agentdeck_core::{RepositoryId, ReviewState};
 
-                let shown = open.shown();
-                assert_eq!(shown.len(), 1, "{shown:?}");
-                assert_eq!(shown[0].title, "Checks failed");
-                open.click(&shown[0].tag);
+            use super::*;
+            use crate::gui_state;
+            use crate::notifications::pr_tag;
+            use crate::overview::fixtures::{links, pr_status, pull_request, repository_id};
+            use crate::pull_requests::PrKey;
 
-                let sheet = open.shell.read_with(open.cx, |s, _| s.task_sheet.clone());
-                let sheet = sheet.expect("the sheet");
-                sheet.read_with(open.cx, |sheet, _| {
-                    assert!(sheet.is_open());
-                    assert_eq!(sheet.task(), Some(id(20)));
-                });
+            /// The signed-in login; [`pull_request`] is authored by it.
+            const ME: &str = "octocat";
+
+            /// PR `n` of `repo`, "PR n", authored by [`ME`], with `checks`.
+            fn pr(n: u32, repo: &str, checks: ChecksState) -> PullRequest {
+                PullRequest {
+                    checks: Some(checks),
+                    ..pull_request(n, repo)
+                }
             }
 
-            /// PR task `n` in `web`, `acme/web #n`, with `checks`.
-            pub(super) fn task_with_checks(
-                n: u32,
-                checks: ChecksState,
-            ) -> agentdeck_client::types::Task {
-                agentdeck_client::types::Task {
-                    pr: Some(TaskPr {
-                        checks: Some(checks),
-                        draft: false,
-                        head_ref: "feat/x".into(),
-                        number: i64::from(n),
-                        repo: "acme/web".into(),
-                        review: None,
-                        state: PrState::Open,
-                        synced_at: "2026-11-14T00:00:00Z".into(),
-                        unreachable: false,
-                        updated_at: "2026-11-14T00:00:00Z".into(),
-                        url: format!("https://github.com/acme/web/pull/{n}"),
-                    }),
-                    ..task(n, TaskKind::Pr, Some(id(1)))
+            fn key(n: u32, repo: &str) -> PrKey {
+                PrKey {
+                    repository: repository_id(repo),
+                    number: n,
+                }
+            }
+
+            fn tag(n: u32, repo: &str) -> SharedString {
+                pr_tag(key(n, repo))
+            }
+
+            /// [`daemon`]'s workspaces, synced as [`ME`], holding `prs`, `acme/web` linked by
+            /// `web` (1) and `acme/api` by `api` (2).
+            fn holding(prs: Vec<PullRequest>) -> Arc<FakeApi> {
+                let api = daemon();
+                let mut snapshot = api.snapshot_now();
+                let mut status = pr_status();
+                status.synced_as = Some(ME.into());
+                snapshot.pr_sync = Some(status);
+                snapshot.prs = prs;
+                snapshot.repositories =
+                    vec![links("acme/web", &[id(1)]), links("acme/api", &[id(2)])];
+                api.set(snapshot);
+                api
+            }
+
+            impl Open {
+                /// A PR sync ends holding `prs`.
+                fn sync(&mut self, prs: Vec<PullRequest>) {
+                    let mut snapshot = self.api.snapshot_now();
+                    snapshot.prs = prs;
+                    self.api.set(snapshot);
+                    self.send(ServerMessage::Changed {
+                        entity: Changed::PrSync,
+                        id: "status".into(),
+                    });
+                }
+
+                fn titles(&self) -> Vec<String> {
+                    (self.shown().into_iter())
+                        .map(|n| n.title.to_string())
+                        .collect()
+                }
+
+                fn selection(&mut self) -> Option<Selection> {
+                    self.shell.read_with(self.cx, |shell, _| shell.selection)
+                }
+
+                fn pull_requests(&mut self) -> Entity<PullRequestsView> {
+                    let view = self
+                        .shell
+                        .read_with(self.cx, |s, _| s.pull_requests.clone());
+                    view.expect("connected")
+                }
+
+                fn show_pull_requests(&mut self) {
+                    let shell = self.shell.clone();
+                    self.cx.update(|_, cx| {
+                        shell.update(cx, |shell, cx| shell.show_pull_requests(cx));
+                    });
+                    self.settle();
+                }
+            }
+
+            mod triggers {
+                use super::*;
+
+                #[gpui::test]
+                fn should_alert_when_checks_turn_failure(cx: &mut TestAppContext) {
+                    let web = |checks| pr(5, "acme/web", checks);
+                    let mut open = Open::new(holding(vec![web(ChecksState::Pending)]), cx);
+
+                    open.sync(vec![web(ChecksState::Failure)]);
+
+                    let shown = open.shown();
+                    assert_eq!(shown.len(), 1, "{shown:?}");
+                    assert_eq!(shown[0].tag, tag(5, "acme/web"));
+                    assert_eq!(shown[0].title, "Checks failed");
+                    assert_eq!(shown[0].body, "acme/web #5 · PR 5");
+                }
+
+                #[gpui::test]
+                fn should_alert_when_a_review_turns_approved_or_changes_requested(
+                    cx: &mut TestAppContext,
+                ) {
+                    let reviewed = |n, review| PullRequest {
+                        review,
+                        ..pull_request(n, "acme/web")
+                    };
+                    let required = Some(ReviewState::ReviewRequired);
+                    let mut open = Open::new(
+                        holding(vec![reviewed(5, required), reviewed(6, required)]),
+                        cx,
+                    );
+
+                    open.sync(vec![
+                        reviewed(5, Some(ReviewState::Approved)),
+                        reviewed(6, Some(ReviewState::ChangesRequested)),
+                    ]);
+
+                    assert_eq!(open.titles(), ["Approved", "Changes requested"]);
+                }
+
+                #[gpui::test]
+                fn should_not_alert_for_a_pr_someone_else_authored(cx: &mut TestAppContext) {
+                    let theirs = |checks| PullRequest {
+                        author: Some("hubot".into()),
+                        ..pr(5, "acme/web", checks)
+                    };
+                    let mut open = Open::new(holding(vec![theirs(ChecksState::Pending)]), cx);
+
+                    open.sync(vec![theirs(ChecksState::Failure)]);
+
+                    assert_eq!(open.shown(), []);
+                }
+            }
+
+            mod one_per_pr {
+                use super::*;
+
+                #[gpui::test]
+                fn should_replace_a_prs_alert_when_it_changes_again(cx: &mut TestAppContext) {
+                    let web = |checks, review| PullRequest {
+                        review,
+                        ..pr(5, "acme/web", checks)
+                    };
+                    let mut open = Open::new(holding(vec![web(ChecksState::Pending, None)]), cx);
+
+                    open.sync(vec![web(ChecksState::Failure, None)]);
+                    open.sync(vec![web(
+                        ChecksState::Failure,
+                        Some(ReviewState::ChangesRequested),
+                    )]);
+
+                    assert_eq!(open.titles(), ["Checks failed", "Changes requested"]);
+                    let tags: Vec<_> = open.shown().into_iter().map(|n| n.tag).collect();
+                    assert_eq!(tags, [tag(5, "acme/web"), tag(5, "acme/web")]);
+                    assert_eq!(open.notifier.open(), [tag(5, "acme/web")]);
+                }
+            }
+
+            mod click {
+                use super::*;
+
+                /// A shell whose PR 5 of `acme/web` was merged, Finished, in a collapsed
+                /// group, with Show finished off, as its checks turned `failure`.
+                fn finished_and_failed(cx: &mut TestAppContext) -> Open {
+                    let merged = |checks| PullRequest {
+                        state: agentdeck_core::PrState::Merged,
+                        finished: true,
+                        ..pr(5, "acme/web", checks)
+                    };
+                    let mut open = Open::new(
+                        holding(vec![
+                            pr(1, "acme/web", ChecksState::Success),
+                            merged(ChecksState::Pending),
+                        ]),
+                        cx,
+                    );
+                    open.cx.update(|_, cx| {
+                        gui_state::update(cx, |state| {
+                            state
+                                .collapsed
+                                .set_pull_requests(repository_id("acme/web"), true);
+                        });
+                    });
+                    open.sync(vec![
+                        pr(1, "acme/web", ChecksState::Success),
+                        merged(ChecksState::Failure),
+                    ]);
+                    open
+                }
+
+                fn collapsed(open: &mut Open) -> std::collections::BTreeSet<RepositoryId> {
+                    open.cx.update(|_, cx| {
+                        gui_state::read(cx, |state| state.collapsed.pull_requests.clone())
+                    })
+                }
+
+                #[gpui::test]
+                fn should_open_the_pull_requests_view_at_the_prs_row(cx: &mut TestAppContext) {
+                    let mut open = finished_and_failed(cx);
+                    open.cx.deactivate_window();
+
+                    open.click(&tag(5, "acme/web"));
+
+                    assert!(open.is_active());
+                    assert_eq!(open.selection(), Some(Selection::PullRequests));
+                    let view = open.pull_requests();
+                    let (rows, highlighted) = view.read_with(open.cx, |view, cx| {
+                        let groups = view.groups(cx);
+                        let rows: Vec<u32> = (groups.iter().flat_map(|g| &g.prs))
+                            .map(|pr| pr.number)
+                            .collect();
+                        (rows, view.highlighted())
+                    });
+                    assert_eq!(rows, [1, 5], "the Finished row shows");
+                    assert_eq!(highlighted, Some(key(5, "acme/web")));
+                }
+
+                #[gpui::test]
+                fn should_open_its_group_and_leave_show_finished_off(cx: &mut TestAppContext) {
+                    let mut open = finished_and_failed(cx);
+
+                    open.click(&tag(5, "acme/web"));
+
+                    assert_eq!(collapsed(&mut open), Default::default());
+                    let show_finished = open
+                        .cx
+                        .update(|_, cx| gui_state::read(cx, |s| s.show_finished));
+                    assert!(!show_finished);
+                }
+
+                #[gpui::test]
+                fn should_hide_the_finished_row_again_once_the_view_is_left(
+                    cx: &mut TestAppContext,
+                ) {
+                    let mut open = finished_and_failed(cx);
+                    open.click(&tag(5, "acme/web"));
+
+                    let shell = open.shell.clone();
+                    open.cx.update(|window, cx| {
+                        shell.update(cx, |shell, cx| shell.show_workspace(id(1), window, cx));
+                    });
+                    open.settle();
+
+                    let view = open.pull_requests();
+                    let groups = view.read_with(open.cx, |view, cx| view.groups(cx));
+                    let rows: Vec<u32> = (groups.iter().flat_map(|g| &g.prs))
+                        .map(|pr| pr.number)
+                        .collect();
+                    assert_eq!(rows, [1]);
+                }
+
+                #[gpui::test]
+                fn should_open_the_pull_requests_view_for_several_prs(cx: &mut TestAppContext) {
+                    let web = |n, checks| pr(n, "acme/web", checks);
+                    let mut open = Open::new(
+                        holding((1..=4).map(|n| web(n, ChecksState::Pending)).collect()),
+                        cx,
+                    );
+                    open.sync((1..=4).map(|n| web(n, ChecksState::Failure)).collect());
+                    assert_eq!(open.titles(), ["4 PRs changed"]);
+
+                    open.click("prs");
+
+                    assert_eq!(open.selection(), Some(Selection::PullRequests));
+                }
+            }
+
+            mod withdraw {
+                use super::*;
+
+                #[gpui::test]
+                fn should_withdraw_a_pr_alert_once_the_pull_requests_view_shows(
+                    cx: &mut TestAppContext,
+                ) {
+                    let web = |checks| pr(5, "acme/web", checks);
+                    let mut open = Open::new(holding(vec![web(ChecksState::Pending)]), cx);
+                    open.sync(vec![web(ChecksState::Failure)]);
+                    assert_eq!(open.notifier.open(), [tag(5, "acme/web")]);
+
+                    open.show_pull_requests();
+
+                    assert_eq!(open.notifier.open(), Vec::<SharedString>::new());
+                }
+
+                #[gpui::test]
+                fn should_not_alert_while_the_pull_requests_view_shows(cx: &mut TestAppContext) {
+                    let web = |checks| pr(5, "acme/web", checks);
+                    let mut open = Open::new(holding(vec![web(ChecksState::Pending)]), cx);
+                    open.show_pull_requests();
+
+                    open.sync(vec![web(ChecksState::Failure)]);
+
+                    assert_eq!(open.shown(), []);
+                }
+            }
+
+            mod muting {
+                use super::*;
+
+                /// The alerts for `acme/web` #5's checks failing, with `acme/web` linked by
+                /// `linking`, and each workspace of `set` muted and archived as it says.
+                fn alerts(
+                    linking: &[u32],
+                    set: &[(u32, bool, bool)],
+                    cx: &mut TestAppContext,
+                ) -> Vec<agentdeck_notify::Notification> {
+                    let web = |checks| pr(5, "acme/web", checks);
+                    let api = holding(vec![web(ChecksState::Pending)]);
+                    let mut snapshot = api.snapshot_now();
+                    for (n, muted, archived) in set {
+                        let w = (snapshot.workspaces.iter_mut())
+                            .find(|w| w.id == id(*n))
+                            .expect("a workspace");
+                        w.muted = *muted;
+                        w.archived_at = archived.then(|| "2026-11-20T00:00:00Z".into());
+                    }
+                    let linking: Vec<WorkspaceId> = linking.iter().map(|n| id(*n)).collect();
+                    snapshot.repositories = vec![links("acme/web", &linking)];
+                    api.set(snapshot);
+                    let mut open = Open::new(api, cx);
+                    open.sync(vec![web(ChecksState::Failure)]);
+                    open.shown()
+                }
+
+                #[gpui::test]
+                fn should_mute_when_every_linking_workspace_is_muted(cx: &mut TestAppContext) {
+                    let shown = alerts(&[1, 2], &[(1, true, false), (2, true, false)], cx);
+
+                    assert_eq!(shown, []);
+                }
+
+                #[gpui::test]
+                fn should_alert_while_one_linking_workspace_is_unmuted(cx: &mut TestAppContext) {
+                    let shown = alerts(&[1, 2], &[(1, true, false)], cx);
+
+                    assert_eq!(shown.len(), 1);
+                }
+
+                #[gpui::test]
+                fn should_alert_when_only_archived_muted_workspaces_link_it(
+                    cx: &mut TestAppContext,
+                ) {
+                    let shown = alerts(&[1], &[(1, true, true)], cx);
+
+                    assert_eq!(shown.len(), 1);
+                }
+
+                #[gpui::test]
+                fn should_alert_for_a_repository_linked_nowhere(cx: &mut TestAppContext) {
+                    let shown = alerts(&[], &[(1, true, false), (2, true, false)], cx);
+
+                    assert_eq!(shown.len(), 1);
                 }
             }
         }
