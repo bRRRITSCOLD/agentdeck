@@ -11,6 +11,7 @@ mod delete_workspace;
 mod edit_workspace;
 mod frame;
 mod github;
+mod gui_state;
 mod inbox;
 mod instruction_list;
 mod keymap;
@@ -25,6 +26,8 @@ mod open_pr;
 mod overview;
 mod pane;
 mod pane_header;
+mod pr_table;
+mod pull_requests;
 mod quit;
 mod rereads;
 mod right_panel;
@@ -36,6 +39,7 @@ mod shell;
 mod sidebar;
 mod state_dir;
 mod state_dot;
+mod sync_parts;
 mod task_list;
 mod task_row;
 mod task_sheet;
@@ -80,6 +84,8 @@ fn main() {
         let connection = cx.new(|cx| Connection::new(Rc::new(DaemonConnector), cx));
         // 1440×900, the design's size, fitted to the display; or the bounds saved last time
         // while they still land on a connected display; never below the minimum (spec §11).
+        // The GUI's own state beside it: collapsed groups and the like (spec §11).
+        gui_state::init(state_dir.as_ref().map(|dir| dir.join(gui_state::FILE)), cx);
         let state_file = state_dir.map(|dir| dir.join("window.json"));
         let saved = state_file.as_deref().and_then(window_state::load);
         let displays: Vec<_> = cx

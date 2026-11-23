@@ -605,7 +605,8 @@ async fn panes(client: Client, workspace: WorkspaceId) -> anyhow::Result<Workspa
 }
 
 /// Reads a [`Snapshot`]: the workspaces, then each live one's tabs and the panes in their
-/// layouts, then the tasks, every workspace's instructions and PR sync status.
+/// layouts, then the tasks, every workspace's instructions, PR sync status and the pull
+/// requests.
 async fn snapshot(client: Client) -> anyhow::Result<Snapshot> {
     let workspaces = (client.workspace_list().send().await)
         .map_err(ApiError::from)?
@@ -654,6 +655,7 @@ async fn snapshot(client: Client) -> anyhow::Result<Snapshot> {
                 .map_err(ApiError::from)?
                 .into_inner(),
         ),
+        prs: agentdeck_client::prs::list(&client).await?,
     })
 }
 
@@ -774,6 +776,9 @@ pub(crate) mod fake {
         pub closes: Mutex<Vec<Vec<PrRef>>>,
         /// The PRs GitHub refuses to close, by their tasks, with its message.
         refusals: Mutex<HashMap<TaskId, String>>,
+        /// The PRs GitHub refuses to close, by their references in lower case, with its
+        /// message.
+        refused_prs: Mutex<HashMap<String, String>>,
         /// Holds the next close's answer until its sender sends or drops.
         held_close: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
         /// Where the GitHub token comes from; none and no client ID when unset.
@@ -886,6 +891,17 @@ pub(crate) mod fake {
                 .lock()
                 .unwrap()
                 .insert(task, message.to_owned());
+        }
+
+        /// Makes GitHub refuse to close pull request `pr` with `message`.
+        pub fn refuse_close_pr(&self, pr: &PrRef, message: &str) {
+            (self.refused_prs.lock().unwrap())
+                .insert(pr.to_string().to_lowercase(), message.into());
+        }
+
+        /// Answers later reads with `prs` as the pull requests PR sync keeps.
+        pub fn set_prs(&self, prs: Vec<agentdeck_client::types::PullRequest>) {
+            self.snapshot.lock().unwrap().prs = prs;
         }
 
         /// Holds the next close's answer, as a daemon waiting on GitHub does, until the sender
@@ -1188,6 +1204,7 @@ pub(crate) mod fake {
             }
             self.closes.lock().unwrap().push(prs.clone());
             let refusals = self.refusals.lock().unwrap();
+            let refused_prs = self.refused_prs.lock().unwrap();
             let mut snapshot = self.snapshot.lock().unwrap();
             let results = (prs.into_iter())
                 .map(|pr| {
@@ -1196,24 +1213,41 @@ pub(crate) mod fake {
                         ok: false,
                         error: Some(error.to_owned()),
                     };
-                    // The daemon finds the PR by its Repository's name, ignoring case.
-                    let Some(task) = snapshot.tasks.iter_mut().find(|task| {
+                    // The daemon finds the PR by its Repository's name, ignoring case, and closes
+                    // only one stored open and reachable.
+                    let named = |repo: &str, number: i64| {
+                        repo.eq_ignore_ascii_case(&pr.repository().to_string())
+                            && number == i64::from(pr.number())
+                    };
+                    let Snapshot { tasks, prs, .. } = &mut *snapshot;
+                    let task = tasks.iter_mut().find(|task| {
                         task.pr.as_ref().is_some_and(|stored| {
-                            stored
-                                .repo
-                                .eq_ignore_ascii_case(&pr.repository().to_string())
-                                && stored.number == i64::from(pr.number())
+                            named(&stored.repo, stored.number)
                                 && stored.state == agentdeck_core::PrState::Open
                         })
-                    }) else {
+                    });
+                    let stored = prs.iter_mut().find(|stored| {
+                        named(&stored.repository.name.to_string(), stored.number.into())
+                            && stored.state == agentdeck_core::PrState::Open
+                            && !stored.unreachable
+                    });
+                    if task.is_none() && stored.is_none() {
                         return failed("Not an open PR");
-                    };
-                    if let Some(message) = refusals.get(&task.id) {
+                    }
+                    let refused = (task.as_ref())
+                        .and_then(|task| refusals.get(&task.id))
+                        .or_else(|| refused_prs.get(&pr.to_string().to_lowercase()));
+                    if let Some(message) = refused {
                         return failed(message);
                     }
                     // GitHub closed it: the daemon stores it closed and its task done.
-                    task.status = TaskStatus::Done;
-                    if let Some(stored) = &mut task.pr {
+                    if let Some(task) = task {
+                        task.status = TaskStatus::Done;
+                        if let Some(stored) = &mut task.pr {
+                            stored.state = agentdeck_core::PrState::Closed;
+                        }
+                    }
+                    if let Some(stored) = stored {
                         stored.state = agentdeck_core::PrState::Closed;
                     }
                     PrCloseResult {

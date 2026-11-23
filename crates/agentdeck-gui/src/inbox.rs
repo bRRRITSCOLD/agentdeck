@@ -1,17 +1,15 @@
 //! The Inbox (spec §11), Penpot "Screens" → "Inbox": tasks with no workspace, mostly PRs,
-//! each with a status picker, and the PR sync's state with a "Sync now" button. Done tasks
-//! are left out. While no GitHub token works, an alert over the columns says so, its **Open
-//! Settings** asking the window for Settings with [`OpenSettings`]. Under the heading, once the
-//! PR sync status is read, a line says which PRs the age cutoff leaves out, its "Settings" a
-//! link that asks for Settings too.
+//! each with a status picker. Done tasks are left out. While no GitHub token works, an alert
+//! over the columns says so, its **Open Settings** asking the window for Settings with
+//! [`OpenSettings`]. Under the heading, once the PR sync status is read, a line says which PRs
+//! the age cutoff leaves out, its "Settings" a link that asks for Settings too. Sync now and
+//! when PRs last synced moved to the Pull requests view.
 //!
-//! Like the Tasks view it shows the sidebar's [`Snapshot`], passed on by the window. A sync
-//! asked for here emits [`Synced`] once done, so the window can have the sidebar read again:
-//! a sync that changes no task broadcasts nothing, yet moves the time it last ran.
+//! Like the Tasks view it shows the sidebar's [`Snapshot`], passed on by the window.
 //!
 //! Its list draws only the rows in view: an inbox can hold hundreds of PRs.
 //!
-//! **Select**, before the sync label, turns on Select mode for closing PRs ([`ClosePrs`]):
+//! **Select**, at the header's end, turns on Select mode for closing PRs ([`ClosePrs`]):
 //! a checkbox on each open PR's row, one in the columns for all of them, and the selection
 //! bar along the bottom.
 
@@ -19,20 +17,19 @@ use std::sync::Arc;
 
 use agentdeck_client::types::GhLogin;
 use agentdeck_core::{TaskId, TaskStatus};
-use brrritscold_core_gpui::{
-    ActiveTheme as _, Alert, AlertAction, AlertTitle, Button, ButtonSize, ButtonVariant, IconName,
-};
+use brrritscold_core_gpui::ActiveTheme as _;
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
-    IntoElement, ListState, ParentElement as _, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, list,
+    IntoElement, ListState, ParentElement as _, Pixels, Render, SharedString, Styled as _,
+    Subscription, Window, div, list,
 };
 
 use crate::api::Api;
 use crate::close_prs::{self, ClosePrs};
-use crate::overview::{PrSync, Snapshot};
+use crate::overview::Snapshot;
+use crate::sync_parts::{self, OpenSettings, SETTINGS_TAIL, cutoff, logged_out_title};
 use crate::task_list::{self, Query, Row, Scope};
 use crate::task_row::{self, Layout, Table};
 use crate::task_sheet::{EditTask, OpenTask};
@@ -42,45 +39,10 @@ use crate::workspace::failed;
 const ABOUT: &str =
     "Tasks with no workspace. A PR lands here when no workspace has a clone of its repo.";
 
-/// The end of a cutoff line that names Settings; its "Settings" is drawn as a link.
-const SETTINGS_TAIL: &str = "Settings.";
-
-/// Which open PRs sync, for a cutoff of `days` (`0` for none).
-fn cutoff(days: u32) -> String {
-    let unit = match days {
-        0 => return "Every open PR syncs.".to_owned(),
-        1 => "day",
-        _ => "days",
-    };
-    format!("PRs not updated in the last {days} {unit} are left out; change that in Settings.")
-}
-
-/// A sync asked for in the Inbox has finished.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Synced;
-
-/// The banner's title while no GitHub token works and no PR sync ever named a login.
-pub const LOGGED_OUT: &str = "Not signed in to GitHub, so PRs don't sync.";
-
-/// The banner's title while no GitHub token works: whose PRs it shows once a sync ran as
-/// `synced_as` (Penpot "Inbox · logged out · synced before"), else [`LOGGED_OUT`].
-pub fn logged_out_title(synced_as: Option<&str>) -> SharedString {
-    match synced_as {
-        Some(login) => format!("Synced as {login}. Sign in to refresh.").into(),
-        None => LOGGED_OUT.into(),
-    }
-}
-
-/// The cutoff line's "Settings" or the banner's Open Settings was clicked: show Settings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OpenSettings;
-
 /// The Inbox view.
 pub struct InboxView {
     api: Arc<dyn Api>,
     snapshot: Snapshot,
-    /// Whether a sync asked for here is still running.
-    syncing: bool,
     /// The rows the list draws from, as last rendered.
     shown: Vec<Row>,
     list: ListState,
@@ -91,13 +53,12 @@ pub struct InboxView {
     _close: Subscription,
 }
 
-impl EventEmitter<Synced> for InboxView {}
 impl EventEmitter<OpenTask> for InboxView {}
 impl EventEmitter<EditTask> for InboxView {}
 impl EventEmitter<OpenSettings> for InboxView {}
 
 impl InboxView {
-    /// A view that syncs and changes statuses through `api`; it shows nothing until given a
+    /// A view that changes statuses through `api`; it shows nothing until given a
     /// snapshot.
     pub fn new(api: Arc<dyn Api>, cx: &mut Context<Self>) -> Self {
         let close = cx.new(|_| ClosePrs::new(api.clone(), "inbox"));
@@ -108,7 +69,6 @@ impl InboxView {
         InboxView {
             api,
             snapshot: Snapshot::default(),
-            syncing: false,
             shown: Vec::new(),
             list: task_row::list_state(),
             layout: Table::Inbox.widest(),
@@ -151,28 +111,6 @@ impl InboxView {
             show_done: false,
         };
         task_list::rows(&self.snapshot, &query)
-    }
-
-    /// Syncs PRs now, in full: what "Sync now" does. A sync already asked for isn't repeated.
-    pub fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.syncing {
-            return;
-        }
-        self.syncing = true;
-        cx.notify();
-        let syncing = self.api.sync_prs(true, cx);
-        cx.spawn_in(window, async move |this, cx| {
-            let synced = syncing.await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.syncing = false;
-                match synced {
-                    Ok(()) => cx.emit(Synced),
-                    Err(err) => failed("Couldn't sync PRs", &err, window, cx),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     /// Moves `task` to `status`, reporting a failure in a toast.
@@ -236,16 +174,6 @@ impl InboxView {
         }
     }
 
-    /// Where PR sync stands, at `now`: how far a running sync is, whoever started it, or
-    /// "Syncing…" from the moment "Sync now" is clicked until the daemon says more.
-    pub fn sync_label(&self, now: chrono::DateTime<chrono::Utc>) -> String {
-        let sync = self.snapshot.overview().pr_sync;
-        if self.syncing && !matches!(sync, PrSync::Syncing { .. }) {
-            return "Syncing…".to_owned();
-        }
-        sync.short_label(now)
-    }
-
     /// The lines under the heading: what the Inbox holds, then which PRs the age cutoff
     /// leaves out, once the PR sync status is read.
     pub fn description(&self) -> Vec<SharedString> {
@@ -255,10 +183,9 @@ impl InboxView {
             .collect()
     }
 
-    /// Penpot `Header`: heading, spacer, Select, when PRs last synced, "Sync now".
+    /// Penpot `Header`: heading, spacer, Select.
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
-        let synced = self.sync_label(chrono::Utc::now());
         div()
             .flex()
             .flex_none()
@@ -289,7 +216,7 @@ impl InboxView {
                                     Some(lead) => line_div
                                         .flex()
                                         .child(SharedString::from(lead.to_owned()))
-                                        .child(settings_link(cx))
+                                        .child(sync_parts::settings_link("inbox", cx))
                                         .child("."),
                                     None => line_div.child(line),
                                 }
@@ -298,61 +225,7 @@ impl InboxView {
             )
             .child(div().flex_1())
             .child(close_prs::select_toggle(&self.close, cx))
-            .child(
-                div()
-                    .text_size(font_size::SM)
-                    .text_color(s.muted_foreground)
-                    .child(synced),
-            )
-            .child(
-                div().debug_selector(|| "sync now".into()).child(
-                    Button::new("sync-now")
-                        .variant(ButtonVariant::Outline)
-                        .label("Sync now")
-                        .disabled(self.syncing)
-                        .on_click(cx.listener(|this, _, window, cx| this.sync(window, cx))),
-                ),
-            )
     }
-}
-
-/// "Settings", styled as core-gpui's link button (`primary`, underlined on hover), asking for
-/// Settings when clicked.
-fn settings_link(cx: &mut Context<InboxView>) -> impl IntoElement {
-    let s = cx.theme().semantic();
-    div()
-        .id("inbox-settings-link")
-        .debug_selector(|| "inbox settings link".into())
-        .text_color(s.primary)
-        .cursor_pointer()
-        .hover(|style| style.underline())
-        .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenSettings)))
-        .child("Settings")
-}
-
-/// The banner while no GitHub token works: what's wrong, or whose PRs show, and **Open
-/// Settings** to fix it.
-fn logged_out_banner(title: SharedString, cx: &mut Context<InboxView>) -> impl IntoElement {
-    div()
-        .flex_none()
-        .debug_selector(|| "logged out banner".into())
-        .child(
-            Alert::new()
-                .icon(IconName::Info)
-                .title(AlertTitle::new(title))
-                // Centred on the one-line alert, as Penpot's `Action` sits.
-                .action(
-                    AlertAction::new().top(space::S1_5).child(
-                        div().debug_selector(|| "open settings".into()).child(
-                            Button::new("inbox-open-settings")
-                                .variant(ButtonVariant::Link)
-                                .size(ButtonSize::Sm)
-                                .label("Open Settings")
-                                .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenSettings))),
-                        ),
-                    ),
-                ),
-        )
 }
 
 impl Render for InboxView {
@@ -415,7 +288,7 @@ impl Render for InboxView {
                 (self.snapshot.pr_sync.as_ref()).filter(|s| s.login == GhLogin::LoggedOut),
                 |content, status| {
                     let title = logged_out_title(status.synced_as.as_deref());
-                    content.child(logged_out_banner(title, cx))
+                    content.child(sync_parts::logged_out_banner("inbox", title, cx))
                 },
             )
             .child(table)
@@ -454,8 +327,6 @@ mod tests {
     struct Harness {
         api: Arc<FakeApi>,
         view: Entity<InboxView>,
-        synced: Rc<RefCell<usize>>,
-        _synced: gpui::Subscription,
     }
 
     impl Harness {
@@ -474,18 +345,8 @@ mod tests {
             });
             let cx = VisualTestContext::from_window(*window, cx).into_mut();
             let view = view.unwrap();
-            let synced = Rc::new(RefCell::new(0));
-            let seen = synced.clone();
-            let _synced = cx.update(|_, cx| {
-                cx.subscribe(&view, move |_, _: &Synced, _| *seen.borrow_mut() += 1)
-            });
             cx.run_until_parked();
-            let harness = Harness {
-                api,
-                view,
-                synced,
-                _synced,
-            };
+            let harness = Harness { api, view };
             (harness, cx)
         }
 
@@ -670,39 +531,6 @@ mod tests {
         assert!(drawn(1, cx));
     }
 
-    #[gpui::test]
-    fn should_run_a_full_sync_when_sync_now_is_clicked_and_say_so(cx: &mut TestAppContext) {
-        let (harness, cx) = Harness::open(inbox(), cx);
-        harness.draw(cx);
-
-        let button = cx.debug_bounds("sync now").expect("the Sync now button");
-        cx.simulate_click(button.center(), Modifiers::default());
-        cx.run_until_parked();
-
-        assert_eq!(*harness.api.syncs.lock().unwrap(), [true]);
-        assert_eq!(*harness.synced.borrow(), 1);
-    }
-
-    #[gpui::test]
-    fn should_say_how_far_a_sync_it_did_not_start_is(cx: &mut TestAppContext) {
-        let (harness, cx) = Harness::open(inbox(), cx);
-        let mut snapshot = inbox();
-        pr_sync(&mut snapshot).progress = Some(agentdeck_client::types::PrSyncProgress {
-            prs_done: 50,
-            prs: 271,
-            stage: agentdeck_client::types::PrSyncStage::Listing,
-        });
-
-        cx.update(|_, cx| {
-            harness
-                .view
-                .update(cx, |view, cx| view.set_snapshot(snapshot, cx))
-        });
-
-        let label = cx.update(|_, cx| harness.view.read(cx).sync_label(chrono::Utc::now()));
-        assert_eq!(label, "Syncing… 50 of 271 PRs");
-    }
-
     /// [`inbox`] signed out of GitHub.
     fn logged_out() -> Snapshot {
         let mut snapshot = inbox();
@@ -717,21 +545,6 @@ mod tests {
         harness.draw(cx);
 
         assert!(cx.debug_bounds("logged out banner").is_some());
-        let label = cx.update(|_, cx| harness.view.read(cx).sync_label(chrono::Utc::now()));
-        assert_eq!(label, "Not signed in");
-    }
-
-    #[test]
-    fn should_name_the_login_prs_last_synced_as_in_the_banner() {
-        assert_eq!(
-            logged_out_title(Some("bRRRITSCOLD")),
-            "Synced as bRRRITSCOLD. Sign in to refresh."
-        );
-    }
-
-    #[test]
-    fn should_say_prs_do_not_sync_when_no_sync_named_a_login() {
-        assert_eq!(logged_out_title(None), LOGGED_OUT);
     }
 
     #[gpui::test]
@@ -779,18 +592,6 @@ mod tests {
         harness.draw(cx);
 
         assert!(cx.debug_bounds("logged out banner").is_none());
-    }
-
-    #[gpui::test]
-    fn should_report_a_failed_sync_without_saying_synced(cx: &mut TestAppContext) {
-        let (harness, cx) = Harness::open(inbox(), cx);
-        harness.api.fail_next("gh is logged out");
-
-        cx.update(|window, cx| harness.view.update(cx, |view, cx| view.sync(window, cx)));
-        cx.run_until_parked();
-
-        assert_eq!(*harness.synced.borrow(), 0);
-        harness.draw(cx);
     }
 
     mod description {

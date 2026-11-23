@@ -1,8 +1,8 @@
 //! The main window's sidebar (spec §11), the `Sidebar` board of Penpot's "Main window": the
-//! brand, Inbox and Tasks, then the Workspaces header with its new workspace `+`, every
-//! workspace with its rolled-up state, open PRs and a `BellOff` while muted, the archived ones
-//! in a foldable Archived group, and when PRs last synced at the bottom, ending in a gear that
-//! selects Settings. The `+` asks the window for the dialog with a [`SidebarEvent`].
+//! brand, Pull requests with its count of open PRs, Inbox and Tasks, then the Workspaces header
+//! with its new workspace `+`, every workspace with its rolled-up state, open PRs and a
+//! `BellOff` while muted, the archived ones in a foldable Archived group, and at the bottom a
+//! gear that selects Settings. The `+` asks the window for the dialog with a [`SidebarEvent`].
 //!
 //! It reads a [`Snapshot`] through the session's [`Api`] when it opens and again whenever the
 //! daemon reports a `changed`; `state` and `exit` messages patch pane states in place. What
@@ -13,7 +13,6 @@
 //! selection and snapshot through [`SidebarEvent::Changed`], not through its every redraw.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use agentdeck_core::ws::ServerMessage;
 use agentdeck_core::{AgentState, WorkspaceId};
@@ -42,12 +41,11 @@ use crate::task_row;
 /// The sidebar's width. Raw in Penpot too: no sizing token is 260px.
 pub const WIDTH: gpui::Pixels = px(260.);
 
-/// How often the footer's "synced N min ago" is redrawn.
-const FOOTER_TICK: Duration = Duration::from_secs(30);
-
 /// What the sidebar has selected, and the window shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Selection {
+    /// Every pull request, by Repository.
+    PullRequests,
     /// Tasks with no workspace.
     Inbox,
     /// Every task.
@@ -95,7 +93,6 @@ pub struct SidebarView {
     /// The panes just reattached, whose agents may settle back into the state they held.
     reattached: Reattached,
     _events: Subscription,
-    _tick: Task<()>,
     /// The workspace list: where it is scrolled to, and its items' heights.
     list: ListState,
     /// The items `list` was last sized for.
@@ -110,14 +107,6 @@ impl SidebarView {
     /// A sidebar over `api`, refreshed by `connection`'s messages. It starts reading at once.
     pub fn new(api: Arc<dyn Api>, connection: &Entity<Connection>, cx: &mut Context<Self>) -> Self {
         let events = cx.subscribe(connection, |this, _, event, cx| this.on_event(event, cx));
-        let tick = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(FOOTER_TICK).await;
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
-                    break;
-                }
-            }
-        });
         let snapshot = Snapshot::default();
         let mut sidebar = SidebarView {
             api,
@@ -132,7 +121,6 @@ impl SidebarView {
             prs: PrBatch::default(),
             reattached: Reattached::default(),
             _events: events,
-            _tick: tick,
             // Every item measured once, after each change to the items, so the scrollbar's
             // thumb is right from the first frame; a redraw then renders the rows in view.
             list: task_row::list_state().measure_all(),
@@ -149,7 +137,9 @@ impl SidebarView {
     pub fn selection(&self) -> Selection {
         let exists = |picked: &Selection| match picked {
             Selection::Workspace(id) => self.overview.workspace(*id).is_some(),
-            Selection::Inbox | Selection::Tasks | Selection::Settings => true,
+            Selection::PullRequests | Selection::Inbox | Selection::Tasks | Selection::Settings => {
+                true
+            }
         };
         self.picked.filter(exists).unwrap_or_else(|| {
             self.overview
@@ -163,7 +153,9 @@ impl SidebarView {
     fn archived_shown(&self) -> bool {
         let selected_archived = match self.selection() {
             Selection::Workspace(id) => self.overview.workspace(id).is_some_and(|w| w.archived),
-            Selection::Inbox | Selection::Tasks | Selection::Settings => false,
+            Selection::PullRequests | Selection::Inbox | Selection::Tasks | Selection::Settings => {
+                false
+            }
         };
         self.archived_open || selected_archived
     }
@@ -342,7 +334,9 @@ impl SidebarView {
         let (archived, muted) = match selection {
             Selection::Workspace(id) => (self.overview.workspace(id))
                 .map_or((false, false), |w| (w.archived, w.muted && !w.archived)),
-            Selection::Inbox | Selection::Tasks | Selection::Settings => (false, false),
+            Selection::PullRequests | Selection::Inbox | Selection::Tasks | Selection::Settings => {
+                (false, false)
+            }
         };
         // A muted row's bell sits with its counts, so it holds the label short of them too.
         let has_counts = counts != Counts::default() || muted;
@@ -412,6 +406,7 @@ impl SidebarView {
     /// The name a row is found by in tests.
     fn debug_name(&self, selection: Selection) -> String {
         match selection {
+            Selection::PullRequests => "pull requests".into(),
             Selection::Inbox => "inbox".into(),
             Selection::Tasks => "tasks".into(),
             Selection::Settings => "settings".into(),
@@ -513,6 +508,14 @@ impl Render for SidebarView {
                 .text_size(font_size::XS)
                 .text_color(s.muted_foreground)
         };
+        let pull_requests = self.row(
+            "pull-requests",
+            Selection::PullRequests,
+            "Pull requests".into(),
+            Lead::Icon(IconName::GitPullRequest),
+            self.overview.pull_requests,
+            cx,
+        );
         let inbox = self.row(
             "inbox",
             Selection::Inbox,
@@ -536,10 +539,6 @@ impl Render for SidebarView {
             self.listed = items;
         }
         self.reveal_picked(relisted, window);
-        let footer = match &self.error {
-            Some(error) => error.clone(),
-            None => self.overview.pr_sync.label(chrono::Utc::now()).into(),
-        };
 
         // Penpot `Sidebar`: p-3, rows 4px apart.
         Sidebar::new()
@@ -561,6 +560,7 @@ impl Render for SidebarView {
                     .text_color(s.foreground)
                     .child("agentdeck"),
             )
+            .child(pull_requests)
             .child(inbox)
             .child(tasks)
             // Penpot gives the separator 8px above and below, on top of the 4px row gap.
@@ -610,18 +610,19 @@ impl Render for SidebarView {
                     ),
             )
             .child(scrollbar::vertical(&self.list, cx))
-            // Penpot `Footer`: the sync line, then the Settings gear pushed to the end.
+            // Penpot `Footer`: the Settings gear pushed to the end. Sync status lives on the
+            // Pull requests view; a failed read says why here.
             .child(
                 small()
                     .debug_selector(|| "footer".into())
                     .gap(space::S1_5)
-                    // The icon keeps the library icon's `foreground`, as Penpot's does.
-                    .child(
-                        Icon::new(IconName::GitPullRequest)
-                            .size(space::S3)
-                            .text_color(s.foreground),
-                    )
-                    .child(div().min_w_0().truncate().child(footer))
+                    .children(self.error.clone().map(|error| {
+                        div()
+                            .debug_selector(|| "read error".into())
+                            .min_w_0()
+                            .truncate()
+                            .child(error)
+                    }))
                     .child(div().flex_1())
                     .child(
                         div()
@@ -644,6 +645,7 @@ impl Render for SidebarView {
 #[cfg(test)]
 mod tests {
     use std::rc::Rc;
+    use std::time::Duration;
 
     use agentdeck_client::ws::{self, Remote};
     use agentdeck_core::TaskKind;
@@ -790,13 +792,16 @@ mod tests {
 
     mod rows {
         use super::*;
+        use crate::overview::fixtures::pull_request;
 
         #[gpui::test]
-        fn should_list_the_workspaces_below_inbox_and_tasks(cx: &mut TestAppContext) {
+        fn should_list_the_workspaces_below_pull_requests_inbox_and_tasks(cx: &mut TestAppContext) {
             let mut open = open(two_workspaces(), cx);
 
             let top = |open: &mut Open, selector| open.cx.debug_bounds(selector).unwrap().top();
             let tops = [
+                top(&mut open, "brand"),
+                top(&mut open, "row pull requests"),
                 top(&mut open, "row inbox"),
                 top(&mut open, "row tasks"),
                 top(&mut open, "row a"),
@@ -804,6 +809,49 @@ mod tests {
             ];
 
             assert!(tops.is_sorted_by(|x, y| x < y), "{tops:?}");
+        }
+
+        #[gpui::test]
+        fn should_count_open_reachable_prs_drafts_included_on_pull_requests(
+            cx: &mut TestAppContext,
+        ) {
+            use agentdeck_client::types::PullRequest;
+            use agentdeck_core::PrState;
+
+            let snapshot = Snapshot {
+                prs: vec![
+                    pull_request(1, "acme/widgets"),
+                    PullRequest {
+                        draft: true,
+                        ..pull_request(2, "acme/widgets")
+                    },
+                    PullRequest {
+                        state: PrState::Merged,
+                        ..pull_request(3, "acme/widgets")
+                    },
+                    PullRequest {
+                        unreachable: true,
+                        ..pull_request(4, "acme/gadgets")
+                    },
+                ],
+                ..two_workspaces()
+            };
+            let open = open(snapshot, cx);
+
+            let counts = open
+                .sidebar
+                .read_with(open.cx, |s, _| s.overview().pull_requests);
+            assert_eq!(counts.prs, 2);
+            let row = open.cx.debug_bounds("row pull requests").expect("the row");
+            let count = (open.cx.debug_bounds("counts pull requests")).expect("its count");
+            assert!(row.contains(&count.center()), "{count:?} in {row:?}");
+        }
+
+        #[gpui::test]
+        fn should_show_no_count_on_pull_requests_with_none_open(cx: &mut TestAppContext) {
+            let mut open = open(two_workspaces(), cx);
+
+            assert!(!open.shows("counts pull requests"));
         }
 
         #[gpui::test]
@@ -976,6 +1024,9 @@ mod tests {
 
             open.click("row tasks");
             assert_eq!(open.selection(), Selection::Tasks);
+
+            open.click("row pull requests");
+            assert_eq!(open.selection(), Selection::PullRequests);
         }
 
         #[gpui::test]
@@ -992,6 +1043,18 @@ mod tests {
             open.click("settings");
 
             assert_eq!(open.selection(), Selection::Settings);
+        }
+
+        #[gpui::test]
+        fn should_say_nothing_of_pr_sync_in_the_footer(cx: &mut TestAppContext) {
+            let mut snapshot = two_workspaces();
+            crate::overview::fixtures::pr_sync(&mut snapshot).last_synced_at =
+                Some("2026-11-12T00:00:00Z".into());
+            let mut open = open(snapshot, cx);
+
+            // The gear alone, at its end: the footer has no sync line.
+            assert!(open.shows("settings"));
+            assert!(!open.shows("read error"));
         }
 
         #[gpui::test]
@@ -1261,7 +1324,6 @@ mod tests {
         }
 
         mod reattach {
-            use std::time::Duration;
 
             use super::*;
 

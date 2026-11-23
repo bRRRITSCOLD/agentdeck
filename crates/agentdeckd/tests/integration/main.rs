@@ -19,6 +19,7 @@ mod older_daemon;
 mod panes;
 mod panes_client;
 mod prs;
+mod prs_client;
 mod settings;
 mod settings_client;
 mod support;

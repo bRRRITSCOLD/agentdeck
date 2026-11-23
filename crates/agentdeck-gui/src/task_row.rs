@@ -57,6 +57,42 @@ pub fn table(
     on_width: impl Fn(&Pixels, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> Div {
+    let header = Header {
+        columns: columns(layout, select, cx),
+        ghost: columns(layout, SelectCell::Space, cx),
+        min_width: layout.min_width(),
+    };
+    table_of(id, selector, header, rows, list, on_width, cx)
+}
+
+/// A table's column names, as [`table_of`] draws them over its rows.
+pub struct Header {
+    /// The column names.
+    pub columns: Div,
+    /// The same names as wide, with nothing to click: an unseen copy keeps the scrollbar
+    /// level with the list.
+    pub ghost: Div,
+    /// The table's least width; a narrower area scrolls it sideways.
+    pub min_width: Pixels,
+}
+
+/// [`table`] for any columns: `header` over `rows`, `list`'s rows, as wide as the area allows
+/// and never narrower than its `min_width`, with the list's scrollbar just right of the area.
+/// Each frame tells `on_width` the area's width.
+pub fn table_of(
+    id: &'static str,
+    selector: &'static str,
+    header: Header,
+    rows: impl IntoElement,
+    list: &ListState,
+    on_width: impl Fn(&Pixels, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> Div {
+    let Header {
+        columns,
+        ghost,
+        min_width,
+    } = header;
     let scrolled = div()
         .id(id)
         .flex_1()
@@ -70,11 +106,11 @@ pub fn table(
             div()
                 .flex_1()
                 .min_h_0()
-                .min_w(layout.min_width())
+                .min_w(min_width)
                 .flex()
                 .flex_col()
                 .gap(space::S4)
-                .child(columns(layout, select, cx))
+                .child(columns)
                 .child(rows),
         );
     // As wide as the area and its scrollbar, not the table: the copy of the columns
@@ -89,11 +125,7 @@ pub fn table(
         .flex()
         .flex_col()
         .gap(space::S4)
-        .child(
-            columns(layout, SelectCell::Space, cx)
-                .min_w(layout.min_width())
-                .invisible(),
-        )
+        .child(ghost.min_w(min_width).invisible())
         .child(
             div()
                 .flex_1()
@@ -334,7 +366,7 @@ pub fn status_label(status: TaskStatus) -> &'static str {
 }
 
 /// A cell `width` wide, its content in a row `space.1-5` apart.
-fn cell(width: Pixels) -> Div {
+pub fn cell(width: Pixels) -> Div {
     div()
         .flex_none()
         .w(width)
@@ -345,7 +377,7 @@ fn cell(width: Pixels) -> Div {
 }
 
 /// `—`, for a cell with nothing to show.
-fn none(cx: &App) -> Div {
+pub fn none(cx: &App) -> Div {
     div()
         .text_size(font_size::XS)
         .text_color(cx.theme().semantic().muted_foreground)
