@@ -214,7 +214,7 @@ impl EditWorkspaceDialog {
         .detach();
     }
 
-    /// Penpot `agentdeck/EditWorkspaceForm`: the Name field with its error, then the
+    /// Penpot `agentdeck/EditWorkspaceForm`: the Name field, its error, then the
     /// Repositories, `space.4` apart.
     fn form(&self, cx: &App) -> impl IntoElement {
         let problem = self.problem(cx);
@@ -223,21 +223,19 @@ impl EditWorkspaceDialog {
             .flex_col()
             .gap(space::S4)
             .child(
-                Field::new()
-                    .child(Label::new().child("Name"))
-                    .child(
-                        div()
-                            .debug_selector(|| "edit workspace name".into())
-                            .child(Input::new(&self.name).aria_invalid(problem.is_some())),
-                    )
-                    .when_some(problem, |field, why| {
-                        field.child(
-                            div()
-                                .debug_selector(|| "edit workspace error".into())
-                                .child(FieldError::new(why)),
-                        )
-                    }),
+                Field::new().child(Label::new().child("Name")).child(
+                    div()
+                        .debug_selector(|| "edit workspace name".into())
+                        .child(Input::new(&self.name).aria_invalid(problem.is_some())),
+                ),
             )
+            .when_some(problem, |form, why| {
+                form.child(
+                    div()
+                        .debug_selector(|| "edit workspace error".into())
+                        .child(FieldError::new(why)),
+                )
+            })
             .child(self.picker.clone())
     }
 }
