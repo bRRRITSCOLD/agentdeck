@@ -14,6 +14,10 @@ _Avoid_: Repo (in UI copy), project
 A Repository or Pull request your GitHub sign-in can no longer see. It is kept and marked, not removed.
 _Avoid_: Deleted, gone, missing
 
+**Not in a workspace**:
+A Repository that no Workspace links, counting only Workspaces that aren't archived.
+_Avoid_: Unlinked, orphan, unassigned
+
 **Pull request**:
 A GitHub pull request you authored, were asked to review, or are assigned. It belongs to exactly one Repository, and GitHub is the only source of its state.
 _Avoid_: PR task, task
@@ -35,3 +39,13 @@ _Avoid_: Tab, session
 **Link**:
 The tie, made by you, between a Workspace and a Repository. One Repository can be linked to many Workspaces; its Pull requests show in each.
 _Avoid_: Attach, assign, match
+
+### Views
+
+**Pull requests view**:
+The one place that lists all your Pull requests, each under its Repository.
+_Avoid_: Inbox, all PRs, PR list
+
+**A Workspace's Pull requests**:
+The Pull requests in the Repositories a Workspace links: the Workspace's other side, beside its Panes.
+_Avoid_: PR tab, Tasks & PRs
