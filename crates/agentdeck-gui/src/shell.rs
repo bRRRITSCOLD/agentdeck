@@ -22,10 +22,10 @@
 //! workspace view's [`LinkPane`] and opens the Link to task dialog on that pane.
 //!
 //! It shows the sidebar's [`Alerts`] as OS notifications (spec §11), leaving out one while the
-//! user can see what it is about in the focused window: the pane's tab, the task sheet on the
-//! PR task, the Tasks view. Clicking one focuses the window and shows what it is about. One
-//! still open is withdrawn once the user can see what it is about: the window focused, the
-//! workspace, tab or task sheet shown.
+//! user can see what it is about in the focused window: the pane's tab, or, for a PR, the Pull
+//! requests view. Clicking one focuses the window and shows what it is about: a PR alert lands
+//! on the PR's row ([`PullRequestsView::reveal`]). One still open is withdrawn once the user can
+//! see what it is about: the window focused, the workspace, tab or Pull requests view shown.
 //!
 //! Closing the window (its own close button or the compositor's) and Quit ask first while an
 //! agent runs, unless `gui.confirm_quit` is off (spec §11): "Quit agentdeck?", Penpot "Screens"
