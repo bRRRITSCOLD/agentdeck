@@ -183,6 +183,24 @@ pub(crate) async fn link_delete(
     Ok(HttpResponseDeleted())
 }
 
+/// Workspace `id`'s Suggestions (spec §3): the Repositories its Panes work in that it doesn't
+/// link, each as GitHub showed it when this run first asked about its name, by name ignoring
+/// case. A Pane counts at its current folder, an exited one at its last known folder; its git
+/// repo's `upstream` remote counts when it is on GitHub, else its `origin`. A Repository other
+/// Workspaces link is still suggested; one GitHub can't see never is; signed out, only one
+/// agentdeck keeps is. An archived Workspace has none. Not filtered by what the GUI was told
+/// Not now. A Workspace that doesn't exist is 404 `not_found`.
+#[endpoint { method = GET, path = "/v1/workspaces/{id}/suggestions" }]
+pub(crate) async fn suggestion_list(
+    rqctx: RequestContext<ApiContext>,
+    _auth: Authorized,
+    path: Path<IdPath<WorkspaceId>>,
+) -> Result<HttpResponseOk<Vec<Repository>>, HttpError> {
+    let workspace = path.into_inner().id;
+    let suggestions = rqctx.context().suggestions.list(workspace).await?;
+    Ok(HttpResponseOk(suggestions))
+}
+
 /// What linking each of `names` takes, in order: a Repository agentdeck keeps by that name
 /// now, ignoring case, or else the one GitHub shows by it, looked up as
 /// `GET /v1/repositories/resolve` does. The first that fails fails them all, before anything is

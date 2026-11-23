@@ -212,6 +212,12 @@ pub enum Entity {
     /// its number, `1296269#7`, so a rename keeps it. It came with `API_VERSION` 22, when the
     /// `task` it replaces went; an older client skips the message.
     PullRequest,
+    /// `/v1/workspaces/{id}/suggestions`: a Workspace's Suggestions differ from the last ones
+    /// the daemon worked out for it, after a Pane of it opened, exited, moved or was deleted,
+    /// a Link of it changed, it was archived or brought back, or the GitHub sign-in changed.
+    /// Its id is the Workspace's. It came with `API_VERSION` 26; an older client skips the
+    /// message.
+    Suggestions,
 }
 
 #[cfg(test)]
@@ -385,6 +391,14 @@ mod tests {
                         id: "1296269".into(),
                     },
                     json!({"t": "changed", "entity": "repository", "id": "1296269"}),
+                ),
+                (
+                    ServerMessage::Changed {
+                        entity: Entity::Suggestions,
+                        id: "019a0000-0000-7000-8000-000000000001".into(),
+                    },
+                    json!({"t": "changed", "entity": "suggestions",
+                           "id": "019a0000-0000-7000-8000-000000000001"}),
                 ),
                 (
                     ServerMessage::Lagged { channel: 3 },

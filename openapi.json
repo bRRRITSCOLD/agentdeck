@@ -2550,6 +2550,46 @@
         "summary": "Unlinks the Workspace from a Repository. The Repository goes too when no other Workspace"
       }
     },
+    "/v1/workspaces/{id}/suggestions": {
+      "get": {
+        "description": "link, each as GitHub showed it when this run first asked about its name, by name ignoring case. A Pane counts at its current folder, an exited one at its last known folder; its git repo's `upstream` remote counts when it is on GitHub, else its `origin`. A Repository other Workspaces link is still suggested; one GitHub can't see never is; signed out, only one agentdeck keeps is. An archived Workspace has none. Not filtered by what the GUI was told Not now. A Workspace that doesn't exist is 404 `not_found`.",
+        "operationId": "suggestion_list",
+        "parameters": [
+          {
+            "description": "The entity's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/WorkspaceId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Repository"
+                  },
+                  "title": "Array_of_Repository",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Workspace `id`'s Suggestions (spec §3): the Repositories its Panes work in that it doesn't"
+      }
+    },
     "/v1/workspaces/{id}/tabs": {
       "get": {
         "operationId": "tab_list",

@@ -32,6 +32,7 @@ use crate::events::Events;
 use crate::github_auth::GithubAuth;
 use crate::prsync::PrSync;
 use crate::prsync::github::Github;
+use crate::suggestions::Suggestions;
 use crate::terminal::Terminals;
 
 /// The version `openapi.json` declares: the API is `/v1`.
@@ -57,6 +58,8 @@ pub struct ApiContext {
     pub terminals: Terminals,
     /// The events every WebSocket client gets.
     pub events: Events,
+    /// Each Workspace's Suggestions, for `/v1/workspaces/{id}/suggestions`.
+    pub suggestions: Suggestions,
 }
 
 /// Every endpoint.
@@ -83,6 +86,7 @@ pub fn api() -> ApiDescription<ApiContext> {
         api.register(repositories::repository_resolve),
         api.register(repositories::link_create),
         api.register(repositories::link_delete),
+        api.register(repositories::suggestion_list),
         api.register(github::github_auth_get),
         api.register(github::github_token_put),
         api.register(github::github_token_delete),
@@ -231,7 +235,7 @@ mod tests {
         /// `openapi.json`'s fingerprint when [`agentdeck_core::API_VERSION`] was last set,
         /// and that version. Clients tell an older daemon by its API version, so a route or
         /// field added without a bump would go unnoticed: they would call it and get a 404.
-        const FINGERPRINT_AT_API_VERSION: (u64, u32) = (0x4933_5dbf_cf35_14c9, 25);
+        const FINGERPRINT_AT_API_VERSION: (u64, u32) = (0xc935_79a3_d8ff_d5cc, 26);
 
         /// FNV-1a: stable across Rust releases, unlike `DefaultHasher`.
         fn fingerprint(text: &str) -> u64 {
