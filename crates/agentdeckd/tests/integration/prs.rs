@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use agentdeck_client::Client;
 use agentdeck_client::types::{
-    GhLogin, NewWorkspace, PrClose, PrCloseResult, PrSyncProgress, PrSyncStage, PrSyncStatus,
-    PullRequest, Repository, Task, Workspace,
+    GhLogin, NewLink, NewWorkspace, PrClose, PrCloseResult, PrSyncProgress, PrSyncStage,
+    PrSyncStatus, PullRequest, Repository, Task, Workspace,
 };
 use agentdeck_core::{
     ChecksState, PrRef, PrState, RepositoryId, RepositoryName, ReviewState, TaskKind, TaskStatus,
@@ -1831,6 +1831,51 @@ mod get_v1_prs {
         let references: Vec<String> = gadgets.iter().map(|pr| pr.reference.to_string()).collect();
         assert_eq!(references, ["acme/gadgets#9"]);
         assert!(none.is_empty(), "{none:?}");
+    }
+
+    #[tokio::test]
+    async fn should_list_only_the_prs_of_the_repositories_a_workspace_links_200() {
+        let github = MockServer::start_async().await;
+        let gadget = Pr {
+            repo: "acme/gadgets",
+            ..Pr::open(9)
+        };
+        let daemon = synced(&github, &[Pr::open(7), gadget]).await;
+        let web = daemon
+            .client
+            .workspace_create()
+            .body(NewWorkspace {
+                name: "web".into(),
+                dir: None,
+            })
+            .send()
+            .await
+            .expect("create a workspace")
+            .into_inner();
+        daemon
+            .client
+            .link_create()
+            .id(web.id)
+            .body(NewLink {
+                repository: "acme/gadgets".parse().unwrap(),
+            })
+            .send()
+            .await
+            .expect("link");
+
+        let webs = daemon.client.pr_list().workspace(web.id).send().await;
+        let widgets_of_web = daemon
+            .client
+            .pr_list()
+            .workspace(web.id)
+            .repository("acme/widgets".parse::<RepositoryName>().unwrap())
+            .send()
+            .await;
+
+        let webs = webs.expect("list PRs").into_inner();
+        let references: Vec<String> = webs.iter().map(|pr| pr.reference.to_string()).collect();
+        assert_eq!(references, ["acme/gadgets#9"]);
+        assert_eq!(widgets_of_web.expect("list PRs").into_inner(), []);
     }
 
     #[tokio::test]

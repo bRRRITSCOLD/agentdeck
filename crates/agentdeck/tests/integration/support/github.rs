@@ -18,11 +18,9 @@ impl Pr {
         format!("PR_{}_{}", self.repo.replace('/', "_"), self.number)
     }
 
-    /// GitHub's id for its Repository: a different one for each name.
+    /// GitHub's id for its Repository.
     fn repository_id(&self) -> u64 {
-        self.repo.bytes().fold(17_u64, |id, byte| {
-            id.wrapping_mul(31).wrapping_add(u64::from(byte))
-        }) & 0x7fff_ffff
+        repository_id(self.repo)
     }
 
     /// The fields a sync reads, light and full alike.
@@ -48,6 +46,40 @@ impl Pr {
             "commits": { "nodes": [] }
         })
     }
+}
+
+/// GitHub's id for Repository `repo` in these tests: a different one for each name.
+pub fn repository_id(repo: &str) -> u64 {
+    repo.bytes().fold(17_u64, |id, byte| {
+        id.wrapping_mul(31).wrapping_add(u64::from(byte))
+    }) & 0x7fff_ffff
+}
+
+/// The REST API's `GET /repos/{owner}/{repo}` for `repo` with `token`, answered with the
+/// public Repository GitHub calls `repo`, with its id from [`repository_id`].
+pub fn mock_repo<'a>(server: &'a MockServer, token: &str, repo: &str) -> Mock<'a> {
+    server.mock(|when, then| {
+        when.method(GET)
+            .path(format!("/repos/{repo}"))
+            .header("authorization", format!("Bearer {token}"));
+        then.status(200).json_body(json!({
+            "id": repository_id(repo),
+            "full_name": repo,
+            "html_url": format!("https://github.com/{repo}"),
+            "private": false,
+            "archived": false
+        }));
+    })
+}
+
+/// The REST API's `GET /repos/{owner}/{repo}` for `repo`, answered 404 as for a Repository
+/// that doesn't exist or that the token can't see.
+pub fn mock_repo_missing<'a>(server: &'a MockServer, repo: &str) -> Mock<'a> {
+    server.mock(|when, then| {
+        when.method(GET).path(format!("/repos/{repo}"));
+        then.status(404)
+            .json_body(json!({ "message": "Not Found" }));
+    })
 }
 
 /// The mocks [`mock_open_prs`] answers a sync with.

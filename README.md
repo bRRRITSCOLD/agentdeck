@@ -37,10 +37,26 @@ agentdeck task ls --ws <ws>   # task ids
 
 Or install them: `for c in agentdeck agentdeckd agentdeck-gui; do cargo install --path crates/$c; done`.
 
-- **Agents use the CLI:** every Pane's `PATH` ends with the folder holding `agentdeckd`, so an agent in any Pane, launched by agentdeck or started in a shell, can run `agentdeck` as long as it is installed beside `agentdeckd`. agentdeck no longer has an MCP server: if you added one to your agents' config with an older `agentdeck mcp install`, remove it with `claude mcp remove --scope user agentdeck` and by deleting `[mcp_servers.agentdeck]` from `~/.codex/config.toml`.
 - **After a pull:** a GUI newer than the running daemon shows an "older daemon" banner; press **Restart** (or `agentdeck daemon restart`). Running agents resume.
 - **Stop everything:** closing the window leaves agents running in `agentdeckd` (spec §2). `pkill -TERM agentdeckd` stops it and every pane.
 - **A daemon by hand:** with the GUI closed, `pkill -TERM agentdeckd`, then start one yourself, e.g. `GH_TOKEN=… agentdeckd &`, before `agentdeck-gui`. A second `agentdeckd` while one is healthy exits 1 with "another agentdeckd is running".
+
+### Agents you start yourself
+
+Every Pane's `PATH` ends with the folder holding `agentdeckd`, so any agent in a Pane, launched by agentdeck or started in a shell, can run `agentdeck` when it is installed beside `agentdeckd`. Nothing tells the agent so; paste this into your `CLAUDE.md` or `AGENTS.md`:
+
+```markdown
+## agentdeck
+
+In an agentdeck Pane, `agentdeck` is on your PATH and `$AGENTDECK_WORKSPACE` names your Workspace.
+
+- Its pull requests: `agentdeck pr ls --ws "$AGENTDECK_WORKSPACE" --json`
+- The repositories it links: `agentdeck repo ls --ws "$AGENTDECK_WORKSPACE" --json`
+
+Ask GitHub (`gh`) for a pull request's diff, checks and reviews.
+```
+
+agentdeck no longer has an MCP server: if you added one with an older `agentdeck mcp install`, remove it with `claude mcp remove --scope user agentdeck` and by deleting `[mcp_servers.agentdeck]` from `~/.codex/config.toml`.
 
 ### A scratch instance
 
@@ -55,7 +71,7 @@ unset GH_TOKEN                    # no token from the environment
 agentdeck-gui
 ```
 
-Its log is `$XDG_STATE_HOME/agentdeck/agentdeckd.log`. `AGENTDECK_GITHUB_API` and `AGENTDECK_GITHUB_OAUTH` point PR sync and sign-in at a fake GitHub, as the integration tier does.
+Its log is `$XDG_STATE_HOME/agentdeck/agentdeckd.log`. `AGENTDECK_GITHUB_API`, `AGENTDECK_GITHUB_REST_API` and `AGENTDECK_GITHUB_OAUTH` point PR sync, Repository lookups and sign-in at a fake GitHub, as the integration tier does.
 
 ### Desktop entry
 
@@ -67,7 +83,7 @@ install -Dm644 packaging/agentdeck.desktop ~/.local/share/applications/agentdeck
 
 | Crate | Kind | |
 |---|---|---|
-| `agentdeck` | bin | the CLI and `agentdeck mcp` |
+| `agentdeck` | bin | the CLI |
 | `agentdeckd` | bin | the daemon |
 | `agentdeck-gui` | bin | the GPUI app, on `brrritscold-core-gpui` |
 | `agentdeck-client` | lib | the generated HTTP client |

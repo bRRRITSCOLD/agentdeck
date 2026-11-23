@@ -207,9 +207,11 @@ pub enum Entity {
     PrSync,
     /// `/v1/settings`: a setting changed. Its id is always `settings`.
     Settings,
-    /// A Repository was created, or GitHub renamed or otherwise changed it: `GET /v1/prs`
-    /// carries it on each of its pull requests. Its id is GitHub's repository id. It came with
-    /// `API_VERSION` 16; an older client skips the message.
+    /// A Repository was created or deleted, GitHub renamed or otherwise changed it, or a
+    /// Workspace linked or unlinked it: `GET /v1/repositories` lists it with the Workspaces
+    /// that link it, and `GET /v1/prs` carries it on each of its pull requests. Its id is
+    /// GitHub's repository id. It came with `API_VERSION` 16; an older client skips the
+    /// message.
     Repository,
 }
 

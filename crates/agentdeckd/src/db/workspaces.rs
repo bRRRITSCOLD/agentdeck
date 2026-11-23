@@ -2,10 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
-use agentdeck_core::WorkspaceId;
+use agentdeck_core::{RepositoryId, WorkspaceId};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use super::{DbError, new_id, now, text};
+use super::{DbError, new_id, now, repositories, text};
 use crate::model::{Workspace, WorkspacePatch};
 
 const COLUMNS: &str = "id, slug, name, dir, dir_owned, muted, archived_at, created_at";
@@ -152,12 +152,20 @@ pub fn set_archived(
     get(conn, id)
 }
 
-/// Deletes the row. Its tabs, panes and instructions go with it; its tasks move to the inbox.
-pub fn delete(conn: &Connection, id: WorkspaceId) -> Result<(), DbError> {
-    match conn.execute("DELETE FROM workspaces WHERE id = ?1", [id.to_string()])? {
-        0 => Err(DbError::NotFound("workspace")),
-        _ => Ok(()),
+/// Deletes the row. Its tabs, panes, instructions and Links go with it, and so does each
+/// Repository it linked that nothing else names now (spec §3); its tasks move to the inbox.
+/// Returns the Repositories it linked.
+pub fn delete(conn: &mut Connection, id: WorkspaceId) -> Result<Vec<RepositoryId>, DbError> {
+    let tx = conn.transaction()?;
+    let linked = repositories::linked_by(&tx, id)?;
+    if tx.execute("DELETE FROM workspaces WHERE id = ?1", [id.to_string()])? == 0 {
+        return Err(DbError::NotFound("workspace"));
     }
+    for repository in &linked {
+        repositories::forget_if_unreferenced(&tx, *repository)?;
+    }
+    tx.commit()?;
+    Ok(linked)
 }
 
 /// A slug from a name: lowercase ASCII letters and digits, with every other run of

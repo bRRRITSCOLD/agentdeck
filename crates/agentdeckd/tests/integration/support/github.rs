@@ -15,6 +15,76 @@ use serde_json::{Value, json};
 /// A GraphQL endpoint nothing listens on, for daemons that aren't testing PR sync.
 pub const UNREACHABLE: &str = "http://127.0.0.1:9/graphql";
 
+/// The REST API's base URL on the server whose GraphQL endpoint is `graphql`: the same
+/// server, so one httpmock answers both.
+pub fn rest_api(graphql: &str) -> &str {
+    graphql.strip_suffix("/graphql").unwrap_or(graphql)
+}
+
+/// A Repository as the REST API's `GET /repos/{owner}/{repo}` answers it.
+#[derive(Clone, Copy)]
+pub struct RestRepo {
+    /// `owner/name`, as GitHub calls it now.
+    pub name: &'static str,
+    /// GitHub's id for it.
+    pub id: u64,
+    pub private: bool,
+}
+
+impl RestRepo {
+    /// Public `name`, with the id [`repository_id`] gives it, as a PR of it carries.
+    pub fn new(name: &'static str) -> RestRepo {
+        RestRepo {
+            name,
+            id: repository_id(name),
+            private: false,
+        }
+    }
+
+    pub fn url(&self) -> String {
+        format!("https://github.com/{}", self.name)
+    }
+}
+
+/// `GET /repos/{owner}/{repo}` for `asked` (as typed) with `token`, answered with `repo`: the
+/// same Repository, or the one GitHub renamed it to.
+pub fn mock_rest_repo<'a>(
+    server: &'a MockServer,
+    token: &str,
+    asked: &str,
+    repo: RestRepo,
+) -> Mock<'a> {
+    server.mock(|when, then| {
+        when.method(GET)
+            .path(format!("/repos/{asked}"))
+            .header("authorization", format!("Bearer {token}"))
+            .header("x-github-api-version", "2022-11-28");
+        then.status(200).json_body(json!({
+            "id": repo.id,
+            "node_id": "R_kgDOtest",
+            "name": repo.name.split_once('/').expect("owner/name").1,
+            "full_name": repo.name,
+            "html_url": repo.url(),
+            "private": repo.private,
+            "archived": false,
+            "default_branch": "main"
+        }));
+    })
+}
+
+/// `GET /repos/{owner}/{repo}` for `asked`, answered 404 as GitHub answers for a Repository
+/// that doesn't exist or that the token can't see.
+pub fn mock_rest_repo_missing<'a>(server: &'a MockServer, asked: &str) -> Mock<'a> {
+    server.mock(|when, then| {
+        when.method(GET).path(format!("/repos/{asked}"));
+        then.status(404).json_body(json!({
+            "message": "Not Found",
+            "documentation_url": "https://docs.github.com/rest/repos/repos#get-a-repository",
+            "status": "404"
+        }));
+    })
+}
+
 /// The stub `gh auth token`: prints `<root>/gh-token`, or fails as a logged-out `gh` does.
 const STUB_GH: &str = r#"#!/bin/sh
 [ "$1 $2" = "auth token" ] || { echo "stub gh: unsupported: $*" >&2; exit 2; }

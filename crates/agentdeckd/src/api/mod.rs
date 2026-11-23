@@ -10,6 +10,7 @@ mod health;
 mod instructions;
 mod panes;
 mod prs;
+mod repositories;
 mod settings;
 mod tabs;
 mod tasks;
@@ -22,8 +23,8 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use dropshot::{
-    ApiDescription, ApiEndpointBodyContentType, ClientErrorStatusCode, ExtensionMode,
-    ExtractorMetadata, HttpError, RequestContext, ServerContext, SharedExtractor,
+    ApiDescription, ApiEndpointBodyContentType, ClientErrorStatusCode, ErrorStatusCode,
+    ExtensionMode, ExtractorMetadata, HttpError, RequestContext, ServerContext, SharedExtractor,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -34,6 +35,7 @@ use crate::db::{Db, DbError};
 use crate::events::Events;
 use crate::github_auth::GithubAuth;
 use crate::prsync::PrSync;
+use crate::prsync::github::Github;
 use crate::terminal::Terminals;
 
 /// The version `openapi.json` declares: the API is `/v1`.
@@ -51,8 +53,10 @@ pub struct ApiContext {
     pub scratch_root: PathBuf,
     /// PR sync, for `/v1/prs`.
     pub prs: PrSync,
-    /// The GitHub credentials, for `/v1/github`.
+    /// The GitHub credentials, for `/v1/github`, and for reading Repositories from GitHub.
     pub github: GithubAuth,
+    /// GitHub's APIs, for reading a Repository by name.
+    pub github_api: Github,
     /// The settings in `config.toml`, for `/v1/settings`.
     pub settings: Config,
     /// The live panes.
@@ -97,6 +101,10 @@ pub fn api() -> ApiDescription<ApiContext> {
         api.register(prs::prs_sync),
         api.register(prs::prs_status),
         api.register(prs::prs_close),
+        api.register(repositories::repository_list),
+        api.register(repositories::repository_resolve),
+        api.register(repositories::link_create),
+        api.register(repositories::link_delete),
         api.register(github::github_auth_get),
         api.register(github::github_token_put),
         api.register(github::github_token_delete),
@@ -192,6 +200,18 @@ pub(crate) fn client_error(
     HttpError::for_client_error(Some(code.to_owned()), status, message)
 }
 
+/// A 5xx with a `code` and a message the client shows: a third party or a system service
+/// failed.
+pub(crate) fn server_error(status: ErrorStatusCode, code: &str, message: String) -> HttpError {
+    HttpError {
+        status_code: status,
+        error_code: Some(code.to_owned()),
+        external_message: message.clone(),
+        internal_message: message,
+        headers: None,
+    }
+}
+
 impl From<DbError> for HttpError {
     fn from(err: DbError) -> Self {
         let message = err.to_string();
@@ -236,7 +256,7 @@ mod tests {
         /// `openapi.json`'s fingerprint when [`agentdeck_core::API_VERSION`] was last set,
         /// and that version. Clients tell an older daemon by its API version, so a route or
         /// field added without a bump would go unnoticed: they would call it and get a 404.
-        const FINGERPRINT_AT_API_VERSION: (u64, u32) = (0x9e7c_bb42_09eb_1c84, 18);
+        const FINGERPRINT_AT_API_VERSION: (u64, u32) = (0x8ad0_9445_190a_f249, 19);
 
         /// FNV-1a: stable across Rust releases, unlike `DefaultHasher`.
         fn fingerprint(text: &str) -> u64 {

@@ -6,11 +6,11 @@ use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
 
 use agentdeck_client::types::{
-    InputWhen, InstructionPatch, NewComment, NewInstruction, NewTask, NewWorkspace, PaneInput,
-    PrClose, TaskPatch,
+    InputWhen, InstructionPatch, NewComment, NewInstruction, NewLink, NewTask, NewWorkspace,
+    PaneInput, PrClose, TaskPatch,
 };
 use agentdeck_client::{Client, panes};
-use agentdeck_core::{Layout, PaneId, PrRef, TaskId, TaskPlace, WorkspaceId};
+use agentdeck_core::{Layout, PaneId, PrRef, RepositoryName, TaskId, TaskPlace, WorkspaceId};
 use anyhow::Context;
 use futures_util::TryStreamExt;
 use serde::Serialize;
@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 
 use crate::cli::{
     AgentCommand, Command, CommentCommand, ConfigCommand, InstructionCommand, PrCommand,
-    TaskCommand, WsCommand,
+    RepoCommand, TaskCommand, WsCommand,
 };
 use crate::resolve::IdRef;
 use crate::{launch, render, resolve};
@@ -58,6 +58,7 @@ pub async fn run(client: &Client, command: Command) -> anyhow::Result<Output> {
         Command::Comment(command) => comment(client, command).await,
         Command::Instruction(command) => instruction(client, command).await,
         Command::Agent(command) => agent(client, command).await,
+        Command::Repo(command) => repo(client, command).await,
         Command::Pr(command) => pr(client, command).await,
         Command::Config(command) => config(client, command).await,
         Command::Tail { pane, bytes } => tail(client, pane_id(client, &pane).await?, bytes).await,
@@ -589,12 +590,75 @@ async fn agent(client: &Client, command: AgentCommand) -> anyhow::Result<Output>
     }
 }
 
+async fn repo(client: &Client, command: RepoCommand) -> anyhow::Result<Output> {
+    match command {
+        RepoCommand::Ls { ws } => {
+            let workspaces = client
+                .workspace_list()
+                .send()
+                .await
+                .map_err(ApiError::from)?
+                .into_inner();
+            let mut request = client.repository_list();
+            if let Some(ws) = ws {
+                request = request.workspace(resolve::workspace(&workspaces, &ws)?);
+            }
+            let list = request.send().await.map_err(ApiError::from)?;
+            Output::new(&*list, render::repositories(&list, &workspaces))
+        }
+        RepoCommand::Link { repo, ws } => {
+            let id = workspace_id(client, &ws).await?;
+            let linked = client
+                .link_create()
+                .id(id)
+                .body(NewLink { repository: repo })
+                .send()
+                .await
+                .map_err(ApiError::from)?;
+            Output::new(&*linked, format!("linked {} to {ws}\n", linked.name))
+        }
+        RepoCommand::Unlink { repo, ws } => {
+            let id = workspace_id(client, &ws).await?;
+            let linked = client
+                .repository_list()
+                .workspace(id)
+                .send()
+                .await
+                .map_err(ApiError::from)?
+                .into_inner();
+            let Some(repository) = linked.iter().find(|linked| same_name(&linked.name, &repo))
+            else {
+                anyhow::bail!("{repo} isn't linked to {ws} (not_found)");
+            };
+            client
+                .link_delete()
+                .id(id)
+                .repository(repository.id)
+                .send()
+                .await
+                .map_err(ApiError::from)?;
+            Output::new(
+                &json!({ "workspace_id": id, "repository_id": repository.id, "unlinked": true }),
+                format!("unlinked {} from {ws}\n", repository.name),
+            )
+        }
+    }
+}
+
+/// Whether two Repository names are the same, ignoring case as GitHub does.
+fn same_name(a: &RepositoryName, b: &RepositoryName) -> bool {
+    a.to_string().eq_ignore_ascii_case(&b.to_string())
+}
+
 async fn pr(client: &Client, command: PrCommand) -> anyhow::Result<Output> {
     let status = match command {
-        PrCommand::Ls { repo } => {
+        PrCommand::Ls { repo, ws } => {
             let mut request = client.pr_list();
             if let Some(repo) = repo {
                 request = request.repository(repo);
+            }
+            if let Some(ws) = ws {
+                request = request.workspace(workspace_id(client, &ws).await?);
             }
             let prs = request.send().await.map_err(ApiError::from)?;
             return Output::new(&*prs, render::pull_requests(&prs));
