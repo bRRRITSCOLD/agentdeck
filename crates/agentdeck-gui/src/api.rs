@@ -10,7 +10,9 @@ use agentdeck_client::types::{
 };
 pub use agentdeck_client::workspaces::Change;
 use agentdeck_client::{ApiError, Client};
-use agentdeck_core::{PaneId, PrRef, RepositoryName, SplitDirection, TabId, WorkspaceId};
+use agentdeck_core::{
+    PaneId, PrRef, RepositoryId, RepositoryName, SplitDirection, TabId, WorkspaceId,
+};
 use gpui::{App, Task};
 
 use crate::new_agent::{Launch, Launched};
@@ -95,6 +97,26 @@ pub trait Api: Send + Sync {
         name: RepositoryName,
         cx: &App,
     ) -> Task<anyhow::Result<Repository>>;
+
+    /// Links `workspace` to `repository` by GitHub's id, as the view holds it (spec §4): the
+    /// Repository the daemon keeps with that id, or, when an unlink took it meanwhile, one
+    /// stored again from `repository` without asking GitHub, so Undo works signed out.
+    fn link_repository(
+        &self,
+        workspace: WorkspaceId,
+        repository: Repository,
+        cx: &App,
+    ) -> Task<anyhow::Result<()>>;
+
+    /// Unlinks `workspace` from Repository `repository`; the daemon deletes the Repository once
+    /// nothing names it (spec §3). A refusal is an [`ApiError`]; `not_found` means the
+    /// Workspace doesn't link it.
+    fn unlink_repository(
+        &self,
+        workspace: WorkspaceId,
+        repository: RepositoryId,
+        cx: &App,
+    ) -> Task<anyhow::Result<()>>;
 
     /// Mutes `workspace`'s notifications, or unmutes them.
     fn set_muted(&self, workspace: WorkspaceId, muted: bool, cx: &App) -> Task<anyhow::Result<()>>;
@@ -288,6 +310,32 @@ impl Api for Daemon {
         let client = self.client.clone();
         runtime::spawn(cx, async move {
             Ok(agentdeck_client::repositories::resolve(&client, &name).await?)
+        })
+    }
+
+    fn link_repository(
+        &self,
+        workspace: WorkspaceId,
+        repository: Repository,
+        cx: &App,
+    ) -> Task<anyhow::Result<()>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            agentdeck_client::repositories::link(&client, workspace, &repository).await?;
+            Ok(())
+        })
+    }
+
+    fn unlink_repository(
+        &self,
+        workspace: WorkspaceId,
+        repository: RepositoryId,
+        cx: &App,
+    ) -> Task<anyhow::Result<()>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            agentdeck_client::repositories::unlink(&client, workspace, repository).await?;
+            Ok(())
         })
     }
 
@@ -496,6 +544,15 @@ pub(crate) mod fake {
         }
     }
 
+    /// The daemon's `not_found` refusal, saying `message`.
+    fn not_found(message: &str) -> anyhow::Error {
+        ApiError {
+            message: message.to_owned(),
+            code: Some("not_found".into()),
+        }
+        .into()
+    }
+
     /// Answers every read with what it holds now, and counts the snapshot reads. Writes
     /// change what it holds, as the daemon would, but broadcast nothing.
     #[derive(Default)]
@@ -532,6 +589,10 @@ pub(crate) mod fake {
         pub muted: Mutex<Vec<(WorkspaceId, bool)>>,
         /// The edits asked for: the workspace and what to change, in order.
         pub edits: Mutex<Vec<(WorkspaceId, Change)>>,
+        /// The links asked for by GitHub's id: the workspace and the Repository, in order.
+        pub links: Mutex<Vec<(WorkspaceId, Repository)>>,
+        /// The unlinks asked for: the workspace and the Repository, in order.
+        pub unlinks: Mutex<Vec<(WorkspaceId, agentdeck_core::RepositoryId)>>,
         /// The Repositories GitHub shows, by `owner/name` in lower case: what a typed name
         /// resolves to and what linking a Repository the snapshot doesn't hold finds.
         github_repositories: Mutex<HashMap<String, Repository>>,
@@ -1082,6 +1143,60 @@ pub(crate) mod fake {
                 return Task::ready(Err(err));
             }
             Task::ready(self.github(&name))
+        }
+
+        fn link_repository(
+            &self,
+            workspace: WorkspaceId,
+            repository: Repository,
+            _cx: &App,
+        ) -> Task<anyhow::Result<()>> {
+            self.links
+                .lock()
+                .unwrap()
+                .push((workspace, repository.clone()));
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            let mut snapshot = self.snapshot.lock().unwrap();
+            if !snapshot.workspaces.iter().any(|w| w.id == workspace) {
+                return Task::ready(Err(not_found("workspace not found")));
+            }
+            if !(snapshot.repositories.iter()).any(|r| r.id == repository.id) {
+                snapshot.repositories.push(RepositoryLinks {
+                    id: repository.id,
+                    name: repository.name,
+                    url: repository.url,
+                    private: repository.private,
+                    archived: repository.archived,
+                    unreachable: false,
+                    workspaces: Vec::new(),
+                });
+                (snapshot.repositories).sort_by_key(|r| r.name.to_string().to_lowercase());
+            }
+            let held = (snapshot.repositories.iter_mut()).find(|r| r.id == repository.id);
+            if let Some(held) = held.filter(|r| !r.workspaces.contains(&workspace)) {
+                held.workspaces.push(workspace);
+            }
+            Task::ready(Ok(()))
+        }
+
+        fn unlink_repository(
+            &self,
+            workspace: WorkspaceId,
+            repository: agentdeck_core::RepositoryId,
+            _cx: &App,
+        ) -> Task<anyhow::Result<()>> {
+            self.unlinks.lock().unwrap().push((workspace, repository));
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            let linked = (self.snapshot.lock().unwrap().repositories.iter())
+                .any(|r| r.id == repository && r.workspaces.contains(&workspace));
+            if !linked {
+                return Task::ready(Err(not_found("link not found")));
+            }
+            Task::ready(self.relink(workspace, &[], &[repository]))
         }
 
         fn set_muted(

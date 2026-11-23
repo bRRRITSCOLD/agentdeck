@@ -172,6 +172,24 @@ pub fn store_and_link(
     Ok(linked)
 }
 
+/// Links Workspace `workspace` to Repository `held.id`: the one stored with that id, as it is,
+/// or, when none is, `held` stored as the client holds it. One transaction. A Workspace that
+/// doesn't exist is [`DbError::NotFound`], and nothing is stored.
+pub fn link_held(
+    conn: &mut Connection,
+    workspace: WorkspaceId,
+    held: &RemoteRepository,
+) -> Result<Linked, DbError> {
+    let tx = conn.transaction()?;
+    if !super::exists(&tx, "workspaces", workspace)? {
+        return Err(DbError::NotFound("workspace"));
+    }
+    let stored = !is_known(&tx, held.id)? && store(&tx, held)?;
+    let linked = insert_link(&tx, workspace, held.id, stored)?;
+    tx.commit()?;
+    Ok(linked)
+}
+
 /// Adds the Link, unless it's there; `changed` is whether it was added or `stored` is.
 fn insert_link(
     conn: &Connection,

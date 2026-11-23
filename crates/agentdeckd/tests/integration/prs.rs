@@ -1503,9 +1503,7 @@ mod get_v1_prs {
             .client
             .link_create()
             .id(web.id)
-            .body(NewLink {
-                repository: "acme/gadgets".parse().unwrap(),
-            })
+            .body(NewLink::named("acme/gadgets".parse().unwrap()))
             .send()
             .await
             .expect("link");
@@ -2333,9 +2331,9 @@ mod finished {
             .into_inner();
         (daemon.client.link_create())
             .id(web.id)
-            .body(NewLink {
-                repository: "acme/widgets".parse().expect("a Repository"),
-            })
+            .body(NewLink::named(
+                "acme/widgets".parse().expect("a Repository"),
+            ))
             .send()
             .await
             .expect("link");

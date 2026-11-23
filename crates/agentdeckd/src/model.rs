@@ -192,12 +192,28 @@ pub struct RepositoryFilter {
     pub workspace: Option<WorkspaceId>,
 }
 
-/// `POST /v1/workspaces/{id}/links`: the Repository to link.
+/// `POST /v1/workspaces/{id}/links`: the Repository to link, by name, or by GitHub's id with
+/// what the client holds of it.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct NewLink {
-    /// The Repository's `owner/name` (or its GitHub URL). One agentdeck doesn't know by that
-    /// name is looked up on GitHub first.
+    /// The Repository's `owner/name` (or its GitHub URL). Without `id`, one agentdeck doesn't
+    /// know by that name is looked up on GitHub first.
     pub repository: RepositoryName,
+    /// GitHub's id for it, as the client last read it (Undo after an unlink sends it). The
+    /// Repository agentdeck keeps with this id is linked, whatever its name now; one it no
+    /// longer keeps is stored again from `repository`, `url`, `private` and `archived`,
+    /// without asking GitHub, so this works signed out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<RepositoryId>,
+    /// Its GitHub page, with `id`; `https://github.com/<repository>` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Whether it is private, with `id`; false when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private: Option<bool>,
+    /// Whether it is archived on GitHub, with `id`; false when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
 }
 
 /// Whether the daemon has a GitHub token GitHub accepts (spec §8).

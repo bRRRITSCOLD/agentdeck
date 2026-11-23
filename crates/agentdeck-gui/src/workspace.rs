@@ -4,8 +4,8 @@
 //! tab's split tree, a [`PaneView`] at each leaf; or its Pull requests (Penpot "Workspace ·
 //! Pull requests"), a [`PullRequestsView`] over the Repositories it links. Each workspace opens
 //! on the side it showed last, remembered in the GUI's own state ([`gui_state`]); a new one
-//! opens on its Panes. Its Pull requests' asks, to open another Workspace's Pull requests or
-//! Settings, go on to the window.
+//! opens on its Panes. Its Pull requests' asks, to open another Workspace's Pull requests,
+//! Settings or New workspace with a Repository picked, go on to the window.
 //!
 //! It reads the workspace's tabs and panes when it opens and again whenever the daemon reports
 //! a tab or pane `changed`. Each shown pane keeps its view, and so its
@@ -54,6 +54,7 @@ use gpui_base::actions::Confirm;
 
 use crate::api::{Api, PaneAt, Split, WorkspacePanes};
 use crate::connection::{Connection, DaemonEvent};
+use crate::group_menu::NewWorkspaceLinking;
 use crate::gui_state::{self, Side};
 use crate::keymap::{
     self, ClosePane, NewTab, NextPane, NextTab, PreviousPane, PreviousTab, SelectTab, SplitDown,
@@ -126,11 +127,12 @@ pub struct WorkspaceView {
     pull_requests: Entity<PullRequestsView>,
     _events: Subscription,
     /// Passes its Pull requests' asks on to the window.
-    _pull_requests: [Subscription; 2],
+    _pull_requests: [Subscription; 3],
 }
 
 impl EventEmitter<OpenWorkspace> for WorkspaceView {}
 impl EventEmitter<OpenSettings> for WorkspaceView {}
+impl EventEmitter<NewWorkspaceLinking> for WorkspaceView {}
 
 impl WorkspaceView {
     /// `workspace`, headed by `top_bar`, read through `api` and attached over `connection`'s
@@ -167,6 +169,9 @@ impl WorkspaceView {
                 cx.emit(*ask)
             }),
             cx.subscribe(&pull_requests, |_, _, ask: &OpenSettings, cx| cx.emit(*ask)),
+            cx.subscribe(&pull_requests, |_, _, ask: &NewWorkspaceLinking, cx| {
+                cx.emit(ask.clone());
+            }),
         ];
         let mut view = WorkspaceView {
             workspace,

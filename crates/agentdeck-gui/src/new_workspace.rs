@@ -25,7 +25,7 @@ use gpui::{
 use gpui_base::input::InputEvent;
 
 use crate::api::Api;
-use crate::link_picker::{LinkPicker, Offer};
+use crate::link_picker::{Choice, LinkPicker, Offer};
 use crate::workspace::failed;
 
 /// The dialog's description, under its title.
@@ -92,6 +92,20 @@ impl NewWorkspaceDialog {
         self.handle.open(window, cx);
         self.focus_name = true;
         cx.notify();
+    }
+
+    /// Opens it as [`open`](Self::open) does, with `picked` already in its Repositories, to
+    /// link: a Repository group's New workspace.
+    pub fn open_linking(
+        &mut self,
+        offer: Offer,
+        picked: Choice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open(offer, window, cx);
+        self.picker
+            .update(cx, |picker, cx| picker.pick(picked, window, cx));
     }
 
     /// Whether it is open.

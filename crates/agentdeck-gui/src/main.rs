@@ -11,6 +11,7 @@ mod delete_workspace;
 mod edit_workspace;
 mod frame;
 mod github;
+mod group_menu;
 mod gui_state;
 mod keymap;
 mod link_picker;
