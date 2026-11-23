@@ -69,9 +69,9 @@ use crate::gui_state;
 use crate::open_pr;
 use crate::overview::Snapshot;
 use crate::pr_table::{self, Linker};
-use crate::top_bar::EditWorkspace;
 use crate::sync_parts::{self, OpenSettings, SETTINGS_TAIL, cutoff, logged_out_title};
 use crate::table::{self, Header, RowParts, SelectCell};
+use crate::top_bar::EditWorkspace;
 use crate::workspace::failed;
 
 /// How often "Synced N min ago" is redrawn.
@@ -259,7 +259,12 @@ pub fn groups(
     }
     groups.sort_by_key(|g| {
         let unlinked = g.workspaces.is_empty();
-        (unlinked, g.label.to_lowercase(), g.name.to_lowercase(), g.repository)
+        (
+            unlinked,
+            g.label.to_lowercase(),
+            g.name.to_lowercase(),
+            g.repository,
+        )
     });
     groups
 }
@@ -748,10 +753,9 @@ impl PullRequestsView {
             })
             .map(|header| match self.scope {
                 Scope::All => header.children(self.sync_controls(cx)),
-                Scope::Workspace(_) if linked => header.child(edit_workspace(
-                    "edit workspace",
-                    "Edit workspace",
-                )),
+                Scope::Workspace(_) if linked => {
+                    header.child(edit_workspace("edit workspace", "Edit workspace"))
+                }
                 Scope::Workspace(_) => {
                     header.child(edit_workspace("link repository", "Link repository"))
                 }
@@ -791,20 +795,20 @@ impl PullRequestsView {
 fn show_finished_switch(finished: bool, cx: &mut Context<PullRequestsView>) -> impl IntoElement {
     let toggle = cx.listener(|this, checked: &bool, _, cx| this.set_show_finished(*checked, cx));
     div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(space::S2)
-                    .child(
-                        div().debug_selector(|| "show finished".into()).child(
-                            Switch::new("show-finished")
-                                .checked(finished)
-                                .accessibility_label("Show finished")
-                                .on_change(move |checked, window, cx| {
-                                    toggle(&checked, window, cx);
-                                }),
-                        ),
-                    )
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(space::S2)
+        .child(
+            div().debug_selector(|| "show finished".into()).child(
+                Switch::new("show-finished")
+                    .checked(finished)
+                    .accessibility_label("Show finished")
+                    .on_change(move |checked, window, cx| {
+                        toggle(&checked, window, cx);
+                    }),
+            ),
+        )
         .child(Label::new().child("Show finished").whitespace_nowrap())
 }
 
@@ -1244,7 +1248,11 @@ mod tests {
         use super::*;
 
         fn linkers(group: &Group) -> Vec<String> {
-            group.workspaces.iter().map(|w| w.name.to_string()).collect()
+            group
+                .workspaces
+                .iter()
+                .map(|w| w.name.to_string())
+                .collect()
         }
 
         #[test]
@@ -1294,7 +1302,10 @@ mod tests {
             let header = bounds("group acme/widgets".into(), cx);
             let a = bounds("workspace link acme/widgets a".into(), cx);
             let b = bounds("workspace link acme/widgets b".into(), cx);
-            assert!(a.left() > header.right() && b.left() > a.right(), "{a:?} {b:?}");
+            assert!(
+                a.left() > header.right() && b.left() > a.right(),
+                "{a:?} {b:?}"
+            );
             assert!(shows("group workspaces acme/gadgets".into(), cx));
             assert!(!shows("workspace link acme/gadgets old".into(), cx));
         }
@@ -1306,7 +1317,10 @@ mod tests {
             click("workspace link acme/widgets b".into(), cx);
 
             assert_eq!(*harness.opened.borrow(), [id(2)]);
-            assert!(shows("pr acme/widgets#3".into(), cx), "the group stays open");
+            assert!(
+                shows("pr acme/widgets#3".into(), cx),
+                "the group stays open"
+            );
         }
 
         #[gpui::test]
@@ -1364,9 +1378,16 @@ mod tests {
         fn should_head_it_with_select_show_finished_and_edit_workspace(cx: &mut TestAppContext) {
             let (_harness, cx) = Harness::open_in(a(), linked(), cx);
 
-            let tops = ["workspace-pull-requests select", "show finished", "edit workspace"]
-                .map(|selector| bounds(selector.into(), cx));
-            assert!(tops.windows(2).all(|w| w[0].right() <= w[1].left()), "{tops:?}");
+            let tops = [
+                "workspace-pull-requests select",
+                "show finished",
+                "edit workspace",
+            ]
+            .map(|selector| bounds(selector.into(), cx));
+            assert!(
+                tops.windows(2).all(|w| w[0].right() <= w[1].left()),
+                "{tops:?}"
+            );
             assert!(!shows("sync now".into(), cx));
             assert!(!shows("pull requests synced".into(), cx));
         }
@@ -1404,7 +1425,9 @@ mod tests {
             click("pr title acme/widgets#3".into(), cx);
 
             let picked = harness.view.read_with(cx, |view, cx| {
-                view.close_prs().read(cx).picked(PrKey::of(&linked().prs[2]))
+                view.close_prs()
+                    .read(cx)
+                    .picked(PrKey::of(&linked().prs[2]))
             });
             assert!(picked);
         }
@@ -1537,7 +1560,10 @@ mod tests {
             };
 
             assert_eq!(numbers(groups(&of(&prs), Scope::All, false, None)), [1]);
-            assert_eq!(numbers(groups(&of(&prs), Scope::All, true, None)), [3, 1, 2, 5]);
+            assert_eq!(
+                numbers(groups(&of(&prs), Scope::All, true, None)),
+                [3, 1, 2, 5]
+            );
         }
 
         #[test]

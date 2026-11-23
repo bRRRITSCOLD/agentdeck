@@ -1,10 +1,11 @@
 //! The selected workspace (spec §11), Penpot "Main window" `Centre`: its [`TopBar`], then one
-//! of its two sides, switched in the top bar or with `secondary-shift-p` ([`ToggleSide`]): its
-//! Panes, a row of tabs over the selected tab's split tree, a [`PaneView`] at each leaf; or its
-//! Pull requests (Penpot "Workspace · Pull requests"), a [`PullRequestsView`] over the
-//! Repositories it links. Each workspace opens on the side it showed last, remembered in the
-//! GUI's own state ([`gui_state`]); a new one opens on its Panes. Its Pull requests' asks, to
-//! open another Workspace's Pull requests or Settings, go on to the window.
+//! of its two sides, switched in the top bar or with `secondary-shift-p`
+//! ([`ToggleSide`](crate::keymap::ToggleSide)): its Panes, a row of tabs over the selected
+//! tab's split tree, a [`PaneView`] at each leaf; or its Pull requests (Penpot "Workspace ·
+//! Pull requests"), a [`PullRequestsView`] over the Repositories it links. Each workspace opens
+//! on the side it showed last, remembered in the GUI's own state ([`gui_state`]); a new one
+//! opens on its Panes. Its Pull requests' asks, to open another Workspace's Pull requests or
+//! Settings, go on to the window.
 //!
 //! It reads the workspace's tabs and panes when it opens and again whenever the daemon reports
 //! a tab or pane `changed`. Each shown pane keeps its view, and so its
@@ -46,8 +47,8 @@ use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Div, Entity, EventEmitter, FocusHandle,
-    Focusable as _, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Subscription, Task, Window, div, relative,
+    Focusable as _, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    Styled as _, Subscription, Task, Window, div, relative,
 };
 use gpui_base::actions::Confirm;
 
@@ -58,13 +59,13 @@ use crate::keymap::{
     self, ClosePane, NewTab, NextPane, NextTab, PreviousPane, PreviousTab, SelectTab, SplitDown,
     SplitRight,
 };
-use crate::overview::Snapshot;
-use crate::pull_requests::{OpenWorkspace, PullRequestsView, Scope};
-use crate::sync_parts::OpenSettings;
 use crate::new_agent::{agent_name, home_folder};
 use crate::notice::Notice;
+use crate::overview::Snapshot;
 use crate::pane::{PaneRequest, PaneView};
+use crate::pull_requests::{OpenWorkspace, PullRequestsView, Scope};
 use crate::rereads::Rereads;
+use crate::sync_parts::OpenSettings;
 use crate::top_bar::TopBar;
 
 /// Where the read stands.
@@ -162,7 +163,9 @@ impl WorkspaceView {
         let pull_requests =
             cx.new(|cx| PullRequestsView::new(api.clone(), Scope::Workspace(workspace), cx));
         let asks = [
-            cx.subscribe(&pull_requests, |_, _, ask: &OpenWorkspace, cx| cx.emit(*ask)),
+            cx.subscribe(&pull_requests, |_, _, ask: &OpenWorkspace, cx| {
+                cx.emit(*ask)
+            }),
             cx.subscribe(&pull_requests, |_, _, ask: &OpenSettings, cx| cx.emit(*ask)),
         ];
         let mut view = WorkspaceView {
@@ -203,6 +206,7 @@ impl WorkspaceView {
     }
 
     /// The side it shows.
+    #[cfg(test)]
     pub fn side(&self) -> Side {
         self.side
     }
@@ -221,7 +225,8 @@ impl WorkspaceView {
             Side::PullRequests => window.focus(&self.focus, cx),
             Side::Panes => {
                 let shown = self.shown();
-                let last = (self.last_focused).and_then(|id| shown.iter().find(|p| p.read(cx).id() == id));
+                let last =
+                    (self.last_focused).and_then(|id| shown.iter().find(|p| p.read(cx).id() == id));
                 match last.or(shown.first()) {
                     Some(pane) => window.focus(&pane.focus_handle(cx), cx),
                     None => window.focus(&self.focus, cx),

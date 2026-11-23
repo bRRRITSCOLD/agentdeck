@@ -180,22 +180,25 @@ fn switch(side: Side, prs: usize) -> impl IntoElement {
                 }
             })
     };
-    div().flex_none().debug_selector(|| "side switch".into()).child(
-        ToggleGroup::new("side-switch")
-            .spacing(ToggleGroupSpacing::One)
-            .item(item(
-                "side-panes",
-                "Panes".to_owned(),
-                Side::Panes,
-                Box::new(ShowPanes),
-            ))
-            .item(item(
-                "side-pull-requests",
-                pull_requests_label(prs),
-                Side::PullRequests,
-                Box::new(ShowPullRequests),
-            )),
-    )
+    div()
+        .flex_none()
+        .debug_selector(|| "side switch".into())
+        .child(
+            ToggleGroup::new("side-switch")
+                .spacing(ToggleGroupSpacing::One)
+                .item(item(
+                    "side-panes",
+                    "Panes".to_owned(),
+                    Side::Panes,
+                    Box::new(ShowPanes),
+                ))
+                .item(item(
+                    "side-pull-requests",
+                    pull_requests_label(prs),
+                    Side::PullRequests,
+                    Box::new(ShowPullRequests),
+                )),
+        )
 }
 
 /// An outline sm button reading `label` that dispatches `action`; tests find it as `name`.
@@ -284,6 +287,33 @@ mod tests {
                 (name.center().y - bar.center().y).abs() <= px(0.5),
                 "name {name:?} in bar {bar:?}"
             );
+        }
+
+        #[gpui::test]
+        fn should_put_the_side_switch_after_the_name(cx: &mut TestAppContext) {
+            cx.update(brrritscold_core_gpui::init);
+            let bar = TopBar::new("agentdeck").prs(3).side(Side::PullRequests);
+            let window = cx.add_window(|_, _| Shows(bar));
+            let cx = VisualTestContext::from_window(*window, cx).into_mut();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+
+            let name = cx.debug_bounds("workspace name").expect("the name");
+            let switch = cx.debug_bounds("side switch").expect("the switch");
+            let new_agent = cx.debug_bounds("new agent").expect("New agent");
+            assert!(name.right() < switch.left() && switch.right() < new_agent.left());
+            assert!((switch.center().y - name.center().y).abs() <= px(0.5));
+        }
+
+        #[gpui::test]
+        fn should_show_no_switch_on_an_archived_workspace(cx: &mut TestAppContext) {
+            cx.update(brrritscold_core_gpui::init);
+            let bar = TopBar::new("old").archived(true).side(Side::Panes);
+            let window = cx.add_window(|_, _| Shows(bar));
+            let cx = VisualTestContext::from_window(*window, cx).into_mut();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+
+            assert!(cx.debug_bounds("side switch").is_none());
+            assert!(cx.debug_bounds("unarchive").is_some());
         }
     }
 }

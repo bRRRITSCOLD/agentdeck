@@ -231,7 +231,9 @@ mod tests {
         #[test]
         fn should_read_each_workspaces_collapsed_groups() {
             let ws = "00000000-0000-7000-8000-000000000001";
-            let state = parse(&format!(r#"{{"collapsed":{{"workspaces":{{"{ws}":[7,9]}}}}}}"#));
+            let state = parse(&format!(
+                r#"{{"collapsed":{{"workspaces":{{"{ws}":[7,9]}}}}}}"#
+            ));
 
             let id: WorkspaceId = ws.parse().unwrap();
             assert_eq!(
@@ -309,7 +311,10 @@ mod tests {
             collapsed.set_workspace(ws, RepositoryId::from(7), true);
 
             assert!(collapsed.pull_requests.is_empty());
-            assert_eq!(collapsed.workspace(ws), BTreeSet::from([RepositoryId::from(7)]));
+            assert_eq!(
+                collapsed.workspace(ws),
+                BTreeSet::from([RepositoryId::from(7)])
+            );
             collapsed.set_workspace(ws, RepositoryId::from(7), false);
             assert_eq!(collapsed, Collapsed::default());
         }

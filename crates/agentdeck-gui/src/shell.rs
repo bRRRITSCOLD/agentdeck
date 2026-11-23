@@ -386,7 +386,8 @@ impl Shell {
                     let api = session.api.clone();
                     let connection = self.connection.clone();
                     let dialog = cx.new(|cx| NewWorkspaceDialog::new(api.clone(), window, cx));
-                    let pull_requests = cx.new(|cx| PullRequestsView::new(api.clone(), Scope::All, cx));
+                    let pull_requests =
+                        cx.new(|cx| PullRequestsView::new(api.clone(), Scope::All, cx));
                     let new_agent = cx.new(|_| NewAgentDialog::new(api.clone()));
                     let edit = cx.new(|cx| EditWorkspaceDialog::new(api.clone(), window, cx));
                     let delete = cx.new(|cx| DeleteWorkspaceDialog::new(api.clone(), window, cx));
@@ -537,7 +538,8 @@ impl Shell {
         let (api, sender) = (session.api.clone(), session.sender.clone());
         let connection = self.connection.clone();
         let view = cx.new(|cx| {
-            let mut view = WorkspaceView::new(selected, top_bar, api, connection, sender, window, cx);
+            let mut view =
+                WorkspaceView::new(selected, top_bar, api, connection, sender, window, cx);
             view.set_snapshot(snapshot, cx);
             view
         });
@@ -553,7 +555,9 @@ impl Shell {
                     shell.open_workspace_prs(*id, window, cx);
                 },
             ),
-            cx.subscribe(&view, |shell, _, _: &OpenSettings, cx| shell.open_settings(cx)),
+            cx.subscribe(&view, |shell, _, _: &OpenSettings, cx| {
+                shell.open_settings(cx)
+            }),
         ];
         self.workspace = Some(view);
         cx.notify();
@@ -1171,6 +1175,36 @@ mod tests {
 
             draw_in_both_themes(connector, cx);
         }
+
+        #[gpui::test]
+        fn should_draw_a_workspaces_pull_requests_in_both_themes(cx: &mut TestAppContext) {
+            use crate::gui_state::{self, Side};
+            use crate::overview::fixtures::{links, pull_request};
+
+            let connector = Rc::new(FakeConnector::default());
+            let api = workspace_with_a_pane();
+            api.set(Snapshot {
+                workspaces: vec![workspace(1, "agentdeck")],
+                repositories: vec![
+                    links("acme/widgets", &[id(1)]),
+                    links("acme/tools", &[id(1)]),
+                ],
+                prs: vec![pull_request(1, "acme/widgets")],
+                ..Snapshot::default()
+            });
+            let _remote = connector.then_connect_to(api);
+            cx.update(|cx| gui_state::update(cx, |s| s.set_side(id(1), Side::PullRequests)));
+
+            draw_in_both_themes(connector, cx);
+        }
+
+        #[gpui::test]
+        fn should_draw_the_sidebar_with_no_workspaces_in_both_themes(cx: &mut TestAppContext) {
+            let connector = Rc::new(FakeConnector::default());
+            let _remote = connector.then_connect_to(Arc::new(FakeApi::with(Snapshot::default())));
+
+            draw_in_both_themes(connector, cx);
+        }
     }
 
     /// A daemon with workspace 1, whose one tab holds pane 7.
@@ -1704,7 +1738,10 @@ mod tests {
             let api = Arc::new(FakeApi::with(Snapshot {
                 workspaces: vec![workspace(1, "agentdeck"), workspace(2, "docs"), old],
                 repositories: vec![links("acme/widgets", &[id(1)])],
-                prs: vec![pull_request(1, "acme/widgets"), pull_request(2, "acme/widgets")],
+                prs: vec![
+                    pull_request(1, "acme/widgets"),
+                    pull_request(2, "acme/widgets"),
+                ],
                 ..Snapshot::default()
             }));
             api.set_tabs(id(1), vec![tab(1, id(1), 0, Some(id(7)))]);
@@ -1766,7 +1803,13 @@ mod tests {
             let (harness, cx) = open(cx);
 
             let prs = harness.shell.read_with(cx, |shell, cx| {
-                shell.workspace.as_ref().unwrap().read(cx).top_bar().open_prs()
+                shell
+                    .workspace
+                    .as_ref()
+                    .unwrap()
+                    .read(cx)
+                    .top_bar()
+                    .open_prs()
             });
             assert_eq!(prs, 2);
             assert_eq!(top_bar::pull_requests_label(2), "Pull requests · 2");
@@ -1830,7 +1873,9 @@ mod tests {
         #[gpui::test]
         fn should_open_a_workspaces_pull_requests_from_a_group_header(cx: &mut TestAppContext) {
             let (harness, cx) = open(cx);
-            let sidebar = harness.shell.read_with(cx, |shell, _| shell.sidebar.clone());
+            let sidebar = harness
+                .shell
+                .read_with(cx, |shell, _| shell.sidebar.clone());
             sidebar.unwrap().update(cx, |sidebar, cx| {
                 sidebar.select(Selection::PullRequests, cx);
             });
@@ -1864,8 +1909,9 @@ mod tests {
 
             click(&harness, "link repository", cx);
 
-            let dialog: Entity<EditWorkspaceDialog> =
-                harness.shell.read_with(cx, |shell, _| shell.edit_workspace.clone().unwrap());
+            let dialog: Entity<EditWorkspaceDialog> = harness
+                .shell
+                .read_with(cx, |shell, _| shell.edit_workspace.clone().unwrap());
             assert!(dialog.read_with(cx, |d, _| d.is_open()));
             assert_eq!(cx.update(|_, cx| dialog.read(cx).name(cx)), "docs");
         }

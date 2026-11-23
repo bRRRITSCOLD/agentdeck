@@ -179,7 +179,8 @@ impl Snapshot {
 
     /// The sidebar's content.
     pub fn overview(&self) -> Overview {
-        let counted = |pr: &&PullRequest| pr.state == PrState::Open && !pr.unreachable && !pr.finished;
+        let counted =
+            |pr: &&PullRequest| pr.state == PrState::Open && !pr.unreachable && !pr.finished;
         let row = |workspace: &Workspace| {
             let archived = workspace.archived_at.is_some();
             let prs = match archived {

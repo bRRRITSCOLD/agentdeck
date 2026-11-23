@@ -893,9 +893,7 @@ mod tests {
         }
 
         #[gpui::test]
-        fn should_count_the_open_prs_of_a_workspaces_linked_repositories(
-            cx: &mut TestAppContext,
-        ) {
+        fn should_count_the_open_prs_of_a_workspaces_linked_repositories(cx: &mut TestAppContext) {
             let mut open = open(linked(), cx);
 
             let counts = (open.sidebar).read_with(open.cx, |s, _| {
@@ -1018,7 +1016,10 @@ mod tests {
                 })
             });
 
-            let header = open.cx.debug_bounds("workspaces header").expect("the header");
+            let header = open
+                .cx
+                .debug_bounds("workspaces header")
+                .expect("the header");
             let hint = open.cx.debug_bounds("no workspaces").expect("the hint");
             assert!(hint.top() >= header.bottom(), "{hint:?} under {header:?}");
             assert_eq!(
