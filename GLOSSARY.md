@@ -40,6 +40,14 @@ _Avoid_: Tab, session
 The tie, made by you, between a Workspace and a Repository. One Repository can be linked to many Workspaces; its Pull requests show in each.
 _Avoid_: Attach, assign, match
 
+**Archived**:
+A Workspace put away until you bring it back. It keeps its Links and Panes, but counts as linking nothing, so its Repositories read Not in a workspace and their Pull requests alert as if linked nowhere.
+_Avoid_: Closed, hidden, deleted
+
+**Muted**:
+A Workspace that doesn't alert you. Its Panes stay quiet, and a Pull request stays quiet only when every Workspace linking its Repository is Muted; Archived Workspaces don't count. Only Workspaces are Muted, never a Repository or a single Pull request.
+_Avoid_: Silenced, snoozed, hidden
+
 **Suggestion**:
 A Repository that one of a Workspace's Panes works in and that the Workspace doesn't link, offered for linking. Nothing is stored except that you said Not now.
 _Avoid_: Detected repo, auto-link, match
