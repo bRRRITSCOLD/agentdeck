@@ -380,6 +380,7 @@ impl TaskSheet {
     }
 
     /// The task shown.
+    #[cfg(test)]
     pub fn task(&self) -> Option<TaskId> {
         self.task
     }

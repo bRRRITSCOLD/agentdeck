@@ -6,7 +6,9 @@
 //! a pure function the views render. Live `state` and `exit` messages patch the snapshot's
 //! pane states in place; anything else that changes is read again.
 
-use agentdeck_client::types::{Instruction, PrSyncStatus, PullRequest, Task, Workspace};
+use agentdeck_client::types::{
+    Instruction, PrSyncStatus, PullRequest, RepositoryLinks, Task, Workspace,
+};
 use agentdeck_core::{
     Agent, AgentState, PaneId, PrState, TaskId, TaskKind, TaskStatus, WorkspaceId,
 };
@@ -46,6 +48,9 @@ pub struct Snapshot {
     pub pr_sync: Option<PrSyncStatus>,
     /// Every pull request PR sync keeps, by Repository name, then number (spec §4).
     pub prs: Vec<PullRequest>,
+    /// Every Repository the daemon keeps, with the Workspaces linking it, archived ones
+    /// included: what the PR alert mute rule reads (spec §11).
+    pub repositories: Vec<RepositoryLinks>,
 }
 
 /// A row's counts; a zero hides its count.
@@ -253,7 +258,8 @@ impl Snapshot {
 #[cfg(test)]
 pub(crate) mod fixtures {
     use agentdeck_client::types::{
-        Comment, Instruction, PrSyncStatus, PullRequest, Repository, Task, TaskPr, Workspace,
+        Comment, Instruction, PrSyncStatus, PullRequest, Repository, RepositoryLinks, Task, TaskPr,
+        Workspace,
     };
     use agentdeck_core::{
         AgentState, CommentAuthor, PaneId, PrRef, PrState, RepositoryId, RepositoryName, TaskId,
@@ -409,6 +415,20 @@ pub(crate) mod fixtures {
             finished: false,
             updated_at: CREATED.into(),
             url: format!("https://github.com/{repo}/pull/{n}"),
+        }
+    }
+
+    /// Repository `repo` (`owner/name`), with the id [`repository_id`] gives it, linked by
+    /// `workspaces`.
+    pub fn links(repo: &str, workspaces: &[WorkspaceId]) -> RepositoryLinks {
+        RepositoryLinks {
+            archived: false,
+            id: repository_id(repo),
+            name: repo.parse().expect("owner/name"),
+            private: false,
+            unreachable: false,
+            url: format!("https://github.com/{repo}"),
+            workspaces: workspaces.to_vec(),
         }
     }
 

@@ -4,12 +4,15 @@
 //! - **Panes:** an agent pane turning `blocked` or `done`, once per change. Whether its tab is
 //!   in view is the window's call, so [`pane_alert`] doesn't know. [`Reattached`] leaves out a
 //!   pane settling back, just after it reattached, into the state it held then.
-//! - **PRs:** a PR task's checks turning `failure`, or a review arriving (`approved`,
-//!   `changes_requested`). [`PrBatch`] holds them while a sync runs, and lets them out as one
-//!   alert per change once it ends, or as one "N PRs changed" when more than 3 PRs changed.
+//! - **PRs:** a PR you authored (its author is the login PR sync runs as) whose checks turn
+//!   `failure`, or whose review turns `approved` or `changes_requested`. [`PrBatch`] holds
+//!   them while a sync runs, and lets them out as one alert per PR once it ends, tagged by the
+//!   PR ([`pr_tag`]), or as one "N PRs changed" when more than 3 PRs changed.
 //!
-//! A muted workspace's panes and PR tasks never alert; an Inbox task has no workspace to mute.
-//! Only what both reads hold can change, so the first read alerts nothing.
+//! A muted workspace's panes never alert. A PR alert is muted only when every unarchived
+//! Workspace linking its Repository is muted; a Repository linked nowhere, or only by archived
+//! Workspaces, always alerts. Only what both reads hold can change, so the first read alerts
+//! nothing.
 //!
 //! The shell shows them through an `agentdeck_notify::Notifier`: the desktop's notification
 //! server over one shared D-Bus connection, or, in the unit tier, `fake::FakeNotifier`.
@@ -17,12 +20,16 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use agentdeck_client::types::Task;
-use agentdeck_core::{AgentState, ChecksState, PaneId, ReviewState, TaskId, WorkspaceId};
+use agentdeck_client::types::PullRequest;
+use agentdeck_core::{
+    AgentState, ChecksState, Linking, PaneId, RepositoryId, ReviewState, WorkspaceId,
+    pr_alerts_muted,
+};
 use agentdeck_notify::Notification;
 use gpui::SharedString;
 
 use crate::overview::{PaneState, Snapshot};
+use crate::pull_requests::PrKey;
 use crate::task_sheet::agent_name;
 
 /// More PRs than this changing in one sync make one alert.
@@ -42,10 +49,10 @@ pub enum Target {
         /// The pane.
         pane: PaneId,
     },
-    /// The task sheet on a task.
-    Task(TaskId),
-    /// The Tasks view, for several PRs at once.
-    Tasks,
+    /// The Pull requests view at a PR's row.
+    Pr(PrKey),
+    /// The Pull requests view, for several PRs at once.
+    PullRequests,
 }
 
 /// A notification to show, and what clicking it shows.
@@ -72,9 +79,9 @@ impl Alert {
     }
 }
 
-/// Whether `workspace`'s notifications are muted; the Inbox (`None`) never is.
-fn muted(snapshot: &Snapshot, workspace: Option<WorkspaceId>) -> bool {
-    workspace.is_some_and(|id| (snapshot.workspaces.iter()).any(|w| w.id == id && w.muted))
+/// Whether `workspace`'s pane notifications are muted.
+fn muted(snapshot: &Snapshot, workspace: WorkspaceId) -> bool {
+    (snapshot.workspaces.iter()).any(|w| w.id == workspace && w.muted)
 }
 
 /// The alert for `pane`, now as `snapshot` holds it, having been `before`: "Claude Code is
@@ -87,7 +94,7 @@ pub fn pane_alert(before: AgentState, pane: &PaneState, snapshot: &Snapshot) -> 
         _ => return None,
     };
     let agent = pane.agent?;
-    if before == pane.state || muted(snapshot, Some(pane.workspace)) {
+    if before == pane.state || muted(snapshot, pane.workspace) {
         return None;
     }
     let workspace = (snapshot.workspaces.iter()).find(|w| w.id == pane.workspace)?;
@@ -151,105 +158,121 @@ impl Reattached {
     }
 }
 
-/// What happened to a PR.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What happened to a PR, most pressing first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum PrEvent {
     ChecksFailed,
-    Approved,
     ChangesRequested,
+    Approved,
 }
 
 impl PrEvent {
     fn title(self) -> &'static str {
         match self {
             PrEvent::ChecksFailed => "Checks failed",
-            PrEvent::Approved => "Approved",
             PrEvent::ChangesRequested => "Changes requested",
+            PrEvent::Approved => "Approved",
         }
     }
 }
 
-/// One PR task's change, waiting for its sync to end.
+/// One PR's change, waiting for its sync to end.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PrChange {
-    task: TaskId,
+    pr: PrKey,
     event: PrEvent,
-    /// `<repo> #<n>`.
-    pr: String,
-    /// The task's title, the PR's.
+    /// `<owner/name> #<n>`.
+    reference: String,
+    /// The PR's title.
     title: String,
 }
 
-/// The changes to the PR tasks both reads hold, outside muted workspaces.
+/// Whether a PR alert for `repository` is muted: only when every unarchived Workspace linking
+/// it is muted (spec §11). A Repository linked nowhere, or only by archived Workspaces, alerts.
+fn pr_muted(snapshot: &Snapshot, repository: RepositoryId) -> bool {
+    let linked = (snapshot.repositories.iter()).find(|r| r.id == repository);
+    let linking = linked.map_or(&[][..], |r| r.workspaces.as_slice());
+    pr_alerts_muted(linking.iter().filter_map(|id| {
+        let workspace = snapshot.workspaces.iter().find(|w| w.id == *id)?;
+        Some(Linking {
+            archived: workspace.archived_at.is_some(),
+            muted: workspace.muted,
+        })
+    }))
+}
+
+/// Whether `pr` is one the signed-in login authored: its author is who the last good sync ran
+/// as (`synced_as`), as GitHub matches logins, ignoring case.
+fn authored(pr: &PullRequest, snapshot: &Snapshot) -> bool {
+    let me = (snapshot.pr_sync.as_ref()).and_then(|status| status.synced_as.as_deref());
+    match (me, pr.author.as_deref()) {
+        (Some(me), Some(author)) => me.eq_ignore_ascii_case(author),
+        _ => false,
+    }
+}
+
+/// The changes to the PRs you authored that both reads hold, unless muted: one per PR, the
+/// most pressing when several happened at once.
 fn pr_changes(before: &Snapshot, after: &Snapshot) -> Vec<PrChange> {
     let mut changes = Vec::new();
-    for task in &after.tasks {
-        let (Some(pr), Some(was)) = (&task.pr, before.tasks.iter().find(|t| t.id == task.id))
-        else {
+    for pr in (after.prs.iter()).filter(|pr| authored(pr, after)) {
+        let key = PrKey::of(pr);
+        let Some(was) = before.prs.iter().find(|was| PrKey::of(was) == key) else {
             continue;
         };
-        if muted(after, task.workspace_id) {
+        if pr_muted(after, pr.repository.id) {
             continue;
         }
-        let was = was.pr.as_ref();
-        let mut push = |event| changes.push(change(task, event));
         let failing = |checks: Option<ChecksState>| checks == Some(ChecksState::Failure);
-        if failing(pr.checks) && !was.is_some_and(|was| failing(was.checks)) {
-            push(PrEvent::ChecksFailed);
-        }
+        let checks = (failing(pr.checks) && !failing(was.checks)).then_some(PrEvent::ChecksFailed);
         let review = match pr.review {
             Some(ReviewState::Approved) => Some(PrEvent::Approved),
             Some(ReviewState::ChangesRequested) => Some(PrEvent::ChangesRequested),
             Some(ReviewState::ReviewRequired) | None => None,
         };
-        if let Some(event) = review
-            && was.is_none_or(|was| was.review != pr.review)
-        {
-            push(event);
+        let review = review.filter(|_| was.review != pr.review);
+        if let Some(event) = checks.into_iter().chain(review).min() {
+            changes.push(PrChange {
+                pr: key,
+                event,
+                reference: format!("{} #{}", pr.repository.name, pr.number),
+                title: pr.title.clone(),
+            });
         }
     }
     changes
 }
 
-/// `task`'s `event`, with what its alert says.
-fn change(task: &Task, event: PrEvent) -> PrChange {
-    let pr =
-        (task.pr.as_ref()).map_or_else(String::new, |pr| format!("{} #{}", pr.repo, pr.number));
-    PrChange {
-        task: task.id,
-        event,
-        pr,
-        title: task.title.clone(),
-    }
-}
-
-/// One alert per change: "Checks failed" over "\<repo> #\<n> · \<title>"; or, when more than 3
-/// PRs changed, one "N PRs changed" over their numbers that opens the Tasks view.
+/// One alert per PR: "Checks failed" over "\<owner/name> #\<n> · \<title>", tagged by the PR;
+/// or, when more than 3 PRs changed, one "N PRs changed" over their references that opens the
+/// Pull requests view.
 fn pr_alerts(changes: Vec<PrChange>) -> Vec<Alert> {
-    let mut prs: Vec<TaskId> = changes.iter().map(|change| change.task).collect();
-    prs.sort();
-    prs.dedup();
-    if prs.len() > COALESCE_OVER {
-        let mut numbers: Vec<&str> = changes.iter().map(|change| change.pr.as_str()).collect();
-        numbers.dedup();
+    if changes.len() > COALESCE_OVER {
+        let references: Vec<&str> = (changes.iter()).map(|c| c.reference.as_str()).collect();
         return vec![Alert {
             tag: "prs".into(),
-            title: format!("{} PRs changed", prs.len()).into(),
-            body: numbers.join(", ").into(),
-            target: Target::Tasks,
+            title: format!("{} PRs changed", changes.len()).into(),
+            body: references.join(", ").into(),
+            target: Target::PullRequests,
         }];
     }
     (changes.into_iter())
         .map(|change| Alert {
-            tag: format!("task:{}", change.task).into(),
+            tag: pr_tag(change.pr),
             title: change.event.title().into(),
-            body: format!("{} · {}", change.pr, change.title).into(),
-            target: Target::Task(change.task),
+            body: format!("{} · {}", change.reference, change.title).into(),
+            target: Target::Pr(change.pr),
         })
         .collect()
 }
 
-/// The PR changes of the sync running, until it ends.
+/// A PR alert's tag: `pr:<Repository id>#<number>`, by GitHub's id for the Repository, so a
+/// rename keeps it the same PR's.
+pub fn pr_tag(pr: PrKey) -> SharedString {
+    format!("pr:{}#{}", pr.repository, pr.number).into()
+}
+
+/// The PR changes of the sync running, until it ends: one per PR, a later one replacing it.
 #[derive(Debug, Default)]
 pub struct PrBatch {
     changes: Vec<PrChange>,
@@ -259,7 +282,10 @@ impl PrBatch {
     /// Adds what changed from `before` to `after`, and lets the batch out as alerts unless
     /// `after` has a sync still running.
     pub fn read(&mut self, before: &Snapshot, after: &Snapshot) -> Vec<Alert> {
-        self.changes.extend(pr_changes(before, after));
+        for change in pr_changes(before, after) {
+            self.changes.retain(|held| held.pr != change.pr);
+            self.changes.push(change);
+        }
         let syncing = (after.pr_sync.as_ref()).is_some_and(|status| status.progress.is_some());
         if syncing {
             return Vec::new();
@@ -330,8 +356,8 @@ pub(crate) mod fake {
 
 #[cfg(test)]
 mod tests {
-    use agentdeck_client::types::{PrSyncProgress, PrSyncStage, TaskPr};
-    use agentdeck_core::{Agent, PrState, TaskKind};
+    use agentdeck_client::types::{PrSyncProgress, PrSyncStage};
+    use agentdeck_core::{Agent, TaskKind};
 
     use super::*;
     use crate::overview::fixtures::*;
@@ -525,7 +551,7 @@ mod tests {
                 tag: "prs".into(),
                 title: "4 PRs changed".into(),
                 body: "".into(),
-                target: Target::Tasks,
+                target: Target::PullRequests,
             }];
 
             reattached.retain(&mut alerts, &web(), Instant::now());
@@ -535,166 +561,302 @@ mod tests {
     }
 
     mod pr_batch {
+        use agentdeck_client::types::PullRequest;
+
         use super::*;
 
-        /// A PR task `n` in `workspace`, `<repo> #n`, with its checks and review.
-        fn pr_task(
-            n: u32,
-            workspace: Option<WorkspaceId>,
-            checks: Option<ChecksState>,
-            review: Option<ReviewState>,
-        ) -> Task {
-            Task {
-                pr: Some(TaskPr {
-                    checks,
-                    draft: false,
-                    head_ref: "feat/x".into(),
-                    number: i64::from(n),
-                    repo: "acme/web".into(),
-                    review,
-                    state: PrState::Open,
-                    synced_at: "2026-11-14T00:00:00Z".into(),
-                    unreachable: false,
-                    updated_at: "2026-11-14T00:00:00Z".into(),
-                    url: format!("https://github.com/acme/web/pull/{n}"),
-                }),
-                title: format!("PR {n}"),
-                ..task(n, TaskKind::Pr, workspace)
+        /// The signed-in login in these tests; [`pull_request`] is authored by it.
+        const ME: &str = "octocat";
+
+        /// PR `n` of `acme/web`, "PR n", authored by [`ME`], with its checks and review.
+        fn pr(n: u32, checks: Option<ChecksState>, review: Option<ReviewState>) -> PullRequest {
+            PullRequest {
+                checks,
+                review,
+                ..pull_request(n, "acme/web")
             }
         }
 
-        /// `web` holding `tasks`.
-        fn holding(tasks: Vec<Task>) -> Snapshot {
-            Snapshot { tasks, ..web() }
+        fn pending(n: u32) -> PullRequest {
+            pr(n, Some(ChecksState::Pending), None)
         }
 
-        fn pending(n: u32) -> Task {
-            pr_task(n, Some(id(1)), Some(ChecksState::Pending), None)
+        fn failed(n: u32) -> PullRequest {
+            pr(n, Some(ChecksState::Failure), None)
         }
 
-        fn failed(n: u32) -> Task {
-            pr_task(n, Some(id(1)), Some(ChecksState::Failure), None)
+        /// `web` holding `prs`, synced as [`ME`], `acme/web` linked by `web` (unmuted).
+        fn holding(prs: Vec<PullRequest>) -> Snapshot {
+            let mut status = pr_status();
+            status.synced_as = Some(ME.into());
+            Snapshot {
+                prs,
+                pr_sync: Some(status),
+                repositories: vec![links("acme/web", &[id(1)])],
+                ..web()
+            }
         }
 
-        #[test]
-        fn should_say_checks_failed_over_the_pr_and_its_title() {
-            let alerts =
-                PrBatch::default().read(&holding(vec![pending(5)]), &holding(vec![failed(5)]));
-
-            assert_eq!(
-                alerts,
-                [Alert {
-                    tag: format!("task:{}", id::<TaskId>(5)).into(),
-                    title: "Checks failed".into(),
-                    body: "acme/web #5 · PR 5".into(),
-                    target: Target::Task(id(5)),
-                }]
-            );
+        fn key(n: u32) -> PrKey {
+            PrKey {
+                repository: repository_id("acme/web"),
+                number: n,
+            }
         }
 
-        #[test]
-        fn should_say_a_review_arrived() {
-            let review = |review| pr_task(5, Some(id(1)), None, review);
-            let before = holding(vec![review(Some(ReviewState::ReviewRequired))]);
-
-            let approved = PrBatch::default()
-                .read(&before, &holding(vec![review(Some(ReviewState::Approved))]));
-            let changes = PrBatch::default().read(
-                &before,
-                &holding(vec![review(Some(ReviewState::ChangesRequested))]),
-            );
-
-            assert_eq!(approved[0].title, "Approved");
-            assert_eq!(changes[0].title, "Changes requested");
+        fn read(before: Vec<PullRequest>, after: Vec<PullRequest>) -> Vec<Alert> {
+            PrBatch::default().read(&holding(before), &holding(after))
         }
 
-        #[test]
-        fn should_not_alert_again_while_checks_stay_failed() {
-            let alerts =
-                PrBatch::default().read(&holding(vec![failed(5)]), &holding(vec![failed(5)]));
+        mod triggers {
+            use super::*;
 
-            assert_eq!(alerts, []);
+            #[test]
+            fn should_say_checks_failed_over_the_pr_and_its_title_tagged_by_the_pr() {
+                let alerts = read(vec![pending(5)], vec![failed(5)]);
+
+                assert_eq!(
+                    alerts,
+                    [Alert {
+                        tag: format!("pr:{}#5", repository_id("acme/web")).into(),
+                        title: "Checks failed".into(),
+                        body: "acme/web #5 · PR 5".into(),
+                        target: Target::Pr(key(5)),
+                    }]
+                );
+            }
+
+            #[test]
+            fn should_say_a_review_turned_approved_or_changes_requested() {
+                let review = |review| pr(5, None, review);
+                let before = vec![review(Some(ReviewState::ReviewRequired))];
+
+                let approved = read(before.clone(), vec![review(Some(ReviewState::Approved))]);
+                let changes = read(before, vec![review(Some(ReviewState::ChangesRequested))]);
+
+                assert_eq!(approved[0].title, "Approved");
+                assert_eq!(changes[0].title, "Changes requested");
+            }
+
+            #[test]
+            fn should_not_alert_for_a_review_turning_required() {
+                let review = |review| pr(5, None, review);
+
+                let alerts = read(
+                    vec![review(Some(ReviewState::Approved))],
+                    vec![review(Some(ReviewState::ReviewRequired))],
+                );
+
+                assert_eq!(alerts, []);
+            }
+
+            #[test]
+            fn should_not_alert_again_while_checks_stay_failed() {
+                assert_eq!(read(vec![failed(5)], vec![failed(5)]), []);
+            }
+
+            #[test]
+            fn should_not_alert_for_a_pr_first_seen() {
+                assert_eq!(read(vec![], vec![failed(5)]), []);
+            }
         }
 
-        #[test]
-        fn should_not_alert_for_a_pr_first_seen() {
-            let alerts = PrBatch::default().read(&holding(vec![]), &holding(vec![failed(5)]));
+        mod authored {
+            use super::*;
 
-            assert_eq!(alerts, []);
+            #[test]
+            fn should_not_alert_for_a_pr_someone_else_authored() {
+                let theirs = |checks| PullRequest {
+                    author: Some("hubot".into()),
+                    ..pr(5, Some(checks), None)
+                };
+
+                let alerts = read(
+                    vec![theirs(ChecksState::Pending)],
+                    vec![theirs(ChecksState::Failure)],
+                );
+
+                assert_eq!(alerts, []);
+            }
+
+            #[test]
+            fn should_match_the_login_ignoring_case() {
+                let mine = |checks| PullRequest {
+                    author: Some("OctoCat".into()),
+                    ..pr(5, Some(checks), None)
+                };
+
+                let alerts = read(
+                    vec![mine(ChecksState::Pending)],
+                    vec![mine(ChecksState::Failure)],
+                );
+
+                assert_eq!(alerts.len(), 1);
+            }
+
+            #[test]
+            fn should_not_alert_before_a_sync_has_run_as_a_login() {
+                let mut before = holding(vec![pending(5)]);
+                let mut after = holding(vec![failed(5)]);
+                for snapshot in [&mut before, &mut after] {
+                    pr_sync(snapshot).synced_as = None;
+                }
+
+                assert_eq!(PrBatch::default().read(&before, &after), []);
+            }
         }
 
-        #[test]
-        fn should_not_alert_for_a_muted_workspaces_pr() {
-            let before = Snapshot {
-                tasks: vec![pending(5)],
-                ..muted_web()
-            };
-            let after = Snapshot {
-                tasks: vec![failed(5)],
-                ..muted_web()
-            };
+        mod one_per_pr {
+            use super::*;
 
-            assert_eq!(PrBatch::default().read(&before, &after), []);
+            #[test]
+            fn should_make_one_alert_when_checks_and_review_change_at_once() {
+                let alerts = read(
+                    vec![pending(5)],
+                    vec![pr(
+                        5,
+                        Some(ChecksState::Failure),
+                        Some(ReviewState::Approved),
+                    )],
+                );
+
+                assert_eq!(alerts.len(), 1, "{alerts:?}");
+                assert_eq!(alerts[0].title, "Checks failed");
+            }
+
+            #[test]
+            fn should_keep_a_prs_latest_change_while_a_sync_runs() {
+                let syncing = |mut snapshot: Snapshot| {
+                    pr_sync(&mut snapshot).progress = Some(PrSyncProgress {
+                        prs: 1,
+                        prs_done: 0,
+                        stage: PrSyncStage::Details,
+                    });
+                    snapshot
+                };
+                let mut batch = PrBatch::default();
+                let start = holding(vec![pending(5)]);
+                let half = syncing(holding(vec![failed(5)]));
+                let approved = pr(5, Some(ChecksState::Failure), Some(ReviewState::Approved));
+                let done = holding(vec![approved]);
+
+                assert_eq!(batch.read(&start, &half), []);
+                let alerts = batch.read(&half, &done);
+
+                assert_eq!(alerts.len(), 1, "{alerts:?}");
+                assert_eq!(alerts[0].title, "Approved");
+                assert_eq!(alerts[0].tag, pr_tag(key(5)));
+            }
         }
 
-        #[test]
-        fn should_alert_for_an_inbox_pr() {
-            let inbox = |checks| pr_task(5, None, Some(checks), None);
+        mod muting {
+            use super::*;
 
-            let alerts = PrBatch::default().read(
-                &holding(vec![inbox(ChecksState::Success)]),
-                &holding(vec![inbox(ChecksState::Failure)]),
-            );
-
-            assert_eq!(alerts.len(), 1);
-        }
-
-        #[test]
-        fn should_coalesce_more_than_three_prs_into_one() {
-            let before = holding((1..=4).map(pending).collect());
-            let after = holding((1..=4).map(failed).collect());
-
-            let alerts = PrBatch::default().read(&before, &after);
-
-            assert_eq!(
-                alerts,
-                [Alert {
-                    tag: "prs".into(),
-                    title: "4 PRs changed".into(),
-                    body: "acme/web #1, acme/web #2, acme/web #3, acme/web #4".into(),
-                    target: Target::Tasks,
-                }]
-            );
-        }
-
-        #[test]
-        fn should_keep_three_prs_apart() {
-            let before = holding((1..=3).map(pending).collect());
-            let after = holding((1..=3).map(failed).collect());
-
-            assert_eq!(PrBatch::default().read(&before, &after).len(), 3);
-        }
-
-        #[test]
-        fn should_hold_a_syncs_changes_until_it_ends() {
-            let syncing = |mut snapshot: Snapshot| {
-                pr_sync(&mut snapshot).progress = Some(PrSyncProgress {
-                    prs: 4,
-                    prs_done: 2,
-                    stage: PrSyncStage::Details,
-                });
+            /// `holding` with workspaces `web` (1) and `api` (2), `acme/web` linked by `linking`,
+            /// each workspace muted and archived as `set` says.
+            fn linked(
+                prs: Vec<PullRequest>,
+                linking: &[u32],
+                set: &[(u32, bool, bool)],
+            ) -> Snapshot {
+                let mut snapshot = holding(prs);
+                snapshot.workspaces = vec![workspace(1, "web"), workspace(2, "api")];
+                for (n, muted, archived) in set {
+                    let w = (snapshot.workspaces.iter_mut())
+                        .find(|w| w.id == id(*n))
+                        .unwrap();
+                    w.muted = *muted;
+                    w.archived_at = archived.then(|| "2026-11-20T00:00:00Z".into());
+                }
+                let linking: Vec<WorkspaceId> = linking.iter().map(|n| id(*n)).collect();
+                snapshot.repositories = vec![links("acme/web", &linking)];
                 snapshot
-            };
-            let mut batch = PrBatch::default();
-            let start = holding((1..=4).map(pending).collect());
-            let half = syncing(holding(vec![failed(1), failed(2), pending(3), pending(4)]));
-            let done = holding((1..=4).map(failed).collect());
+            }
 
-            assert_eq!(batch.read(&start, &half), []);
-            let alerts = batch.read(&half, &done);
+            fn alerts(linking: &[u32], set: &[(u32, bool, bool)]) -> Vec<Alert> {
+                let before = linked(vec![pending(5)], linking, set);
+                let after = linked(vec![failed(5)], linking, set);
+                PrBatch::default().read(&before, &after)
+            }
 
-            assert_eq!(alerts.len(), 1, "{alerts:?}");
-            assert_eq!(alerts[0].title, "4 PRs changed");
+            #[test]
+            fn should_mute_when_every_linking_workspace_is_muted() {
+                assert_eq!(alerts(&[1, 2], &[(1, true, false), (2, true, false)]), []);
+            }
+
+            #[test]
+            fn should_alert_while_one_linking_workspace_is_unmuted() {
+                assert_eq!(alerts(&[1, 2], &[(1, true, false)]).len(), 1);
+            }
+
+            #[test]
+            fn should_alert_when_only_archived_muted_workspaces_link_it() {
+                assert_eq!(alerts(&[1], &[(1, true, true)]).len(), 1);
+            }
+
+            #[test]
+            fn should_alert_for_a_repository_linked_nowhere() {
+                assert_eq!(alerts(&[], &[(1, true, false), (2, true, false)]).len(), 1);
+            }
+
+            #[test]
+            fn should_leave_an_archived_unmuted_workspace_out_of_the_rule() {
+                assert_eq!(alerts(&[1, 2], &[(1, false, true), (2, true, false)]), []);
+            }
+        }
+
+        mod coalescing {
+            use super::*;
+
+            #[test]
+            fn should_coalesce_more_than_three_prs_into_one_that_opens_the_view() {
+                let alerts = read(
+                    (1..=4).map(pending).collect(),
+                    (1..=4).map(failed).collect(),
+                );
+
+                assert_eq!(
+                    alerts,
+                    [Alert {
+                        tag: "prs".into(),
+                        title: "4 PRs changed".into(),
+                        body: "acme/web #1, acme/web #2, acme/web #3, acme/web #4".into(),
+                        target: Target::PullRequests,
+                    }]
+                );
+            }
+
+            #[test]
+            fn should_keep_three_prs_apart() {
+                let alerts = read(
+                    (1..=3).map(pending).collect(),
+                    (1..=3).map(failed).collect(),
+                );
+
+                assert_eq!(alerts.len(), 3);
+            }
+
+            #[test]
+            fn should_hold_a_syncs_changes_until_it_ends() {
+                let syncing = |mut snapshot: Snapshot| {
+                    pr_sync(&mut snapshot).progress = Some(PrSyncProgress {
+                        prs: 4,
+                        prs_done: 2,
+                        stage: PrSyncStage::Details,
+                    });
+                    snapshot
+                };
+                let mut batch = PrBatch::default();
+                let start = holding((1..=4).map(pending).collect());
+                let half = syncing(holding(vec![failed(1), failed(2), pending(3), pending(4)]));
+                let done = holding((1..=4).map(failed).collect());
+
+                assert_eq!(batch.read(&start, &half), []);
+                let alerts = batch.read(&half, &done);
+
+                assert_eq!(alerts.len(), 1, "{alerts:?}");
+                assert_eq!(alerts[0].title, "4 PRs changed");
+            }
         }
     }
 }

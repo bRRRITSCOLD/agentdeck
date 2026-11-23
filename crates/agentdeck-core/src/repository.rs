@@ -309,12 +309,18 @@ mod tests {
 
         #[test]
         fn should_mute_when_every_linking_workspace_is_muted() {
-            assert!(pr_alerts_muted([linking(false, true), linking(false, true)]));
+            assert!(pr_alerts_muted([
+                linking(false, true),
+                linking(false, true)
+            ]));
         }
 
         #[test]
         fn should_alert_while_one_linking_workspace_is_unmuted() {
-            assert!(!pr_alerts_muted([linking(false, true), linking(false, false)]));
+            assert!(!pr_alerts_muted([
+                linking(false, true),
+                linking(false, false)
+            ]));
         }
 
         #[test]
@@ -329,7 +335,10 @@ mod tests {
 
         #[test]
         fn should_leave_archived_workspaces_out_of_the_rule() {
-            assert!(pr_alerts_muted([linking(true, false), linking(false, true)]));
+            assert!(pr_alerts_muted([
+                linking(true, false),
+                linking(false, true)
+            ]));
         }
     }
 }

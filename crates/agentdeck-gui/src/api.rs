@@ -605,8 +605,8 @@ async fn panes(client: Client, workspace: WorkspaceId) -> anyhow::Result<Workspa
 }
 
 /// Reads a [`Snapshot`]: the workspaces, then each live one's tabs and the panes in their
-/// layouts, then the tasks, every workspace's instructions, PR sync status and the pull
-/// requests.
+/// layouts, then the tasks, every workspace's instructions, PR sync status, the pull requests
+/// and the Repositories with the Workspaces linking each.
 async fn snapshot(client: Client) -> anyhow::Result<Snapshot> {
     let workspaces = (client.workspace_list().send().await)
         .map_err(ApiError::from)?
@@ -656,6 +656,7 @@ async fn snapshot(client: Client) -> anyhow::Result<Snapshot> {
                 .into_inner(),
         ),
         prs: agentdeck_client::prs::list(&client).await?,
+        repositories: agentdeck_client::repositories::list(&client).await?,
     })
 }
 
