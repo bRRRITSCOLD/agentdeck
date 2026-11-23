@@ -408,13 +408,14 @@ mod pr_sync_cutoff {
         assert_eq!(status.into_inner().max_age_days, 30);
         let numbers: Vec<i64> = daemon
             .client
-            .task_list()
+            .pr_list()
+            .finished(true)
             .send()
             .await
-            .expect("list tasks")
+            .expect("list PRs")
             .into_inner()
             .into_iter()
-            .filter_map(|task| task.pr.map(|pr| pr.number))
+            .map(|pr| i64::from(pr.number))
             .collect();
         assert_eq!(numbers, [7]);
     }
@@ -423,13 +424,14 @@ mod pr_sync_cutoff {
     async fn numbers(daemon: &TestDaemon) -> Vec<i64> {
         let mut numbers: Vec<i64> = daemon
             .client
-            .task_list()
+            .pr_list()
+            .finished(true)
             .send()
             .await
-            .expect("list tasks")
+            .expect("list PRs")
             .into_inner()
             .into_iter()
-            .filter_map(|task| task.pr.map(|pr| pr.number))
+            .map(|pr| i64::from(pr.number))
             .collect();
         numbers.sort_unstable();
         numbers

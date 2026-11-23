@@ -102,6 +102,40 @@ impl RepositoryName {
         let (owner, name) = text.split_once('/')?;
         RepositoryName::from_parts(owner, name)
     }
+
+    /// The Repository a git remote URL names, when it is on github.com, in any of git's URL
+    /// forms: `https://`, `http://`, `ssh://` and `git://` URLs, with or without a user or a
+    /// port, and scp-like `[user@]github.com:owner/name`, each with or without a trailing `/`
+    /// or `.git`. `None` for another host, a local path or a path that isn't `owner/name`.
+    /// The name keeps its case as written; GitHub matches it ignoring case. Suggestions read a
+    /// Pane's folder's remotes with it (spec §3).
+    pub fn from_remote_url(url: &str) -> Option<RepositoryName> {
+        let url = url.trim();
+        let path = if let Some((scheme, rest)) = url.split_once("://") {
+            if !matches!(scheme, "https" | "http" | "ssh" | "git") {
+                return None;
+            }
+            let rest = rest
+                .rsplit_once('@')
+                .map_or(rest, |(_, host_path)| host_path);
+            let (host, path) = rest.split_once('/')?;
+            let host = host.split_once(':').map_or(host, |(host, _port)| host);
+            if !host.eq_ignore_ascii_case("github.com") {
+                return None;
+            }
+            path
+        } else {
+            // scp-like: [user@]github.com:owner/name
+            let (host, path) = url.split_once(':')?;
+            let host = host.rsplit_once('@').map_or(host, |(_, host)| host);
+            if !host.eq_ignore_ascii_case("github.com") {
+                return None;
+            }
+            path
+        };
+        let path = path.trim_matches('/');
+        RepositoryName::plain(path.strip_suffix(".git").unwrap_or(path))
+    }
 }
 
 impl fmt::Display for RepositoryName {
@@ -283,6 +317,68 @@ mod tests {
         #[test]
         fn should_fail_to_deserialize_text_that_names_no_repository() {
             assert!(serde_json::from_str::<RepositoryName>(r#""widgets""#).is_err());
+        }
+    }
+
+    mod from_remote_url {
+        use super::*;
+
+        fn remote(url: &str) -> Option<String> {
+            RepositoryName::from_remote_url(url).map(|name| name.to_string())
+        }
+
+        #[test]
+        fn should_read_an_https_url() {
+            assert_eq!(
+                remote("https://github.com/Acme/Widgets.git").as_deref(),
+                Some("Acme/Widgets")
+            );
+            assert_eq!(
+                remote("https://github.com/acme/widgets").as_deref(),
+                Some("acme/widgets")
+            );
+        }
+
+        #[test]
+        fn should_read_an_scp_like_ssh_url() {
+            assert_eq!(
+                remote("git@github.com:acme/widgets.git").as_deref(),
+                Some("acme/widgets")
+            );
+        }
+
+        #[test]
+        fn should_read_an_ssh_url_with_a_port() {
+            assert_eq!(
+                remote("ssh://git@github.com:22/acme/widgets.git").as_deref(),
+                Some("acme/widgets")
+            );
+        }
+
+        #[test]
+        fn should_ignore_a_trailing_slash() {
+            assert_eq!(
+                remote("https://github.com/acme/widgets/").as_deref(),
+                Some("acme/widgets")
+            );
+        }
+
+        #[test]
+        fn should_reject_another_host() {
+            assert_eq!(remote("https://gitlab.com/acme/widgets.git"), None);
+            assert_eq!(remote("git@example.com:acme/widgets.git"), None);
+        }
+
+        #[test]
+        fn should_reject_a_local_path() {
+            assert_eq!(remote("/srv/git/widgets.git"), None);
+            assert_eq!(remote("file:///srv/git/widgets.git"), None);
+        }
+
+        #[test]
+        fn should_reject_a_path_that_is_not_owner_and_name() {
+            assert_eq!(remote("https://github.com/acme"), None);
+            assert_eq!(remote("https://github.com/acme/widgets/pull/7"), None);
         }
     }
 

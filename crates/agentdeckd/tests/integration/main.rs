@@ -23,7 +23,6 @@ mod settings;
 mod settings_client;
 mod support;
 mod tabs;
-mod tasks;
 mod version;
 mod workspaces;
 mod ws;

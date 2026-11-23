@@ -517,7 +517,6 @@ mod get_v1_workspaces_id_dirty {
 }
 
 mod delete_v1_workspaces_id {
-    use agentdeck_client::types::NewTask;
 
     use super::*;
 
@@ -605,43 +604,6 @@ mod delete_v1_workspaces_id {
             .expect("delete");
 
         assert!(dir.join("keep.txt").is_file());
-    }
-
-    #[tokio::test]
-    async fn should_move_its_tasks_to_the_inbox_204() {
-        let daemon = TestDaemon::start().await;
-        let workspace = create(&daemon.client, "ws", None).await;
-        let task = daemon
-            .client
-            .task_create()
-            .body(NewTask {
-                title: "t".into(),
-                body: None,
-                status: None,
-                workspace_id: Some(workspace.id),
-            })
-            .send()
-            .await
-            .expect("task")
-            .into_inner();
-
-        daemon
-            .client
-            .workspace_delete()
-            .id(workspace.id)
-            .send()
-            .await
-            .expect("delete");
-
-        let task = daemon
-            .client
-            .task_get()
-            .id(task.id)
-            .send()
-            .await
-            .expect("the task stays")
-            .into_inner();
-        assert_eq!(task.workspace_id, None);
     }
 
     #[tokio::test]

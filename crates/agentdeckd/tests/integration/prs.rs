@@ -1,22 +1,18 @@
-//! PR sync: `/v1/prs`, the pull requests and Repositories it keeps and their PR tasks (spec
-//! §4, §8), against httpmock as GitHub and a stub `gh` on `PATH`.
+//! PR sync: `/v1/prs`, the pull requests and Repositories it keeps (spec §4, §8), against
+//! httpmock as GitHub and a stub `gh` on `PATH`.
 
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use agentdeck_client::Client;
 use agentdeck_client::types::{
     GhLogin, NewLink, NewWorkspace, PrClose, PrCloseResult, PrSyncProgress, PrSyncStage,
-    PrSyncStatus, PullRequest, Repository, Task, Workspace,
+    PrSyncStatus, PullRequest, Repository,
 };
-use agentdeck_core::{
-    ChecksState, PrRef, PrState, RepositoryId, RepositoryName, ReviewState, TaskKind, TaskStatus,
-};
+use agentdeck_core::{ChecksState, PrRef, PrState, RepositoryId, RepositoryName, ReviewState};
 use httpmock::{Mock, MockServer};
 
 use agentdeck_core::ws::{Entity, ServerMessage};
 
-use crate::support::git::git;
 use crate::support::github::{
     BATCH, Pr, days_ago, mock_close, mock_close_refused, mock_fetch, mock_hidden, mock_list,
     mock_list_page, mock_node_ids, mock_search, mock_unauthorized, mock_updated_search,
@@ -89,43 +85,31 @@ async fn full_sync(client: &Client) -> PrSyncStatus {
     response.into_inner()
 }
 
-async fn pr_tasks(client: &Client) -> Vec<Task> {
-    client
-        .task_list()
-        .kind(TaskKind::Pr)
-        .send()
-        .await
-        .expect("list PR tasks")
-        .into_inner()
+/// Every pull request the daemon keeps, Finished ones included, as `GET /v1/prs` lists them.
+async fn kept_prs(client: &Client) -> Vec<PullRequest> {
+    let response = client.pr_list().finished(true).send().await;
+    let response = response.expect("list PRs");
+    assert_eq!(response.status().as_u16(), 200);
+    response.into_inner()
 }
 
-async fn attach(client: &Client, dir: &Path) -> Workspace {
-    client
-        .workspace_create()
-        .body(NewWorkspace {
-            name: "ws".into(),
-            dir: Some(dir.to_str().expect("a UTF-8 path").into()),
-        })
-        .send()
+/// The kept pull request `repo#number`, Finished or not.
+async fn pr_in(client: &Client, repo: &str, number: u32) -> PullRequest {
+    kept_prs(client)
         .await
-        .expect("attach a workspace")
-        .into_inner()
+        .into_iter()
+        .find(|pr| pr.repository.name.to_string() == repo && pr.number == number)
+        .unwrap_or_else(|| panic!("{repo}#{number}, kept"))
 }
 
-/// A repo at `dir` with `origin` on GitHub's `repo` and a commit on `branch`. Nothing is
-/// fetched: a remote URL is all matching reads.
-fn clone_of(dir: &Path, repo: &str, branch: &str) {
-    crate::support::git::init_with_commit(dir);
-    git(
-        dir,
-        &[
-            "remote",
-            "add",
-            "origin",
-            &format!("git@github.com:{repo}.git"),
-        ],
-    );
-    git(dir, &["branch", branch]);
+/// The kept pull request numbered `number` on `acme/widgets`, Finished or not.
+async fn pr_numbered(client: &Client, number: u32) -> PullRequest {
+    pr_in(client, "acme/widgets", number).await
+}
+
+/// The id of `pr`'s `changed` event: its Repository's GitHub id and its number.
+fn changed_id(pr: &Pr) -> String {
+    format!("{}#{}", pr.repository_id(), pr.number)
 }
 
 /// Open PR `number`, last updated on GitHub `days` ago.
@@ -150,13 +134,9 @@ async fn list(client: &Client) -> Vec<PullRequest> {
     response.into_inner()
 }
 
-/// The numbers of the stored PRs, in task order.
-async fn numbers(client: &Client) -> Vec<i64> {
-    let mut numbers: Vec<i64> = pr_tasks(client)
-        .await
-        .into_iter()
-        .map(|task| task.pr.expect("the task's PR").number)
-        .collect();
+/// The numbers of the stored PRs, sorted.
+async fn numbers(client: &Client) -> Vec<u32> {
+    let mut numbers: Vec<u32> = kept_prs(client).await.iter().map(|pr| pr.number).collect();
     numbers.sort_unstable();
     numbers
 }
@@ -165,7 +145,7 @@ mod post_v1_prs_sync {
     use super::*;
 
     #[tokio::test]
-    async fn should_put_a_new_pr_in_the_inbox_in_review_200() {
+    async fn should_keep_a_new_pr_with_its_fields_200() {
         let github = MockServer::start_async().await;
         let pr = Pr {
             checks: Some("FAILURE"),
@@ -181,14 +161,12 @@ mod post_v1_prs_sync {
         assert_eq!(status.login, GhLogin::LoggedIn);
         assert_eq!(status.last_error, None);
         assert!(status.last_synced_at.is_some());
-        let tasks = pr_tasks(&daemon.client).await;
-        assert_eq!(tasks.len(), 1);
-        let task = &tasks[0];
-        assert_eq!(task.title, "Add PR sync");
-        assert_eq!(task.status, TaskStatus::Review);
-        assert_eq!(task.workspace_id, None);
-        let stored = task.pr.as_ref().expect("the task's PR");
-        assert_eq!(stored.repo, "acme/widgets");
+        let prs = kept_prs(&daemon.client).await;
+        assert_eq!(prs.len(), 1);
+        let stored = &prs[0];
+        assert_eq!(stored.title, "Add PR sync");
+        assert!(!stored.finished);
+        assert_eq!(stored.repository.name.to_string(), "acme/widgets");
         assert_eq!(stored.number, 7);
         assert_eq!(stored.url, pr.url());
         assert_eq!(stored.state, PrState::Open);
@@ -199,7 +177,7 @@ mod post_v1_prs_sync {
     }
 
     #[tokio::test]
-    async fn should_tell_websocket_clients_which_tasks_changed_200() {
+    async fn should_tell_websocket_clients_which_prs_changed_200() {
         let github = MockServer::start_async().await;
         let daemon = daemon(&github, Some(TOKEN)).await;
         // Connected before GitHub shows the PR, so whichever sync finds it, this client hears.
@@ -211,97 +189,21 @@ mod post_v1_prs_sync {
         let changed = ws
             .until(|frame| match frame {
                 Frame::Message(ServerMessage::Changed {
-                    entity: Entity::Task,
+                    entity: Entity::PullRequest,
                     id,
                 }) => Some(id),
                 _ => None,
             })
             .await;
-        let tasks = pr_tasks(&daemon.client).await;
-        assert_eq!(changed, tasks[0].id.to_string());
+        assert_eq!(changed, changed_id(&Pr::open(7)));
     }
 
     #[tokio::test]
-    async fn should_put_a_pr_in_the_workspace_whose_clone_has_its_branch_200() {
-        let github = MockServer::start_async().await;
-        mock_search(&github, TOKEN, &[Pr::open(7)]);
-        let daemon = daemon(&github, Some(TOKEN)).await;
-        let other = daemon.new_dir("other");
-        clone_of(&other.join("widgets"), "acme/widgets", "main-only");
-        let home = daemon.new_dir("home");
-        clone_of(&home.join("src/widgets"), "Acme/Widgets", "feat/sync");
-        let _other = attach(&daemon.client, &other).await;
-        let home = attach(&daemon.client, &home).await;
-
-        sync(&daemon.client).await;
-
-        let tasks = pr_tasks(&daemon.client).await;
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].workspace_id, Some(home.id));
-    }
-
-    #[tokio::test]
-    async fn should_put_a_pr_whose_branch_no_clone_has_in_the_oldest_workspace_with_its_repo_200() {
-        let github = MockServer::start_async().await;
-        mock_search(&github, TOKEN, &[Pr::open(7)]);
-        let daemon = daemon(&github, Some(TOKEN)).await;
-        let gadgets = daemon.new_dir("gadgets");
-        clone_of(&gadgets.join("gadgets"), "acme/gadgets", "feat/sync");
-        let oldest = daemon.new_dir("oldest");
-        clone_of(&oldest.join("widgets"), "acme/widgets", "main-only");
-        let newer = daemon.new_dir("newer");
-        clone_of(&newer.join("widgets"), "acme/widgets", "other-only");
-        attach(&daemon.client, &gadgets).await;
-        let oldest = attach(&daemon.client, &oldest).await;
-        attach(&daemon.client, &newer).await;
-
-        sync(&daemon.client).await;
-
-        assert_eq!(
-            pr_tasks(&daemon.client).await[0].workspace_id,
-            Some(oldest.id)
-        );
-    }
-
-    #[tokio::test]
-    async fn should_leave_a_pr_in_the_inbox_when_no_clone_is_of_its_repo_200() {
-        let github = MockServer::start_async().await;
-        mock_search(&github, TOKEN, &[Pr::open(7)]);
-        let daemon = daemon(&github, Some(TOKEN)).await;
-        let dir = daemon.new_dir("ws");
-        clone_of(&dir.join("gadgets"), "acme/gadgets", "feat/sync");
-        attach(&daemon.client, &dir).await;
-
-        sync(&daemon.client).await;
-
-        assert_eq!(pr_tasks(&daemon.client).await[0].workspace_id, None);
-    }
-
-    #[tokio::test]
-    async fn should_move_an_inbox_pr_into_a_workspace_once_a_clone_appears_200() {
-        let github = MockServer::start_async().await;
-        mock_search(&github, TOKEN, &[Pr::open(7)]);
-        let daemon = daemon(&github, Some(TOKEN)).await;
-        let dir = daemon.new_dir("ws");
-        let workspace = attach(&daemon.client, &dir).await;
-        sync(&daemon.client).await;
-
-        clone_of(&dir.join("widgets"), "acme/widgets", "feat/sync");
-        sync(&daemon.client).await;
-
-        assert_eq!(
-            pr_tasks(&daemon.client).await[0].workspace_id,
-            Some(workspace.id)
-        );
-    }
-
-    #[tokio::test]
-    async fn should_update_checks_and_review_on_the_same_task_200() {
+    async fn should_update_checks_and_review_on_the_same_pr_200() {
         let github = MockServer::start_async().await;
         let mut search = mock_search(&github, TOKEN, &[Pr::open(7)]);
         let daemon = daemon(&github, Some(TOKEN)).await;
         sync(&daemon.client).await;
-        let before = pr_tasks(&daemon.client).await.remove(0);
 
         search.delete();
         mock_search(
@@ -315,40 +217,16 @@ mod post_v1_prs_sync {
         );
         sync(&daemon.client).await;
 
-        let tasks = pr_tasks(&daemon.client).await;
-        assert_eq!(tasks.len(), 1);
-        let after = &tasks[0];
-        assert_eq!(after.id, before.id);
-        assert_eq!(after.status, TaskStatus::Review);
-        let pr = after.pr.as_ref().expect("the task's PR");
+        let prs = kept_prs(&daemon.client).await;
+        assert_eq!(prs.len(), 1);
+        let pr = &prs[0];
+        assert_eq!(pr.reference.to_string(), "acme/widgets#7");
         assert_eq!(pr.checks, Some(ChecksState::Success));
         assert_eq!(pr.review, Some(ReviewState::Approved));
-        assert!(after.updated_at > before.updated_at);
     }
 
     #[tokio::test]
-    async fn should_keep_the_status_the_user_picked_while_the_pr_stays_open_200() {
-        let github = MockServer::start_async().await;
-        mock_search(&github, TOKEN, &[Pr::open(7)]);
-        let daemon = daemon(&github, Some(TOKEN)).await;
-        sync(&daemon.client).await;
-        let task = pr_tasks(&daemon.client).await.remove(0);
-        daemon
-            .client
-            .task_update()
-            .id(task.id)
-            .body_map(|patch| patch.status(Some(TaskStatus::Doing)))
-            .send()
-            .await
-            .expect("update");
-
-        sync(&daemon.client).await;
-
-        assert_eq!(pr_tasks(&daemon.client).await[0].status, TaskStatus::Doing);
-    }
-
-    #[tokio::test]
-    async fn should_move_a_pr_that_merged_out_of_the_search_to_done_200() {
+    async fn should_finish_a_pr_that_merged_out_of_the_search_200() {
         let github = MockServer::start_async().await;
         let mut search = mock_search(&github, TOKEN, &[Pr::open(7)]);
         let daemon = full_daemon(&github, Some(TOKEN)).await;
@@ -366,10 +244,9 @@ mod post_v1_prs_sync {
         sync(&daemon.client).await;
         sync(&daemon.client).await;
 
-        let task = pr_tasks(&daemon.client).await.remove(0);
-        assert_eq!(task.status, TaskStatus::Done);
-        assert!(task.done_at.is_some());
-        assert_eq!(task.pr.expect("the task's PR").state, PrState::Merged);
+        let pr = pr_numbered(&daemon.client, 7).await;
+        assert!(pr.finished);
+        assert_eq!(pr.state, PrState::Merged);
         // Fetched by number once; a merged PR isn't fetched again.
         fetch.assert_calls(1);
     }
@@ -397,16 +274,19 @@ mod post_v1_prs_sync {
             .collect();
         sync(&daemon.client).await;
 
-        let tasks = pr_tasks(&daemon.client).await;
-        assert_eq!(tasks.len(), 120);
-        assert!(tasks.iter().all(|task| task.status == TaskStatus::Done));
+        let prs = kept_prs(&daemon.client).await;
+        assert_eq!(prs.len(), 120);
+        assert!(
+            prs.iter()
+                .all(|pr| pr.state == PrState::Merged && pr.finished)
+        );
         for fetch in &fetches {
             fetch.assert_calls(1);
         }
     }
 
     #[tokio::test]
-    async fn should_mark_a_pr_github_no_longer_shows_unreachable_and_keep_its_task_200() {
+    async fn should_mark_a_pr_github_no_longer_shows_unreachable_and_keep_it_200() {
         let github = MockServer::start_async().await;
         let mut search = mock_search(&github, TOKEN, &[Pr::open(7)]);
         let daemon = full_daemon(&github, Some(TOKEN)).await;
@@ -417,11 +297,10 @@ mod post_v1_prs_sync {
         mock_hidden(&github, TOKEN, &Pr::open(7));
         sync(&daemon.client).await;
 
-        let task = pr_tasks(&daemon.client).await.remove(0);
-        assert_eq!(task.status, TaskStatus::Review);
-        let pr = task.pr.expect("the task's PR");
+        let pr = pr_numbered(&daemon.client, 7).await;
         assert_eq!(pr.state, PrState::Open);
         assert!(pr.unreachable);
+        assert!(!pr.finished);
     }
 
     #[tokio::test]
@@ -439,7 +318,7 @@ mod post_v1_prs_sync {
 
         assert_eq!(status.login, GhLogin::LoggedIn);
         assert_eq!(status.last_error, None);
-        assert_eq!(pr_tasks(&daemon.client).await.len(), 1);
+        assert_eq!(kept_prs(&daemon.client).await.len(), 1);
     }
 
     #[tokio::test]
@@ -489,7 +368,7 @@ mod post_v1_prs_sync {
         let status = sync(&daemon.client).await;
 
         assert_eq!(status.login, GhLogin::LoggedIn);
-        assert_eq!(pr_tasks(&daemon.client).await.len(), 1);
+        assert_eq!(kept_prs(&daemon.client).await.len(), 1);
     }
 
     #[tokio::test]
@@ -524,11 +403,11 @@ mod post_v1_prs_sync {
         let status = sync(&daemon.client).await;
 
         assert_eq!(status.login, GhLogin::LoggedIn);
-        assert_eq!(pr_tasks(&daemon.client).await.len(), 1);
+        assert_eq!(kept_prs(&daemon.client).await.len(), 1);
     }
 
     #[tokio::test]
-    async fn should_report_a_github_failure_briefly_after_three_tries_and_keep_the_tasks_200() {
+    async fn should_report_a_github_failure_briefly_after_three_tries_and_keep_the_prs_200() {
         let github = MockServer::start_async().await;
         let mut search = mock_search(&github, TOKEN, &[Pr::open(7)]);
         let daemon = daemon(&github, Some(TOKEN)).await;
@@ -544,7 +423,7 @@ mod post_v1_prs_sync {
         assert_eq!(status.login, GhLogin::LoggedIn);
         assert_eq!(status.last_error.as_deref(), Some("GitHub answered 502"));
         assert_eq!(status.last_synced_at, synced.last_synced_at);
-        assert_eq!(pr_tasks(&daemon.client).await.len(), 1);
+        assert_eq!(kept_prs(&daemon.client).await.len(), 1);
         bad_gateway.assert_calls(3);
     }
 
@@ -585,7 +464,7 @@ mod post_v1_prs_sync {
             "{:?}",
             status.last_error
         );
-        assert_eq!(pr_tasks(&daemon.client).await.len(), 1);
+        assert_eq!(kept_prs(&daemon.client).await.len(), 1);
         slow.assert_calls(3);
     }
 
@@ -625,7 +504,7 @@ mod post_v1_prs_sync {
             assert!(Instant::now() < deadline, "not synced: {status:?}");
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        assert_eq!(pr_tasks(&daemon.client).await.len(), 1);
+        assert_eq!(kept_prs(&daemon.client).await.len(), 1);
     }
 }
 
@@ -656,11 +535,11 @@ mod incremental {
 
         full.list.assert_calls(1);
         assert!(updated.calls() >= 1);
-        assert_eq!(pr_tasks(&daemon.client).await.len(), 1);
+        assert_eq!(kept_prs(&daemon.client).await.len(), 1);
     }
 
     #[tokio::test]
-    async fn should_move_a_pr_merged_since_the_last_sync_to_done_without_a_fetch_200() {
+    async fn should_finish_a_pr_merged_since_the_last_sync_without_a_fetch_200() {
         let github = MockServer::start_async().await;
         let (daemon, mut updated) = synced(&github, &[Pr::open(7)]).await;
         let fetch = github.mock(|when, then| {
@@ -679,8 +558,9 @@ mod incremental {
         );
         sync(&daemon.client).await;
 
-        let task = pr_tasks(&daemon.client).await.remove(0);
-        assert_eq!(task.status, TaskStatus::Done);
+        let pr = pr_numbered(&daemon.client, 7).await;
+        assert_eq!(pr.state, PrState::Merged);
+        assert!(pr.finished);
         fetch.assert_calls(0);
     }
 
@@ -700,12 +580,7 @@ mod incremental {
         );
         sync(&daemon.client).await;
 
-        let numbers: Vec<i64> = pr_tasks(&daemon.client)
-            .await
-            .into_iter()
-            .map(|task| task.pr.expect("the task's PR").number)
-            .collect();
-        assert_eq!(numbers, [7]);
+        assert_eq!(numbers(&daemon.client).await, [7]);
     }
 
     #[tokio::test]
@@ -726,11 +601,7 @@ mod incremental {
 
         sync(&daemon.client).await;
 
-        let pr = pr_tasks(&daemon.client)
-            .await
-            .remove(0)
-            .pr
-            .expect("the task's PR");
+        let pr = pr_numbered(&daemon.client, 7).await;
         assert_eq!(pr.checks, Some(ChecksState::Success));
         assert!(fetch.calls() >= 1);
     }
@@ -750,22 +621,19 @@ mod incremental {
 
         sync(&daemon.client).await;
 
-        let task = pr_tasks(&daemon.client).await.remove(0);
-        assert_eq!(
-            task.pr.expect("the task's PR").checks,
-            Some(ChecksState::Failure)
-        );
+        let pr = pr_numbered(&daemon.client, 7).await;
+        assert_eq!(pr.checks, Some(ChecksState::Failure));
         assert!(fetch.calls() >= 1);
         let changed = ws
             .until(|frame| match frame {
                 Frame::Message(ServerMessage::Changed {
-                    entity: Entity::Task,
+                    entity: Entity::PullRequest,
                     id,
                 }) => Some(id),
                 _ => None,
             })
             .await;
-        assert_eq!(changed, task.id.to_string());
+        assert_eq!(changed, changed_id(&Pr::open(7)));
     }
 
     #[tokio::test]
@@ -787,11 +655,7 @@ mod incremental {
 
         sync(&daemon.client).await;
 
-        let pr = pr_tasks(&daemon.client)
-            .await
-            .remove(0)
-            .pr
-            .expect("the task's PR");
+        let pr = pr_numbered(&daemon.client, 7).await;
         assert_eq!(pr.review, Some(ReviewState::Approved));
     }
 
@@ -832,160 +696,6 @@ mod incremental {
 
         assert_eq!(numbers(&daemon.client).await, [9]);
     }
-
-    #[tokio::test]
-    async fn should_move_an_inbox_pr_into_a_workspace_once_a_clone_appears_200() {
-        let github = MockServer::start_async().await;
-        let (daemon, _updated) = synced(&github, &[Pr::open(7)]).await;
-        // It has no checks, so it is fetched again in case they started.
-        mock_fetch(&github, &[Pr::open(7)]);
-        let dir = daemon.new_dir("ws");
-        let workspace = attach(&daemon.client, &dir).await;
-
-        clone_of(&dir.join("widgets"), "acme/widgets", "feat/sync");
-        sync(&daemon.client).await;
-
-        assert_eq!(
-            pr_tasks(&daemon.client).await[0].workspace_id,
-            Some(workspace.id)
-        );
-    }
-}
-
-mod edited_by_the_user {
-    use agentdeck_client::types::TaskPatch;
-    use agentdeck_core::TaskPlace;
-
-    use super::*;
-    use crate::support::error_response;
-
-    /// Moves `task` to `place`, as the user does in the task sheet.
-    async fn move_to(client: &Client, task: &Task, place: TaskPlace) {
-        client
-            .task_update()
-            .id(task.id)
-            .body(TaskPatch {
-                workspace_id: Some(place),
-                ..TaskPatch::default()
-            })
-            .send()
-            .await
-            .expect("move the task");
-    }
-
-    /// A daemon with PR #7 matched by a clone to the workspace it returns, after a first sync.
-    /// With `full`, every sync is a full one that lists #7 again; else later syncs are
-    /// incremental and their search shows nothing, so only matching the inbox again sees #7.
-    async fn matched(github: &MockServer, full: bool) -> (TestDaemon, Workspace) {
-        let daemon = if full {
-            mock_search(github, TOKEN, &[Pr::open(7)]);
-            full_daemon(github, Some(TOKEN)).await
-        } else {
-            mock_list(github, TOKEN, &[Pr::open(7)]);
-            mock_updated_search(github, TOKEN, &[]);
-            daemon(github, Some(TOKEN)).await
-        };
-        let dir = daemon.new_dir("ws");
-        clone_of(&dir.join("widgets"), "acme/widgets", "feat/sync");
-        let workspace = attach(&daemon.client, &dir).await;
-        sync(&daemon.client).await;
-        assert_eq!(
-            pr_tasks(&daemon.client).await[0].workspace_id,
-            Some(workspace.id)
-        );
-        (daemon, workspace)
-    }
-
-    #[tokio::test]
-    async fn should_keep_a_pr_task_the_user_moved_to_the_inbox_there_in_a_full_sync_200() {
-        let github = MockServer::start_async().await;
-        let (daemon, _) = matched(&github, true).await;
-        let task = pr_tasks(&daemon.client).await.remove(0);
-
-        move_to(&daemon.client, &task, TaskPlace::Inbox).await;
-        sync(&daemon.client).await;
-
-        assert_eq!(pr_tasks(&daemon.client).await[0].workspace_id, None);
-    }
-
-    #[tokio::test]
-    async fn should_keep_a_pr_task_the_user_moved_to_the_inbox_there_in_an_incremental_sync_200() {
-        let github = MockServer::start_async().await;
-        let (daemon, _) = matched(&github, false).await;
-        let task = pr_tasks(&daemon.client).await.remove(0);
-
-        move_to(&daemon.client, &task, TaskPlace::Inbox).await;
-        sync(&daemon.client).await;
-
-        assert_eq!(pr_tasks(&daemon.client).await[0].workspace_id, None);
-    }
-
-    #[tokio::test]
-    async fn should_keep_the_workspace_the_user_picked_200() {
-        let github = MockServer::start_async().await;
-        let (daemon, _) = matched(&github, true).await;
-        let picked = attach(&daemon.client, &daemon.new_dir("picked")).await;
-        let task = pr_tasks(&daemon.client).await.remove(0);
-
-        move_to(&daemon.client, &task, TaskPlace::Workspace(picked.id)).await;
-        sync(&daemon.client).await;
-
-        assert_eq!(
-            pr_tasks(&daemon.client).await[0].workspace_id,
-            Some(picked.id)
-        );
-    }
-
-    #[tokio::test]
-    async fn should_refuse_another_title_for_a_pr_task_400() {
-        let github = MockServer::start_async().await;
-        mock_search(&github, TOKEN, &[Pr::open(7)]);
-        let daemon = daemon(&github, Some(TOKEN)).await;
-        sync(&daemon.client).await;
-        let task = pr_tasks(&daemon.client).await.remove(0);
-
-        let (status, error) = error_response(
-            daemon
-                .client
-                .task_update()
-                .id(task.id)
-                .body(TaskPatch {
-                    title: Some("my name for it".into()),
-                    ..TaskPatch::default()
-                })
-                .send()
-                .await,
-        );
-
-        assert_eq!(status, 400);
-        assert_eq!(error.error_code.as_deref(), Some("invalid_title"));
-    }
-
-    #[tokio::test]
-    async fn should_take_a_pr_tasks_own_title_and_a_description_200() {
-        let github = MockServer::start_async().await;
-        mock_search(&github, TOKEN, &[Pr::open(7)]);
-        let daemon = daemon(&github, Some(TOKEN)).await;
-        sync(&daemon.client).await;
-        let task = pr_tasks(&daemon.client).await.remove(0);
-
-        let edited = daemon
-            .client
-            .task_update()
-            .id(task.id)
-            .body(TaskPatch {
-                title: Some(task.title.clone()),
-                body: Some("Ship after the release.".into()),
-                ..TaskPatch::default()
-            })
-            .send()
-            .await
-            .expect("edit")
-            .into_inner();
-
-        assert_eq!(edited.title, task.title);
-        assert_eq!(edited.body, "Ship after the release.");
-    }
 }
 
 mod full {
@@ -1024,13 +734,10 @@ mod full {
         list.assert_calls(1);
         unchanged.assert_calls(0);
         details.assert_calls(1);
-        let checks: Vec<_> = pr_tasks(&daemon.client)
+        let checks: Vec<_> = kept_prs(&daemon.client)
             .await
             .into_iter()
-            .map(|task| {
-                let pr = task.pr.expect("the task's PR");
-                (pr.number, pr.checks)
-            })
+            .map(|pr| (pr.number, pr.checks))
             .collect();
         assert!(
             checks.contains(&(8, Some(ChecksState::Success))),
@@ -1096,7 +803,7 @@ mod full {
         let daemon = daemon(&github, Some(TOKEN)).await;
 
         let deadline = Instant::now() + Duration::from_secs(3);
-        while pr_tasks(&daemon.client).await.is_empty() {
+        while kept_prs(&daemon.client).await.is_empty() {
             assert!(Instant::now() < deadline, "no row while its details load");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -1106,10 +813,10 @@ mod full {
 mod asked_full {
     use super::*;
 
-    /// PR 7's task's status and its PR's stored state.
-    async fn seven(client: &Client) -> (TaskStatus, PrState) {
-        let task = pr_tasks(client).await.remove(0);
-        (task.status, task.pr.expect("the task's PR").state)
+    /// Whether PR 7 is Finished, and its stored state.
+    async fn seven(client: &Client) -> (bool, PrState) {
+        let pr = pr_numbered(client, 7).await;
+        (pr.finished, pr.state)
     }
 
     #[tokio::test]
@@ -1136,12 +843,9 @@ mod asked_full {
         let incremental = seven(&daemon.client).await;
         let status = full_sync(&daemon.client).await;
 
-        assert_eq!(incremental, (TaskStatus::Done, PrState::Closed));
+        assert_eq!(incremental, (true, PrState::Closed));
         assert_eq!(status.last_error, None);
-        assert_eq!(
-            seven(&daemon.client).await,
-            (TaskStatus::Review, PrState::Open)
-        );
+        assert_eq!(seven(&daemon.client).await, (false, PrState::Open));
     }
 
     #[tokio::test]
@@ -1196,37 +900,14 @@ mod sign_in_changes {
         }
     }
 
-    /// The task of `repo#number`.
-    async fn task_of(client: &Client, repo: &str, number: i64) -> Task {
-        pr_tasks(client)
-            .await
-            .into_iter()
-            .find(|task| {
-                (task.pr.as_ref()).is_some_and(|pr| pr.repo == repo && pr.number == number)
-            })
-            .expect("the PR's task")
-    }
-
-    /// A daemon that synced PR 7 and [`secret`] with [`FULL`], then had PR 8's task moved to
-    /// `doing`, and that GitHub answers for [`NARROW`] with PR 7 alone.
+    /// A daemon that synced PR 7 and [`secret`] with [`FULL`], and that GitHub answers for
+    /// [`NARROW`] with PR 7 alone.
     async fn narrowed(github: &MockServer) -> TestDaemon {
         mock_search(github, FULL, &[Pr::open(7), secret()]);
         mock_search(github, NARROW, &[Pr::open(7)]);
         mock_hidden(github, NARROW, &secret());
         let daemon = daemon(github, Some(FULL)).await;
         sync(&daemon.client).await;
-        let task = task_of(&daemon.client, "acme/secret", 8).await;
-        daemon
-            .client
-            .task_update()
-            .id(task.id)
-            .body(agentdeck_client::types::TaskPatch {
-                status: Some(TaskStatus::Doing),
-                ..Default::default()
-            })
-            .send()
-            .await
-            .expect("move the task to doing");
         set_gh_token(daemon.root(), Some(NARROW));
         daemon
     }
@@ -1239,17 +920,16 @@ mod sign_in_changes {
         let status = sync(&daemon.client).await;
 
         assert_eq!(status.last_error, None);
-        let task = task_of(&daemon.client, "acme/secret", 8).await;
-        assert_eq!(task.status, TaskStatus::Doing);
-        let pr = task.pr.expect("the task's PR");
+        let pr = pr_in(&daemon.client, "acme/secret", 8).await;
         assert_eq!(pr.state, PrState::Open);
         assert!(pr.unreachable);
-        let seen = task_of(&daemon.client, "acme/widgets", 7).await;
-        assert!(!seen.pr.expect("the task's PR").unreachable);
+        assert!(!pr.finished);
+        let seen = pr_in(&daemon.client, "acme/widgets", 7).await;
+        assert!(!seen.unreachable);
     }
 
     #[tokio::test]
-    async fn should_bring_back_a_pr_the_token_sees_again_in_review_200() {
+    async fn should_bring_back_a_pr_the_token_sees_again_200() {
         let github = MockServer::start_async().await;
         let daemon = narrowed(&github).await;
         sync(&daemon.client).await;
@@ -1257,9 +937,7 @@ mod sign_in_changes {
         set_gh_token(daemon.root(), Some(FULL));
         sync(&daemon.client).await;
 
-        let task = task_of(&daemon.client, "acme/secret", 8).await;
-        assert_eq!(task.status, TaskStatus::Review);
-        let pr = task.pr.expect("the task's PR");
+        let pr = pr_in(&daemon.client, "acme/secret", 8).await;
         assert_eq!(pr.state, PrState::Open);
         assert!(!pr.unreachable);
     }
@@ -1341,9 +1019,9 @@ mod sign_in_changes {
         assert_eq!(signed_in.synced_as.as_deref(), Some("octocat"));
         assert_eq!(status.login, GhLogin::LoggedOut);
         assert_eq!(status.synced_as.as_deref(), Some("octocat"));
-        let task = pr_tasks(&daemon.client).await.remove(0);
-        assert_eq!(task.status, TaskStatus::Review);
-        assert_eq!(task.pr.expect("the task's PR").state, PrState::Open);
+        let pr = pr_numbered(&daemon.client, 7).await;
+        assert!(!pr.finished);
+        assert_eq!(pr.state, PrState::Open);
     }
 
     #[tokio::test]
@@ -1400,7 +1078,7 @@ mod max_age {
         let daemon =
             TestDaemon::start_with_github(dirs_with_cutoff("0"), &github.url("/graphql")).await;
         sync(&daemon.client).await;
-        assert_eq!(pr_tasks(&daemon.client).await.len(), open.len());
+        assert_eq!(kept_prs(&daemon.client).await.len(), open.len());
         let (_, dirs) = daemon.terminate();
         first.delete();
         set_gh_token(dirs.path(), None);
@@ -1417,14 +1095,6 @@ mod max_age {
     /// GitHub's list of open PRs, most recently updated first, as one page.
     pub(super) fn mock_open<'a>(github: &'a MockServer, prs: &[Pr]) -> Mock<'a> {
         mock_list_page(github, TOKEN, prs, None, None, prs.len(), Duration::ZERO)
-    }
-
-    pub(super) async fn task_of(client: &Client, number: i64) -> Task {
-        pr_tasks(client)
-            .await
-            .into_iter()
-            .find(|task| task.pr.as_ref().is_some_and(|pr| pr.number == number))
-            .expect("the PR's task")
     }
 
     #[tokio::test]
@@ -1484,32 +1154,31 @@ mod max_age {
     }
 
     #[tokio::test]
-    async fn should_move_a_stored_pr_older_than_the_cutoff_to_done_200() {
+    async fn should_finish_a_stored_pr_older_than_the_cutoff_and_say_so_200() {
         let github = MockServer::start_async().await;
         let daemon = restarted_with_cutoff(&github, &[aged(7, 1), aged(8, 400)]).await;
         mock_open(&github, &[aged(7, 1), aged(8, 400)]);
         // 7 has no checks, so it is fetched again in case they started.
         mock_fetch(&github, &[aged(7, 1)]);
-        let old = task_of(&daemon.client, 8).await;
         let mut ws = Ws::connect(&daemon).await;
 
         set_gh_token(daemon.root(), Some(TOKEN));
         sync(&daemon.client).await;
 
+        let id = changed_id(&aged(8, 400));
         ws.until(|frame| match frame {
             Frame::Message(ServerMessage::Changed {
-                entity: Entity::Task,
-                id,
-            }) if id == old.id.to_string() => Some(()),
+                entity: Entity::PullRequest,
+                id: changed,
+            }) if changed == id => Some(()),
             _ => None,
         })
         .await;
-        let old = task_of(&daemon.client, 8).await;
-        assert_eq!(old.status, TaskStatus::Done);
-        assert!(old.done_at.is_some());
+        let old = pr_numbered(&daemon.client, 8).await;
+        assert!(old.finished);
         // Nothing changed on GitHub: the PR is still open.
-        assert_eq!(old.pr.expect("the task's PR").state, PrState::Open);
-        assert_eq!(task_of(&daemon.client, 7).await.status, TaskStatus::Review);
+        assert_eq!(old.state, PrState::Open);
+        assert!(!pr_numbered(&daemon.client, 7).await.finished);
     }
 
     #[tokio::test]
@@ -1528,36 +1197,13 @@ mod max_age {
     }
 
     #[tokio::test]
-    async fn should_move_an_aged_out_task_to_done_only_once_200() {
-        let github = MockServer::start_async().await;
-        let daemon = restarted_with_cutoff(&github, &[aged(8, 400)]).await;
-        mock_open(&github, &[aged(8, 400)]);
-        set_gh_token(daemon.root(), Some(TOKEN));
-        sync(&daemon.client).await;
-        let task = task_of(&daemon.client, 8).await;
-        assert_eq!(task.status, TaskStatus::Done);
-
-        daemon
-            .client
-            .task_update()
-            .id(task.id)
-            .body_map(|patch| patch.status(Some(TaskStatus::Review)))
-            .send()
-            .await
-            .expect("update");
-        sync(&daemon.client).await;
-
-        assert_eq!(task_of(&daemon.client, 8).await.status, TaskStatus::Review);
-    }
-
-    #[tokio::test]
     async fn should_bring_back_an_aged_out_pr_github_updates_again_200() {
         let github = MockServer::start_async().await;
         let daemon = restarted_with_cutoff(&github, &[aged(8, 400)]).await;
         let mut list = mock_open(&github, &[aged(8, 400)]);
         set_gh_token(daemon.root(), Some(TOKEN));
         sync(&daemon.client).await;
-        assert_eq!(task_of(&daemon.client, 8).await.status, TaskStatus::Done);
+        assert!(pr_numbered(&daemon.client, 8).await.finished);
 
         list.delete();
         let fresh = aged(8, 0);
@@ -1565,7 +1211,7 @@ mod max_age {
         mock_fetch(&github, &[fresh]);
         sync(&daemon.client).await;
 
-        assert_eq!(task_of(&daemon.client, 8).await.status, TaskStatus::Review);
+        assert!(!pr_numbered(&daemon.client, 8).await.finished);
     }
 }
 
@@ -1603,7 +1249,7 @@ mod progress {
         let daemon = two_pages(&github, Duration::from_secs(3)).await;
 
         let deadline = Instant::now() + Duration::from_secs(2);
-        while pr_tasks(&daemon.client).await.is_empty() {
+        while kept_prs(&daemon.client).await.is_empty() {
             assert!(
                 Instant::now() < deadline,
                 "page 1 not stored while page 2 waits"
@@ -1621,7 +1267,7 @@ mod progress {
         );
         let finished = sync(&daemon.client).await;
         assert_eq!(finished.progress, None);
-        assert_eq!(pr_tasks(&daemon.client).await.len(), 2);
+        assert_eq!(kept_prs(&daemon.client).await.len(), 2);
     }
 
     #[tokio::test]
@@ -1689,8 +1335,8 @@ mod timer {
         let daemon = daemon(&github, Some(TOKEN)).await;
 
         let deadline = Instant::now() + Duration::from_secs(10);
-        while pr_tasks(&daemon.client).await.is_empty() {
-            assert!(Instant::now() < deadline, "no PR task 10 s after start");
+        while kept_prs(&daemon.client).await.is_empty() {
+            assert!(Instant::now() < deadline, "no PR 10 s after start");
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         let status = daemon
@@ -1885,7 +1531,6 @@ mod get_v1_prs {
         let mut before = mock_search(&github, TOKEN, &[Pr::open(7)]);
         let daemon = full_daemon(&github, Some(TOKEN)).await;
         sync(&daemon.client).await;
-        let task = pr_tasks(&daemon.client).await.remove(0);
 
         before.delete();
         mock_search(&github, TOKEN, &[renamed(Pr::open(7))]);
@@ -1901,10 +1546,55 @@ mod get_v1_prs {
         );
         assert_eq!(prs[0].repository.name.to_string(), "acme/gizmos");
         assert_eq!(prs[0].repository.url, "https://github.com/acme/gizmos");
-        let tasks = pr_tasks(&daemon.client).await;
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].id, task.id);
-        assert_eq!(tasks[0].pr.as_ref().expect("its PR").repo, "acme/gizmos");
+    }
+
+    /// `acme/widgets` renamed to `acme/gizmos`, and another Repository then created as
+    /// `acme/widgets` with a PR of the same number: two PRs, each with its own Repository.
+    /// A PR keyed by its name would collide with the renamed one's stored name.
+    #[tokio::test]
+    async fn should_keep_two_prs_when_another_repository_takes_a_renamed_ones_name_200() {
+        let github = MockServer::start_async().await;
+        let mut before = mock_search(&github, TOKEN, &[Pr::open(7)]);
+        let daemon = full_daemon(&github, Some(TOKEN)).await;
+        sync(&daemon.client).await;
+        let newcomer = Pr {
+            repo_id: Some(repository_id("acme/widgets, the second")),
+            title: "Start over",
+            ..Pr::open(7)
+        };
+
+        before.delete();
+        // The newcomer first, so it is stored while the renamed one still has the name.
+        mock_search(&github, TOKEN, &[newcomer.clone(), renamed(Pr::open(7))]);
+        let status = sync(&daemon.client).await;
+
+        assert_eq!(status.last_error, None);
+        let prs = list(&daemon.client).await;
+        let kept: Vec<(String, u64, String)> = prs
+            .iter()
+            .map(|pr| {
+                (
+                    pr.reference.to_string(),
+                    pr.repository.id.get(),
+                    pr.title.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                (
+                    "acme/gizmos#7".to_owned(),
+                    repository_id("acme/widgets"),
+                    "Add PR sync".to_owned()
+                ),
+                (
+                    "acme/widgets#7".to_owned(),
+                    newcomer.repository_id(),
+                    "Start over".to_owned()
+                ),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1930,7 +1620,7 @@ mod get_v1_prs {
         assert_eq!(prs.len(), 1, "{prs:?}");
         assert_eq!(prs[0].reference.to_string(), "acme/gizmos#7");
         assert_eq!(prs[0].state, PrState::Merged);
-        assert_eq!(pr_tasks(&daemon.client).await[0].status, TaskStatus::Done);
+        assert!(prs[0].finished);
     }
 
     #[tokio::test]
@@ -1959,7 +1649,7 @@ mod get_v1_prs {
 }
 
 mod post_v1_prs_close {
-    use super::max_age::{mock_open, restarted_with_cutoff, task_of};
+    use super::max_age::{mock_open, restarted_with_cutoff};
     use super::*;
 
     /// Closes `prs`, which must answer 200, and returns the results.
@@ -1974,12 +1664,12 @@ mod post_v1_prs_close {
         response.into_inner().results
     }
 
-    /// A daemon that has synced `open` into PR tasks; every sync after is full.
+    /// A daemon that has synced `open`; every sync after is full.
     async fn synced(github: &MockServer, open: &[Pr]) -> TestDaemon {
         mock_search(github, TOKEN, open);
         let daemon = full_daemon(github, Some(TOKEN)).await;
         sync(&daemon.client).await;
-        assert_eq!(pr_tasks(&daemon.client).await.len(), open.len());
+        assert_eq!(kept_prs(&daemon.client).await.len(), open.len());
         daemon
     }
 
@@ -2000,7 +1690,7 @@ mod post_v1_prs_close {
     }
 
     #[tokio::test]
-    async fn should_close_each_pr_and_move_its_task_to_done_200() {
+    async fn should_close_each_pr_and_finish_it_200() {
         let github = MockServer::start_async().await;
         let prs = [Pr::open(7), Pr::open(8)];
         let daemon = synced(&github, &prs).await;
@@ -2017,10 +1707,9 @@ mod post_v1_prs_close {
             mock.assert_calls(1);
         }
         for number in [7, 8] {
-            let task = task_of(&daemon.client, number).await;
-            assert_eq!(task.status, TaskStatus::Done);
-            assert!(task.done_at.is_some());
-            assert_eq!(task.pr.expect("the task's PR").state, PrState::Closed);
+            let pr = pr_numbered(&daemon.client, number).await;
+            assert!(pr.finished);
+            assert_eq!(pr.state, PrState::Closed);
         }
     }
 
@@ -2072,22 +1761,21 @@ mod post_v1_prs_close {
     }
 
     #[tokio::test]
-    async fn should_tell_websocket_clients_the_closed_task_changed_200() {
+    async fn should_tell_websocket_clients_the_closed_pr_changed_200() {
         let github = MockServer::start_async().await;
         let pr = Pr::open(7);
         let daemon = synced(&github, std::slice::from_ref(&pr)).await;
         mock_node_ids(&github, std::slice::from_ref(&pr));
         mock_close(&github, &pr);
-        let task = task_of(&daemon.client, 7).await;
         let mut ws = Ws::connect(&daemon).await;
 
         close(&daemon.client, vec![reference(&pr)]).await;
 
         ws.until(|frame| match frame {
             Frame::Message(ServerMessage::Changed {
-                entity: Entity::Task,
+                entity: Entity::PullRequest,
                 id,
-            }) if id == task.id.to_string() => Some(()),
+            }) if id == changed_id(&pr) => Some(()),
             _ => None,
         })
         .await;
@@ -2134,9 +1822,9 @@ mod post_v1_prs_close {
             [ok(&refs[0]), failed(&refs[1], refusal), ok(&refs[2])]
         );
         last.assert_calls(1);
-        let refused = task_of(&daemon.client, 8).await;
-        assert_eq!(refused.status, TaskStatus::Review);
-        assert_eq!(refused.pr.expect("the task's PR").state, PrState::Open);
+        let refused = pr_numbered(&daemon.client, 8).await;
+        assert!(!refused.finished);
+        assert_eq!(refused.state, PrState::Open);
     }
 
     #[tokio::test]
@@ -2347,16 +2035,14 @@ mod post_v1_prs_close {
         mock_open(&github, std::slice::from_ref(&old));
         set_gh_token(daemon.root(), Some(TOKEN));
         sync(&daemon.client).await;
-        let task = task_of(&daemon.client, 8).await;
-        assert_eq!(task.status, TaskStatus::Done);
+        assert!(pr_numbered(&daemon.client, 8).await.finished);
         mock_node_ids(&github, std::slice::from_ref(&old));
         mock_close(&github, &old);
 
         let results = close(&daemon.client, vec![reference(&old)]).await;
 
         assert_eq!(results, [ok(&reference(&old))]);
-        let task = task_of(&daemon.client, 8).await;
-        assert_eq!(task.pr.expect("the task's PR").state, PrState::Closed);
+        assert_eq!(pr_numbered(&daemon.client, 8).await.state, PrState::Closed);
     }
 
     #[tokio::test]
@@ -2382,12 +2068,13 @@ mod post_v1_prs_close {
         sync(&daemon.client).await;
 
         fetch.assert_calls(0);
-        assert_eq!(task_of(&daemon.client, 7).await.status, TaskStatus::Done);
+        let pr = pr_numbered(&daemon.client, 7).await;
+        assert_eq!((pr.state, pr.finished), (PrState::Closed, true));
     }
 }
 
 mod finished {
-    use super::max_age::{mock_open, restarted_with_cutoff, task_of};
+    use super::max_age::{mock_open, restarted_with_cutoff};
     use super::*;
 
     /// Every pull request the daemon keeps, Finished ones included.
@@ -2576,7 +2263,6 @@ mod finished {
         sync(&daemon.client).await;
 
         assert!(!kept(&daemon.client, 8).await.expect("PR 8").finished);
-        assert_eq!(task_of(&daemon.client, 8).await.status, TaskStatus::Review);
     }
 
     #[tokio::test]
@@ -2606,7 +2292,6 @@ mod finished {
         let daemon =
             TestDaemon::start_with_github(dirs_keeping_for("0"), &github.url("/graphql")).await;
         sync(&daemon.client).await;
-        let gadget_task = super::task_in(&daemon.client, "acme/gadgets", 3).await;
         let mut ws = Ws::connect(&daemon).await;
 
         search.delete();
@@ -2626,9 +2311,6 @@ mod finished {
             .map(|pr| pr.reference.to_string())
             .collect();
         assert_eq!(kept, ["acme/widgets#8"]);
-        // The PR's task goes with it.
-        assert!(!(pr_tasks(&daemon.client).await.iter()).any(|task| task.id == gadget_task.id));
-        assert_eq!(numbers(&daemon.client).await, [8]);
         // acme/widgets keeps PR 8, so it stays; acme/gadgets has nothing left, so it goes.
         assert_eq!(repositories(&daemon.client).await, ["acme/widgets"]);
     }
@@ -2704,13 +2386,4 @@ mod finished {
         assert!(!pr.finished);
         assert_eq!(pr.repository.name.to_string(), "acme/secret");
     }
-}
-
-/// The task of `repo#number`.
-async fn task_in(client: &Client, repo: &str, number: i64) -> Task {
-    pr_tasks(client)
-        .await
-        .into_iter()
-        .find(|task| (task.pr.as_ref()).is_some_and(|pr| pr.repo == repo && pr.number == number))
-        .expect("the PR's task")
 }

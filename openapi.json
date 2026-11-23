@@ -524,42 +524,6 @@
         ],
         "type": "object"
       },
-      "NewTask": {
-        "description": "`POST /v1/tasks`.",
-        "properties": {
-          "body": {
-            "description": "The body; empty when absent.",
-            "nullable": true,
-            "type": "string"
-          },
-          "status": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/TaskStatus"
-              }
-            ],
-            "description": "The status; `todo` when absent.",
-            "nullable": true
-          },
-          "title": {
-            "description": "The title.",
-            "type": "string"
-          },
-          "workspace_id": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/WorkspaceId"
-              }
-            ],
-            "description": "The workspace to link; the inbox when absent.",
-            "nullable": true
-          }
-        },
-        "required": [
-          "title"
-        ],
-        "type": "object"
-      },
       "NewWorkspace": {
         "description": "`POST /v1/workspaces`.",
         "properties": {
@@ -661,15 +625,6 @@
             ],
             "description": "The tab it belongs to."
           },
-          "task_id": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/TaskId"
-              }
-            ],
-            "description": "The linked task, if any.",
-            "nullable": true
-          },
           "title": {
             "description": "The title the program set, or empty.",
             "type": "string"
@@ -725,24 +680,6 @@
           "shell"
         ],
         "type": "string"
-      },
-      "PanePatch": {
-        "description": "`PATCH /v1/panes/{id}`: the task to link the pane to, or null to unlink it. `task_id` is required, so an empty body can't unlink a pane by accident.",
-        "properties": {
-          "task_id": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/TaskId"
-              }
-            ],
-            "description": "A task in the pane's workspace that isn't done, or null.",
-            "nullable": true
-          }
-        },
-        "required": [
-          "task_id"
-        ],
-        "type": "object"
       },
       "PaneRespawn": {
         "description": "`POST /v1/panes/{id}/respawn`.",
@@ -1371,223 +1308,6 @@
         },
         "type": "object"
       },
-      "Task": {
-        "description": "An item in the one global task list.",
-        "properties": {
-          "body": {
-            "description": "The body, possibly empty.",
-            "type": "string"
-          },
-          "created_at": {
-            "description": "When the task was created.",
-            "type": "string"
-          },
-          "done_at": {
-            "description": "When the task last moved to done; `None` while it isn't done.",
-            "nullable": true,
-            "type": "string"
-          },
-          "id": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/TaskId"
-              }
-            ],
-            "description": "The task's id."
-          },
-          "kind": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/TaskKind"
-              }
-            ],
-            "description": "Plain or PR."
-          },
-          "pr": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/TaskPr"
-              }
-            ],
-            "description": "The pull request behind a PR task; `None` for a plain task.",
-            "nullable": true
-          },
-          "status": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/TaskStatus"
-              }
-            ],
-            "description": "The status."
-          },
-          "title": {
-            "description": "The title.",
-            "type": "string"
-          },
-          "updated_at": {
-            "description": "When the task last changed.",
-            "type": "string"
-          },
-          "workspace_id": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/WorkspaceId"
-              }
-            ],
-            "description": "The linked workspace; `None` puts the task in the inbox.",
-            "nullable": true
-          }
-        },
-        "required": [
-          "body",
-          "created_at",
-          "id",
-          "kind",
-          "status",
-          "title",
-          "updated_at"
-        ],
-        "type": "object"
-      },
-      "TaskId": {
-        "format": "uuid",
-        "type": "string"
-      },
-      "TaskKind": {
-        "enum": [
-          "plain",
-          "pr"
-        ],
-        "type": "string"
-      },
-      "TaskPatch": {
-        "description": "`PATCH /v1/tasks/{id}`: the fields to change.",
-        "properties": {
-          "body": {
-            "description": "A new body.",
-            "nullable": true,
-            "type": "string"
-          },
-          "status": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/TaskStatus"
-              }
-            ],
-            "description": "A new status.",
-            "nullable": true
-          },
-          "title": {
-            "description": "A new title. A PR task's title is GitHub's: only its own title is accepted.",
-            "nullable": true,
-            "type": "string"
-          },
-          "workspace_id": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/TaskPlace"
-              }
-            ],
-            "description": "Where to move it: a workspace that isn't archived, or null for the inbox. Absent leaves it where it is.",
-            "nullable": true
-          }
-        },
-        "type": "object"
-      },
-      "TaskPlace": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/WorkspaceId"
-          }
-        ],
-        "description": "A workspace's id, or null for the inbox.",
-        "nullable": true
-      },
-      "TaskPr": {
-        "description": "The GitHub pull request behind a PR task, as PR sync last saw it (spec §8).",
-        "properties": {
-          "checks": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/ChecksState"
-              }
-            ],
-            "description": "The head commit's rolled-up checks; `None` when it has none.",
-            "nullable": true
-          },
-          "draft": {
-            "description": "A draft PR.",
-            "type": "boolean"
-          },
-          "head_ref": {
-            "description": "The branch the PR merges from.",
-            "type": "string"
-          },
-          "number": {
-            "description": "The PR's number in that repo.",
-            "format": "int64",
-            "type": "integer"
-          },
-          "repo": {
-            "description": "`owner/name` of the repo the PR targets.",
-            "type": "string"
-          },
-          "review": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/ReviewState"
-              }
-            ],
-            "description": "The review decision; `None` when the repo requires no review.",
-            "nullable": true
-          },
-          "state": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/PrState"
-              }
-            ],
-            "description": "Open, merged or closed."
-          },
-          "synced_at": {
-            "description": "When PR sync last saw the PR.",
-            "type": "string"
-          },
-          "unreachable": {
-            "default": false,
-            "description": "Whether the GitHub sign-in can't see the PR: the last full sync fetched it by number and GitHub didn't show it to the token (not found, or no access). It is shown as it was last synced. Absent from an older daemon, which reads as false.",
-            "type": "boolean"
-          },
-          "updated_at": {
-            "description": "When the PR last changed on GitHub.",
-            "type": "string"
-          },
-          "url": {
-            "description": "The PR's web URL.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "draft",
-          "head_ref",
-          "number",
-          "repo",
-          "state",
-          "synced_at",
-          "updated_at",
-          "url"
-        ],
-        "type": "object"
-      },
-      "TaskStatus": {
-        "enum": [
-          "todo",
-          "doing",
-          "review",
-          "done"
-        ],
-        "type": "string"
-      },
       "TerminalPatch": {
         "description": "`[terminal]` in a [`SettingsPatch`]: its schema only, since `config::validate` reads the JSON itself.",
         "properties": {
@@ -2090,50 +1810,6 @@
           }
         },
         "summary": "One pane, with its live title, state and current folder."
-      },
-      "patch": {
-        "description": "null). Nothing is typed into the pane (spec §9).",
-        "operationId": "pane_update",
-        "parameters": [
-          {
-            "description": "The entity's id.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "$ref": "#/components/schemas/PaneId"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/PanePatch"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Pane"
-                }
-              }
-            },
-            "description": "successful operation"
-          },
-          "4XX": {
-            "$ref": "#/components/responses/Error"
-          },
-          "5XX": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "Links the pane to a task in its workspace that isn't done, or unlinks it (`task_id`"
       }
     },
     "/v1/panes/{id}/input": {
@@ -2183,7 +1859,7 @@
     },
     "/v1/panes/{id}/respawn": {
       "post": {
-        "description": "`cwd` and its task link (spec §4). `run: \"agent\"`, for an agent pane only (`unsupported_kind`), runs its agent again: claude and codex resume their session when it is known, else start fresh with a new session; an `other` agent runs its argv again. A resume that exits non-zero within 10 s, as one of a session the agent can no longer find does, is followed by a fresh start, once. `run: \"shell\"` turns the pane into a shell pane running `$SHELL`, with hosting on. The state starts over. `running` (409) while its process hasn't exited; `invalid_dir` when its `cwd` is gone; `invalid_argv` when the program can't start, and the pane stays exited.",
+        "description": "its `cwd` (spec §4). `run: \"agent\"`, for an agent pane only (`unsupported_kind`), runs its agent again: claude and codex resume their session when it is known, else start fresh with a new session; an `other` agent runs its argv again. A resume that exits non-zero within 10 s, as one of a session the agent can no longer find does, is followed by a fresh start, once. `run: \"shell\"` turns the pane into a shell pane running `$SHELL`, with hosting on. The state starts over. `running` (409) while its process hasn't exited; `invalid_dir` when its `cwd` is gone; `invalid_argv` when the program can't start, and the pane stays exited.",
         "operationId": "pane_respawn",
         "parameters": [
           {
@@ -2224,12 +1900,12 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Starts an exited pane again in place, keeping its id, its place in the tab's layout, its"
+        "summary": "Starts an exited pane again in place, keeping its id, its place in the tab's layout and"
       }
     },
     "/v1/panes/{id}/stop": {
       "post": {
-        "description": "its task link: SIGHUP, then SIGKILL after 3 s, as `DELETE` does. An agent pane's process is stopped, and the pane reads as exited once it has, so `POST /v1/panes/{id}/respawn` (Restart agent) resumes the session later and a restarted daemon doesn't resume it. A shell pane's hosted agent is stopped, its process group alone, and the shell keeps running. Answers once the signal is sent: the `state` and `exit` events, or `changed` for a hosted agent, follow. `exited` (409) when the process has already exited; `no_agent` (409) for a shell pane hosting no agent.",
+        "description": "SIGHUP, then SIGKILL after 3 s, as `DELETE` does. An agent pane's process is stopped, and the pane reads as exited once it has, so `POST /v1/panes/{id}/respawn` (Restart agent) resumes the session later and a restarted daemon doesn't resume it. A shell pane's hosted agent is stopped, its process group alone, and the shell keeps running. Answers once the signal is sent: the `state` and `exit` events, or `changed` for a hosted agent, follow. `exited` (409) when the process has already exited; `no_agent` (409) for a shell pane hosting no agent.",
         "operationId": "pane_stop",
         "parameters": [
           {
@@ -2253,7 +1929,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Stops the pane's agent and keeps the pane, with its place in the layout, its session and"
+        "summary": "Stops the pane's agent and keeps the pane, with its place in the layout and its session:"
       }
     },
     "/v1/panes/{id}/tail": {
@@ -2359,7 +2035,7 @@
     },
     "/v1/prs/close": {
       "post": {
-        "description": "delete. Answers one result per reference, in the order asked, once every PR is tried; 200 even when some failed. Only a PR stored open and reachable closes; a closed PR's task moves to done at once.",
+        "description": "delete. Answers one result per reference, in the order asked, once every PR is tried; 200 even when some failed. Only a PR stored open and reachable closes; a closed PR is stored closed, and Finished, at once.",
         "operationId": "prs_close",
         "requestBody": {
           "content": {
@@ -2449,7 +2125,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Syncs PR tasks with GitHub now, after any sync running, and answers with the status the"
+        "summary": "Syncs PRs with GitHub now, after any sync running, and answers with the status the"
       }
     },
     "/v1/repositories": {
@@ -2656,206 +2332,6 @@
         "summary": "Renames, moves or re-lays-out a tab."
       }
     },
-    "/v1/tasks": {
-      "get": {
-        "operationId": "task_list",
-        "parameters": [
-          {
-            "description": "`true`: only tasks with no workspace; `false`: only tasks with one.",
-            "in": "query",
-            "name": "inbox",
-            "schema": {
-              "nullable": true,
-              "type": "boolean"
-            }
-          },
-          {
-            "description": "Only tasks of this kind.",
-            "in": "query",
-            "name": "kind",
-            "schema": {
-              "$ref": "#/components/schemas/TaskKind"
-            }
-          },
-          {
-            "description": "Only tasks with this status.",
-            "in": "query",
-            "name": "status",
-            "schema": {
-              "$ref": "#/components/schemas/TaskStatus"
-            }
-          },
-          {
-            "description": "Only tasks linked to this workspace.",
-            "in": "query",
-            "name": "workspace",
-            "schema": {
-              "$ref": "#/components/schemas/WorkspaceId"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/Task"
-                  },
-                  "title": "Array_of_Task",
-                  "type": "array"
-                }
-              }
-            },
-            "description": "successful operation"
-          },
-          "4XX": {
-            "$ref": "#/components/responses/Error"
-          },
-          "5XX": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "The tasks matching every filter given, oldest first."
-      },
-      "post": {
-        "operationId": "task_create",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/NewTask"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Task"
-                }
-              }
-            },
-            "description": "successful creation"
-          },
-          "4XX": {
-            "$ref": "#/components/responses/Error"
-          },
-          "5XX": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "Creates a plain task."
-      }
-    },
-    "/v1/tasks/{id}": {
-      "delete": {
-        "operationId": "task_delete",
-        "parameters": [
-          {
-            "description": "The entity's id.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "$ref": "#/components/schemas/TaskId"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "successful deletion"
-          },
-          "4XX": {
-            "$ref": "#/components/responses/Error"
-          },
-          "5XX": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "Deletes a task."
-      },
-      "get": {
-        "operationId": "task_get",
-        "parameters": [
-          {
-            "description": "The entity's id.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "$ref": "#/components/schemas/TaskId"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Task"
-                }
-              }
-            },
-            "description": "successful operation"
-          },
-          "4XX": {
-            "$ref": "#/components/responses/Error"
-          },
-          "5XX": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "One task."
-      },
-      "patch": {
-        "description": "`\"workspace_id\": null` moves the task to the inbox. Refuses a blank title, or another title for a PR task, whose title is its PR's (`invalid_title`), and a workspace that doesn't exist or is archived (`unknown_workspace`). A PR task's workspace set here sticks: PR sync never moves it again. Moving a task out of a linked pane's workspace unlinks the pane.",
-        "operationId": "task_update",
-        "parameters": [
-          {
-            "description": "The entity's id.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "$ref": "#/components/schemas/TaskId"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/TaskPatch"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Task"
-                }
-              }
-            },
-            "description": "successful operation"
-          },
-          "4XX": {
-            "$ref": "#/components/responses/Error"
-          },
-          "5XX": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "Changes a task's title, body, status or workspace."
-      }
-    },
     "/v1/workspaces": {
       "get": {
         "operationId": "workspace_list",
@@ -2918,7 +2394,7 @@
     },
     "/v1/workspaces/{id}": {
       "delete": {
-        "description": "Links go, and with them each Repository nothing else names, with a `repository` change for each Repository it linked. Without `force`, a dir holding uncommitted or unpushed work is a 409 `dirty` carrying the dirty report.",
+        "description": "Repository nothing else names, with a `repository` change for each Repository it linked. Without `force`, a dir holding uncommitted or unpushed work is a 409 `dirty` carrying the dirty report.",
         "operationId": "workspace_delete",
         "parameters": [
           {
@@ -2951,7 +2427,7 @@
             "$ref": "#/components/responses/DeleteWorkspaceError"
           }
         },
-        "summary": "Deletes a workspace, and its dir when agentdeck created it. Its tasks move to the inbox; its"
+        "summary": "Deletes a workspace, and its dir when agentdeck created it. Its Links go, and with them each"
       },
       "get": {
         "operationId": "workspace_get",
@@ -3063,7 +2539,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Archives a workspace; its tasks and dir are kept. Refused (409 `panes_running`) while"
+        "summary": "Archives a workspace; its dir is kept. Refused (409 `panes_running`) while"
       }
     },
     "/v1/workspaces/{id}/dirty": {

@@ -1,6 +1,6 @@
 # agentdeck
 
-An agent workspace GUI for Linux. Agents run as real CLIs (Claude Code, Codex, any command) in terminals grouped into free-form workspaces. agentdeck adds tasks that survive across sessions, tracking for your GitHub PRs, and (in v1.1) channels between agents. It doesn't brief agents: they read their own `CLAUDE.md` or `AGENTS.md`, and you hand them work by pasting or with `agentdeck agent send`.
+An agent workspace GUI for Linux. Agents run as real CLIs (Claude Code, Codex, any command) in terminals grouped into Workspaces, each linking the GitHub Repositories it works on. agentdeck keeps your GitHub pull requests in one view, by Repository, and (in v1.1) adds channels between agents. It doesn't brief agents: they read their own `CLAUDE.md` or `AGENTS.md`, and you hand them work by pasting or with `agentdeck agent send`.
 
 It is three programs in one Cargo workspace:
 
@@ -32,12 +32,13 @@ export PATH="$PWD/target/debug:$PATH"
 agentdeck-gui &          # starts agentdeckd if none is running
 agentdeck ws ls          # the CLI talks to the same daemon
 agentdeck agent ls       # pane ids, for `agentdeck agent send <pane>`
-agentdeck task ls --ws <ws>   # task ids
+agentdeck pr ls          # your pull requests
 ```
 
 Or install them: `for c in agentdeck agentdeckd agentdeck-gui; do cargo install --path crates/$c; done`.
 
 - **After a pull:** a GUI newer than the running daemon shows an "older daemon" banner; press **Restart** (or `agentdeck daemon restart`). Running agents resume.
+- **The domain reset:** the first daemon from after it finds a database with tasks in it, moves it aside to `agentdeck.db.pre-domain-reset` (with its `-wal` and `-shm` files) and starts empty: your Workspaces, Panes and Links are gone, and PRs come back with the next sync. Nothing upgrades the old file; it stays there, and so do scratch folders under `workspaces/`. The removed code is in the tag `pre-domain-reset`.
 - **Stop everything:** closing the window leaves agents running in `agentdeckd` (spec §2). `pkill -TERM agentdeckd` stops it and every pane.
 - **A daemon by hand:** with the GUI closed, `pkill -TERM agentdeckd`, then start one yourself, e.g. `GH_TOKEN=… agentdeckd &`, before `agentdeck-gui`. A second `agentdeckd` while one is healthy exits 1 with "another agentdeckd is running".
 

@@ -248,7 +248,7 @@ mod tests {
 
     fn changed(id: &str) -> ServerMessage {
         ServerMessage::Changed {
-            entity: Entity::Task,
+            entity: Entity::Pane,
             id: id.into(),
         }
     }

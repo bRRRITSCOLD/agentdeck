@@ -2,7 +2,6 @@
 
 use std::time::Duration;
 
-use agentdeck_client::types::NewTask;
 use agentdeck_core::AgentState;
 use agentdeck_core::ws::{ClientMessage, Entity, ServerMessage};
 use tokio_tungstenite::tungstenite;
@@ -440,23 +439,18 @@ mod get_v1_ws {
             let daemon = TestDaemon::start().await;
             let mut ws = Ws::connect(&daemon).await;
 
-            let task = daemon
+            let workspace = daemon
                 .client
-                .task_create()
-                .body(NewTask {
-                    title: "t".into(),
-                    body: None,
-                    status: None,
-                    workspace_id: None,
-                })
+                .workspace_create()
+                .body_map(|new| new.name("w"))
                 .send()
                 .await
-                .expect("create a task")
+                .expect("create a workspace")
                 .into_inner();
 
             ws.expect(ServerMessage::Changed {
-                entity: Entity::Task,
-                id: task.id.to_string(),
+                entity: Entity::Workspace,
+                id: workspace.id.to_string(),
             })
             .await;
         }
@@ -465,29 +459,29 @@ mod get_v1_ws {
         async fn should_send_an_event_published_right_after_the_upgrade() {
             let daemon = TestDaemon::start().await;
             // Warm the client's connection pool, so the change below goes out at once.
-            daemon.client.task_list().send().await.expect("list tasks");
+            daemon
+                .client
+                .workspace_list()
+                .send()
+                .await
+                .expect("list workspaces");
 
             for round in 0..20 {
                 let mut ws = Ws::connect(&daemon).await;
                 // No await between the 101 and the change: the daemon must already be
                 // subscribed when the client sees the connection open.
-                let task = daemon
+                let workspace = daemon
                     .client
-                    .task_create()
-                    .body(NewTask {
-                        title: format!("t{round}"),
-                        body: None,
-                        status: None,
-                        workspace_id: None,
-                    })
+                    .workspace_create()
+                    .body_map(|new| new.name(format!("w{round}")))
                     .send()
                     .await
-                    .expect("create a task")
+                    .expect("create a workspace")
                     .into_inner();
 
                 ws.expect(ServerMessage::Changed {
-                    entity: Entity::Task,
-                    id: task.id.to_string(),
+                    entity: Entity::Workspace,
+                    id: workspace.id.to_string(),
                 })
                 .await;
             }

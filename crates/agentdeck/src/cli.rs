@@ -2,10 +2,10 @@
 
 use std::path::PathBuf;
 
-use agentdeck_core::{Agent, PrRef, RepositoryName, TaskStatus};
-use clap::{ArgGroup, Parser, Subcommand};
+use agentdeck_core::{Agent, PrRef, RepositoryName};
+use clap::{Parser, Subcommand};
 
-/// `agentdeck`: drive agentdeck's workspaces, tasks, agents, Repositories and pull requests
+/// `agentdeck`: drive agentdeck's workspaces, agents, Repositories and pull requests
 /// from a shell or an agent.
 #[derive(Debug, Parser)]
 #[command(name = "agentdeck", version, about, propagate_version = true)]
@@ -24,9 +24,6 @@ pub enum Command {
     /// Workspaces.
     #[command(subcommand)]
     Ws(WsCommand),
-    /// Tasks.
-    #[command(subcommand)]
-    Task(TaskCommand),
     /// Agent panes.
     #[command(subcommand)]
     Agent(AgentCommand),
@@ -104,74 +101,12 @@ pub enum WsCommand {
     },
 }
 
-/// `agentdeck task …`. A task's id may be a short id: 6 or more of its hex digits in a row,
+/// `agentdeck agent …`. A pane id may be a short id: 6 or more of its hex digits in a row,
 /// such as its last 8.
-#[derive(Debug, Subcommand)]
-pub enum TaskCommand {
-    /// List tasks.
-    Ls {
-        /// Only tasks with this status: todo, doing, review or done.
-        #[arg(long, value_name = "S")]
-        status: Option<TaskStatus>,
-        /// Only tasks in this workspace.
-        #[arg(long, value_name = "WS")]
-        ws: Option<String>,
-        /// Only tasks with no workspace.
-        #[arg(long, conflicts_with = "ws")]
-        inbox: bool,
-    },
-    /// Create a task.
-    Add {
-        /// The title.
-        title: String,
-        /// The workspace; the inbox without it.
-        #[arg(long, value_name = "WS")]
-        ws: Option<String>,
-        /// The body.
-        #[arg(long, value_name = "B")]
-        body: Option<String>,
-    },
-    /// Change a task's status.
-    Set {
-        /// The task: its id or a short id.
-        id: String,
-        /// The new status: todo, doing, review or done.
-        #[arg(long, value_name = "S")]
-        status: TaskStatus,
-    },
-    /// Change a task's title, body or workspace. A PR task's title is its PR's.
-    #[command(group(
-        ArgGroup::new("change").required(true).multiple(true).args(["title", "body", "ws", "inbox"])
-    ))]
-    Edit {
-        /// The task: its id or a short id.
-        id: String,
-        /// A new title.
-        #[arg(long, value_name = "T")]
-        title: Option<String>,
-        /// A new body.
-        #[arg(long, value_name = "B")]
-        body: Option<String>,
-        /// Move it to this workspace.
-        #[arg(long, value_name = "WS")]
-        ws: Option<String>,
-        /// Move it to the inbox.
-        #[arg(long, conflicts_with = "ws")]
-        inbox: bool,
-    },
-    /// Show one task.
-    Show {
-        /// The task: its id or a short id.
-        id: String,
-    },
-}
-
-/// `agentdeck agent …`. A pane or task id may be a short id: 6 or more of its hex digits in a
-/// row, such as its last 8.
 #[derive(Debug, Subcommand)]
 pub enum AgentCommand {
     /// List every pane, agent and shell, exited ones too: its id, workspace, tab, agent,
-    /// state and linked task.
+    /// state and current folder.
     Ls {
         /// Only panes in this workspace.
         #[arg(long, value_name = "WS")]
@@ -188,19 +123,6 @@ pub enum AgentCommand {
         /// Where it runs; the current folder without it.
         #[arg(long, value_name = "DIR")]
         cwd: Option<PathBuf>,
-    },
-    /// Link a running pane to a task in its workspace, or unlink it. Nothing is typed into
-    /// the pane.
-    #[command(group(ArgGroup::new("link").required(true).args(["task", "none"])))]
-    Link {
-        /// The pane: its id or a short id.
-        pane: String,
-        /// The task to link it to.
-        #[arg(long, value_name = "T")]
-        task: Option<String>,
-        /// Unlink it from its task.
-        #[arg(long)]
-        none: bool,
     },
     /// Stop a pane's agent and keep the pane: Restart agent in the app resumes it. In a shell
     /// pane, only the agent it hosts stops; the shell keeps running.
@@ -264,7 +186,7 @@ pub enum PrCommand {
         #[arg(long, value_name = "WS")]
         ws: Option<String>,
     },
-    /// Sync PR tasks with GitHub now: a full sync, which reads every open PR again.
+    /// Sync your pull requests with GitHub now: a full sync, which reads every open PR again.
     Sync,
     /// Whether GitHub takes the token, and the last sync.
     Status,
@@ -314,7 +236,7 @@ mod tests {
         Cli::try_parse_from(std::iter::once("agentdeck").chain(args.iter().copied()))
     }
 
-    const TASK: &str = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
+    const PANE: &str = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
 
     mod cli {
         use super::*;
@@ -331,63 +253,6 @@ mod tests {
 
             assert!(cli.json);
             assert!(matches!(cli.command, Command::Ws(WsCommand::Ls)));
-        }
-    }
-
-    mod task {
-        use super::*;
-
-        #[test]
-        fn should_parse_the_status_filter() {
-            let cli = parse(&["task", "ls", "--status", "review"]).unwrap();
-
-            assert!(matches!(
-                cli.command,
-                Command::Task(TaskCommand::Ls {
-                    status: Some(TaskStatus::Review),
-                    ..
-                })
-            ));
-        }
-
-        #[test]
-        fn should_reject_an_unknown_status() {
-            assert!(parse(&["task", "set", TASK, "--status", "blocked"]).is_err());
-        }
-
-        #[test]
-        fn should_reject_inbox_with_a_workspace() {
-            assert!(parse(&["task", "ls", "--inbox", "--ws", "web"]).is_err());
-        }
-
-        #[test]
-        fn should_require_a_status_to_set() {
-            assert!(parse(&["task", "set", TASK]).is_err());
-        }
-
-        #[test]
-        fn should_edit_a_title_and_a_workspace() {
-            let cli = parse(&["task", "edit", TASK, "--title", "t", "--ws", "web"]).unwrap();
-
-            let Command::Task(TaskCommand::Edit {
-                title, ws, inbox, ..
-            }) = cli.command
-            else {
-                panic!("not task edit: {:?}", cli.command);
-            };
-            assert_eq!(title.as_deref(), Some("t"));
-            assert_eq!(ws.as_deref(), Some("web"));
-            assert!(!inbox);
-        }
-
-        #[test]
-        fn should_need_something_to_edit() {
-            assert!(parse(&["task", "edit", TASK]).is_err());
-        }
-
-        #[test]
-        fn should_not_move_to_a_workspace_and_the_inbox_at_once() {
-            assert!(parse(&["task", "edit", TASK, "--ws", "web", "--inbox"]).is_err());
         }
     }
 
@@ -449,49 +314,18 @@ mod tests {
         }
 
         #[test]
-        fn should_link_to_a_task() {
-            let cli = parse(&["agent", "link", TASK, "--task", TASK]).unwrap();
-
-            let Command::Agent(AgentCommand::Link { task, none, .. }) = cli.command else {
-                panic!("not agent link: {:?}", cli.command);
-            };
-            assert_eq!(task.as_deref(), Some(TASK));
-            assert!(!none);
-        }
-
-        #[test]
-        fn should_unlink_with_none() {
-            let cli = parse(&["agent", "link", TASK, "--none"]).unwrap();
-
-            assert!(matches!(
-                cli.command,
-                Command::Agent(AgentCommand::Link {
-                    task: None,
-                    none: true,
-                    ..
-                })
-            ));
-        }
-
-        #[test]
         fn should_stop_a_pane() {
-            let cli = parse(&["agent", "stop", TASK]).unwrap();
+            let cli = parse(&["agent", "stop", PANE]).unwrap();
 
             let Command::Agent(AgentCommand::Stop { pane }) = cli.command else {
                 panic!("not agent stop: {:?}", cli.command);
             };
-            assert_eq!(pane, TASK);
+            assert_eq!(pane, PANE);
         }
 
         #[test]
         fn should_need_a_pane_to_stop() {
             assert!(parse(&["agent", "stop"]).is_err());
-        }
-
-        #[test]
-        fn should_need_exactly_one_of_task_and_none_to_link() {
-            assert!(parse(&["agent", "link", TASK]).is_err());
-            assert!(parse(&["agent", "link", TASK, "--task", TASK, "--none"]).is_err());
         }
 
         #[test]
@@ -581,7 +415,7 @@ mod tests {
 
         #[test]
         fn should_wait_for_idle_unless_now() {
-            let cli = parse(&["agent", "send", TASK, "hi"]).unwrap();
+            let cli = parse(&["agent", "send", PANE, "hi"]).unwrap();
 
             assert!(matches!(
                 cli.command,

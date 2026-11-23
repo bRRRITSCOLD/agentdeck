@@ -7,34 +7,22 @@ pub mod panes;
 pub mod pull_requests;
 pub mod repositories;
 pub mod tabs;
-pub mod tasks;
 pub mod workspaces;
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::Context;
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use rusqlite_migration::{M, Migrations};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-/// The migrations, in order. Embedded, and run to the latest at start.
-const MIGRATION_LIST: &[M<'static>] = &[
-    M::up(include_str!("migrations/0001_init.sql")),
-    M::up(include_str!(
-        "migrations/0002_comments_and_instructions.sql"
-    )),
-    M::up(include_str!("migrations/0003_pr_aged_out.sql")),
-    M::up(include_str!("migrations/0004_pr_workspace_picked.sql")),
-    M::up(include_str!("migrations/0005_pane_hosted_agent.sql")),
-    M::up(include_str!("migrations/0006_pr_unreachable.sql")),
-    M::up(include_str!("migrations/0007_repositories.sql")),
-    M::up(include_str!("migrations/0008_pane_folder.sql")),
-    M::up(include_str!("migrations/0009_links.sql")),
-    M::up(include_str!("migrations/0010_pr_finished.sql")),
-];
+/// The migrations, in order. Embedded, and run to the latest at start. The domain reset
+/// squashed every earlier one into the first; a database from before it is moved aside
+/// ([`move_aside_pre_reset`]) rather than migrated.
+const MIGRATION_LIST: &[M<'static>] = &[M::up(include_str!("migrations/0001_init.sql"))];
 const MIGRATIONS: Migrations<'static> = Migrations::from_slice(MIGRATION_LIST);
 
 /// A failed query, as a handler needs to tell them apart.
@@ -106,6 +94,14 @@ impl Db {
     /// Opens (creating) the database at `path`, migrates it to the latest version and starts
     /// the actor. Must be called inside a tokio runtime.
     pub fn open(path: &Path) -> anyhow::Result<Db> {
+        if let Some(aside) = move_aside_pre_reset(path)? {
+            tracing::warn!(
+                "{} is from before the domain reset (it has a tasks table): moved it, with its \
+                 WAL and SHM files, to {} and starting with an empty database",
+                path.display(),
+                aside.display()
+            );
+        }
         let mut conn =
             Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -139,6 +135,72 @@ impl Db {
     }
 }
 
+/// What a database from before the domain reset is renamed to, beside it (spec §2).
+pub const PRE_RESET_SUFFIX: &str = ".pre-domain-reset";
+
+/// The SQLite sidecar files that go with a database file, by suffix.
+const SIDECARS: [&str; 2] = ["-wal", "-shm"];
+
+/// Moves the database at `path` aside when it is from before the domain reset, one with a
+/// `tasks` table (spec §2): renames it, with its WAL and SHM files, to
+/// `<name>.pre-domain-reset` beside it, so the daemon starts with an empty database and the
+/// old one stays on disk. A name already taken gets `.2`, `.3`, … after it, so nothing is
+/// overwritten. Returns where it went; `None` when there is no database or it is a current
+/// one. Nothing else (scratch folders) is touched.
+pub fn move_aside_pre_reset(path: &Path) -> anyhow::Result<Option<PathBuf>> {
+    if !path.exists() || !has_tasks_table(path)? {
+        return Ok(None);
+    }
+    let aside = (1..)
+        .map(|n| {
+            let mut name = path.as_os_str().to_owned();
+            name.push(PRE_RESET_SUFFIX);
+            if n > 1 {
+                name.push(format!(".{n}"));
+            }
+            PathBuf::from(name)
+        })
+        .find(|aside| !aside.exists() && SIDECARS.iter().all(|s| !sidecar(aside, s).exists()))
+        .expect("an unused name");
+    std::fs::rename(path, &aside)
+        .with_context(|| format!("moving {} to {}", path.display(), aside.display()))?;
+    for suffix in SIDECARS {
+        let from = sidecar(path, suffix);
+        if from.exists() {
+            let to = sidecar(&aside, suffix);
+            std::fs::rename(&from, &to)
+                .with_context(|| format!("moving {} to {}", from.display(), to.display()))?;
+        }
+    }
+    Ok(Some(aside))
+}
+
+/// `path` with `suffix` after its file name: SQLite's name for a sidecar file.
+fn sidecar(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// Whether the database at `path`, which exists, has a `tasks` table. Read-only, so it
+/// neither checkpoints nor deletes the WAL; the connection closes before this returns, so its
+/// files can be moved.
+fn has_tasks_table(path: &Path) -> anyhow::Result<bool> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("opening {}", path.display()))?;
+    let found = conn
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks')",
+            [],
+            |row| row.get(0),
+        )
+        .with_context(|| format!("reading {}'s schema", path.display()))?;
+    Ok(found)
+}
+
 /// Now, as the RFC 3339 UTC string every time column holds.
 pub fn now() -> String {
     stamp(chrono::Utc::now())
@@ -146,7 +208,7 @@ pub fn now() -> String {
 
 /// `at` as the RFC 3339 UTC string every time column holds: to the microsecond, so a create
 /// and an edit in the same millisecond still stamp in order. Every stamp has six fraction digits
-/// and a `Z`, so stamps sort as text, also after the millisecond stamps older rows carry.
+/// and a `Z`, so stamps sort as text.
 pub fn stamp(at: chrono::DateTime<chrono::Utc>) -> String {
     at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
 }
@@ -214,14 +276,6 @@ mod tests {
             let second = stamp(at("2026-11-14T10:00:00.123401Z"));
 
             assert!(second > first, "{first} then {second}");
-        }
-
-        #[test]
-        fn should_sort_after_a_millisecond_stamp_from_an_earlier_millisecond() {
-            // Rows written before stamps carried microseconds keep their millisecond stamps.
-            let stored = "2026-11-14T10:00:00.123Z";
-
-            assert!(stamp(at("2026-11-14T10:00:00.124000Z")).as_str() > stored);
         }
 
         #[test]

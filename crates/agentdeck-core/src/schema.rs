@@ -70,7 +70,7 @@ mod tests {
     use schemars::schema_for;
     use serde_json::{Value, json};
 
-    use crate::{Layout, TaskStatus, WorkspaceId};
+    use crate::{Layout, PaneKind, WorkspaceId};
 
     fn schema<T: schemars::JsonSchema>() -> Value {
         serde_json::to_value(schema_for!(T)).unwrap()
@@ -88,10 +88,7 @@ mod tests {
 
         #[test]
         fn should_describe_a_text_enum_by_its_column_words() {
-            assert_eq!(
-                schema::<TaskStatus>()["enum"],
-                json!(["todo", "doing", "review", "done"])
-            );
+            assert_eq!(schema::<PaneKind>()["enum"], json!(["agent", "shell"]));
         }
 
         #[test]

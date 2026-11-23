@@ -22,9 +22,6 @@ pub struct AgentLaunch {
     pub session_id: Option<String>,
 }
 
-/// The variable a pane linked to a task at launch has its task's id in (spec §6).
-pub const TASK_VAR: &str = "AGENTDECK_TASK";
-
 /// How a new pane of `agent` starts, with no prompt. Claude Code starts on
 /// a session id agentdeck chooses; Codex chooses its own, which [`codex`] finds afterwards.
 /// `other` panes run their argv as given, so they have none here.

@@ -1173,7 +1173,7 @@ mod tests {
                 open.remote
                     .events
                     .try_send(ws::Event::Message(ServerMessage::Changed {
-                        entity: Changed::Task,
+                        entity: Changed::PullRequest,
                         id: "x".into(),
                     }))
                     .unwrap();

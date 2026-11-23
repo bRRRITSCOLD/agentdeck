@@ -52,7 +52,7 @@ mod starting_the_daemon {
         env.ok(&["ws", "ls"]);
         let first = env.daemon_info().unwrap();
 
-        env.ok(&["task", "ls"]);
+        env.ok(&["repo", "ls"]);
 
         assert_eq!(env.daemon_info().unwrap(), first);
     }

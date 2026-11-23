@@ -576,7 +576,7 @@ mod tests {
                 })
             });
             let changed = ServerMessage::Changed {
-                entity: Changed::Task,
+                entity: Changed::PullRequest,
                 id: "t".into(),
             };
 
