@@ -1,20 +1,20 @@
 //! The GUI's own state, kept across restarts in `$XDG_STATE_HOME/agentdeck/gui.json`, beside
-//! `window.json` (spec §11): GUI-only, never the daemon's. Today it holds which Repository
-//! groups are collapsed on the Pull requests view, and whether Show finished is on.
+//! `window.json` (spec §11): GUI-only, never the daemon's. It holds which Repository groups
+//! are collapsed, per view (the Pull requests view, and each Workspace's Pull requests), whether
+//! Show finished is on, and the side each Workspace last showed.
 //!
 //! Every field is optional in the file, and a field the GUI doesn't know is skipped, so a later
-//! version adds its own (each Workspace's last side, dismissed Suggestions) without breaking an
-//! older file, and an older GUI reads a newer file. A missing or broken file reads as the
-//! defaults.
+//! version adds its own (dismissed Suggestions) without breaking an older file, and an older GUI
+//! reads a newer file. A missing or broken file reads as the defaults.
 //!
 //! The state is a GPUI [`Global`] that `main` sets with [`init`]; a view reads it with
 //! [`read`] and changes it with [`update`], which writes the file at once. Without [`init`]
 //! (a view test that doesn't ask for it) the state lives in memory only.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use agentdeck_core::RepositoryId;
+use agentdeck_core::{RepositoryId, WorkspaceId};
 use gpui::{App, Global};
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +30,44 @@ pub struct GuiState {
     /// Show finished: whether PR lists show Finished pull requests too. One preference for
     /// every view; off by default.
     pub show_finished: bool,
+    /// The side each Workspace showed last; a Workspace not named here opens on its Panes.
+    pub last_side: BTreeMap<WorkspaceId, Side>,
+}
+
+/// A Workspace's two sides, switched in its top bar (spec §11).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Side {
+    /// Its Panes: tabs of split terminals.
+    #[default]
+    Panes,
+    /// A Workspace's Pull requests: those of the Repositories it links.
+    PullRequests,
+}
+
+impl Side {
+    /// The other side.
+    pub fn other(self) -> Side {
+        match self {
+            Side::Panes => Side::PullRequests,
+            Side::PullRequests => Side::Panes,
+        }
+    }
+}
+
+impl GuiState {
+    /// The side `workspace` opens on: the one it showed last, else its Panes.
+    pub fn side(&self, workspace: WorkspaceId) -> Side {
+        self.last_side.get(&workspace).copied().unwrap_or_default()
+    }
+
+    /// Remembers `side` as the one `workspace` showed last. Panes, the default, isn't written.
+    pub fn set_side(&mut self, workspace: WorkspaceId, side: Side) {
+        match side {
+            Side::Panes => self.last_side.remove(&workspace),
+            Side::PullRequests => self.last_side.insert(workspace, side),
+        };
+    }
 }
 
 /// The Repository groups collapsed in each view that groups PRs by Repository. A group is
@@ -39,16 +77,42 @@ pub struct GuiState {
 pub struct Collapsed {
     /// On the Pull requests view.
     pub pull_requests: BTreeSet<RepositoryId>,
+    /// On each Workspace's Pull requests.
+    pub workspaces: BTreeMap<WorkspaceId, BTreeSet<RepositoryId>>,
 }
 
 impl Collapsed {
     /// Collapses `repository`'s group on the Pull requests view, or opens it.
     pub fn set_pull_requests(&mut self, repository: RepositoryId, collapsed: bool) {
-        if collapsed {
-            self.pull_requests.insert(repository);
-        } else {
-            self.pull_requests.remove(&repository);
+        set(&mut self.pull_requests, repository, collapsed);
+    }
+
+    /// The groups collapsed on `workspace`'s Pull requests.
+    pub fn workspace(&self, workspace: WorkspaceId) -> BTreeSet<RepositoryId> {
+        self.workspaces.get(&workspace).cloned().unwrap_or_default()
+    }
+
+    /// Collapses `repository`'s group on `workspace`'s Pull requests, or opens it.
+    pub fn set_workspace(
+        &mut self,
+        workspace: WorkspaceId,
+        repository: RepositoryId,
+        collapsed: bool,
+    ) {
+        let groups = self.workspaces.entry(workspace).or_default();
+        set(groups, repository, collapsed);
+        if groups.is_empty() {
+            self.workspaces.remove(&workspace);
         }
+    }
+}
+
+/// Puts `repository` in `collapsed`, or takes it out.
+fn set(collapsed: &mut BTreeSet<RepositoryId>, repository: RepositoryId, on: bool) {
+    if on {
+        collapsed.insert(repository);
+    } else {
+        collapsed.remove(&repository);
     }
 }
 
@@ -128,6 +192,7 @@ mod tests {
         GuiState {
             collapsed: Collapsed {
                 pull_requests: ids.iter().copied().map(RepositoryId::from).collect(),
+                ..Collapsed::default()
             },
             ..GuiState::default()
         }
@@ -158,9 +223,30 @@ mod tests {
 
         #[test]
         fn should_skip_what_a_later_version_adds() {
-            let state = parse(r#"{"last_side":{},"collapsed":{"pull_requests":[7],"ws":{}}}"#);
+            let state = parse(r#"{"dismissed":[],"collapsed":{"pull_requests":[7],"ws":{}}}"#);
 
             assert_eq!(state, collapsed(&[7]));
+        }
+
+        #[test]
+        fn should_read_each_workspaces_collapsed_groups() {
+            let ws = "00000000-0000-7000-8000-000000000001";
+            let state = parse(&format!(r#"{{"collapsed":{{"workspaces":{{"{ws}":[7,9]}}}}}}"#));
+
+            let id: WorkspaceId = ws.parse().unwrap();
+            assert_eq!(
+                state.collapsed.workspace(id),
+                BTreeSet::from([RepositoryId::from(7), RepositoryId::from(9)])
+            );
+            assert!(state.collapsed.pull_requests.is_empty());
+        }
+
+        #[test]
+        fn should_read_each_workspaces_last_side() {
+            let ws = "00000000-0000-7000-8000-000000000001";
+            let state = parse(&format!(r#"{{"last_side":{{"{ws}":"pull_requests"}}}}"#));
+
+            assert_eq!(state.side(ws.parse().unwrap()), Side::PullRequests);
         }
 
         #[test]
@@ -170,6 +256,62 @@ mod tests {
                 parse(r#"{"collapsed":{"pull_requests":"x"}}"#),
                 GuiState::default()
             );
+        }
+    }
+
+    mod side {
+        use super::*;
+
+        fn ws(n: u32) -> WorkspaceId {
+            format!("00000000-0000-7000-8000-{n:012}").parse().unwrap()
+        }
+
+        #[test]
+        fn should_open_a_workspace_not_seen_before_on_its_panes() {
+            assert_eq!(GuiState::default().side(ws(1)), Side::Panes);
+        }
+
+        #[test]
+        fn should_remember_each_workspaces_side_apart() {
+            let mut state = GuiState::default();
+
+            state.set_side(ws(1), Side::PullRequests);
+
+            assert_eq!(state.side(ws(1)), Side::PullRequests);
+            assert_eq!(state.side(ws(2)), Side::Panes);
+            state.set_side(ws(1), Side::Panes);
+            assert_eq!(state, GuiState::default());
+        }
+
+        #[test]
+        fn should_write_the_side_by_name() {
+            let mut state = GuiState::default();
+            state.set_side(ws(1), Side::PullRequests);
+
+            let json = serde_json::to_string(&state).unwrap();
+
+            assert!(
+                json.contains(r#""00000000-0000-7000-8000-000000000001":"pull_requests""#),
+                "{json}"
+            );
+            assert_eq!(parse(&json), state);
+        }
+    }
+
+    mod collapsed {
+        use super::*;
+
+        #[test]
+        fn should_keep_each_views_groups_apart() {
+            let ws: WorkspaceId = "00000000-0000-7000-8000-000000000001".parse().unwrap();
+            let mut collapsed = Collapsed::default();
+
+            collapsed.set_workspace(ws, RepositoryId::from(7), true);
+
+            assert!(collapsed.pull_requests.is_empty());
+            assert_eq!(collapsed.workspace(ws), BTreeSet::from([RepositoryId::from(7)]));
+            collapsed.set_workspace(ws, RepositoryId::from(7), false);
+            assert_eq!(collapsed, Collapsed::default());
         }
     }
 

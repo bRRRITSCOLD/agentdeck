@@ -1,7 +1,10 @@
 //! The main window's sidebar (spec §11), the `Sidebar` board of Penpot's "Main window": the
 //! brand, Pull requests with its count of open PRs, then the Workspaces header with its new
-//! workspace `+`, every workspace with its rolled-up state and a `BellOff` while muted, the archived ones in a foldable Archived group, and at the bottom a
-//! gear that selects Settings. The `+` asks the window for the dialog with a [`SidebarEvent`].
+//! workspace `+`, every workspace with its rolled-up state, its count of open PRs in the
+//! Repositories it links and a `BellOff` while muted, the archived ones (no count, no bell) in
+//! a foldable Archived group, and at the bottom a gear that selects Settings. With no workspace
+//! at all, a hint and a New workspace button stand in for the list (Penpot "No workspaces").
+//! The `+` and that button ask the window for the dialog with a [`SidebarEvent`].
 //!
 //! It reads a [`Snapshot`] through the session's [`Api`] when it opens and again whenever the
 //! daemon reports a `changed`; `state` and `exit` messages patch pane states in place. What
@@ -39,6 +42,11 @@ use crate::table;
 
 /// The sidebar's width. Raw in Penpot too: no sizing token is 260px.
 pub const WIDTH: gpui::Pixels = px(260.);
+
+/// What the sidebar says under the Workspaces header while there is no Workspace (Penpot "No
+/// workspaces"), over a New workspace button.
+pub const NO_WORKSPACES: &str =
+    "No workspaces yet. A workspace keeps your panes and the repositories you work in together.";
 
 /// What the sidebar has selected, and the window shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -446,12 +454,13 @@ impl SidebarView {
             let Some(w) = w.cloned() else {
                 return div().into_any_element();
             };
+            // An archived row's count is 0: it links nothing.
             self.row(
                 ElementId::Name(format!("workspace-{}", w.id).into()),
                 Selection::Workspace(w.id),
                 w.name,
                 Lead::Dot(state_dot::of(w.state, None)),
-                Counts::default(),
+                w.counts,
                 cx,
             )
         };
@@ -504,6 +513,7 @@ impl Render for SidebarView {
             cx,
         );
         let items = self.items();
+        let no_workspaces = items.count == 0;
         let relisted = items != self.listed;
         if relisted {
             table::relist(&self.list, items.count);
@@ -556,6 +566,40 @@ impl Render for SidebarView {
                         ),
                     ),
             )
+            // Penpot "No workspaces": the hint and New workspace (outline, sm), `space.3`
+            // apart, inset as a row's label.
+            .when(no_workspaces, |sidebar| {
+                sidebar.child(
+                    div()
+                        .debug_selector(|| "no workspaces".into())
+                        .flex()
+                        .flex_none()
+                        .flex_col()
+                        .items_start()
+                        .gap(space::S3)
+                        .px(space::S2)
+                        .pt(space::S1)
+                        .child(
+                            div()
+                                .text_size(font_size::SM)
+                                .text_color(s.muted_foreground)
+                                .child(NO_WORKSPACES),
+                        )
+                        .child(
+                            div()
+                                .debug_selector(|| "no workspaces new workspace".into())
+                                .child(
+                                    Button::new("no-workspaces-new-workspace")
+                                        .variant(ButtonVariant::Outline)
+                                        .size(ButtonSize::Sm)
+                                        .label("New workspace")
+                                        .on_click(cx.listener(|_, _, _, cx| {
+                                            cx.emit(SidebarEvent::NewWorkspace);
+                                        })),
+                                ),
+                        ),
+                )
+            })
             // Penpot `Workspaces` takes the room down to the footer and scrolls. It reaches the
             // sidebar's right edge, over its padding, and pads its rows back in by the
             // scrollbar's gutter: the rows stay as wide as Pull requests, and the scrollbar
@@ -830,18 +874,58 @@ mod tests {
             assert!(!open.shows("counts pull requests"));
         }
 
-        #[gpui::test]
-        fn should_show_no_count_on_a_workspace_row(cx: &mut TestAppContext) {
-            // A Workspace's count comes with its Links' Pull requests.
-            let snapshot = Snapshot {
-                prs: vec![pull_request(1, "acme/widgets")],
+        /// [`two_workspaces`] with `a` linking widgets, which has two open PRs, and gadgets,
+        /// which has one; `b` links nothing.
+        fn linked() -> Snapshot {
+            Snapshot {
+                prs: vec![
+                    pull_request(1, "acme/widgets"),
+                    pull_request(2, "acme/widgets"),
+                    pull_request(3, "acme/gadgets"),
+                    pull_request(4, "acme/elsewhere"),
+                ],
+                repositories: vec![
+                    links("acme/widgets", &[id(1)]),
+                    links("acme/gadgets", &[id(1)]),
+                ],
                 ..two_workspaces()
-            };
-            let mut open = open(snapshot, cx);
+            }
+        }
 
-            assert!(open.shows("counts pull requests"));
-            assert!(!open.shows("counts a"));
-            assert!(!open.shows("counts b"));
+        #[gpui::test]
+        fn should_count_the_open_prs_of_a_workspaces_linked_repositories(
+            cx: &mut TestAppContext,
+        ) {
+            let mut open = open(linked(), cx);
+
+            let counts = (open.sidebar).read_with(open.cx, |s, _| {
+                (s.overview().workspaces.iter())
+                    .map(|w| w.counts.prs)
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(counts, [3, 0]);
+            let row = open.cx.debug_bounds("row a").expect("a's row");
+            let count = open.cx.debug_bounds("counts a").expect("a's count");
+            assert!(row.contains(&count.center()), "{count:?} in {row:?}");
+            assert!(!open.shows("counts b"), "no count at 0");
+        }
+
+        #[gpui::test]
+        fn should_show_no_count_on_an_archived_row(cx: &mut TestAppContext) {
+            use agentdeck_client::types::Workspace;
+
+            let mut snapshot = linked();
+            snapshot.workspaces.push(Workspace {
+                archived_at: Some("2026-11-13T00:00:00Z".into()),
+                ..workspace(3, "old")
+            });
+            snapshot.repositories[0].workspaces.push(id(3));
+            let mut open = open(snapshot, cx);
+            open.click("group archived");
+
+            assert!(open.shows("row old"));
+            assert!(!open.shows("counts old"));
+            assert!(open.shows("counts a"));
         }
     }
 
@@ -915,6 +999,60 @@ mod tests {
             let (changes, _subscription) = changes(&mut open);
             redraw(&open.sidebar, 10, open.cx);
             assert_eq!(changes.get(), 0);
+        }
+    }
+
+    mod no_workspaces {
+        use std::cell::RefCell;
+
+        use super::*;
+
+        #[gpui::test]
+        fn should_say_there_are_none_yet_with_a_new_workspace_button(cx: &mut TestAppContext) {
+            let mut open = open(Snapshot::default(), cx);
+            let asked = Rc::new(RefCell::new(Vec::new()));
+            let seen = asked.clone();
+            let _asks = open.cx.update(|_, cx| {
+                cx.subscribe(&open.sidebar, move |_, event: &SidebarEvent, _| {
+                    seen.borrow_mut().push(*event);
+                })
+            });
+
+            let header = open.cx.debug_bounds("workspaces header").expect("the header");
+            let hint = open.cx.debug_bounds("no workspaces").expect("the hint");
+            assert!(hint.top() >= header.bottom(), "{hint:?} under {header:?}");
+            assert_eq!(
+                NO_WORKSPACES,
+                "No workspaces yet. A workspace keeps your panes and the repositories you work \
+                 in together."
+            );
+            open.click("no workspaces new workspace");
+
+            assert_eq!(*asked.borrow(), [SidebarEvent::NewWorkspace]);
+        }
+
+        #[gpui::test]
+        fn should_say_nothing_of_it_once_a_workspace_exists(cx: &mut TestAppContext) {
+            let mut open = open(two_workspaces(), cx);
+
+            assert!(!open.shows("no workspaces"));
+        }
+
+        #[gpui::test]
+        fn should_say_nothing_of_it_while_a_workspace_is_archived(cx: &mut TestAppContext) {
+            use agentdeck_client::types::Workspace;
+
+            let snapshot = Snapshot {
+                workspaces: vec![Workspace {
+                    archived_at: Some("2026-11-13T00:00:00Z".into()),
+                    ..workspace(3, "old")
+                }],
+                ..Snapshot::default()
+            };
+            let mut open = open(snapshot, cx);
+
+            assert!(!open.shows("no workspaces"));
+            assert!(open.shows("group archived"));
         }
     }
 

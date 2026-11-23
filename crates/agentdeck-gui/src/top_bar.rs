@@ -1,5 +1,7 @@
 //! Penpot `Centre / TopBar`: the selected workspace's name, above its tabs (spec §11). A
-//! workspace has no folder, so the bar shows none.
+//! workspace has no folder, so the bar shows none. After the name, a switch between the
+//! Workspace's two sides, Panes and "Pull requests · N" (Penpot `SideSwitch`, "· N" dropped at
+//! 0), dispatching [`ShowPanes`] or [`ShowPullRequests`]; an archived workspace has none.
 //!
 //! Its New agent button opens the new agent dialog, its `…` menu opens the Edit workspace
 //! dialog, mutes or unmutes the workspace's notifications, archives it or opens the Delete
@@ -9,7 +11,7 @@
 use brrritscold_core_gpui::{
     ActiveTheme as _, Button, ButtonSize, ButtonVariant, DropdownMenu, DropdownMenuAlign,
     DropdownMenuContent, DropdownMenuItem, DropdownMenuItemVariant, DropdownMenuSeparator,
-    IconName,
+    IconName, ToggleGroup, ToggleGroupItem, ToggleGroupSpacing,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
@@ -18,6 +20,7 @@ use gpui::{
     SharedString, Styled as _, Window, actions, div, px,
 };
 
+use crate::gui_state::Side;
 use crate::new_agent::NewAgent;
 
 actions!(
@@ -35,8 +38,21 @@ actions!(
         MuteWorkspace,
         /// Unmutes the notifications of the workspace shown.
         UnmuteWorkspace,
+        /// Shows the Panes side of the workspace shown.
+        ShowPanes,
+        /// Shows the Pull requests side of the workspace shown.
+        ShowPullRequests,
     ]
 );
+
+/// What the switch's Pull requests side reads: "Pull requests · N", or "Pull requests" with
+/// none open.
+pub fn pull_requests_label(prs: usize) -> String {
+    match prs {
+        0 => "Pull requests".to_owned(),
+        n => format!("Pull requests · {n}"),
+    }
+}
 
 /// The bar's height. Raw in Penpot too: no sizing token is 52px.
 const HEIGHT: f32 = 52.;
@@ -47,6 +63,10 @@ pub struct TopBar {
     name: SharedString,
     archived: bool,
     muted: bool,
+    /// The workspace's open PRs, as its sidebar row counts them.
+    prs: usize,
+    /// The side shown, which the switch presses; no switch without one.
+    side: Option<Side>,
 }
 
 impl TopBar {
@@ -56,7 +76,27 @@ impl TopBar {
             name: name.into(),
             archived: false,
             muted: false,
+            prs: 0,
+            side: None,
         }
+    }
+
+    /// The bar of a workspace with `prs` open PRs in the Repositories it links.
+    pub fn prs(mut self, prs: usize) -> Self {
+        self.prs = prs;
+        self
+    }
+
+    /// The bar with its switch, `side` pressed; an archived workspace's shows none.
+    pub fn side(mut self, side: Side) -> Self {
+        self.side = Some(side);
+        self
+    }
+
+    /// The open PRs the switch counts.
+    #[cfg(test)]
+    pub fn open_prs(&self) -> usize {
+        self.prs
     }
 
     /// The bar of an archived workspace, or of a live one.
@@ -111,6 +151,11 @@ impl RenderOnce for TopBar {
                     .text_color(s.foreground)
                     .child(self.name),
             )
+            // Penpot `SideSwitch`: a ToggleGroup (default, spacing 1) of Panes and Pull
+            // requests, the side shown pressed.
+            .when_some(self.side.filter(|_| !self.archived), |bar, side| {
+                bar.child(switch(side, self.prs))
+            })
             // Penpot `Spacer`, `NewAgent` (outline, sm) or, archived, `Unarchive` (outline,
             // sm), then `WorkspaceMenu`.
             .child(div().flex_1())
@@ -120,6 +165,37 @@ impl RenderOnce for TopBar {
             })
             .child(menu(self.archived, self.muted))
     }
+}
+
+/// The switch between the workspace's sides, `side` pressed, counting `prs`; tests find it as
+/// `side switch`, Panes at its left end. A click on the side not shown dispatches its action.
+fn switch(side: Side, prs: usize) -> impl IntoElement {
+    let item = |id: &'static str, label: String, this: Side, action: Box<dyn Action>| {
+        ToggleGroupItem::new(id)
+            .label(label)
+            .pressed(side == this)
+            .on_change(move |pressed, window, cx| {
+                if pressed {
+                    window.dispatch_action(action.boxed_clone(), cx);
+                }
+            })
+    };
+    div().flex_none().debug_selector(|| "side switch".into()).child(
+        ToggleGroup::new("side-switch")
+            .spacing(ToggleGroupSpacing::One)
+            .item(item(
+                "side-panes",
+                "Panes".to_owned(),
+                Side::Panes,
+                Box::new(ShowPanes),
+            ))
+            .item(item(
+                "side-pull-requests",
+                pull_requests_label(prs),
+                Side::PullRequests,
+                Box::new(ShowPullRequests),
+            )),
+    )
 }
 
 /// An outline sm button reading `label` that dispatches `action`; tests find it as `name`.

@@ -1,8 +1,15 @@
 //! The Pull requests view (spec §11), Penpot "Screens · Main" → "Pull requests": every open
-//! pull request you have, each under its own Repository group. Groups go alphabetically by the
-//! Repository's name; a group with no PR to show is left out. Each group's header reads "Not in
-//! a workspace" until Links come, and collapses at a click, remembered per Repository across
-//! restarts in the GUI's own state ([`gui_state`]).
+//! pull request you have, each under its own Repository group; and, with [`Scope::Workspace`],
+//! a Workspace's Pull requests (Penpot "Workspace · Pull requests"), the same list over the
+//! Repositories that Workspace links.
+//!
+//! Groups go linked Repositories first, then those Not in a workspace, each alphabetically by
+//! the Repository's name. A group's header names the Workspaces linking its Repository (archived
+//! ones link nothing), each a link to that Workspace's Pull requests ([`OpenWorkspace`]), or
+//! reads "Not in a workspace". On the Pull requests view a group with no PR to show is left out;
+//! on a Workspace's Pull requests every linked Repository shows, one with none to show over a
+//! muted "No open PRs" row. A group collapses at a click, remembered per view and per
+//! Repository across restarts in the GUI's own state ([`gui_state`]).
 //!
 //! Finished pull requests are hidden until **Show finished** is on (Penpot "Pull requests ·
 //! show finished"): one preference, kept in the GUI's state too. A Finished row shows GitHub's
@@ -22,8 +29,12 @@
 //! reference after asking ([`ClosePrs`]); a PR that didn't close stays picked, marked with why.
 //! Select is disabled while there is no PR to show.
 //!
-//! The header ends in Select, Show finished, when PRs last synced and **Sync now**, which runs
-//! a full sync and emits
+//! A Workspace's Pull requests has no sync controls: its header ends in Select, Show finished
+//! and **Edit workspace**. With no Repository linked it says so, with **Link repository**,
+//! which opens Edit workspace too.
+//!
+//! The Pull requests view's header ends in Select, Show finished, when PRs last synced and
+//! **Sync now**, which runs a full sync and emits
 //! [`Synced`] once done, so the window can have the sidebar read again: a sync that changes no
 //! PR broadcasts nothing, yet moves the time it last ran. While no GitHub token works, the
 //! logged-out banner sits over the list, its **Open Settings** asking for Settings with
@@ -33,11 +44,12 @@
 //! view.
 
 use std::collections::BTreeSet;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use agentdeck_client::types::{GhLogin, PullRequest};
-use agentdeck_core::{PrState, RepositoryId, pr_details, prs_details};
+use agentdeck_core::{PrState, RepositoryId, WorkspaceId, pr_details, prs_details};
 use brrritscold_core_gpui::{
     ActiveTheme as _, Button, ButtonSize, ButtonVariant, DropdownMenu, DropdownMenuAlign,
     DropdownMenuContent, DropdownMenuItem, DropdownMenuItemVariant, DropdownMenuSeparator,
@@ -56,7 +68,8 @@ use crate::close_prs::{self, ClosePrs, Target};
 use crate::gui_state;
 use crate::open_pr;
 use crate::overview::Snapshot;
-use crate::pr_table;
+use crate::pr_table::{self, Linker};
+use crate::top_bar::EditWorkspace;
 use crate::sync_parts::{self, OpenSettings, SETTINGS_TAIL, cutoff, logged_out_title};
 use crate::table::{self, Header, RowParts, SelectCell};
 use crate::workspace::failed;
@@ -78,6 +91,33 @@ pub const HIGHLIGHT_FADE: Duration = Duration::from_millis(400);
 
 /// What the view says with no PR to show (Penpot "Pull requests · empty").
 pub const EMPTY: &str = "No open PRs. PRs you open on GitHub show here.";
+
+/// What a Workspace's Pull requests says while the Workspace links no Repository (Penpot
+/// "Workspace · no repositories"), over its Link repository button.
+pub const NO_REPOSITORIES: [&str; 2] = [
+    "No repositories linked yet. Link one to see its PRs here.",
+    "They stay in Pull requests too.",
+];
+
+/// The row under a linked Repository's group with no PR to show, on a Workspace's Pull
+/// requests.
+pub const NO_OPEN_PRS: &str = "No open PRs";
+
+/// The second line of a Workspace's Pull requests' description.
+const LINK_OR_UNLINK: &str = "Link or unlink repositories in Edit workspace.";
+
+/// Which pull requests a list shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// The Pull requests view: every one.
+    All,
+    /// A Workspace's Pull requests: those of the Repositories it links.
+    Workspace(WorkspaceId),
+}
+
+/// A Workspace's name in a group header was clicked: show that Workspace's Pull requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenWorkspace(pub WorkspaceId);
 
 /// A pull request, by its Repository's GitHub id and its number: the row a PR alert's click
 /// lands on, the same PR through a rename of its Repository.
@@ -131,7 +171,7 @@ fn details(pr: &PullRequest) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Synced;
 
-/// A Repository's group: its PRs to show, by number.
+/// A Repository's group: its PRs to show, by number, and the Workspaces linking it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Group {
     /// The Repository, by GitHub's id.
@@ -143,29 +183,66 @@ pub struct Group {
     pub label: SharedString,
     /// Its PRs, by number.
     pub prs: Vec<PullRequest>,
+    /// The Workspaces linking it, archived ones left out, in the sidebar's order; none while
+    /// it is Not in a workspace.
+    pub workspaces: Vec<Linker>,
 }
 
-/// The groups of `prs` the view shows: one per Repository with a PR to show, alphabetical by
-/// the Repository's name (without the owner, ignoring case, then by owner), its PRs by number.
-/// Finished PRs are shown only with `show_finished`, or the one `revealed` by a PR alert's
-/// click; merged and closed ones are Finished.
-pub fn groups(prs: &[PullRequest], show_finished: bool, revealed: Option<PrKey>) -> Vec<Group> {
+/// The groups of `snapshot`'s PRs a list over `scope` shows, its PRs by number: one per
+/// Repository with a PR to show, and on a Workspace's Pull requests one per Repository it links
+/// too, PRs or none. Linked Repositories come first, then those Not in a workspace, each
+/// alphabetical by the Repository's name (without the owner, ignoring case, then by owner).
+/// Archived Workspaces link nothing. Finished PRs are shown only with `show_finished`, or the
+/// one `revealed` by a PR alert's click; merged and closed ones are Finished.
+pub fn groups(
+    snapshot: &Snapshot,
+    scope: Scope,
+    show_finished: bool,
+    revealed: Option<PrKey>,
+) -> Vec<Group> {
     let shown = |pr: &&PullRequest| {
         show_finished
             || (pr.state == PrState::Open && !pr.finished)
             || revealed == Some(PrKey::of(pr))
     };
+    let in_scope = |repository: RepositoryId| match scope {
+        Scope::All => true,
+        Scope::Workspace(workspace) => snapshot.links(workspace, repository),
+    };
+    let group = |repository, name: &agentdeck_core::RepositoryName| Group {
+        repository,
+        name: name.to_string().into(),
+        label: name.name().to_owned().into(),
+        prs: Vec::new(),
+        workspaces: Vec::new(),
+    };
     let mut groups: Vec<Group> = Vec::new();
-    for pr in prs.iter().filter(shown) {
+    for pr in (snapshot.prs.iter()).filter(shown) {
+        if !in_scope(pr.repository.id) {
+            continue;
+        }
         match groups.iter_mut().find(|g| g.repository == pr.repository.id) {
             Some(group) => group.prs.push(pr.clone()),
             None => groups.push(Group {
-                repository: pr.repository.id,
-                name: pr.repository.name.to_string().into(),
-                label: pr.repository.name.name().to_owned().into(),
                 prs: vec![pr.clone()],
+                ..group(pr.repository.id, &pr.repository.name)
             }),
         }
+    }
+    if let Scope::Workspace(_) = scope {
+        for links in &snapshot.repositories {
+            if in_scope(links.id) && !groups.iter().any(|g| g.repository == links.id) {
+                groups.push(group(links.id, &links.name));
+            }
+        }
+    }
+    for group in &mut groups {
+        group.workspaces = (snapshot.linking(group.repository).into_iter())
+            .map(|w| Linker {
+                id: w.id,
+                name: w.name.clone().into(),
+            })
+            .collect();
     }
     let shared: BTreeSet<String> = {
         let mut seen = BTreeSet::new();
@@ -180,7 +257,10 @@ pub fn groups(prs: &[PullRequest], show_finished: bool, revealed: Option<PrKey>)
         }
         group.prs.sort_by_key(|pr| pr.number);
     }
-    groups.sort_by_key(|g| (g.label.to_lowercase(), g.name.to_lowercase(), g.repository));
+    groups.sort_by_key(|g| {
+        let unlinked = g.workspaces.is_empty();
+        (unlinked, g.label.to_lowercase(), g.name.to_lowercase(), g.repository)
+    });
     groups
 }
 
@@ -196,9 +276,13 @@ enum Item {
         collapsed: bool,
         /// Its PRs Select mode can pick, folded or not.
         selectable: Vec<PrKey>,
+        /// The Workspaces linking it.
+        workspaces: Vec<Linker>,
     },
     /// A PR.
     Row(Box<PullRequest>),
+    /// [`NO_OPEN_PRS`], under an open group with no PR to show, by its Repository's name.
+    NoOpenPrs(SharedString),
 }
 
 /// The list's items for `groups`, each group's rows under its header unless `collapsed`.
@@ -216,17 +300,24 @@ fn items(groups: &[Group], collapsed: &BTreeSet<RepositoryId>) -> Vec<Item> {
                 .filter(|pr| closable(pr))
                 .map(PrKey::of)
                 .collect(),
+            workspaces: group.workspaces.clone(),
         });
-        if !folded {
-            items.extend(group.prs.iter().map(|pr| Item::Row(Box::new(pr.clone()))));
+        if folded {
+            continue;
         }
+        if group.prs.is_empty() {
+            items.push(Item::NoOpenPrs(group.name.clone()));
+        }
+        items.extend(group.prs.iter().map(|pr| Item::Row(Box::new(pr.clone()))));
     }
     items
 }
 
-/// The Pull requests view.
+/// The Pull requests view, or a Workspace's Pull requests.
 pub struct PullRequestsView {
     api: Arc<dyn Api>,
+    /// Which PRs it shows.
+    scope: Scope,
     snapshot: Snapshot,
     /// Whether a sync asked for here is still running.
     syncing: bool,
@@ -251,12 +342,17 @@ pub struct PullRequestsView {
 
 impl EventEmitter<Synced> for PullRequestsView {}
 impl EventEmitter<OpenSettings> for PullRequestsView {}
+impl EventEmitter<OpenWorkspace> for PullRequestsView {}
 
 impl PullRequestsView {
-    /// A view that syncs and closes PRs through `api`; it shows nothing until given a
-    /// snapshot.
-    pub fn new(api: Arc<dyn Api>, cx: &mut Context<Self>) -> Self {
-        let close = cx.new(|_| ClosePrs::new(api.clone(), "pull-requests"));
+    /// A view of the PRs in `scope` that syncs and closes PRs through `api`; it shows nothing
+    /// until given a snapshot.
+    pub fn new(api: Arc<dyn Api>, scope: Scope, cx: &mut Context<Self>) -> Self {
+        let id = match scope {
+            Scope::All => "pull-requests",
+            Scope::Workspace(_) => "workspace-pull-requests",
+        };
+        let close = cx.new(|_| ClosePrs::new(api.clone(), id));
         let _close = cx.observe(&close, |this, _, cx| {
             this.list.remeasure();
             cx.notify();
@@ -271,6 +367,7 @@ impl PullRequestsView {
         });
         PullRequestsView {
             api,
+            scope,
             snapshot: Snapshot::default(),
             syncing: false,
             shown: Vec::new(),
@@ -344,7 +441,7 @@ impl PullRequestsView {
         };
         let row = (self.shown.iter()).position(|item| match item {
             Item::Row(pr) => PrKey::of(pr) == revealed,
-            Item::Header { .. } => false,
+            Item::Header { .. } | Item::NoOpenPrs(_) => false,
         });
         let Some(ix) = row else {
             // Not read yet: it lands with the next snapshot.
@@ -383,7 +480,30 @@ impl PullRequestsView {
 
     /// The groups shown.
     pub fn groups(&self, cx: &App) -> Vec<Group> {
-        groups(&self.snapshot.prs, show_finished(cx), self.revealed)
+        groups(&self.snapshot, self.scope, show_finished(cx), self.revealed)
+    }
+
+    /// The groups collapsed in this view.
+    fn collapsed(&self, cx: &App) -> BTreeSet<RepositoryId> {
+        gui_state::read(cx, |state| match self.scope {
+            Scope::All => state.collapsed.pull_requests.clone(),
+            Scope::Workspace(workspace) => state.collapsed.workspace(workspace),
+        })
+    }
+
+    /// The Workspace whose Pull requests it shows, by name, as last read.
+    fn workspace_name(&self) -> Option<SharedString> {
+        let Scope::Workspace(id) = self.scope else {
+            return None;
+        };
+        (self.snapshot.workspaces.iter())
+            .find(|w| w.id == id)
+            .map(|w| w.name.clone().into())
+    }
+
+    /// Whether the list holds a PR row.
+    fn has_rows(&self) -> bool {
+        self.shown.iter().any(|item| matches!(item, Item::Row(_)))
     }
 
     /// Select mode, the selection and the Close PRs confirm dialog.
@@ -394,9 +514,13 @@ impl PullRequestsView {
 
     /// Collapses `repository`'s group, or opens it, remembering it for the next start.
     pub fn toggle(&mut self, repository: RepositoryId, cx: &mut Context<Self>) {
-        gui_state::update(cx, |state| {
-            let collapsed = state.collapsed.pull_requests.contains(&repository);
-            state.collapsed.set_pull_requests(repository, !collapsed);
+        let collapsed = self.collapsed(cx).contains(&repository);
+        let scope = self.scope;
+        gui_state::update(cx, |state| match scope {
+            Scope::All => state.collapsed.set_pull_requests(repository, !collapsed),
+            Scope::Workspace(workspace) => {
+                (state.collapsed).set_workspace(workspace, repository, !collapsed);
+            }
         });
         cx.notify();
     }
@@ -440,8 +564,24 @@ impl PullRequestsView {
     }
 
     /// The lines under the heading: what the view holds, then which PRs the age cutoff leaves
-    /// out, once the PR sync status is read.
+    /// out, once the PR sync status is read. On a Workspace's Pull requests, which Repositories
+    /// it lists and where to change them, or, while it links none, [`NO_REPOSITORIES`].
     pub fn description(&self, cx: &App) -> Vec<SharedString> {
+        if let Scope::Workspace(_) = self.scope {
+            if self.shown.is_empty() {
+                return NO_REPOSITORIES.map(SharedString::new_static).to_vec();
+            }
+            let name = self.workspace_name().unwrap_or_default();
+            let which = if show_finished(cx) {
+                "open and finished"
+            } else {
+                "open"
+            };
+            return vec![
+                format!("Your {which} PRs from the repositories {name} links.").into(),
+                LINK_OR_UNLINK.into(),
+            ];
+        }
         let cutoff = (self.snapshot.pr_sync.as_ref()).map(|status| cutoff(status.max_age_days));
         let about = if show_finished(cx) {
             ABOUT_FINISHED
@@ -463,18 +603,39 @@ impl PullRequestsView {
                 count,
                 collapsed,
                 selectable,
+                workspaces,
             }) => {
                 let repository = *repository;
                 let select = close_prs::select_all(&self.close, name, selectable.clone(), cx);
+                let this = cx.entity().downgrade();
+                let on_workspace: pr_table::OnWorkspace = Rc::new(move |workspace, _, cx| {
+                    let _ = this.update(cx, |_, cx| cx.emit(OpenWorkspace(workspace)));
+                });
                 pr_table::group_header(
                     name.clone(),
                     label.clone(),
                     *count,
                     *collapsed,
                     select,
+                    workspaces,
                     cx.listener(move |this, _, _, cx| this.toggle(repository, cx)),
+                    on_workspace,
                     cx,
                 )
+            }
+            // Under its group's header, inset as a row's state icon is.
+            Some(Item::NoOpenPrs(name)) => {
+                let name = name.clone();
+                div()
+                    .debug_selector(move || format!("no open prs {name}"))
+                    .flex()
+                    .items_center()
+                    .h(space::S10)
+                    .px(space::S2)
+                    .text_size(font_size::SM)
+                    .text_color(cx.theme().semantic().muted_foreground)
+                    .child(NO_OPEN_PRS)
+                    .into_any_element()
             }
             Some(Item::Row(pr)) => {
                 let url = pr.url.clone();
@@ -522,13 +683,13 @@ impl PullRequestsView {
     /// Penpot `Header`: heading and description, a spacer, Select (disabled with no PR to
     /// show), Show finished, when PRs last synced, "Sync now", `space.3` apart. The heading and
     /// description take what the rest leave, the description wrapping, so the header fits the
-    /// narrowest window (spec §11, Window).
+    /// narrowest window (spec §11, Window). A Workspace's Pull requests has no heading, since
+    /// the top bar names it, and ends in Edit workspace in place of the sync controls; while it
+    /// links no Repository, only its description and Link repository.
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
-        let synced = self.sync_label(chrono::Utc::now());
         let finished = show_finished(cx);
-        let toggle =
-            cx.listener(|this, checked: &bool, _, cx| this.set_show_finished(*checked, cx));
+        let linked = !self.shown.is_empty();
         let lines: Vec<AnyElement> = (self.description(cx).into_iter().enumerate())
             .map(|(ix, line)| {
                 let line_div = div()
@@ -568,24 +729,68 @@ impl PullRequestsView {
                     .flex()
                     .flex_col()
                     .gap(space::S1)
-                    .child(
-                        div()
-                            .text_size(font_size::XL)
-                            .font_weight(font_weight::MEDIUM)
-                            .text_color(s.foreground)
-                            .child("Pull requests"),
-                    )
+                    .when(self.scope == Scope::All, |heading| {
+                        heading.child(
+                            div()
+                                .text_size(font_size::XL)
+                                .font_weight(font_weight::MEDIUM)
+                                .text_color(s.foreground)
+                                .child("Pull requests"),
+                        )
+                    })
                     // Penpot's `Description` is one text of two lines: no gap between them.
                     .child(div().flex().flex_col().children(lines)),
             )
-            .child(close_prs::select_toggle(
-                &self.close,
-                !self.shown.is_empty(),
-                cx,
-            ))
-            // Penpot `ShowFinished`: a Switch and its Label, `space.2` apart.
-            .child(
-                div()
+            .when(self.scope == Scope::All || linked, |header| {
+                header
+                    .child(close_prs::select_toggle(&self.close, self.has_rows(), cx))
+                    .child(show_finished_switch(finished, cx))
+            })
+            .map(|header| match self.scope {
+                Scope::All => header.children(self.sync_controls(cx)),
+                Scope::Workspace(_) if linked => header.child(edit_workspace(
+                    "edit workspace",
+                    "Edit workspace",
+                )),
+                Scope::Workspace(_) => {
+                    header.child(edit_workspace("link repository", "Link repository"))
+                }
+            })
+    }
+
+    /// When PRs last synced and "Sync now", on the Pull requests view's header.
+    fn sync_controls(&self, cx: &mut Context<Self>) -> [AnyElement; 2] {
+        let s = cx.theme().semantic();
+        let synced = self.sync_label(chrono::Utc::now());
+        [
+            div()
+                .debug_selector(|| "pull requests synced".into())
+                .flex_none()
+                .whitespace_nowrap()
+                .text_size(font_size::SM)
+                .text_color(s.muted_foreground)
+                .child(synced)
+                .into_any_element(),
+            div()
+                .flex_none()
+                .debug_selector(|| "sync now".into())
+                .child(
+                    Button::new("sync-now")
+                        .variant(ButtonVariant::Outline)
+                        .label("Sync now")
+                        .disabled(self.syncing)
+                        .on_click(cx.listener(|this, _, window, cx| this.sync(window, cx))),
+                )
+                .into_any_element(),
+        ]
+    }
+}
+
+/// Penpot `ShowFinished`: a Switch and its Label, `space.2` apart, `finished` or not; flipping
+/// it turns Show finished on or off for every PR list.
+fn show_finished_switch(finished: bool, cx: &mut Context<PullRequestsView>) -> impl IntoElement {
+    let toggle = cx.listener(|this, checked: &bool, _, cx| this.set_show_finished(*checked, cx));
+    div()
                     .flex_none()
                     .flex()
                     .items_center()
@@ -600,30 +805,18 @@ impl PullRequestsView {
                                 }),
                         ),
                     )
-                    .child(Label::new().child("Show finished").whitespace_nowrap()),
-            )
-            .child(
-                div()
-                    .debug_selector(|| "pull requests synced".into())
-                    .flex_none()
-                    .whitespace_nowrap()
-                    .text_size(font_size::SM)
-                    .text_color(s.muted_foreground)
-                    .child(synced),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .debug_selector(|| "sync now".into())
-                    .child(
-                        Button::new("sync-now")
-                            .variant(ButtonVariant::Outline)
-                            .label("Sync now")
-                            .disabled(self.syncing)
-                            .on_click(cx.listener(|this, _, window, cx| this.sync(window, cx))),
-                    ),
-            )
-    }
+        .child(Label::new().child("Show finished").whitespace_nowrap())
+}
+
+/// An outline button reading `label` that opens Edit workspace on the Workspace shown, as its
+/// top bar's menu does; tests find it as `name`.
+fn edit_workspace(name: &'static str, label: &'static str) -> impl IntoElement {
+    div().flex_none().debug_selector(move || name.into()).child(
+        Button::new(name)
+            .variant(ButtonVariant::Outline)
+            .label(label)
+            .on_click(|_, window, cx| window.dispatch_action(Box::new(EditWorkspace), cx)),
+    )
 }
 
 /// `row` highlighted after a PR alert's click (Penpot "Pull requests · highlighted row"): an
@@ -739,7 +932,7 @@ impl Render for PullRequestsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
         let groups = self.groups(cx);
-        let collapsed = gui_state::read(cx, |state| state.collapsed.pull_requests.clone());
+        let collapsed = self.collapsed(cx);
         let items = items(&groups, &collapsed);
         let relisted = items != self.shown;
         // Every PR Select mode can pick, folded or not, in the list's order.
@@ -754,7 +947,7 @@ impl Render for PullRequestsView {
             self.close.update(cx, |close, cx| close.retain(&keys, cx));
         }
         // With no PR to show, Select is disabled, so Select mode ends.
-        if self.shown.is_empty() && self.close.read(cx).active() {
+        if !self.has_rows() && self.close.read(cx).active() {
             self.close
                 .update(cx, |close, cx| close.set_active(false, cx));
         }
@@ -792,6 +985,10 @@ impl Render for PullRequestsView {
                 content.child(sync_parts::logged_out_banner("pull-requests", title, cx))
             })
             .map(|content| {
+                if self.shown.is_empty() && self.scope != Scope::All {
+                    // Penpot "Workspace · no repositories": the header says it all.
+                    return content;
+                }
                 if self.shown.is_empty() {
                     // Penpot "Pull requests · empty": the words alone, no columns.
                     return content.child(
@@ -855,26 +1052,40 @@ mod tests {
 
     use super::*;
     use crate::api::fake::FakeApi;
-    use crate::overview::fixtures::{pr_status, pr_sync, pull_request, repository_id};
+    use crate::overview::fixtures::{
+        id, links, pr_status, pr_sync, pull_request, repository_id, workspace,
+    };
 
     struct Harness {
         api: Arc<FakeApi>,
         view: Entity<PullRequestsView>,
         synced: Rc<RefCell<usize>>,
         settings: Rc<RefCell<usize>>,
-        _events: [gpui::Subscription; 2],
+        opened: Rc<RefCell<Vec<WorkspaceId>>>,
+        _events: [gpui::Subscription; 3],
     }
 
     impl Harness {
-        /// A `Root` window on the view showing `snapshot`, over a fake daemon holding it.
+        /// A `Root` window on the Pull requests view showing `snapshot`, over a fake daemon
+        /// holding it.
         fn open(snapshot: Snapshot, cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
+            Harness::open_in(Scope::All, snapshot, cx)
+        }
+
+        /// A `Root` window on a view of `scope` showing `snapshot`, over a fake daemon holding
+        /// it.
+        fn open_in(
+            scope: Scope,
+            snapshot: Snapshot,
+            cx: &mut TestAppContext,
+        ) -> (Harness, &mut VisualTestContext) {
             cx.update(brrritscold_core_gpui::init);
             let api = Arc::new(FakeApi::with(snapshot.clone()));
             let mut view = None;
             let window = cx.add_window(|window, cx| {
                 let api: Arc<dyn Api> = api.clone();
                 let prs = cx.new(|cx| {
-                    let mut prs = PullRequestsView::new(api, cx);
+                    let mut prs = PullRequestsView::new(api, scope, cx);
                     prs.set_snapshot(snapshot, cx);
                     prs
                 });
@@ -884,12 +1095,17 @@ mod tests {
             let cx = VisualTestContext::from_window(*window, cx).into_mut();
             let view = view.unwrap();
             let (synced, settings) = (Rc::new(RefCell::new(0)), Rc::new(RefCell::new(0)));
+            let opened = Rc::new(RefCell::new(Vec::new()));
             let (seen_sync, seen_settings) = (synced.clone(), settings.clone());
+            let seen_opened = opened.clone();
             let events = cx.update(|_, cx| {
                 [
                     cx.subscribe(&view, move |_, _: &Synced, _| *seen_sync.borrow_mut() += 1),
                     cx.subscribe(&view, move |_, _: &OpenSettings, _| {
                         *seen_settings.borrow_mut() += 1;
+                    }),
+                    cx.subscribe(&view, move |_, OpenWorkspace(id): &OpenWorkspace, _| {
+                        seen_opened.borrow_mut().push(*id);
                     }),
                 ]
             });
@@ -899,6 +1115,7 @@ mod tests {
                 view,
                 synced,
                 settings,
+                opened,
                 _events: events,
             };
             harness.draw(cx);
@@ -974,12 +1191,299 @@ mod tests {
         groups.iter().map(|g| g.label.to_string()).collect()
     }
 
+    /// A snapshot holding `prs` alone.
+    fn of(prs: &[PullRequest]) -> Snapshot {
+        Snapshot {
+            prs: prs.to_vec(),
+            ..Snapshot::default()
+        }
+    }
+
+    /// Workspaces `a` (1) and `b` (2), and `old` (3), archived. `a` and `b` link widgets, `a`
+    /// links tools too, which has no PR, and only `old` links gadgets. apples and zebra are
+    /// linked by none. Each of widgets, gadgets, apples and zebra has one open PR.
+    fn linked() -> Snapshot {
+        let old = agentdeck_client::types::Workspace {
+            archived_at: Some("2026-11-13T00:00:00Z".into()),
+            ..workspace(3, "old")
+        };
+        Snapshot {
+            workspaces: vec![workspace(1, "a"), workspace(2, "b"), old],
+            repositories: vec![
+                links("acme/widgets", &[id(1), id(2)]),
+                links("acme/tools", &[id(1)]),
+                links("acme/gadgets", &[id(3)]),
+            ],
+            prs: vec![
+                pull_request(1, "acme/zebra"),
+                pull_request(2, "acme/gadgets"),
+                pull_request(3, "acme/widgets"),
+                pull_request(4, "acme/apples"),
+            ],
+            pr_sync: Some(pr_status()),
+            ..Snapshot::default()
+        }
+    }
+
+    /// Workspace `a`'s Pull requests.
+    fn a() -> Scope {
+        Scope::Workspace(id(1))
+    }
+
+    /// Whether the window dispatches [`EditWorkspace`] from now on, as the top bar's menu does.
+    fn edit_workspace_asked(cx: &mut VisualTestContext) -> Rc<RefCell<usize>> {
+        let asked = Rc::new(RefCell::new(0));
+        let seen = asked.clone();
+        cx.update(|_, cx| {
+            cx.on_action(move |_: &EditWorkspace, _| *seen.borrow_mut() += 1);
+        });
+        asked
+    }
+
+    mod linked {
+        use super::*;
+
+        fn linkers(group: &Group) -> Vec<String> {
+            group.workspaces.iter().map(|w| w.name.to_string()).collect()
+        }
+
+        #[test]
+        fn should_put_linked_repositories_first_then_the_rest_each_alphabetical() {
+            let groups = groups(&linked(), Scope::All, false, None);
+
+            assert_eq!(names(&groups), ["widgets", "apples", "gadgets", "zebra"]);
+        }
+
+        #[test]
+        fn should_name_the_workspaces_linking_each_repository_in_the_sidebars_order() {
+            let groups = groups(&linked(), Scope::All, false, None);
+
+            assert_eq!(linkers(&groups[0]), ["a", "b"]);
+            assert!(linkers(&groups[1]).is_empty());
+        }
+
+        #[test]
+        fn should_count_archived_workspaces_as_linking_nothing() {
+            let groups = groups(&linked(), Scope::All, false, None);
+
+            let gadgets = groups.iter().find(|g| g.label == "gadgets").unwrap();
+            assert!(linkers(gadgets).is_empty());
+            assert_eq!(names(&groups)[1..], ["apples", "gadgets", "zebra"]);
+        }
+
+        #[test]
+        fn should_list_a_workspaces_linked_repositories_alone_prs_or_none() {
+            let groups = groups(&linked(), a(), false, None);
+
+            assert_eq!(names(&groups), ["tools", "widgets"]);
+            assert!(groups[0].prs.is_empty());
+            assert_eq!(groups[1].prs.len(), 1);
+            assert_eq!(linkers(&groups[1]), ["a", "b"]);
+        }
+
+        #[test]
+        fn should_list_nothing_for_a_workspace_linking_nothing() {
+            assert!(groups(&linked(), Scope::Workspace(id(9)), false, None).is_empty());
+            assert!(groups(&linked(), Scope::Workspace(id(3)), false, None).is_empty());
+        }
+
+        #[gpui::test]
+        fn should_name_each_linking_workspace_in_its_groups_header(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open(linked(), cx);
+
+            let header = bounds("group acme/widgets".into(), cx);
+            let a = bounds("workspace link acme/widgets a".into(), cx);
+            let b = bounds("workspace link acme/widgets b".into(), cx);
+            assert!(a.left() > header.right() && b.left() > a.right(), "{a:?} {b:?}");
+            assert!(shows("group workspaces acme/gadgets".into(), cx));
+            assert!(!shows("workspace link acme/gadgets old".into(), cx));
+        }
+
+        #[gpui::test]
+        fn should_open_a_workspaces_pull_requests_from_its_name(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(linked(), cx);
+
+            click("workspace link acme/widgets b".into(), cx);
+
+            assert_eq!(*harness.opened.borrow(), [id(2)]);
+            assert!(shows("pr acme/widgets#3".into(), cx), "the group stays open");
+        }
+
+        #[gpui::test]
+        fn should_draw_the_groups_in_their_order(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open(linked(), cx);
+
+            let tops: Vec<_> = ["widgets", "apples", "gadgets", "zebra"]
+                .map(|name| bounds(format!("group acme/{name}"), cx).top())
+                .to_vec();
+
+            assert!(tops.is_sorted(), "{tops:?}");
+        }
+    }
+
+    mod workspace_side {
+        use super::*;
+
+        #[gpui::test]
+        fn should_list_the_prs_of_the_repositories_it_links(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open_in(a(), linked(), cx);
+
+            assert!(shows("pr acme/widgets#3".into(), cx));
+            for other in ["pr acme/zebra#1", "pr acme/gadgets#2", "pr acme/apples#4"] {
+                assert!(!shows(other.into(), cx), "{other}");
+            }
+        }
+
+        #[gpui::test]
+        fn should_show_a_linked_repository_with_no_open_pr_over_a_muted_row(
+            cx: &mut TestAppContext,
+        ) {
+            let (_harness, cx) = Harness::open_in(a(), linked(), cx);
+
+            let header = bounds("group acme/tools".into(), cx);
+            let row = bounds("no open prs acme/tools".into(), cx);
+            let next = bounds("group acme/widgets".into(), cx);
+            assert!(header.bottom() <= row.top() && row.bottom() <= next.top());
+            assert_eq!(NO_OPEN_PRS, "No open PRs");
+        }
+
+        #[gpui::test]
+        fn should_show_no_open_prs_once_its_last_pr_finishes(cx: &mut TestAppContext) {
+            let mut snapshot = linked();
+            snapshot.prs[2].finished = true;
+            snapshot.prs[2].state = PrState::Merged;
+            let (_harness, cx) = Harness::open_in(a(), snapshot, cx);
+
+            assert!(shows("no open prs acme/widgets".into(), cx));
+            click("show finished".into(), cx);
+            assert!(!shows("no open prs acme/widgets".into(), cx));
+            assert!(shows("pr acme/widgets#3".into(), cx));
+        }
+
+        #[gpui::test]
+        fn should_head_it_with_select_show_finished_and_edit_workspace(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open_in(a(), linked(), cx);
+
+            let tops = ["workspace-pull-requests select", "show finished", "edit workspace"]
+                .map(|selector| bounds(selector.into(), cx));
+            assert!(tops.windows(2).all(|w| w[0].right() <= w[1].left()), "{tops:?}");
+            assert!(!shows("sync now".into(), cx));
+            assert!(!shows("pull requests synced".into(), cx));
+        }
+
+        #[gpui::test]
+        fn should_say_which_repositories_it_lists(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open_in(a(), linked(), cx);
+
+            let lines = harness.view.read_with(cx, |view, cx| view.description(cx));
+
+            assert_eq!(
+                lines,
+                [
+                    "Your open PRs from the repositories a links.",
+                    "Link or unlink repositories in Edit workspace."
+                ]
+            );
+        }
+
+        #[gpui::test]
+        fn should_open_edit_workspace_from_its_header(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open_in(a(), linked(), cx);
+            let asked = edit_workspace_asked(cx);
+
+            click("edit workspace".into(), cx);
+
+            assert_eq!(*asked.borrow(), 1);
+        }
+
+        #[gpui::test]
+        fn should_pick_and_copy_its_prs_in_select_mode(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open_in(a(), linked(), cx);
+
+            click("workspace-pull-requests select".into(), cx);
+            click("pr title acme/widgets#3".into(), cx);
+
+            let picked = harness.view.read_with(cx, |view, cx| {
+                view.close_prs().read(cx).picked(PrKey::of(&linked().prs[2]))
+            });
+            assert!(picked);
+        }
+
+        #[gpui::test]
+        fn should_show_the_logged_out_banner_over_it(cx: &mut TestAppContext) {
+            let mut snapshot = linked();
+            pr_sync(&mut snapshot).login = GhLogin::LoggedOut;
+            let (_harness, cx) = Harness::open_in(a(), snapshot, cx);
+
+            let banner = bounds("logged out banner".into(), cx);
+            let table = bounds("pull requests table".into(), cx);
+            assert!(banner.bottom() <= table.top(), "{banner:?} over {table:?}");
+        }
+
+        #[gpui::test]
+        fn should_remember_collapse_apart_from_the_pull_requests_view(cx: &mut TestAppContext) {
+            let (_harness, window) = Harness::open_in(a(), linked(), cx);
+
+            click("group acme/widgets".into(), window);
+
+            assert!(!shows("pr acme/widgets#3".into(), window));
+            let state = window.read(|cx| gui_state::read(cx, Clone::clone));
+            assert_eq!(
+                state.collapsed.workspace(id(1)),
+                BTreeSet::from([repository_id("acme/widgets")])
+            );
+            assert!(state.collapsed.pull_requests.is_empty());
+            let (_harness, cx) = Harness::open(linked(), cx);
+            assert!(shows("pr acme/widgets#3".into(), cx));
+        }
+
+        mod no_repositories {
+            use super::*;
+
+            /// Workspace `c` (4), linking nothing, beside [`linked`]'s.
+            fn c() -> (Scope, Snapshot) {
+                let mut snapshot = linked();
+                snapshot.workspaces.push(workspace(4, "c"));
+                (Scope::Workspace(id(4)), snapshot)
+            }
+
+            #[gpui::test]
+            fn should_say_it_links_none_with_link_repository(cx: &mut TestAppContext) {
+                let (scope, snapshot) = c();
+                let (harness, cx) = Harness::open_in(scope, snapshot, cx);
+
+                let lines = harness.view.read_with(cx, |view, cx| view.description(cx));
+                assert_eq!(lines, NO_REPOSITORIES);
+                assert!(shows("link repository".into(), cx));
+                for gone in [
+                    "pull requests table",
+                    "workspace-pull-requests select",
+                    "show finished",
+                    "edit workspace",
+                ] {
+                    assert!(!shows(gone.into(), cx), "{gone}");
+                }
+            }
+
+            #[gpui::test]
+            fn should_open_edit_workspace_from_link_repository(cx: &mut TestAppContext) {
+                let (scope, snapshot) = c();
+                let (_harness, cx) = Harness::open_in(scope, snapshot, cx);
+                let asked = edit_workspace_asked(cx);
+
+                click("link repository".into(), cx);
+
+                assert_eq!(*asked.borrow(), 1);
+            }
+        }
+    }
+
     mod groups {
         use super::*;
 
         #[test]
         fn should_put_each_pr_under_its_repository_alphabetically_by_name() {
-            let groups = groups(&prs().prs, false, None);
+            let groups = groups(&prs(), Scope::All, false, None);
 
             assert_eq!(names(&groups), ["gadgets", "widgets"]);
             let numbers: Vec<u32> = groups[1].prs.iter().map(|pr| pr.number).collect();
@@ -995,14 +1499,14 @@ mod tests {
             ];
 
             assert_eq!(
-                names(&groups(&prs, false, None)),
+                names(&groups(&of(&prs), Scope::All, false, None)),
                 ["alpha", "Beta", "gamma"]
             );
         }
 
         #[test]
         fn should_leave_out_a_repository_with_no_open_pr() {
-            let groups = groups(&prs().prs, false, None);
+            let groups = groups(&prs(), Scope::All, false, None);
 
             assert!(!names(&groups).contains(&"gizmos".to_owned()));
         }
@@ -1032,8 +1536,8 @@ mod tests {
                     .collect()
             };
 
-            assert_eq!(numbers(groups(&prs, false, None)), [1]);
-            assert_eq!(numbers(groups(&prs, true, None)), [3, 1, 2, 5]);
+            assert_eq!(numbers(groups(&of(&prs), Scope::All, false, None)), [1]);
+            assert_eq!(numbers(groups(&of(&prs), Scope::All, true, None)), [3, 1, 2, 5]);
         }
 
         #[test]
@@ -1044,7 +1548,7 @@ mod tests {
             ];
 
             assert_eq!(
-                names(&groups(&prs, false, None)),
+                names(&groups(&of(&prs), Scope::All, false, None)),
                 ["me/agentdeck", "upstream/agentdeck"]
             );
         }
@@ -1062,7 +1566,7 @@ mod tests {
                 },
             ];
 
-            assert_eq!(groups(&prs, false, None)[0].prs.len(), 2);
+            assert_eq!(groups(&of(&prs), Scope::All, false, None)[0].prs.len(), 2);
         }
     }
 

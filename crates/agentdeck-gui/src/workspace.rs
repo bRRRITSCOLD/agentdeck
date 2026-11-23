@@ -1,5 +1,10 @@
-//! The selected workspace (spec §11), Penpot "Main window" `Centre`: its [`TopBar`], then a
-//! row of tabs over the selected tab's split tree, a [`PaneView`] at each leaf.
+//! The selected workspace (spec §11), Penpot "Main window" `Centre`: its [`TopBar`], then one
+//! of its two sides, switched in the top bar or with `secondary-shift-p` ([`ToggleSide`]): its
+//! Panes, a row of tabs over the selected tab's split tree, a [`PaneView`] at each leaf; or its
+//! Pull requests (Penpot "Workspace · Pull requests"), a [`PullRequestsView`] over the
+//! Repositories it links. Each workspace opens on the side it showed last, remembered in the
+//! GUI's own state ([`gui_state`]); a new one opens on its Panes. Its Pull requests' asks, to
+//! open another Workspace's Pull requests or Settings, go on to the window.
 //!
 //! It reads the workspace's tabs and panes when it opens and again whenever the daemon reports
 //! a tab or pane `changed`. Each shown pane keeps its view, and so its
@@ -17,8 +22,12 @@
 //! in the current folder of the pane it splits, a new tab or agent in the focused pane's, or
 //! the last pane here that had the keyboard, else in `~`: a workspace has no folder.
 //!
-//! An archived workspace shows only its top bar over a note saying so: it reads no tabs and
-//! attaches no terminals. The window opens a fresh view when that changes.
+//! While its Pull requests show, its panes stay attached but out of view: the tab and pane
+//! shortcuts do nothing, and its panes count as unseen for alerts. A workspace with no tabs
+//! gets its shell tab once its Panes first show.
+//!
+//! An archived workspace shows only its top bar, with no switch, over a note saying so: it
+//! reads no tabs and attaches no terminals. The window opens a fresh view when that changes.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -36,18 +45,22 @@ use brrritscold_core_gpui::{
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Div, Entity, FocusHandle, Focusable as _,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
-    Subscription, Task, Window, div, relative,
+    AnyElement, App, AppContext as _, Context, Div, Entity, EventEmitter, FocusHandle,
+    Focusable as _, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    SharedString, Styled as _, Subscription, Task, Window, div, relative,
 };
 use gpui_base::actions::Confirm;
 
 use crate::api::{Api, PaneAt, Split, WorkspacePanes};
 use crate::connection::{Connection, DaemonEvent};
+use crate::gui_state::{self, Side};
 use crate::keymap::{
     self, ClosePane, NewTab, NextPane, NextTab, PreviousPane, PreviousTab, SelectTab, SplitDown,
     SplitRight,
 };
+use crate::overview::Snapshot;
+use crate::pull_requests::{OpenWorkspace, PullRequestsView, Scope};
+use crate::sync_parts::OpenSettings;
 use crate::new_agent::{agent_name, home_folder};
 use crate::notice::Notice;
 use crate::pane::{PaneRequest, PaneView};
@@ -97,13 +110,26 @@ pub struct WorkspaceView {
     closing_now: HashSet<PaneId>,
     /// The last read started.
     reading: Option<Task<()>>,
-    /// Whether a read has landed yet: the first one opens a shell tab in an empty workspace.
+    /// Whether a read has landed yet.
     read_once: bool,
+    /// Whether its Panes have shown a read yet: the first time, an empty workspace gets a
+    /// shell tab.
+    panes_seen: bool,
     rereads: Rereads,
-    /// Holds the keyboard while the tab shown has no pane to.
+    /// Holds the keyboard while the tab shown has no pane to, and while its Pull requests
+    /// show.
     focus: FocusHandle,
+    /// The side shown.
+    side: Side,
+    /// Its Pull requests.
+    pull_requests: Entity<PullRequestsView>,
     _events: Subscription,
+    /// Passes its Pull requests' asks on to the window.
+    _pull_requests: [Subscription; 2],
 }
+
+impl EventEmitter<OpenWorkspace> for WorkspaceView {}
+impl EventEmitter<OpenSettings> for WorkspaceView {}
 
 impl WorkspaceView {
     /// `workspace`, headed by `top_bar`, read through `api` and attached over `connection`'s
@@ -132,6 +158,13 @@ impl WorkspaceView {
                 this.reread(window, cx);
             }
         });
+        let side = gui_state::read(cx, |state| state.side(workspace));
+        let pull_requests =
+            cx.new(|cx| PullRequestsView::new(api.clone(), Scope::Workspace(workspace), cx));
+        let asks = [
+            cx.subscribe(&pull_requests, |_, _, ask: &OpenWorkspace, cx| cx.emit(*ask)),
+            cx.subscribe(&pull_requests, |_, _, ask: &OpenSettings, cx| cx.emit(*ask)),
+        ];
         let mut view = WorkspaceView {
             workspace,
             top_bar,
@@ -152,14 +185,73 @@ impl WorkspaceView {
             closing_now: HashSet::new(),
             reading: None,
             read_once: false,
+            panes_seen: false,
             rereads: Rereads::default(),
             focus: cx.focus_handle(),
+            side,
+            pull_requests,
             _events: events,
+            _pull_requests: asks,
         };
         if !view.top_bar.is_archived() {
             view.reread(window, cx);
+            if side == Side::PullRequests {
+                window.focus(&view.focus, cx);
+            }
         }
         view
+    }
+
+    /// The side it shows.
+    pub fn side(&self) -> Side {
+        self.side
+    }
+
+    /// Shows `side`, remembering it for the next start: its Pull requests take the keyboard,
+    /// so the shortcut toggles back; its Panes give it to the pane that last had it. An
+    /// archived workspace has no sides.
+    pub fn set_side(&mut self, side: Side, window: &mut Window, cx: &mut Context<Self>) {
+        if self.top_bar.is_archived() || self.side == side {
+            return;
+        }
+        self.side = side;
+        let workspace = self.workspace;
+        gui_state::update(cx, |state| state.set_side(workspace, side));
+        match side {
+            Side::PullRequests => window.focus(&self.focus, cx),
+            Side::Panes => {
+                let shown = self.shown();
+                let last = (self.last_focused).and_then(|id| shown.iter().find(|p| p.read(cx).id() == id));
+                match last.or(shown.first()) {
+                    Some(pane) => window.focus(&pane.focus_handle(cx), cx),
+                    None => window.focus(&self.focus, cx),
+                }
+                self.open_first_tab(window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Shows the other side.
+    pub fn toggle_side(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_side(self.side.other(), window, cx);
+    }
+
+    /// Shows `snapshot` on its Pull requests.
+    pub fn set_snapshot(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
+        (self.pull_requests).update(cx, |view, cx| view.set_snapshot(snapshot, cx));
+    }
+
+    /// Opens a shell tab the first time its Panes show a read with none (spec §11); one emptied
+    /// while shown stays empty.
+    fn open_first_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.side != Side::Panes || !self.read_once || self.panes_seen {
+            return;
+        }
+        self.panes_seen = true;
+        if self.read.tabs.is_empty() {
+            self.new_tab(window, cx);
+        }
     }
 
     /// The workspace it shows.
@@ -367,6 +459,7 @@ impl WorkspaceView {
     }
 
     /// Shows `tab` and focuses `pane` in it once a read has both: a pane just placed there.
+    /// Its Panes show.
     pub fn show_pane(
         &mut self,
         tab: TabId,
@@ -374,13 +467,15 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.set_side(Side::Panes, window, cx);
         self.selected = Some(tab);
         self.focus_next = Some(pane);
         self.reread(window, cx);
     }
 
-    /// Shows the tab holding `pane` and focuses it, once a read has it.
+    /// Shows the tab holding `pane` and focuses it, once a read has it. Its Panes show.
     pub fn reveal_pane(&mut self, pane: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_side(Side::Panes, window, cx);
         self.focus_next = Some(pane);
         self.reread(window, cx);
     }
@@ -444,8 +539,11 @@ impl WorkspaceView {
         }
     }
 
-    /// The panes it shows, left to right and top to bottom.
+    /// The panes it shows, left to right and top to bottom; none while its Pull requests show.
     pub fn shown(&self) -> Vec<Entity<PaneView>> {
+        if self.side != Side::Panes {
+            return Vec::new();
+        }
         self.layout()
             .map(|layout| layout.panes())
             .unwrap_or_default()
@@ -499,10 +597,9 @@ impl WorkspaceView {
         });
         self.selected = (holding.or(kept)).or_else(|| self.read.tabs.first().map(|tab| tab.id));
         self.sync(window, cx);
+        self.read_once = true;
         // A workspace opened with no tabs gets a shell; one emptied while shown stays empty.
-        if !std::mem::replace(&mut self.read_once, true) && self.read.tabs.is_empty() {
-            self.new_tab(window, cx);
-        }
+        self.open_first_tab(window, cx);
     }
 
     /// The selected tab's layout, if it has a pane.
@@ -563,6 +660,10 @@ impl WorkspaceView {
             .focus_next
             .and_then(|pane| self.panes.get(&pane))
             .cloned();
+        // Its Pull requests keep the keyboard while they show.
+        if self.side != Side::Panes {
+            return;
+        }
         if let Some(pane) = waiting {
             self.focus_next = None;
             window.focus(&pane.focus_handle(cx), cx);
@@ -746,9 +847,37 @@ pub fn failed(
 
 impl Render for WorkspaceView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let archived = self.top_bar.is_archived();
+        let top_bar = match archived {
+            true => self.top_bar.clone(),
+            false => self.top_bar.clone().side(self.side),
+        };
         let view = div()
             .key_context(keymap::WORKSPACE)
             .track_focus(&self.focus)
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            // Penpot `Centre`: TopBar, then a side.
+            .child(top_bar)
+            .child(self.close_confirmation(cx));
+        if archived {
+            return view.child(self.archived_note(cx));
+        }
+        if self.side == Side::PullRequests {
+            return view.child(
+                div()
+                    .debug_selector(|| "workspace pull requests".into())
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .child(self.pull_requests.clone()),
+            );
+        }
+        // Penpot `Centre` on its Panes: TopBar / TabsRow / Separator / Panes.
+        let view = view
             .on_action(cx.listener(|this, _: &NextTab, window, cx| this.step_tab(1, window, cx)))
             .on_action(cx.listener(|this, _: &PreviousTab, window, cx| {
                 this.step_tab(-1, window, cx);
@@ -771,18 +900,7 @@ impl Render for WorkspaceView {
             }))
             .on_action(cx.listener(|this, _: &ClosePane, window, cx| {
                 this.on_focused(PaneRequest::Close, window, cx);
-            }))
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            // Penpot `Centre`: TopBar / TabsRow / Separator / Panes.
-            .child(self.top_bar.clone())
-            .child(self.close_confirmation(cx));
-        if self.top_bar.is_archived() {
-            return view.child(self.archived_note(cx));
-        }
+            }));
         match &self.status {
             Status::Loading => view,
             Status::Failed(reason) => view.child(self.message(reason.clone(), cx)),

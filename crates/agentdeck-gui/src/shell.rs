@@ -14,6 +14,10 @@
 //!
 //! Once an agent starts, the window shows its workspace and tab.
 //!
+//! It switches the workspace shown between its Panes and its Pull requests when the top bar or
+//! `secondary-shift-p` asks. A Workspace's name in a group header, on either PR list, shows
+//! that Workspace's Pull requests ([`Shell::open_workspace_prs`]).
+//!
 //! It shows the sidebar's [`Alerts`] as OS notifications (spec §11), leaving out one while the
 //! user can see what it is about in the focused window: the pane's tab, or, for a PR, the Pull
 //! requests view. Clicking one focuses the window and shows what it is about: a PR alert lands
@@ -55,19 +59,21 @@ use crate::connection::{Connection, Status};
 use crate::delete_workspace::{DeleteEvent, DeleteTarget, DeleteWorkspaceDialog};
 use crate::edit_workspace::{EditTarget, EditWorkspaceDialog, Renamed};
 use crate::frame;
+use crate::gui_state::{self, Side};
+use crate::keymap::ToggleSide;
 use crate::new_agent::{self, Launched, NewAgent, NewAgentDialog, Target, home_folder};
 use crate::new_workspace::{Created, NewWorkspaceDialog};
 use crate::notice::{self, Notice, NoticeAction};
 use crate::notifications::{self, Alert as Notification};
-use crate::pull_requests::{PullRequestsView, Synced};
+use crate::pull_requests::{OpenWorkspace, PullRequestsView, Scope, Synced};
 use crate::quit;
 use crate::settings::SettingsView;
 use crate::sidebar::{Alerts, Selection, SidebarEvent, SidebarView};
 use crate::sync_parts::OpenSettings;
 use crate::title_bar::{Close, Minimize, TitleBar, ToggleMaximize};
 use crate::top_bar::{
-    ArchiveWorkspace, DeleteWorkspace, EditWorkspace, MuteWorkspace, TopBar, UnarchiveWorkspace,
-    UnmuteWorkspace,
+    ArchiveWorkspace, DeleteWorkspace, EditWorkspace, MuteWorkspace, ShowPanes, ShowPullRequests,
+    TopBar, UnarchiveWorkspace, UnmuteWorkspace,
 };
 use crate::workspace::{WorkspaceView, failed};
 
@@ -380,7 +386,7 @@ impl Shell {
                     let api = session.api.clone();
                     let connection = self.connection.clone();
                     let dialog = cx.new(|cx| NewWorkspaceDialog::new(api.clone(), window, cx));
-                    let pull_requests = cx.new(|cx| PullRequestsView::new(api.clone(), cx));
+                    let pull_requests = cx.new(|cx| PullRequestsView::new(api.clone(), Scope::All, cx));
                     let new_agent = cx.new(|_| NewAgentDialog::new(api.clone()));
                     let edit = cx.new(|cx| EditWorkspaceDialog::new(api.clone(), window, cx));
                     let delete = cx.new(|cx| DeleteWorkspaceDialog::new(api.clone(), window, cx));
@@ -420,6 +426,13 @@ impl Shell {
                         cx.subscribe(&pull_requests, |shell, _, _: &OpenSettings, cx| {
                             shell.open_settings(cx);
                         }),
+                        cx.subscribe_in(
+                            &pull_requests,
+                            window,
+                            |shell, _, OpenWorkspace(id): &OpenWorkspace, window, cx| {
+                                shell.open_workspace_prs(*id, window, cx);
+                            },
+                        ),
                         // Show the agent's workspace and tab, and focus it: it may be asking
                         // about trust.
                         cx.subscribe_in(
@@ -495,6 +508,7 @@ impl Shell {
             return;
         };
         let sidebar = sidebar.read(cx);
+        let snapshot = sidebar.snapshot().clone();
         let row = match selection {
             Selection::Workspace(selected) => sidebar.overview().workspace(selected),
             Selection::PullRequests | Selection::Settings => None,
@@ -506,25 +520,40 @@ impl Shell {
         };
         let top_bar = TopBar::new(row.name.clone())
             .archived(row.archived)
-            .muted(row.muted);
+            .muted(row.muted)
+            .prs(row.counts.prs);
         let selected = row.id;
         // Archiving or unarchiving swaps the view: an archived one holds no terminals.
         if let Some(view) = &self.workspace
             && view.read(cx).workspace() == selected
             && view.read(cx).top_bar().is_archived() == row.archived
         {
-            view.update(cx, |view, cx| view.set_top_bar(top_bar, cx));
+            view.update(cx, |view, cx| {
+                view.set_top_bar(top_bar, cx);
+                view.set_snapshot(snapshot, cx);
+            });
             return;
         }
         let (api, sender) = (session.api.clone(), session.sender.clone());
         let connection = self.connection.clone();
-        let view =
-            cx.new(|cx| WorkspaceView::new(selected, top_bar, api, connection, sender, window, cx));
+        let view = cx.new(|cx| {
+            let mut view = WorkspaceView::new(selected, top_bar, api, connection, sender, window, cx);
+            view.set_snapshot(snapshot, cx);
+            view
+        });
         self._workspace = vec![
-            // Its tabs read, or another tab shown.
+            // Its tabs read, another tab shown, or the other side.
             cx.observe_in(&view, window, |shell, _, window, cx| {
                 shell.withdraw_seen(window, cx);
             }),
+            cx.subscribe_in(
+                &view,
+                window,
+                |shell, _, OpenWorkspace(id): &OpenWorkspace, window, cx| {
+                    shell.open_workspace_prs(*id, window, cx);
+                },
+            ),
+            cx.subscribe(&view, |shell, _, _: &OpenSettings, cx| shell.open_settings(cx)),
         ];
         self.workspace = Some(view);
         cx.notify();
@@ -666,6 +695,30 @@ impl Shell {
                 }
             }
             notifications::Target::PullRequests => self.show_pull_requests(cx),
+        }
+    }
+
+    /// Shows `workspace`'s Pull requests, as a click on its name in a group header asks:
+    /// remembers the side, then shows it, selecting the workspace first if another view shows.
+    pub fn open_workspace_prs(
+        &mut self,
+        workspace: WorkspaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        gui_state::update(cx, |state| state.set_side(workspace, Side::PullRequests));
+        if let Some(view) = self.show_workspace(workspace, window, cx) {
+            view.update(cx, |view, cx| view.set_side(Side::PullRequests, window, cx));
+        }
+    }
+
+    /// Shows `side` of the workspace shown.
+    fn show_side(&mut self, side: Option<Side>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(view) = &self.workspace {
+            view.update(cx, |view, cx| match side {
+                Some(side) => view.set_side(side, window, cx),
+                None => view.toggle_side(window, cx),
+            });
         }
     }
 
@@ -981,6 +1034,15 @@ impl Render for Shell {
             }))
             .on_action(cx.listener(|this, _: &DeleteWorkspace, window, cx| {
                 this.delete_workspace(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowPanes, window, cx| {
+                this.show_side(Some(Side::Panes), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowPullRequests, window, cx| {
+                this.show_side(Some(Side::PullRequests), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleSide, window, cx| {
+                this.show_side(None, window, cx);
             }))
             .on_action(cx.listener(|this, _: &UnarchiveWorkspace, window, cx| {
                 if let Some((workspace, name, true)) = this.selected_workspace(cx) {
@@ -1621,6 +1683,208 @@ mod tests {
         }
     }
 
+    /// A Workspace's two sides, Panes and Pull requests, switched in its top bar.
+    mod side {
+        use agentdeck_client::types::Workspace;
+
+        use super::support::Harness;
+        use super::*;
+        use crate::edit_workspace::EditWorkspaceDialog;
+        use crate::gui_state::{self, Side};
+        use crate::overview::fixtures::{links, pull_request};
+        use crate::top_bar;
+
+        /// Workspace 1, `agentdeck`, with a tab, linking widgets, which has two open PRs;
+        /// workspace 2, `docs`, linking nothing; workspace 3, `old`, archived.
+        fn daemon() -> Arc<FakeApi> {
+            let old = Workspace {
+                archived_at: Some("2026-11-13T00:00:00Z".into()),
+                ..workspace(3, "old")
+            };
+            let api = Arc::new(FakeApi::with(Snapshot {
+                workspaces: vec![workspace(1, "agentdeck"), workspace(2, "docs"), old],
+                repositories: vec![links("acme/widgets", &[id(1)])],
+                prs: vec![pull_request(1, "acme/widgets"), pull_request(2, "acme/widgets")],
+                ..Snapshot::default()
+            }));
+            api.set_tabs(id(1), vec![tab(1, id(1), 0, Some(id(7)))]);
+            api
+        }
+
+        fn open(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
+            cx.update(crate::keymap::init);
+            Harness::open(daemon(), cx)
+        }
+
+        /// The workspace shown and its side.
+        fn showing(harness: &Harness, cx: &mut VisualTestContext) -> Option<(WorkspaceId, Side)> {
+            harness.shell.read_with(cx, |shell, cx| {
+                (shell.workspace.as_ref()).map(|view| {
+                    let view = view.read(cx);
+                    (view.workspace(), view.side())
+                })
+            })
+        }
+
+        fn shows(selector: &'static str, cx: &mut VisualTestContext) -> bool {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.debug_bounds(selector).is_some()
+        }
+
+        fn click(harness: &Harness, selector: &'static str, cx: &mut VisualTestContext) {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let at = cx.debug_bounds(selector).expect(selector).center();
+            harness.click(at, cx);
+        }
+
+        /// Clicks `side` in the top bar's switch: Panes at its left end, Pull requests at its
+        /// right.
+        fn click_side(harness: &Harness, side: Side, cx: &mut VisualTestContext) {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let switch = cx.debug_bounds("side switch").expect("the switch");
+            let x = match side {
+                Side::Panes => switch.left() + gpui::px(8.),
+                Side::PullRequests => switch.right() - gpui::px(8.),
+            };
+            harness.click(gpui::point(x, switch.center().y), cx);
+        }
+
+        #[gpui::test]
+        fn should_open_a_new_workspace_on_its_panes(cx: &mut TestAppContext) {
+            let (harness, cx) = open(cx);
+
+            assert_eq!(showing(&harness, cx), Some((id(1), Side::Panes)));
+            let name = cx.debug_bounds("workspace name").expect("the name");
+            let switch = cx.debug_bounds("side switch").expect("the switch");
+            let new_agent = cx.debug_bounds("new agent").expect("New agent");
+            assert!(name.right() < switch.left() && switch.right() < new_agent.left());
+            assert!(!shows("workspace pull requests", cx));
+        }
+
+        #[gpui::test]
+        fn should_count_its_open_prs_in_the_switch(cx: &mut TestAppContext) {
+            let (harness, cx) = open(cx);
+
+            let prs = harness.shell.read_with(cx, |shell, cx| {
+                shell.workspace.as_ref().unwrap().read(cx).top_bar().open_prs()
+            });
+            assert_eq!(prs, 2);
+            assert_eq!(top_bar::pull_requests_label(2), "Pull requests · 2");
+            assert_eq!(top_bar::pull_requests_label(0), "Pull requests");
+        }
+
+        #[gpui::test]
+        fn should_switch_sides_from_the_top_bar(cx: &mut TestAppContext) {
+            let (harness, cx) = open(cx);
+
+            click_side(&harness, Side::PullRequests, cx);
+
+            assert_eq!(showing(&harness, cx), Some((id(1), Side::PullRequests)));
+            assert!(shows("workspace pull requests", cx));
+            assert!(cx.debug_bounds("pr acme/widgets#1").is_some());
+            click_side(&harness, Side::Panes, cx);
+            assert_eq!(showing(&harness, cx), Some((id(1), Side::Panes)));
+            assert!(!shows("workspace pull requests", cx));
+        }
+
+        #[gpui::test]
+        fn should_toggle_sides_with_secondary_shift_p(cx: &mut TestAppContext) {
+            let (harness, cx) = open(cx);
+
+            cx.simulate_keystrokes("secondary-shift-p");
+            harness.settle(cx);
+            assert_eq!(showing(&harness, cx), Some((id(1), Side::PullRequests)));
+
+            cx.simulate_keystrokes("secondary-shift-p");
+            harness.settle(cx);
+            assert_eq!(showing(&harness, cx), Some((id(1), Side::Panes)));
+        }
+
+        #[gpui::test]
+        fn should_remember_each_workspaces_side_across_restarts(cx: &mut TestAppContext) {
+            let dir = tempfile::tempdir().expect("a temp dir");
+            let path = dir.path().join(gui_state::FILE);
+            cx.update(|cx| gui_state::init(Some(path.clone()), cx));
+            let (harness, window) = open(cx);
+            click_side(&harness, Side::PullRequests, window);
+
+            assert_eq!(gui_state::load(&path).side(id(1)), Side::PullRequests);
+            assert_eq!(gui_state::load(&path).side(id(2)), Side::Panes);
+            // The next start reads the file again.
+            cx.update(|cx| gui_state::init(Some(path), cx));
+            let (harness, cx) = open(cx);
+            assert_eq!(showing(&harness, cx), Some((id(1), Side::PullRequests)));
+        }
+
+        #[gpui::test]
+        fn should_open_the_remembered_side_from_a_sidebar_row(cx: &mut TestAppContext) {
+            let (harness, cx) = open(cx);
+            click_side(&harness, Side::PullRequests, cx);
+
+            harness.select(2, cx);
+            assert_eq!(showing(&harness, cx), Some((id(2), Side::Panes)));
+            harness.select(1, cx);
+            assert_eq!(showing(&harness, cx), Some((id(1), Side::PullRequests)));
+        }
+
+        #[gpui::test]
+        fn should_open_a_workspaces_pull_requests_from_a_group_header(cx: &mut TestAppContext) {
+            let (harness, cx) = open(cx);
+            let sidebar = harness.shell.read_with(cx, |shell, _| shell.sidebar.clone());
+            sidebar.unwrap().update(cx, |sidebar, cx| {
+                sidebar.select(Selection::PullRequests, cx);
+            });
+            harness.settle(cx);
+
+            click(&harness, "workspace link acme/widgets agentdeck", cx);
+
+            assert_eq!(showing(&harness, cx), Some((id(1), Side::PullRequests)));
+        }
+
+        #[gpui::test]
+        fn should_open_its_own_pull_requests_from_its_name_on_its_panes_side(
+            cx: &mut TestAppContext,
+        ) {
+            let (harness, cx) = open(cx);
+            click_side(&harness, Side::PullRequests, cx);
+            click_side(&harness, Side::Panes, cx);
+            cx.update(|window, cx| {
+                (harness.shell).update(cx, |shell, cx| shell.open_workspace_prs(id(1), window, cx));
+            });
+            harness.settle(cx);
+
+            assert_eq!(showing(&harness, cx), Some((id(1), Side::PullRequests)));
+        }
+
+        #[gpui::test]
+        fn should_show_link_repository_for_a_workspace_linking_nothing(cx: &mut TestAppContext) {
+            let (harness, cx) = open(cx);
+            harness.select(2, cx);
+            click_side(&harness, Side::PullRequests, cx);
+
+            click(&harness, "link repository", cx);
+
+            let dialog: Entity<EditWorkspaceDialog> =
+                harness.shell.read_with(cx, |shell, _| shell.edit_workspace.clone().unwrap());
+            assert!(dialog.read_with(cx, |d, _| d.is_open()));
+            assert_eq!(cx.update(|_, cx| dialog.read(cx).name(cx)), "docs");
+        }
+
+        #[gpui::test]
+        fn should_hide_the_switch_on_an_archived_workspace(cx: &mut TestAppContext) {
+            let (harness, cx) = open(cx);
+            click_side(&harness, Side::PullRequests, cx);
+            harness.select(3, cx);
+
+            assert!(shows("archived", cx));
+            assert!(!shows("side switch", cx));
+            assert!(!shows("workspace pull requests", cx));
+            cx.simulate_keystrokes("secondary-shift-p");
+            harness.settle(cx);
+            assert!(shows("archived", cx));
+        }
+    }
+
     mod mute {
         use super::support::{Harness, daemon};
         use super::*;
@@ -2168,6 +2432,19 @@ mod tests {
                 open.turn(7, AgentState::Blocked);
 
                 assert_eq!(open.shown(), []);
+            }
+
+            #[gpui::test]
+            fn should_notify_for_a_pane_while_its_workspace_shows_its_pull_requests(
+                cx: &mut TestAppContext,
+            ) {
+                let mut open = Open::new(daemon(), cx);
+                open.cx.dispatch_action(ShowPullRequests);
+                open.settle();
+
+                open.turn(7, AgentState::Blocked);
+
+                assert_eq!(open.shown().len(), 1);
             }
 
             #[gpui::test]
