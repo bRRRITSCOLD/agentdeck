@@ -61,15 +61,12 @@ pub enum DaemonCommand {
 pub enum WsCommand {
     /// List every workspace, archived ones included.
     Ls,
-    /// Create a workspace on an existing dir, or on a new scratch dir.
+    /// Create a workspace. It has no folder; link Repositories with `repo link`.
     New {
         /// The display name.
         name: String,
-        /// An existing directory to attach.
-        #[arg(long, value_name = "PATH")]
-        dir: Option<PathBuf>,
     },
-    /// Rename a workspace; its slug and dir stay, so its old slug still finds it.
+    /// Rename a workspace; its slug stays, so its old slug still finds it.
     Rename {
         /// The workspace.
         ws: String,
@@ -91,13 +88,11 @@ pub enum WsCommand {
         /// The workspace.
         ws: String,
     },
-    /// Delete a workspace, and its dir when agentdeck created it.
+    /// Delete a workspace, stopping its panes and unlinking its Repositories. No folder is
+    /// touched.
     Rm {
         /// The workspace.
         ws: String,
-        /// Delete even when its dir holds uncommitted or unpushed work.
-        #[arg(long)]
-        force: bool,
     },
 }
 

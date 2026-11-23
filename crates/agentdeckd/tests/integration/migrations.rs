@@ -1,6 +1,7 @@
 //! The database at start (spec §2, §3): a fresh data dir gets the schema from the one first
 //! migration, and a database from before the domain reset, one with a `tasks` table, is moved
-//! aside with its WAL and SHM files so the daemon starts empty.
+//! aside with its WAL and SHM files so the daemon starts empty. A database from the first
+//! migration loses its Workspaces' folder columns and keeps the rest.
 
 use std::path::{Path, PathBuf};
 
@@ -144,6 +145,71 @@ mod fresh_start {
         assert_eq!(workspaces.len(), 1);
         let aside = with_suffix(&daemon.data_dir().join("agentdeck.db"), ".pre-domain-reset");
         assert!(!aside.exists(), "nothing moved aside");
+    }
+}
+
+/// The names of the columns of `table` in the database at `path`, in order.
+fn columns(path: &Path, table: &str) -> Vec<String> {
+    let conn = Connection::open(path).expect("opening the database");
+    conn.prepare(&format!(
+        "SELECT name FROM pragma_table_info('{table}') ORDER BY cid"
+    ))
+    .expect("reading the columns")
+    .query_map([], |row| row.get(0))
+    .expect("reading the columns")
+    .collect::<rusqlite::Result<_>>()
+    .expect("reading the columns")
+}
+
+/// Writes a database under `root` as the first migration left it, before Workspaces lost
+/// their folders: workspace `web`, with a scratch folder, and a Link to a Repository.
+fn first_migration_db(root: &Path) -> PathBuf {
+    let dir = data_dir(root);
+    std::fs::create_dir_all(&dir).expect("creating the data dir");
+    let path = dir.join("agentdeck.db");
+    let conn = Connection::open(&path).expect("opening the database");
+    conn.execute_batch(include_str!("../../src/db/migrations/0001_init.sql"))
+        .expect("the first migration");
+    conn.execute_batch(
+        "INSERT INTO workspaces (id, slug, name, dir, dir_owned, muted, created_at)
+           VALUES ('0190a1b2-c3d4-7e5f-8a9b-000000000001', 'web', 'Web', '/srv/web', 1, 1,
+                   '2026-11-01T00:00:00.000000Z');
+         INSERT INTO repositories (id, full_name, url, private, archived)
+           VALUES (1296269, 'acme/widgets', 'https://github.com/acme/widgets', 0, 0);
+         INSERT INTO links (workspace_id, repository_id)
+           VALUES ('0190a1b2-c3d4-7e5f-8a9b-000000000001', 1296269);
+         PRAGMA user_version = 1;",
+    )
+    .expect("a workspace with a folder");
+    path
+}
+
+mod workspace_folders {
+    use super::*;
+
+    #[tokio::test]
+    async fn should_drop_the_folder_columns_and_keep_each_workspace_and_its_links() {
+        let dirs = tempfile::tempdir().expect("a temp dir");
+        let path = first_migration_db(dirs.path());
+
+        let daemon = TestDaemon::start_in(dirs).await;
+
+        assert_eq!(
+            columns(&path, "workspaces"),
+            ["id", "slug", "name", "muted", "archived_at", "created_at"]
+        );
+        let workspaces = (daemon.client.workspace_list().send().await)
+            .expect("list workspaces")
+            .into_inner();
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(
+            (workspaces[0].slug.as_str(), workspaces[0].muted),
+            ("web", true)
+        );
+        let linked = (daemon.client.repository_list().send().await)
+            .expect("list Repositories")
+            .into_inner();
+        assert_eq!(linked[0].workspaces, [workspaces[0].id]);
     }
 }
 

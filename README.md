@@ -39,6 +39,7 @@ Or install them: `for c in agentdeck agentdeckd agentdeck-gui; do cargo install 
 
 - **After a pull:** a GUI newer than the running daemon shows an "older daemon" banner; press **Restart** (or `agentdeck daemon restart`). Running agents resume.
 - **The domain reset:** the first daemon from after it finds a database with tasks in it, moves it aside to `agentdeck.db.pre-domain-reset` (with its `-wal` and `-shm` files) and starts empty: your Workspaces, Panes and Links are gone, and PRs come back with the next sync. Nothing upgrades the old file; it stays there, and so do scratch folders under `workspaces/`. The removed code is in the tag `pre-domain-reset`.
+- **Workspaces have no folder:** a Workspace is a name, the Repositories it links and its Panes, so its agents work in any repo. A new Pane starts in the focused Pane's folder, or in `~` when the Workspace has none. Updating drops each Workspace's folder from the database and deletes nothing on disk: a scratch folder agentdeck made stays under `~/.local/share/agentdeck/workspaces/` until you remove it. `agentdeck ws new <name>` makes one, and `agentdeck repo link owner/name --ws <name>` links a Repository to it.
 - **Stop everything:** closing the window leaves agents running in `agentdeckd` (spec §2). `pkill -TERM agentdeckd` stops it and every pane.
 - **A daemon by hand:** with the GUI closed, `pkill -TERM agentdeckd`, then start one yourself, e.g. `GH_TOKEN=… agentdeckd &`, before `agentdeck-gui`. A second `agentdeckd` while one is healthy exits 1 with "another agentdeckd is running".
 

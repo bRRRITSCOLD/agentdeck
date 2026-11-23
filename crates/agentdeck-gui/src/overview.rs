@@ -58,8 +58,6 @@ pub struct WorkspaceRow {
     pub id: WorkspaceId,
     /// Its name.
     pub name: SharedString,
-    /// Its directory's absolute path.
-    pub dir: SharedString,
     /// Its panes' states, rolled up.
     pub state: AgentState,
     /// Whether it is archived.
@@ -166,7 +164,6 @@ impl Snapshot {
             WorkspaceRow {
                 id: workspace.id,
                 name: workspace.name.clone().into(),
-                dir: workspace.dir.clone().into(),
                 state: AgentState::rollup(
                     self.panes
                         .iter()
@@ -246,8 +243,6 @@ pub(crate) mod fixtures {
         Workspace {
             archived_at: None,
             created_at: CREATED.into(),
-            dir: format!("/w/{name}"),
-            dir_owned: false,
             id: id(n),
             muted: false,
             name: name.into(),

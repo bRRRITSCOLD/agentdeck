@@ -243,11 +243,7 @@ mod resume_after_restart {
         let old = claude.session_id.clone().expect("a claude session");
         in_state(&daemon.client, claude.id, AgentState::Idle).await;
         let (_, dirs) = daemon.terminate();
-        std::fs::write(
-            std::path::Path::new(&place.workspace.dir).join("lost-session"),
-            "",
-        )
-        .expect("losing the session");
+        std::fs::write(place.dir.join("lost-session"), "").expect("losing the session");
 
         let daemon = TestDaemon::start_in(dirs).await;
 
@@ -272,7 +268,7 @@ mod resume_after_restart {
 
         type_now(&daemon.client, shell.id, "pwd; echo resumed-$((40+2))\r").await;
         let text = printed(&daemon.client, shell.id, "resumed-42").await;
-        assert!(text.contains(&place.workspace.dir), "{text}");
+        assert!(text.contains(&place.folder()), "{text}");
         assert!(
             !text.contains("started"),
             "a fresh process, not the old one"
@@ -421,8 +417,7 @@ mod post_v1_panes_id_respawn {
         /// An exited claude whose next starts find `file` in its folder.
         async fn exited_with(daemon: &TestDaemon, place: &Place, file: &str) -> Pane {
             let pane = exited_agent(daemon, place, Agent::Claude).await;
-            std::fs::write(std::path::Path::new(&place.workspace.dir).join(file), "")
-                .expect("writing the stub's file");
+            std::fs::write(place.dir.join(file), "").expect("writing the stub's file");
             pane
         }
 
@@ -477,11 +472,7 @@ mod post_v1_panes_id_respawn {
             printed(&daemon.client, pane.id, "\u{1b}]0;codex").await;
             submit_now(&daemon.client, pane.id, "/exit").await;
             in_state(&daemon.client, pane.id, AgentState::Exited).await;
-            std::fs::write(
-                std::path::Path::new(&place.workspace.dir).join("lost-session"),
-                "",
-            )
-            .expect("losing the session");
+            std::fs::write(place.dir.join("lost-session"), "").expect("losing the session");
 
             respawn(&daemon.client, pane.id, PaneRun::Agent).await;
 
@@ -561,7 +552,7 @@ mod post_v1_panes_id_respawn {
         printed(&daemon.client, pane.id, "$ ").await;
         type_now(&daemon.client, pane.id, "pwd; echo back-$((40+2))\r").await;
         let text = printed(&daemon.client, pane.id, "back-42").await;
-        assert!(text.contains(&place.workspace.dir), "{text}");
+        assert!(text.contains(&place.folder()), "{text}");
         type_now(&daemon.client, pane.id, "claude\r").await;
         eventually("the shell to host claude", || async {
             (super::pane(&daemon.client, pane.id).await.hosted_agent == Some(Agent::Claude))

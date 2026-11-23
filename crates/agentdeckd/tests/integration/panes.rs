@@ -93,7 +93,7 @@ mod post_v1_panes {
         assert_eq!(pane.kind, PaneKind::Shell);
         assert_eq!(pane.argv, ["sh", "-c", "pwd; sleep 60"]);
         assert_eq!(pane.exit_code, None);
-        printed(&daemon.client, pane.id, &place.workspace.dir).await;
+        printed(&daemon.client, pane.id, &place.folder()).await;
     }
 
     #[tokio::test]
@@ -151,7 +151,7 @@ mod post_v1_panes {
 
         let daemon = TestDaemon::start().await;
         let place = Place::new(&daemon).await;
-        let program = std::path::Path::new(&place.workspace.dir).join("not-executable");
+        let program = place.dir.join("not-executable");
         std::fs::write(&program, "#!/bin/sh\n").expect("writing the program");
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o644))
             .expect("making it not executable");
@@ -359,7 +359,7 @@ mod get_v1_panes_id {
         let exited = in_state(&daemon.client, pane.id, AgentState::Exited).await;
 
         assert_eq!(exited.exit_code, Some(4));
-        let hup = std::path::Path::new(&place.workspace.dir).join("hup");
+        let hup = place.dir.join("hup");
         crate::support::terminal::eventually("the child to get SIGHUP", || async {
             (hup.exists() && !alive(child)).then_some(())
         })

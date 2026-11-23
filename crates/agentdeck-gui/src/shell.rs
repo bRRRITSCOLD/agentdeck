@@ -55,7 +55,7 @@ use crate::connection::{Connection, Status};
 use crate::delete_workspace::{DeleteEvent, DeleteTarget, DeleteWorkspaceDialog};
 use crate::edit_workspace::{EditTarget, EditWorkspaceDialog, Renamed};
 use crate::frame;
-use crate::new_agent::{self, Launched, NewAgent, NewAgentDialog, Target};
+use crate::new_agent::{self, Launched, NewAgent, NewAgentDialog, Target, home_folder};
 use crate::new_workspace::{Created, NewWorkspaceDialog};
 use crate::notice::{self, Notice, NoticeAction};
 use crate::notifications::{self, Alert as Notification};
@@ -504,7 +504,7 @@ impl Shell {
             cx.notify();
             return;
         };
-        let top_bar = TopBar::new(row.name.clone(), row.dir.clone())
+        let top_bar = TopBar::new(row.name.clone())
             .archived(row.archived)
             .muted(row.muted);
         let selected = row.id;
@@ -537,8 +537,8 @@ impl Shell {
         }
     }
 
-    /// Opens the new agent dialog on `workspace`, offering the focused pane's folder while the
-    /// workspace is shown, its root and the repos in it.
+    /// Opens the new agent dialog on `workspace`, offering where a new pane there starts, its
+    /// panes' folders while it is shown, and `~`.
     fn open_new_agent(
         &mut self,
         workspace: WorkspaceId,
@@ -552,11 +552,14 @@ impl Shell {
         let Some(row) = (sidebar.overview().workspaces.iter()).find(|w| w.id == workspace) else {
             return;
         };
-        // Where a new pane in the workspace starts, while it is shown (spec §11).
+        // Where a new pane in the workspace starts, while it is shown (spec §11); else `~`.
         let shown = (self.workspace.as_ref()).filter(|view| view.read(cx).workspace() == workspace);
-        let folder = shown.map_or_else(
-            || row.dir.to_string(),
-            |view| view.read(cx).new_pane_folder(window, cx),
+        let (folder, panes) = shown.map_or_else(
+            || (home_folder(), Vec::new()),
+            |view| {
+                let view = view.read(cx);
+                (view.new_pane_folder(window, cx), view.pane_folders())
+            },
         );
         let target = Target {
             id: row.id,
@@ -564,8 +567,7 @@ impl Shell {
             folder: folder.clone().into(),
         };
         let home = std::env::home_dir();
-        let repos = new_agent::repos_in(&row.dir);
-        let folders = new_agent::folders(&row.dir, repos, &folder, home.as_deref());
+        let folders = new_agent::folders(&folder, &panes, home.as_deref());
         dialog.update(cx, |dialog, cx| {
             dialog.open(target, folders, window, cx);
         });
@@ -743,7 +745,7 @@ impl Shell {
                         }
                     });
                     Notice::new(format!("Archived {name}"))
-                        .description("Its folder is kept.")
+                        .description("Its panes and linked Repositories are kept.")
                         .action(undo)
                         .show(window, cx);
                 }
@@ -802,7 +804,6 @@ impl Shell {
         let target = DeleteTarget {
             id: row.id,
             name: row.name.clone(),
-            dir: row.dir.clone(),
             archived: row.archived,
         };
         let snapshot = sidebar.snapshot().clone();
@@ -1213,7 +1214,8 @@ mod tests {
                 let dialog = shell.read_with(cx, |shell, _| shell.new_agent.clone().unwrap());
                 let (folder, offered) = dialog.read_with(cx, |d, _| d.folders());
                 assert_eq!(folder, "/srv/notes");
-                assert_eq!(offered[0].path, "/srv/notes");
+                let offered: Vec<String> = offered.iter().map(|f| f.path.to_string()).collect();
+                assert_eq!(offered, ["/srv/notes".to_owned(), home_folder()]);
             }
         }
 
@@ -1410,10 +1412,7 @@ mod tests {
 
                 let shell = open(connector, cx);
 
-                assert_eq!(
-                    shown_top_bar(&shell, cx),
-                    Some(TopBar::new("agentdeck", "/w/agentdeck"))
-                );
+                assert_eq!(shown_top_bar(&shell, cx), Some(TopBar::new("agentdeck")));
             }
 
             #[gpui::test]
@@ -1436,10 +1435,7 @@ mod tests {
                     .unwrap();
                 cx.run_until_parked();
 
-                assert_eq!(
-                    shown_top_bar(&shell, cx),
-                    Some(TopBar::new("renamed", "/w/renamed"))
-                );
+                assert_eq!(shown_top_bar(&shell, cx), Some(TopBar::new("renamed")));
             }
         }
     }
@@ -1837,7 +1833,10 @@ mod tests {
             harness.archive(cx);
             let notice = harness.last_notice(cx);
             assert_eq!(notice.title, "Archived agentdeck");
-            assert_eq!(notice.description.as_deref(), Some("Its folder is kept."));
+            assert_eq!(
+                notice.description.as_deref(),
+                Some("Its panes and linked Repositories are kept.")
+            );
             let undo = notice.action.expect("an Undo");
             assert_eq!(undo.label, "Undo");
             cx.update(|window, cx| undo.run(window, cx));

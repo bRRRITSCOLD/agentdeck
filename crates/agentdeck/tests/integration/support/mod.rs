@@ -298,10 +298,9 @@ impl TestEnv {
         run.stderr
     }
 
-    /// Creates a workspace on a fresh dir and returns it as JSON.
+    /// Creates a workspace and returns it as JSON. It has no folder: see [`folder`].
     pub fn workspace(&self, name: &str) -> Value {
-        let dir = self.new_dir(name);
-        self.json(&["ws", "new", name, "--dir", dir.to_str().unwrap()])
+        self.json(&["ws", "new", name])
     }
 }
 
@@ -430,7 +429,13 @@ pub fn tabs(env: &TestEnv, workspace: &Value) -> Vec<agentdeck_client::types::Ta
         .into_inner()
 }
 
-/// Spawns a shell pane running `sh -c <script>` in a new tab of `workspace` (a JSON
+/// A folder for `workspace`'s (a JSON workspace) panes to work in, named by its slug: a
+/// workspace has none of its own.
+pub fn folder(env: &TestEnv, workspace: &Value) -> PathBuf {
+    env.new_dir(text(workspace, "slug"))
+}
+
+/// Spawns a shell pane running `sh -c <script>` in [`folder`], in a new tab of `workspace` (a JSON
 /// workspace), titled `tab`, and makes it the tab's layout, as the GUI does, through the
 /// daemon's API, since the CLI has no command for shell panes. Returns the pane's id.
 pub fn shell_pane(env: &TestEnv, workspace: &Value, script: &str) -> String {
@@ -465,7 +470,10 @@ pub fn shell_pane_in(env: &TestEnv, workspace: &Value, tab: &str, script: &str) 
             .body(NewPane {
                 agent: None,
                 argv: Some(vec!["sh".into(), "-c".into(), script.into()]),
-                cwd: text(workspace, "dir").into(),
+                cwd: folder(env, workspace)
+                    .to_str()
+                    .expect("a UTF-8 path")
+                    .into(),
                 kind: PaneKind::Shell,
                 tab_id: tab.id,
             })

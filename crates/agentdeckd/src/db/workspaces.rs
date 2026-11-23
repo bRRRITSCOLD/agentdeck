@@ -1,22 +1,18 @@
 //! `workspaces` queries.
 
-use std::path::{Path, PathBuf};
-
 use agentdeck_core::{RepositoryId, WorkspaceId};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::{DbError, new_id, now, repositories, text};
 use crate::model::{Workspace, WorkspacePatch};
 
-const COLUMNS: &str = "id, slug, name, dir, dir_owned, muted, archived_at, created_at";
+const COLUMNS: &str = "id, slug, name, muted, archived_at, created_at";
 
 fn from_row(row: &Row<'_>) -> rusqlite::Result<Workspace> {
     Ok(Workspace {
         id: text(row, "id")?,
         slug: row.get("slug")?,
         name: row.get("name")?,
-        dir: row.get("dir")?,
-        dir_owned: row.get("dir_owned")?,
         muted: row.get("muted")?,
         archived_at: row.get("archived_at")?,
         created_at: row.get("created_at")?,
@@ -43,15 +39,9 @@ pub fn get(conn: &Connection, id: WorkspaceId) -> Result<Workspace, DbError> {
     .ok_or(DbError::NotFound("workspace"))
 }
 
-/// Creates a workspace named `name`. With `dir`, attaches that dir; without, creates a
-/// scratch dir `<scratch_root>/<slug>`. The slug is the name's, made unique among the
-/// workspaces and, for a scratch dir, among the dirs already under `scratch_root`.
-pub fn create(
-    conn: &Connection,
-    name: &str,
-    dir: Option<&Path>,
-    scratch_root: &Path,
-) -> Result<Workspace, DbError> {
+/// Creates a workspace named `name`, slugged from its name and made unique among the
+/// workspaces.
+pub fn create(conn: &Connection, name: &str) -> Result<Workspace, DbError> {
     let base = slugify(name);
     let mut n = 1;
     let slug = loop {
@@ -65,32 +55,15 @@ pub fn create(
             [&slug],
             |row| row.get(0),
         )?;
-        if !taken && (dir.is_some() || !scratch_root.join(&slug).exists()) {
+        if !taken {
             break slug;
         }
         n += 1;
     };
-
-    let (dir, dir_owned): (PathBuf, bool) = match dir {
-        Some(dir) => (dir.to_path_buf(), false),
-        None => {
-            let dir = scratch_root.join(&slug);
-            std::fs::create_dir_all(&dir)?;
-            (dir, true)
-        }
-    };
     let id: WorkspaceId = new_id();
     conn.execute(
-        "INSERT INTO workspaces (id, slug, name, dir, dir_owned, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            id.to_string(),
-            slug,
-            name,
-            dir.display().to_string(),
-            dir_owned,
-            now()
-        ],
+        "INSERT INTO workspaces (id, slug, name, created_at) VALUES (?1, ?2, ?3, ?4)",
+        params![id.to_string(), slug, name, now()],
     )?;
     get(conn, id)
 }

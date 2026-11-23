@@ -1,33 +1,32 @@
 //! The Delete workspace dialog (spec §11), Penpot "Screens" → "Delete workspace": what
-//! deleting a workspace loses, a field to type its name into, and Archive instead.
+//! deleting a workspace does, a field to type its name into, and Archive instead.
 //!
-//! It reads the workspace's dirty report when it opens and lists each repo holding work on no
-//! remote, then says what else deleting does: the running panes it stops. Delete workspace stays disabled until the name is typed exactly; then it
-//! deletes, dirty or not, since the user has seen the report. It emits [`DeleteEvent`] for the window.
+//! It says what deleting does when the workspace has any: its Repositories are unlinked and
+//! its running panes stopped. No folder is touched: a workspace has none. Delete workspace
+//! stays disabled until the name is typed exactly. It emits [`DeleteEvent`] for the window.
 
-use std::path::Path;
 use std::sync::Arc;
 
-use agentdeck_client::types::{DirtyRepo, DirtyReport, UnpushedBranch};
 use agentdeck_core::{AgentState, WorkspaceId};
 use brrritscold_core_gpui::{
-    ActiveTheme as _, Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonVariant,
-    Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHandle,
-    DialogHeader, DialogTitle, Field, Icon, IconName, Input, InputState, Label,
+    ActiveTheme as _, Button, ButtonVariant, Dialog, DialogClose, DialogContent, DialogDescription,
+    DialogFooter, DialogHandle, DialogHeader, DialogTitle, Field, Input, InputState, Label,
 };
-use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
+use brrritscold_core_gpui_tokens::primitive::space;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window,
-    div,
+    App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
 };
 use gpui_base::input::InputEvent;
 
 use crate::api::Api;
-use crate::notice;
 use crate::overview::Snapshot;
 use crate::workspace::failed;
+
+/// The dialog's description, under its title.
+pub const DESCRIPTION: &str =
+    "This can't be undone. Archive it instead to keep its panes and linked Repositories.";
 
 /// What the dialog asks of the window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,15 +44,15 @@ pub struct DeleteTarget {
     pub id: WorkspaceId,
     /// Its name, which the user types to confirm.
     pub name: SharedString,
-    /// Its dir, which repo paths are shown under.
-    pub dir: SharedString,
     /// Whether it is archived already: then there's no Archive instead.
     pub archived: bool,
 }
 
-/// What deleting a workspace does beyond its folder, counted when the dialog opens.
+/// What deleting a workspace does, counted when the dialog opens.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Consequences {
+    /// The Repositories it links, which deleting unlinks.
+    pub repositories: usize,
     /// Its panes whose process hasn't exited, which deleting stops: what Archive refuses on.
     pub panes: usize,
 }
@@ -62,6 +61,9 @@ impl Consequences {
     /// Counts `workspace`'s in `snapshot`.
     pub fn of(workspace: WorkspaceId, snapshot: &Snapshot) -> Self {
         Consequences {
+            repositories: (snapshot.repositories.iter())
+                .filter(|repository| repository.workspaces.contains(&workspace))
+                .count(),
             panes: (snapshot.panes.iter())
                 .filter(|p| p.workspace == workspace && p.state != AgentState::Exited)
                 .count(),
@@ -69,30 +71,16 @@ impl Consequences {
     }
 }
 
-/// Where the dirty report stands.
-#[derive(Debug, Clone, PartialEq)]
-enum Dirty {
-    /// Reading it.
-    Checking,
-    /// The read failed; why.
-    Failed(SharedString),
-    /// What it says.
-    Read(DirtyReport),
-}
-
 /// The dialog, kept by the window and opened from the top bar's menu.
 pub struct DeleteWorkspaceDialog {
     api: Arc<dyn Api>,
     handle: DialogHandle,
     target: Option<DeleteTarget>,
-    /// What deleting stops.
+    /// What deleting does.
     consequences: Consequences,
-    dirty: Dirty,
     confirm: Entity<InputState>,
     /// Whether a delete is out; another waits for it.
     deleting: bool,
-    /// The dirty report's read; a new open drops the last one.
-    reading: Option<Task<()>>,
     /// Whether the name field takes the keyboard once the dialog shows.
     focus_confirm: bool,
     _enter: Subscription,
@@ -114,17 +102,15 @@ impl DeleteWorkspaceDialog {
             handle: DialogHandle::new(false),
             target: None,
             consequences: Consequences::default(),
-            dirty: Dirty::Checking,
             confirm,
             deleting: false,
-            reading: None,
             focus_confirm: false,
             _enter,
         }
     }
 
-    /// Opens it on `target`, counting what stops from `snapshot`, and starts reading
-    /// the dirty report. The name field starts empty and takes the keyboard.
+    /// Opens it on `target`, counting what deleting does from `snapshot`. The name field
+    /// starts empty and takes the keyboard.
     pub fn open(
         &mut self,
         target: DeleteTarget,
@@ -132,30 +118,16 @@ impl DeleteWorkspaceDialog {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let workspace = target.id;
-        self.consequences = Consequences::of(workspace, snapshot);
+        self.consequences = Consequences::of(target.id, snapshot);
         self.confirm.update(cx, |input, cx| {
             input.set_value("", window, cx);
             input.set_placeholder(target.name.clone(), window, cx);
         });
         self.target = Some(target);
-        self.dirty = Dirty::Checking;
-        let reading = self.api.dirty(workspace, cx);
-        self.reading = Some(cx.spawn_in(window, async move |this, cx| {
-            let read = reading.await;
-            let _ = this.update(cx, |this, cx| {
-                this.dirty = match read {
-                    Ok(report) => Dirty::Read(report),
-                    Err(err) => Dirty::Failed(notice::message(&err)),
-                };
-                cx.notify();
-            });
-        }));
         self.handle.open(window, cx);
         self.focus_confirm = true;
         cx.notify();
     }
-
     /// Whether it is open.
     #[cfg(test)]
     pub fn is_open(&self) -> bool {
@@ -206,163 +178,36 @@ impl DeleteWorkspaceDialog {
         cx.emit(DeleteEvent::ArchiveInstead(workspace));
         cx.notify();
     }
-
-    /// What the dirty report says: a muted line while it reads or when it fails; when repos
-    /// are dirty, Penpot's destructive `Alert` over a `RepoCard` for each.
-    fn dirty_report(&self, cx: &App) -> Option<AnyElement> {
-        let s = cx.theme().semantic();
-        let muted = |selector: &'static str, text: SharedString| {
-            div()
-                .debug_selector(move || selector.into())
-                .text_color(s.muted_foreground)
-                .child(text)
-                .into_any_element()
-        };
-        let dir = self.target.as_ref().map_or("".into(), |t| t.dir.clone());
-        match &self.dirty {
-            Dirty::Checking => Some(muted("checking", "Checking for unpushed work…".into())),
-            Dirty::Failed(why) => Some(muted(
-                "check failed",
-                format!("Couldn't check for unpushed work: {why}").into(),
-            )),
-            Dirty::Read(report) if report.repos.is_empty() => None,
-            Dirty::Read(report) => Some(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(space::S3)
-                    .child(
-                        div().debug_selector(|| "dirty alert".into()).child(
-                            Alert::new()
-                                .variant(AlertVariant::Destructive)
-                                .icon(IconName::TriangleExclamationPoint)
-                                .title(AlertTitle::new(alert_title(report.repos.len())))
-                                .description(AlertDescription::new(
-                                    "Deleting removes the folder and everything in it.",
-                                )),
-                        ),
-                    )
-                    .children(report.repos.iter().map(|repo| repo_card(repo, &dir, cx)))
-                    .into_any_element(),
-            ),
-        }
-    }
 }
 
-/// Penpot `RepoCard`: a folder icon and the repo's name over a line per kind of unpushed
-/// work, in a `border` box with `radius-md`.
-fn repo_card(repo: &DirtyRepo, dir: &str, cx: &App) -> AnyElement {
-    let s = cx.theme().semantic();
-    let name = repo_name(&repo.path, dir);
-    let line = |icon: IconName, text: String| {
-        div()
-            .flex()
-            .items_center()
-            .gap(space::S1_5)
-            .text_size(font_size::XS)
-            .text_color(s.muted_foreground)
-            .child(Icon::new(icon).size(space::S3).text_color(s.foreground))
-            .child(text)
-    };
-    div()
-        .debug_selector({
-            let name = name.clone();
-            move || format!("repo {name}")
-        })
-        .flex()
-        .flex_col()
-        .gap(space::S1)
-        .px(space::S3)
-        .py(space::S2)
-        .rounded(s.radius_md)
-        .border_1()
-        .border_color(s.border)
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(space::S2)
-                .font_weight(font_weight::MEDIUM)
-                .text_color(s.foreground)
-                .child(Icon::new(IconName::Folder).size(space::S4))
-                .child(name),
-        )
-        .when(!repo.uncommitted.is_empty(), |card| {
-            card.child(line(
-                IconName::TriangleExclamationPoint,
-                uncommitted_line(&repo.uncommitted),
-            ))
-        })
-        .children(
-            (repo.unpushed_branches.iter())
-                .map(|branch| line(IconName::GitBranch, branch_line(branch))),
-        )
-        .into_any_element()
-}
-
-/// "feat/tabs: 2 commits not pushed": a branch and how many of its commits are on no remote.
-pub fn branch_line(branch: &UnpushedBranch) -> String {
-    match branch.commits {
-        1 => format!("{}: 1 commit not pushed", branch.name),
-        n => format!("{}: {n} commits not pushed", branch.name),
-    }
-}
-
-/// The alert's title for `repos` dirty repos.
-pub fn alert_title(repos: usize) -> String {
-    match repos {
-        1 => "1 repo has work that isn't pushed".to_owned(),
-        n => format!("{n} repos have work that isn't pushed"),
+/// What deleting does to the workspace's Links; nothing when it links no Repository
+/// (Penpot `Consequence`).
+pub fn repositories_line(repositories: usize) -> Option<String> {
+    match repositories {
+        0 => None,
+        1 => Some("Its 1 Repository is unlinked. Its PRs stay in Pull requests.".to_owned()),
+        n => Some(format!(
+            "Its {n} Repositories are unlinked. Their PRs stay in Pull requests."
+        )),
     }
 }
 
 /// What deleting does to the workspace's running panes; nothing when it has none (Penpot
 /// `Consequence`).
-pub fn consequence_line(consequences: Consequences) -> Option<String> {
-    match consequences.panes {
+pub fn panes_line(panes: usize) -> Option<String> {
+    match panes {
         0 => None,
         1 => Some("Its 1 running pane will be stopped.".to_owned()),
         n => Some(format!("Its {n} running panes will be stopped.")),
     }
 }
 
-/// The name a repo at `repo` goes by: its path under the workspace's `dir`, or its folder's
-/// name when it is the workspace's dir itself or outside it.
-pub fn repo_name(repo: &str, dir: &str) -> String {
-    let repo = Path::new(repo);
-    match repo.strip_prefix(dir) {
-        Ok(rest) if !rest.as_os_str().is_empty() => rest.display().to_string(),
-        _ => repo.file_name().map_or_else(
-            || repo.display().to_string(),
-            |n| n.to_string_lossy().into(),
-        ),
-    }
-}
-
-/// "3 uncommitted files in packages/core-react": how many `files` changed, and the folder
-/// they share inside the repo, if they share one.
-pub fn uncommitted_line(files: &[String]) -> String {
-    let count = match files.len() {
-        1 => "1 uncommitted file".to_owned(),
-        n => format!("{n} uncommitted files"),
-    };
-    let folders = files.iter().map(|file| {
-        let mut parts: Vec<&str> = file.split('/').collect();
-        parts.pop();
-        parts
-    });
-    let shared = folders.reduce(|shared, folder| {
-        let same = shared
-            .iter()
-            .zip(&folder)
-            .take_while(|(a, b)| a == b)
-            .count();
-        shared[..same].to_vec()
-    });
-    match shared {
-        Some(shared) if !shared.is_empty() => format!("{count} in {}", shared.join("/")),
-        _ => count,
-    }
+/// A muted line of the body that tests find as `selector`.
+fn consequence(selector: &'static str, line: String, cx: &App) -> impl IntoElement {
+    div()
+        .debug_selector(move || selector.into())
+        .text_color(cx.theme().semantic().muted_foreground)
+        .child(line)
 }
 
 impl Render for DeleteWorkspaceDialog {
@@ -379,7 +224,6 @@ impl Render for DeleteWorkspaceDialog {
         }
         let (name, archived) =
             (self.target.as_ref()).map_or(("".into(), false), |t| (t.name.clone(), t.archived));
-        let s = cx.theme().semantic();
         let can_delete = self.can_delete(cx);
         Dialog::new("delete-workspace")
             .handle(self.handle.clone())
@@ -388,21 +232,22 @@ impl Render for DeleteWorkspaceDialog {
                     .header(
                         DialogHeader::new()
                             .title(DialogTitle::new(format!("Delete {name}?")))
-                            .description(DialogDescription::new(
-                                "This can't be undone. Archive it instead to keep its folder.",
-                            )),
+                            .description(DialogDescription::new(DESCRIPTION)),
                     )
-                    // Penpot `DeleteBody`: the report, what stops, then the field, `space.3`
-                    // apart.
+                    // Penpot `DeleteBody`: what it unlinks, what stops, then the field,
+                    // `space.3` apart.
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .gap(space::S3)
-                            .children(self.dirty_report(cx))
                             .children(
-                                consequence_line(self.consequences)
-                                    .map(|line| div().text_color(s.muted_foreground).child(line)),
+                                repositories_line(self.consequences.repositories)
+                                    .map(|line| consequence("repositories line", line, cx)),
+                            )
+                            .children(
+                                panes_line(self.consequences.panes)
+                                    .map(|line| consequence("panes line", line, cx)),
                             )
                             .child(
                                 Field::new()
@@ -466,7 +311,7 @@ mod tests {
         _events: Subscription,
     }
 
-    /// Workspace 1, `tabs-a11y` in `/w/tabs-a11y`.
+    /// Workspace 1, `tabs-a11y`.
     fn snapshot() -> Snapshot {
         Snapshot {
             workspaces: vec![workspace(1, "tabs-a11y")],
@@ -478,36 +323,7 @@ mod tests {
         DeleteTarget {
             id: id(1),
             name: "tabs-a11y".into(),
-            dir: "/w/tabs-a11y".into(),
             archived: false,
-        }
-    }
-
-    /// Two dirty repos in workspace 1, as the design shows them.
-    fn two_dirty_repos() -> DirtyReport {
-        DirtyReport {
-            repos: vec![
-                DirtyRepo {
-                    path: "/w/tabs-a11y/ts-packages".into(),
-                    uncommitted: vec![
-                        "packages/core-react/src/tabs.tsx".into(),
-                        "packages/core-react/src/tabs.stories.tsx".into(),
-                        "packages/core-react/src/tabs.keyboard.test.tsx".into(),
-                    ],
-                    unpushed_branches: vec![UnpushedBranch {
-                        name: "feat/tabs-keyboard".into(),
-                        commits: 2,
-                    }],
-                },
-                DirtyRepo {
-                    path: "/w/tabs-a11y/rust-packages".into(),
-                    uncommitted: vec![],
-                    unpushed_branches: vec![UnpushedBranch {
-                        name: "fix/tab-focus-ring".into(),
-                        commits: 1,
-                    }],
-                },
-            ],
         }
     }
 
@@ -540,18 +356,18 @@ mod tests {
             (harness, cx)
         }
 
-        /// Opens it on [`target`] without letting the dirty report's read land.
-        fn open_only(&self, target: DeleteTarget, cx: &mut VisualTestContext) {
+        /// Opens it on `target`, counting from `snapshot`.
+        fn open_on(&self, target: DeleteTarget, snapshot: &Snapshot, cx: &mut VisualTestContext) {
             cx.update(|window, cx| {
                 self.dialog
-                    .update(cx, |d, cx| d.open(target, &snapshot(), window, cx))
+                    .update(cx, |d, cx| d.open(target, snapshot, window, cx))
             });
+            self.settle(cx);
         }
 
-        /// Opens it on [`target`] and lets the dirty report land.
+        /// Opens it on [`target`].
         fn open(&self, cx: &mut VisualTestContext) {
-            self.open_only(target(), cx);
-            self.settle(cx);
+            self.open_on(target(), &snapshot(), cx);
         }
 
         fn settle(&self, cx: &mut VisualTestContext) {
@@ -692,8 +508,7 @@ mod tests {
                 archived: true,
                 ..target()
             };
-            harness.open_only(archived, cx);
-            harness.settle(cx);
+            harness.open_on(archived, &snapshot(), cx);
 
             assert!(cx.debug_bounds("archive instead").is_none());
         }
@@ -711,74 +526,108 @@ mod tests {
         }
     }
 
-    mod dirty_report {
+    mod consequences {
+        use agentdeck_core::AgentState;
+
         use super::*;
+        use crate::overview::fixtures::{links, pane};
 
-        #[gpui::test]
-        fn should_say_it_is_checking_until_the_report_lands(cx: &mut TestAppContext) {
-            let api = Arc::new(FakeApi::with(snapshot()));
-            api.set_dirty(id(1), two_dirty_repos());
-            let (harness, cx) = Harness::new(api, cx);
-
-            harness.open_only(target(), cx);
-            cx.update(|window, cx| window.draw(cx).clear(cx));
-            assert!(cx.debug_bounds("checking").is_some());
-
-            harness.settle(cx);
-            assert!(cx.debug_bounds("checking").is_none());
+        /// Workspace 1 linking widgets and gadgets, gadgets linked by workspace 2 too, with
+        /// two running panes.
+        fn linked_and_running() -> Snapshot {
+            let (ws, other) = (id(1), id(2));
+            Snapshot {
+                repositories: vec![
+                    links("acme/gadgets", &[ws, other]),
+                    links("acme/tools", &[other]),
+                    links("acme/widgets", &[ws]),
+                ],
+                panes: vec![
+                    pane(40, ws, AgentState::Working),
+                    pane(41, ws, AgentState::Idle),
+                ],
+                ..snapshot()
+            }
         }
 
         #[gpui::test]
-        fn should_list_each_dirty_repo_under_an_alert(cx: &mut TestAppContext) {
-            let api = Arc::new(FakeApi::with(snapshot()));
-            api.set_dirty(id(1), two_dirty_repos());
-            let (harness, cx) = Harness::new(api, cx);
+        fn should_say_its_repositories_are_unlinked_over_its_running_panes(
+            cx: &mut TestAppContext,
+        ) {
+            let snapshot = linked_and_running();
+            let (harness, cx) = Harness::new(Arc::new(FakeApi::with(snapshot.clone())), cx);
 
-            harness.open(cx);
+            harness.open_on(target(), &snapshot, cx);
 
-            let alert = cx.debug_bounds("dirty alert").expect("an alert");
-            let first = cx.debug_bounds("repo ts-packages").expect("ts-packages");
-            let second = cx
-                .debug_bounds("repo rust-packages")
-                .expect("rust-packages");
-            assert!(alert.top() < first.top() && first.top() < second.top());
+            let repositories = cx
+                .debug_bounds("repositories line")
+                .expect("the Links line");
+            let panes = cx.debug_bounds("panes line").expect("the panes line");
+            assert!(repositories.top() < panes.top());
+            assert_eq!(
+                harness.dialog.read_with(cx, |d, _| d.consequences),
+                Consequences {
+                    repositories: 2,
+                    panes: 2
+                }
+            );
         }
 
         #[gpui::test]
-        fn should_show_no_alert_for_a_clean_workspace(cx: &mut TestAppContext) {
+        fn should_say_nothing_of_repositories_or_panes_it_has_none_of(cx: &mut TestAppContext) {
             let (harness, cx) = Harness::new(Arc::new(FakeApi::with(snapshot())), cx);
 
             harness.open(cx);
 
-            assert!(cx.debug_bounds("dirty alert").is_none());
-            assert!(cx.debug_bounds("checking").is_none());
+            assert!(cx.debug_bounds("repositories line").is_none());
+            assert!(cx.debug_bounds("panes line").is_none());
+        }
+
+        #[test]
+        fn should_offer_to_archive_to_keep_its_panes_and_repositories() {
+            assert_eq!(
+                DESCRIPTION,
+                "This can't be undone. Archive it instead to keep its panes and linked \
+                 Repositories."
+            );
         }
     }
 
-    mod alert_title {
+    mod repositories_line {
         use super::*;
 
         #[test]
-        fn should_count_the_repos() {
-            assert_eq!(alert_title(1), "1 repo has work that isn't pushed");
-            assert_eq!(alert_title(2), "2 repos have work that isn't pushed");
+        fn should_say_its_repositories_are_unlinked_and_their_prs_stay() {
+            assert_eq!(
+                repositories_line(2).as_deref(),
+                Some("Its 2 Repositories are unlinked. Their PRs stay in Pull requests.")
+            );
+        }
+
+        #[test]
+        fn should_speak_of_one_repository_in_the_singular() {
+            assert_eq!(
+                repositories_line(1).as_deref(),
+                Some("Its 1 Repository is unlinked. Its PRs stay in Pull requests.")
+            );
+        }
+
+        #[test]
+        fn should_say_nothing_when_it_links_none() {
+            assert_eq!(repositories_line(0), None);
         }
     }
 
-    mod consequence_line {
+    mod panes_line {
         use agentdeck_core::AgentState;
 
         use super::*;
         use crate::overview::fixtures::pane;
 
-        fn line(panes: usize) -> Option<String> {
-            consequence_line(Consequences { panes })
-        }
-
         #[test]
         fn should_say_its_running_panes_will_be_stopped() {
             assert_eq!(
-                line(2).as_deref(),
+                panes_line(2).as_deref(),
                 Some("Its 2 running panes will be stopped.")
             );
         }
@@ -786,14 +635,14 @@ mod tests {
         #[test]
         fn should_speak_of_one_pane_in_the_singular() {
             assert_eq!(
-                line(1).as_deref(),
+                panes_line(1).as_deref(),
                 Some("Its 1 running pane will be stopped.")
             );
         }
 
         #[test]
         fn should_say_nothing_with_no_running_pane() {
-            assert_eq!(line(0), None);
+            assert_eq!(panes_line(0), None);
         }
 
         #[gpui::test]
@@ -817,91 +666,6 @@ mod tests {
             harness.settle(cx);
 
             assert_eq!(harness.dialog.read_with(cx, |d, _| d.consequences.panes), 3);
-        }
-    }
-
-    mod repo_name {
-        use super::*;
-
-        #[test]
-        fn should_be_its_path_under_the_workspace() {
-            assert_eq!(repo_name("/w/x/ts-packages", "/w/x"), "ts-packages");
-            assert_eq!(repo_name("/w/x/group/rust", "/w/x"), "group/rust");
-        }
-
-        #[test]
-        fn should_be_the_folders_name_for_the_workspace_dir_itself() {
-            assert_eq!(repo_name("/w/x", "/w/x"), "x");
-            assert_eq!(repo_name("/w/x/", "/w/x"), "x");
-        }
-    }
-
-    mod branch_line {
-        use super::*;
-
-        fn branch(name: &str, commits: u32) -> UnpushedBranch {
-            UnpushedBranch {
-                name: name.into(),
-                commits,
-            }
-        }
-
-        #[test]
-        fn should_say_how_many_commits_are_not_pushed() {
-            assert_eq!(
-                branch_line(&branch("feat/tabs-keyboard", 2)),
-                "feat/tabs-keyboard: 2 commits not pushed"
-            );
-        }
-
-        #[test]
-        fn should_speak_of_one_commit_in_the_singular() {
-            assert_eq!(
-                branch_line(&branch("fix/tab-focus-ring", 1)),
-                "fix/tab-focus-ring: 1 commit not pushed"
-            );
-        }
-    }
-
-    mod uncommitted_line {
-        use super::*;
-
-        fn files(paths: &[&str]) -> Vec<String> {
-            paths.iter().map(|p| (*p).to_owned()).collect()
-        }
-
-        #[test]
-        fn should_name_the_folder_the_files_share() {
-            let shared = files(&["packages/core-react/a.tsx", "packages/core-react/src/b.tsx"]);
-
-            assert_eq!(
-                uncommitted_line(&shared),
-                "2 uncommitted files in packages/core-react"
-            );
-        }
-
-        #[test]
-        fn should_name_no_folder_when_they_share_none() {
-            assert_eq!(
-                uncommitted_line(&files(&["a.txt", "src/b.rs"])),
-                "2 uncommitted files"
-            );
-        }
-
-        #[test]
-        fn should_name_a_lone_files_folder() {
-            assert_eq!(
-                uncommitted_line(&files(&["docs/spec.md"])),
-                "1 uncommitted file in docs"
-            );
-        }
-
-        #[test]
-        fn should_not_take_a_shared_name_prefix_for_a_folder() {
-            assert_eq!(
-                uncommitted_line(&files(&["src-a/x.rs", "src-b/y.rs"])),
-                "2 uncommitted files"
-            );
         }
     }
 }

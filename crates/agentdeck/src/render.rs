@@ -4,8 +4,8 @@ use agentdeck_client::settings;
 use std::collections::BTreeMap;
 
 use agentdeck_client::types::{
-    DirtyReport, Pane, PrCloseResult, PrSyncStage, PrSyncStatus, PullRequest, RepositoryLinks,
-    Settings, Workspace,
+    Pane, PrCloseResult, PrSyncStage, PrSyncStatus, PullRequest, RepositoryLinks, Settings,
+    Workspace,
 };
 use agentdeck_core::{PaneKind, PrState, WorkspaceId};
 use serde::Serialize;
@@ -42,24 +42,63 @@ fn table<const N: usize>(headers: [&str; N], rows: &[[String; N]], empty: &str) 
     out
 }
 
-/// `agentdeck ws ls`.
-pub fn workspaces(workspaces: &[Workspace]) -> String {
+/// One workspace as `ws ls` lists it: the workspace and the Repositories it links. With
+/// `--json` it is the workspace's own object plus `repositories`, their names (`owner/name`).
+#[derive(Debug, Serialize)]
+pub struct ListedWorkspace {
+    /// The workspace, as the API gives it.
+    #[serde(flatten)]
+    pub workspace: Workspace,
+    /// The names of the Repositories it links, in `GET /v1/repositories`' order.
+    pub repositories: Vec<String>,
+}
+
+/// Each of `workspaces` with the names of the `repositories` (as `GET /v1/repositories` lists
+/// them) that link it, in that order.
+pub fn listed_workspaces(
+    workspaces: Vec<Workspace>,
+    repositories: &[RepositoryLinks],
+) -> Vec<ListedWorkspace> {
+    (workspaces.into_iter())
+        .map(|workspace| ListedWorkspace {
+            repositories: (repositories.iter())
+                .filter(|repository| repository.workspaces.contains(&workspace.id))
+                .map(|repository| repository.name.to_string())
+                .collect(),
+            workspace,
+        })
+        .collect()
+}
+
+/// `agentdeck ws ls`: a line per workspace under `ID  SLUG  NAME  REPOSITORIES`, an archived
+/// one's name marked `(archived)`, then the names of the Repositories it links separated by
+/// `, `, or `-` when it links none.
+pub fn workspaces(workspaces: &[ListedWorkspace]) -> String {
     let rows: Vec<[String; 4]> = workspaces
         .iter()
-        .map(|ws| {
+        .map(|listed| {
+            let ws = &listed.workspace;
             let name = match ws.archived_at {
                 Some(_) => format!("{} (archived)", ws.name),
                 None => ws.name.clone(),
             };
-            [ws.id.to_string(), ws.slug.clone(), name, ws.dir.clone()]
+            let repositories = match listed.repositories.is_empty() {
+                true => "-".to_owned(),
+                false => listed.repositories.join(", "),
+            };
+            [ws.id.to_string(), ws.slug.clone(), name, repositories]
         })
         .collect();
-    table(["ID", "SLUG", "NAME", "DIR"], &rows, "no workspaces")
+    table(
+        ["ID", "SLUG", "NAME", "REPOSITORIES"],
+        &rows,
+        "no workspaces",
+    )
 }
 
-/// One workspace, after `ws new`.
+/// One workspace, after `ws new`: its id and slug.
 pub fn workspace(ws: &Workspace) -> String {
-    format!("{}  {}  {}\n", ws.id, ws.slug, ws.dir)
+    format!("{}  {}\n", ws.id, ws.slug)
 }
 
 /// A pane after `agent new`: its id, agent and dir, and its session once it has one. The
@@ -290,28 +329,9 @@ pub fn setting_value(value: &Value) -> String {
     }
 }
 
-/// What `ws rm` without `--force` would lose.
-pub fn dirty(report: &DirtyReport) -> String {
-    let mut out = String::new();
-    for repo in &report.repos {
-        out.push_str(&format!("{}\n", repo.path));
-        for file in &repo.uncommitted {
-            out.push_str(&format!("  uncommitted: {file}\n"));
-        }
-        for branch in &repo.unpushed_branches {
-            let commits = match branch.commits {
-                1 => "1 commit".to_owned(),
-                n => format!("{n} commits"),
-            };
-            out.push_str(&format!("  unpushed:    {} ({commits})\n", branch.name));
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
-    use agentdeck_client::types::{DirtyRepo, GhLogin, UnpushedBranch};
+    use agentdeck_client::types::GhLogin;
     use agentdeck_core::Agent;
 
     use super::*;
@@ -320,8 +340,6 @@ mod tests {
         Workspace {
             archived_at: archived.then(|| "2026-02-01T00:00:00Z".into()),
             created_at: "2026-01-01T00:00:00Z".into(),
-            dir: format!("/work/{slug}"),
-            dir_owned: false,
             id: "0190a1b2-c3d4-7e5f-8a9b-000000000001".parse().unwrap(),
             muted: false,
             name: name.into(),
@@ -352,11 +370,85 @@ mod tests {
     mod workspaces {
         use super::*;
 
+        fn listed(slug: &str, repositories: &[&str]) -> ListedWorkspace {
+            ListedWorkspace {
+                workspace: workspace_named(slug, slug, false),
+                repositories: repositories.iter().map(|r| (*r).to_owned()).collect(),
+            }
+        }
+
         #[test]
         fn should_mark_archived_workspaces() {
-            let out = workspaces(&[workspace_named("old", "Old", true)]);
+            let old = ListedWorkspace {
+                workspace: workspace_named("old", "Old", true),
+                repositories: Vec::new(),
+            };
+
+            let out = workspaces(&[old]);
 
             assert!(out.contains("Old (archived)"), "{out}");
+        }
+
+        #[test]
+        fn should_list_each_workspaces_repositories_separated_by_commas() {
+            let out = workspaces(&[
+                listed("web", &["acme/gadgets", "acme/widgets"]),
+                listed("api", &[]),
+            ]);
+
+            let id = "0190a1b2-c3d4-7e5f-8a9b-000000000001";
+            let pad = " ".repeat(id.len() - 2);
+            assert_eq!(
+                out,
+                format!(
+                    "ID{pad}  SLUG  NAME  REPOSITORIES\n\
+                     {id}  web   web   acme/gadgets, acme/widgets\n\
+                     {id}  api   api   -\n"
+                )
+            );
+        }
+
+        #[test]
+        fn should_add_the_repositories_to_the_workspaces_json() {
+            let json = serde_json::to_value(listed("web", &["acme/widgets"])).unwrap();
+
+            assert_eq!(json["slug"], "web");
+            assert_eq!(json["repositories"], serde_json::json!(["acme/widgets"]));
+            assert_eq!(json.get("dir"), None);
+        }
+    }
+
+    mod listed_workspaces {
+        use super::*;
+        use agentdeck_client::types::RepositoryLinks;
+
+        fn links(name: &str, workspaces: &[WorkspaceId]) -> RepositoryLinks {
+            RepositoryLinks {
+                id: agentdeck_core::RepositoryId::from(1),
+                name: name.parse().unwrap(),
+                url: format!("https://github.com/{name}"),
+                private: false,
+                archived: false,
+                unreachable: false,
+                workspaces: workspaces.to_vec(),
+            }
+        }
+
+        #[test]
+        fn should_give_each_workspace_the_names_of_the_repositories_it_links_in_their_order() {
+            let web = workspace_named("web", "web", false);
+            let mut api = workspace_named("api", "api", false);
+            api.id = "0190a1b2-c3d4-7e5f-8a9b-000000000002".parse().unwrap();
+            let repositories = [
+                links("acme/gadgets", &[web.id]),
+                links("acme/tools", &[]),
+                links("acme/widgets", &[api.id, web.id]),
+            ];
+
+            let listed = listed_workspaces(vec![web, api], &repositories);
+
+            assert_eq!(listed[0].repositories, ["acme/gadgets", "acme/widgets"]);
+            assert_eq!(listed[1].repositories, ["acme/widgets"]);
         }
     }
 
@@ -684,36 +776,6 @@ mod tests {
         #[test]
         fn should_say_when_there_are_none() {
             assert_eq!(repositories(&[], &[]), "no repositories\n");
-        }
-    }
-
-    mod dirty {
-        use super::*;
-
-        #[test]
-        fn should_list_each_repos_files_and_branches() {
-            let out = dirty(&DirtyReport {
-                repos: vec![DirtyRepo {
-                    path: "/work/web".into(),
-                    uncommitted: vec![" M src/main.rs".into()],
-                    unpushed_branches: vec![
-                        UnpushedBranch {
-                            name: "feat/x".into(),
-                            commits: 2,
-                        },
-                        UnpushedBranch {
-                            name: "fix/y".into(),
-                            commits: 1,
-                        },
-                    ],
-                }],
-            });
-
-            assert_eq!(
-                out,
-                "/work/web\n  uncommitted:  M src/main.rs\n  unpushed:    feat/x (2 commits)\n  \
-                 unpushed:    fix/y (1 commit)\n"
-            );
         }
     }
 }

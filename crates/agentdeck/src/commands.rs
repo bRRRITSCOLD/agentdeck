@@ -120,6 +120,19 @@ async fn set_muted(client: &Client, ws: &str, muted: bool) -> anyhow::Result<Out
     Output::new(&*ws, format!("{verb} {}\n", ws.slug))
 }
 
+/// The Repositories agentdeck keeps, with the Workspaces linking each; only those
+/// `workspace` links when given.
+async fn repositories(
+    client: &Client,
+    workspace: Option<WorkspaceId>,
+) -> anyhow::Result<Vec<agentdeck_client::types::RepositoryLinks>> {
+    let mut request = client.repository_list();
+    if let Some(workspace) = workspace {
+        request = request.workspace(workspace);
+    }
+    Ok(request.send().await.map_err(ApiError::from)?.into_inner())
+}
+
 async fn ws(client: &Client, command: WsCommand) -> anyhow::Result<Output> {
     match command {
         WsCommand::Ls => {
@@ -127,14 +140,15 @@ async fn ws(client: &Client, command: WsCommand) -> anyhow::Result<Output> {
                 .workspace_list()
                 .send()
                 .await
-                .map_err(ApiError::from)?;
-            Output::new(&*list, render::workspaces(&list))
+                .map_err(ApiError::from)?
+                .into_inner();
+            let listed = render::listed_workspaces(list, &repositories(client, None).await?);
+            Output::new(&listed, render::workspaces(&listed))
         }
-        WsCommand::New { name, dir } => {
-            let dir = dir.as_deref().map(absolute).transpose()?;
+        WsCommand::New { name } => {
             let ws = client
                 .workspace_create()
-                .body(NewWorkspace { dir, name })
+                .body(NewWorkspace { name })
                 .send()
                 .await
                 .map_err(ApiError::from)?;
@@ -148,8 +162,13 @@ async fn ws(client: &Client, command: WsCommand) -> anyhow::Result<Output> {
                 .body_map(|patch| patch.name(Some(name)))
                 .send()
                 .await
-                .map_err(ApiError::from)?;
-            Output::new(&*ws, render::workspaces(std::slice::from_ref(&*ws)))
+                .map_err(ApiError::from)?
+                .into_inner();
+            let human = render::workspaces(&render::listed_workspaces(
+                vec![ws.clone()],
+                &repositories(client, Some(id)).await?,
+            ));
+            Output::new(&ws, human)
         }
         WsCommand::Archive { ws } => {
             let id = workspace_id(client, &ws).await?;
@@ -163,28 +182,13 @@ async fn ws(client: &Client, command: WsCommand) -> anyhow::Result<Output> {
         }
         WsCommand::Mute { ws } => set_muted(client, &ws, true).await,
         WsCommand::Unmute { ws } => set_muted(client, &ws, false).await,
-        WsCommand::Rm { ws, force } => {
+        WsCommand::Rm { ws } => {
             let id = workspace_id(client, &ws).await?;
-            match client.workspace_delete().id(id).force(force).send().await {
-                Ok(_) => Output::new(
-                    &json!({ "id": id, "deleted": true }),
-                    format!("deleted {ws}\n"),
-                ),
-                Err(agentdeck_client::Error::ErrorResponse(response))
-                    if response.error_code.as_deref() == Some("dirty") =>
-                {
-                    let report = response.into_inner().dirty;
-                    anyhow::bail!(
-                        "{ws} holds work that isn't pushed; `--force` deletes it anyway:\n{}",
-                        report
-                            .as_ref()
-                            .map(render::dirty)
-                            .unwrap_or_default()
-                            .trim_end()
-                    )
-                }
-                Err(err) => Err(ApiError::from(err).into()),
-            }
+            (client.workspace_delete().id(id).send().await).map_err(ApiError::from)?;
+            Output::new(
+                &json!({ "id": id, "deleted": true }),
+                format!("deleted {ws}\n"),
+            )
         }
     }
 }
@@ -284,12 +288,11 @@ async fn repo(client: &Client, command: RepoCommand) -> anyhow::Result<Output> {
                 .await
                 .map_err(ApiError::from)?
                 .into_inner();
-            let mut request = client.repository_list();
-            if let Some(ws) = ws {
-                request = request.workspace(resolve::workspace(&workspaces, &ws)?);
-            }
-            let list = request.send().await.map_err(ApiError::from)?;
-            Output::new(&*list, render::repositories(&list, &workspaces))
+            let ws = ws
+                .map(|ws| resolve::workspace(&workspaces, &ws))
+                .transpose()?;
+            let list = repositories(client, ws).await?;
+            Output::new(&list, render::repositories(&list, &workspaces))
         }
         RepoCommand::Link { repo, ws } => {
             let id = workspace_id(client, &ws).await?;

@@ -105,8 +105,6 @@ mod tests {
         Workspace {
             archived_at: None,
             created_at: "2026-01-01T00:00:00Z".into(),
-            dir: format!("/work/{slug}"),
-            dir_owned: false,
             id: id.parse().unwrap(),
             muted: false,
             name: name.into(),

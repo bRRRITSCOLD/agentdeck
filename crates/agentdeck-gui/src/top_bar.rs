@@ -1,12 +1,10 @@
-//! Penpot `Centre / TopBar`: the selected workspace's name and directory, above its tabs
-//! (spec §11).
+//! Penpot `Centre / TopBar`: the selected workspace's name, above its tabs (spec §11). A
+//! workspace has no folder, so the bar shows none.
 //!
 //! Its New agent button opens the new agent dialog, its `…` menu opens the Edit workspace
 //! dialog, mutes or unmutes the workspace's notifications, archives it or opens the Delete
 //! workspace dialog, all as actions the window handles. An archived workspace's bar has Unarchive in place of New agent, and its menu only
 //! Edit and Delete.
-
-use std::path::Path;
 
 use brrritscold_core_gpui::{
     ActiveTheme as _, Button, ButtonSize, ButtonVariant, DropdownMenu, DropdownMenuAlign,
@@ -43,31 +41,19 @@ actions!(
 /// The bar's height. Raw in Penpot too: no sizing token is 52px.
 const HEIGHT: f32 = 52.;
 
-/// `dir` as the bar shows it: under `home`, with `~` for `home`.
-pub fn shown_dir(dir: &str, home: Option<&Path>) -> String {
-    let under_home = home.and_then(|home| Path::new(dir).strip_prefix(home).ok());
-    match under_home {
-        Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
-        Some(rest) => format!("~/{}", rest.display()),
-        None => dir.to_owned(),
-    }
-}
-
 /// The workspace view's top bar.
 #[derive(IntoElement, Clone, Debug, PartialEq)]
 pub struct TopBar {
     name: SharedString,
-    dir: SharedString,
     archived: bool,
     muted: bool,
 }
 
 impl TopBar {
-    /// The bar for the workspace named `name`, whose directory is `dir`.
-    pub fn new(name: impl Into<SharedString>, dir: impl Into<SharedString>) -> Self {
+    /// The bar for the workspace named `name`.
+    pub fn new(name: impl Into<SharedString>) -> Self {
         TopBar {
             name: name.into(),
-            dir: dir.into(),
             archived: false,
             muted: false,
         }
@@ -100,50 +86,30 @@ impl TopBar {
     pub fn name(&self) -> &SharedString {
         &self.name
     }
-
-    /// The workspace's directory, as given.
-    pub fn dir(&self) -> &SharedString {
-        &self.dir
-    }
 }
 
 impl RenderOnce for TopBar {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let s = cx.theme().semantic();
-        let dir = shown_dir(&self.dir, std::env::home_dir().as_deref());
         // Penpot `TopBar`: 52px high, px `space.4`, items centred, `space.3` apart.
         div()
+            .debug_selector(|| "top bar".into())
             .flex_none()
             .h(px(HEIGHT))
             .flex()
             .items_center()
             .gap(space::S3)
             .px(space::S4)
-            // Penpot `Heading`: Name over Dir, `space.0-5` apart; each truncates.
+            // Penpot `Name`: sm, medium, `foreground`; it truncates.
             .child(
                 div()
+                    .debug_selector(|| "workspace name".into())
                     .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(space::S0_5)
-                    // Penpot `Name`: sm, medium, `foreground`.
-                    .child(
-                        div()
-                            .truncate()
-                            .text_size(font_size::SM)
-                            .font_weight(font_weight::MEDIUM)
-                            .text_color(s.foreground)
-                            .child(self.name),
-                    )
-                    // Penpot `Dir`: xs, normal, `muted-foreground`.
-                    .child(
-                        div()
-                            .truncate()
-                            .text_size(font_size::XS)
-                            .font_weight(font_weight::NORMAL)
-                            .text_color(s.muted_foreground)
-                            .child(dir),
-                    ),
+                    .truncate()
+                    .text_size(font_size::SM)
+                    .font_weight(font_weight::MEDIUM)
+                    .text_color(s.foreground)
+                    .child(self.name),
             )
             // Penpot `Spacer`, `NewAgent` (outline, sm) or, archived, `Unarchive` (outline,
             // sm), then `WorkspaceMenu`.
@@ -211,37 +177,37 @@ fn menu(archived: bool, muted: bool) -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
+    use gpui::{Context, Render, TestAppContext, VisualTestContext};
+
     use super::*;
 
-    mod shown_dir {
+    /// A view showing one bar.
+    struct Shows(TopBar);
+
+    impl Render for Shows {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(1000.)).child(self.0.clone())
+        }
+    }
+
+    mod top_bar {
         use super::*;
 
-        fn home() -> Option<&'static Path> {
-            Some(Path::new("/home/ada"))
-        }
+        #[gpui::test]
+        fn should_show_the_name_alone_centred_in_the_bar(cx: &mut TestAppContext) {
+            cx.update(brrritscold_core_gpui::init);
+            let window = cx.add_window(|_, _| Shows(TopBar::new("agentdeck")));
+            let cx = VisualTestContext::from_window(*window, cx).into_mut();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
 
-        #[test]
-        fn should_put_a_tilde_for_the_home_dir() {
-            assert_eq!(
-                shown_dir("/home/ada/.local/share/agentdeck/workspaces/x", home()),
-                "~/.local/share/agentdeck/workspaces/x"
+            let bar = cx.debug_bounds("top bar").expect("the bar");
+            let name = cx.debug_bounds("workspace name").expect("the name");
+            assert_eq!(bar.size.height, px(HEIGHT));
+            // Within half a pixel: the text's line box rounds.
+            assert!(
+                (name.center().y - bar.center().y).abs() <= px(0.5),
+                "name {name:?} in bar {bar:?}"
             );
-            assert_eq!(shown_dir("/home/ada", home()), "~");
-        }
-
-        #[test]
-        fn should_keep_a_dir_outside_home_as_it_is() {
-            assert_eq!(shown_dir("/srv/x", home()), "/srv/x");
-        }
-
-        #[test]
-        fn should_not_abbreviate_a_sibling_that_shares_homes_prefix() {
-            assert_eq!(shown_dir("/home/adam/x", home()), "/home/adam/x");
-        }
-
-        #[test]
-        fn should_keep_the_dir_when_home_is_unknown() {
-            assert_eq!(shown_dir("/home/ada/x", None), "/home/ada/x");
         }
     }
 }

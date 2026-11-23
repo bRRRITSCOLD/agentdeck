@@ -5,8 +5,8 @@
 use agentdeck_client::daemon::Daemon;
 use agentdeck_client::panes::{self, pane_if_any};
 use agentdeck_client::types::{
-    DeviceSignIn, DirtyReport, GithubAuthInfo, GithubClientIdBody, GithubTokenBody, NewWorkspace,
-    Pane, PaneRun, PrClose, PrCloseResult, Settings, SettingsPatch, Tab,
+    DeviceSignIn, GithubAuthInfo, GithubClientIdBody, GithubTokenBody, NewWorkspace, Pane, PaneRun,
+    PrClose, PrCloseResult, Settings, SettingsPatch, Tab,
 };
 use agentdeck_client::{ApiError, Client};
 use agentdeck_core::{PaneId, PrRef, SplitDirection, TabId, WorkspaceId};
@@ -50,8 +50,8 @@ pub trait Api: Send + Sync {
     /// reads as exited, or the agent a shell pane hosts, leaving the shell running.
     fn stop_pane(&self, pane: PaneId, cx: &App) -> Task<anyhow::Result<()>>;
 
-    /// Makes a workspace as `request` says; its id. A refusal is an [`ApiError`] whose code
-    /// names the field: `invalid_name` or `invalid_dir`.
+    /// Makes a workspace as `request` says; its id. A refusal is an [`ApiError`];
+    /// `invalid_name` means the name is blank.
     fn new_workspace(&self, request: Request, cx: &App) -> Task<anyhow::Result<WorkspaceId>>;
 
     /// Syncs PRs now, returning once the sync is done: a full sync when `full` (Sync now asks
@@ -68,14 +68,14 @@ pub trait Api: Send + Sync {
     /// agent CLI couldn't start, and its message says why.
     fn launch_agent(&self, launch: Launch, cx: &App) -> Task<anyhow::Result<Launched>>;
 
-    /// Archives `workspace`, keeping its dir. A refusal is an [`ApiError`];
+    /// Archives `workspace`, keeping its panes and Links. A refusal is an [`ApiError`];
     /// `panes_running` means a pane of it still runs.
     fn archive_workspace(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<()>>;
 
     /// Brings the archived `workspace` back.
     fn unarchive_workspace(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<()>>;
 
-    /// Renames `workspace` to `name`, keeping its slug and dir. A refusal is an [`ApiError`];
+    /// Renames `workspace` to `name`, keeping its slug. A refusal is an [`ApiError`];
     /// `invalid_name` means the name is blank.
     fn rename_workspace(
         &self,
@@ -87,11 +87,8 @@ pub trait Api: Send + Sync {
     /// Mutes `workspace`'s notifications, or unmutes them.
     fn set_muted(&self, workspace: WorkspaceId, muted: bool, cx: &App) -> Task<anyhow::Result<()>>;
 
-    /// The git repos under `workspace`'s dir that hold work on no remote.
-    fn dirty(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<DirtyReport>>;
-
-    /// Deletes `workspace`, dirty or not, and its dir when agentdeck made it. Only call it once
-    /// the user has seen the dirty report.
+    /// Deletes `workspace` with its panes, unlinking its Repositories (each one nothing else
+    /// names goes, spec §3). No folder is touched.
     fn delete_workspace(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<()>>;
 
     /// Every setting in `config.toml`, as the daemon uses it (spec §2).
@@ -200,11 +197,11 @@ impl Api for Daemon {
 
     fn new_workspace(&self, request: Request, cx: &App) -> Task<anyhow::Result<WorkspaceId>> {
         let client = self.client.clone();
-        let Request { name, dir } = request;
+        let Request { name } = request;
         runtime::spawn(cx, async move {
             let made = client
                 .workspace_create()
-                .body(NewWorkspace { dir, name })
+                .body(NewWorkspace { name })
                 .send()
                 .await
                 .map_err(ApiError::from)?;
@@ -288,18 +285,10 @@ impl Api for Daemon {
         })
     }
 
-    fn dirty(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<DirtyReport>> {
-        let client = self.client.clone();
-        runtime::spawn(cx, async move {
-            let report = client.workspace_dirty().id(workspace).send().await;
-            Ok(report.map_err(ApiError::from)?.into_inner())
-        })
-    }
-
     fn delete_workspace(&self, workspace: WorkspaceId, cx: &App) -> Task<anyhow::Result<()>> {
         let client = self.client.clone();
         runtime::spawn(cx, async move {
-            let deleting = client.workspace_delete().id(workspace).force(true).send();
+            let deleting = client.workspace_delete().id(workspace).send();
             deleting.await.map_err(ApiError::from)?;
             Ok(())
         })
@@ -526,8 +515,6 @@ pub(crate) mod fake {
         pub muted: Mutex<Vec<(WorkspaceId, bool)>>,
         /// The renames asked for: the workspace and its new name, in order.
         pub renamed: Mutex<Vec<(WorkspaceId, String)>>,
-        /// Each workspace's dirty report; clean when unset.
-        dirty: Mutex<HashMap<WorkspaceId, DirtyReport>>,
         /// The workspaces deleted, in order.
         pub deleted: Mutex<Vec<WorkspaceId>>,
         /// The settings; the daemon's defaults when unset.
@@ -617,11 +604,6 @@ pub(crate) mod fake {
             let tabs = self.tabs.lock().unwrap();
             let tab = tabs.get(&workspace)?.iter().find(|t| t.id == tab)?;
             tab.layout.clone()
-        }
-
-        /// Answers later reads of `workspace`'s dirty report with `report`.
-        pub fn set_dirty(&self, workspace: WorkspaceId, report: DirtyReport) {
-            self.dirty.lock().unwrap().insert(workspace, report);
         }
 
         /// The settings it holds now.
@@ -987,17 +969,22 @@ pub(crate) mod fake {
             Task::ready(Ok(()))
         }
 
-        fn dirty(&self, workspace: WorkspaceId, _cx: &App) -> Task<anyhow::Result<DirtyReport>> {
-            let dirty = self.dirty.lock().unwrap().get(&workspace).cloned();
-            Task::ready(Ok(dirty.unwrap_or(DirtyReport { repos: Vec::new() })))
-        }
-
         fn delete_workspace(&self, workspace: WorkspaceId, _cx: &App) -> Task<anyhow::Result<()>> {
             if let Some(err) = self.failure() {
                 return Task::ready(Err(err));
             }
             let mut snapshot = self.snapshot.lock().unwrap();
             snapshot.workspaces.retain(|w| w.id != workspace);
+            // Its Links go, and each Repository no Link and no kept PR names any more.
+            for repository in &mut snapshot.repositories {
+                repository.workspaces.retain(|w| *w != workspace);
+            }
+            let prs = std::mem::take(&mut snapshot.prs);
+            snapshot.repositories.retain(|repository| {
+                !repository.workspaces.is_empty()
+                    || prs.iter().any(|pr| pr.repository.id == repository.id)
+            });
+            snapshot.prs = prs;
             self.deleted.lock().unwrap().push(workspace);
             Task::ready(Ok(()))
         }
