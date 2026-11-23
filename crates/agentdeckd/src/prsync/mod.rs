@@ -4,10 +4,17 @@
 //! The first sync, and one every [`FULL_SYNC_VAR`] seconds (an hour by default), is full: it
 //! lists the open PRs, most recently updated first, down to the age cutoff (`[pr_sync]
 //! max_age_days`, see [`crate::config`]), and fetches the stored ones that left the list; a
-//! stored one older than the cutoff is aged out instead. The rest are incremental: they
+//! stored one older than the cutoff is Finished instead. The rest are incremental: they
 //! search only the PRs updated since the last good sync began, in any state, then refresh the
 //! [`unsettled`] ones (a finished check run doesn't update a PR) and match inbox PRs to
 //! workspaces again from what's stored.
+//!
+//! A PR is **Finished** from when a sync sees it merged or closed, a close from agentdeck
+//! closes it, or a full sync finds it open but older than the cutoff; GitHub showing it open
+//! within the cutoff again ends that. Each good sync then deletes the PRs Finished
+//! [`FINISHED_VAR`] seconds ago or longer (7 days by default), and the Repositories nothing
+//! references any more. A PR the GitHub sign-in can't see is never Finished by the cutoff,
+//! and is never deleted.
 //!
 //! - [`crate::github_auth`]: the token, from the first source that gives one.
 //! - [`github`]: the GraphQL search and the fetch by number.
@@ -66,6 +73,13 @@ pub const FULL_SYNC_VAR: &str = "AGENTDECK_PR_FULL_SYNC_SECS";
 /// How often a sync is full, unless [`FULL_SYNC_VAR`] says otherwise.
 pub const FULL_SYNC_EVERY: Duration = Duration::from_secs(60 * 60);
 
+/// The environment variable holding how many seconds a PR stays Finished before a sync
+/// deletes it; `0` deletes it at the sync that finishes it (tests use it).
+pub const FINISHED_VAR: &str = "AGENTDECK_PR_FINISHED_SECS";
+
+/// How long a PR stays Finished, unless [`FINISHED_VAR`] says otherwise.
+pub const KEEP_FINISHED: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
 /// Why a PR asked to close isn't closed: it isn't stored open, or the sign-in can't see it.
 const NOT_AN_OPEN_PR: &str = "Not an open PR";
 
@@ -94,6 +108,8 @@ struct Inner {
     auth: GithubAuth,
     /// How often a sync is full.
     full_every: Duration,
+    /// How long a PR stays Finished before a sync deletes it.
+    keep_finished: Duration,
     /// The settings, read again at each sync: `pr_sync.max_age_days` says which open PRs
     /// sync.
     config: Config,
@@ -155,13 +171,15 @@ impl PrSync {
     /// a sign-in change syncs at once too. `github` is the GraphQL client; a sync is full
     /// every `full_every`; open PRs GitHub last updated more than `pr_sync.max_age_days` ago,
     /// as `config` says when the sync begins, aren't synced, and the status says how many
-    /// days that is now. Must be called inside a tokio runtime.
+    /// days that is now. A good sync deletes the PRs Finished `keep_finished` ago or longer.
+    /// Must be called inside a tokio runtime.
     pub fn start(
         db: Db,
         events: Events,
         github: Github,
         auth: GithubAuth,
         full_every: Duration,
+        keep_finished: Duration,
         config: Config,
     ) -> PrSync {
         let max_age_days = config.max_age_days();
@@ -173,6 +191,7 @@ impl PrSync {
                 github,
                 auth,
                 full_every,
+                keep_finished,
                 config,
                 state: Mutex::new(State {
                     status: PrSyncStatus {
@@ -262,7 +281,12 @@ impl PrSync {
         if full {
             self.state().full_wanted = true;
         }
-        let result = self.sync_once(began).await;
+        let mut result = self.sync_once(began).await;
+        if result.is_ok()
+            && let Err(err) = self.prune().await
+        {
+            result = Err(err);
+        }
         let synced_as = match &result {
             Ok(_) => self.store_synced_as().await,
             Err(_) => None,
@@ -395,8 +419,8 @@ impl PrSync {
         results
     }
 
-    /// Stores `pr`, which GitHub just closed, as closed, and tells clients its task changed. A
-    /// failure only logs: GitHub closed it, and the next full sync reads it closed.
+    /// Stores `pr`, which GitHub just closed, as closed and Finished, and tells clients its task
+    /// changed. A failure only logs: GitHub closed it, and the next full sync reads it closed.
     async fn closed(&self, pr: &db::pull_requests::Closable) {
         let task_id = pr.task;
         match self
@@ -531,7 +555,7 @@ impl PrSync {
     /// Then the PRs stored as open that left the list are fetched by number, so a merge or
     /// close reaches its task; one GitHub doesn't show to the token is marked unreachable,
     /// keeping its state and its task's status. One last updated before `cutoff` isn't
-    /// fetched: it is aged out, its task moving to done once.
+    /// fetched: it is Finished, its task moving to done once, unless it is unreachable.
     async fn read_full(
         &self,
         token: &str,
@@ -616,7 +640,7 @@ impl PrSync {
             .into_iter()
             .partition(|pr| older_than(&pr.updated_at, cutoff));
         let aged: Vec<(String, i64)> = aged.into_iter().map(|pr| (pr.repo, pr.number)).collect();
-        self.age_out(missing(&aged, &seen)).await?;
+        self.finish_aged(missing(&aged, &seen)).await?;
         let stored: Vec<(String, i64)> =
             stored.into_iter().map(|pr| (pr.repo, pr.number)).collect();
         let left = missing(&stored, &seen);
@@ -743,18 +767,42 @@ impl PrSync {
         Ok(())
     }
 
-    /// Ages out the stored open PRs `prs`, and tells clients which tasks changed.
-    async fn age_out(&self, prs: Vec<(String, i64)>) -> Result<(), SyncError> {
+    /// Finishes the stored open PRs `prs`, which GitHub hasn't updated within the cutoff, and
+    /// tells clients which tasks changed.
+    async fn finish_aged(&self, prs: Vec<(String, i64)>) -> Result<(), SyncError> {
         if prs.is_empty() {
             return Ok(());
         }
         let changed = self
             .inner
             .db
-            .call(move |conn| db::pull_requests::age_out(conn, &prs))
+            .call(move |conn| db::pull_requests::finish_aged(conn, &prs))
             .await?;
         for task in changed {
             self.inner.events.changed(Entity::Task, task);
+        }
+        Ok(())
+    }
+
+    /// Deletes the PRs Finished `keep_finished` ago or longer, then the Repositories nothing
+    /// references any more, and tells clients which tasks and Repositories went.
+    async fn prune(&self) -> Result<(), SyncError> {
+        let keep =
+            chrono::TimeDelta::from_std(self.inner.keep_finished).unwrap_or(chrono::TimeDelta::MAX);
+        // A window longer than chrono holds deletes nothing.
+        let Some(before) = Utc::now().checked_sub_signed(keep) else {
+            return Ok(());
+        };
+        let pruned = self
+            .inner
+            .db
+            .call(move |conn| db::pull_requests::prune(conn, before))
+            .await?;
+        for task in pruned.tasks {
+            self.inner.events.changed(Entity::Task, task);
+        }
+        for repository in pruned.repositories {
+            self.inner.events.changed(Entity::Repository, repository);
         }
         Ok(())
     }

@@ -6,7 +6,8 @@ use agentdeck_core::PrState;
 use httpmock::MockServer;
 
 use crate::support::TestDaemon;
-use crate::support::github::{Pr, mock_search, set_gh_token};
+use crate::support::github::{Pr, mock_fetch, mock_search, set_gh_token};
+use crate::support::set_daemon_env;
 
 const TOKEN: &str = "gho_test";
 
@@ -39,6 +40,37 @@ mod list {
         );
         assert_eq!(prs[0].state, PrState::Open);
         assert!(!prs[0].unreachable);
+    }
+
+    #[tokio::test]
+    async fn should_list_finished_prs_too_marked_finished() {
+        let github = MockServer::start_async().await;
+        let mut search = mock_search(&github, TOKEN, &[Pr::open(7), Pr::open(8)]);
+        let dirs = tempfile::tempdir().expect("a temp dir");
+        set_gh_token(dirs.path(), Some(TOKEN));
+        set_daemon_env(dirs.path(), &[("AGENTDECK_PR_FULL_SYNC_SECS", "0")]);
+        let daemon = TestDaemon::start_with_github(dirs, &github.url("/graphql")).await;
+        daemon.client.prs_sync().send().await.expect("sync");
+        search.delete();
+        mock_search(&github, TOKEN, &[Pr::open(8)]);
+        mock_fetch(
+            &github,
+            &[Pr {
+                state: "MERGED",
+                ..Pr::open(7)
+            }],
+        );
+        daemon.client.prs_sync().send().await.expect("sync");
+
+        let prs = list(&daemon.client).await.expect("list PRs");
+
+        let listed: Vec<(u32, PrState, bool)> = (prs.iter())
+            .map(|pr| (pr.number, pr.state, pr.finished))
+            .collect();
+        assert_eq!(
+            listed,
+            [(7, PrState::Merged, true), (8, PrState::Open, false)]
+        );
     }
 
     #[tokio::test]

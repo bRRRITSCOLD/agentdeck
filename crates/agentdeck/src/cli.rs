@@ -316,7 +316,7 @@ pub enum RepoCommand {
 /// `owner/name` or its GitHub URL.
 #[derive(Debug, Subcommand)]
 pub enum PrCommand {
-    /// List the pull requests agentdeck keeps, with their state.
+    /// List the pull requests agentdeck keeps that aren't Finished, with their state.
     Ls {
         /// Only this Repository's: `owner/name` or its GitHub URL.
         #[arg(long, value_name = "REPO")]

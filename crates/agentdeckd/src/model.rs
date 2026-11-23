@@ -193,6 +193,11 @@ pub struct PullRequest {
     pub updated_at: String,
     /// Whether the GitHub sign-in can't see it: it shows as last synced (spec §8).
     pub unreachable: bool,
+    /// Whether it is Finished: merged, closed, or open but not updated within the age cutoff.
+    /// PR sync deletes it 7 days after it became Finished (spec §8). Absent from an older
+    /// daemon, which reads as false.
+    #[serde(default)]
+    pub finished: bool,
 }
 
 /// `GET /v1/prs` filters; given together, a PR must pass both.
@@ -203,6 +208,8 @@ pub struct PrFilter {
     pub repository: Option<RepositoryName>,
     /// Only the pull requests of the Repositories this Workspace links.
     pub workspace: Option<WorkspaceId>,
+    /// Include Finished pull requests; without it they are left out.
+    pub finished: Option<bool>,
 }
 
 /// A Repository and the Workspaces that link it (spec §3): what GitHub last said of it, and

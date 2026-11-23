@@ -1,11 +1,11 @@
 //! The GUI's own state, kept across restarts in `$XDG_STATE_HOME/agentdeck/gui.json`, beside
 //! `window.json` (spec §11): GUI-only, never the daemon's. Today it holds which Repository
-//! groups are collapsed on the Pull requests view.
+//! groups are collapsed on the Pull requests view, and whether Show finished is on.
 //!
 //! Every field is optional in the file, and a field the GUI doesn't know is skipped, so a later
-//! version adds its own (each Workspace's last side, Show finished, dismissed Suggestions)
-//! without breaking an older file, and an older GUI reads a newer file. A missing or broken
-//! file reads as the defaults.
+//! version adds its own (each Workspace's last side, dismissed Suggestions) without breaking an
+//! older file, and an older GUI reads a newer file. A missing or broken file reads as the
+//! defaults.
 //!
 //! The state is a GPUI [`Global`] that `main` sets with [`init`]; a view reads it with
 //! [`read`] and changes it with [`update`], which writes the file at once. Without [`init`]
@@ -27,6 +27,9 @@ pub const FILE: &str = "gui.json";
 pub struct GuiState {
     /// The Repository groups collapsed, per view.
     pub collapsed: Collapsed,
+    /// Show finished: whether PR lists show Finished pull requests too. One preference for
+    /// every view; off by default.
+    pub show_finished: bool,
 }
 
 /// The Repository groups collapsed in each view that groups PRs by Repository. A group is
@@ -126,6 +129,7 @@ mod tests {
             collapsed: Collapsed {
                 pull_requests: ids.iter().copied().map(RepositoryId::from).collect(),
             },
+            ..GuiState::default()
         }
     }
 
@@ -140,6 +144,13 @@ mod tests {
         }
 
         #[test]
+        fn should_read_show_finished() {
+            let state = parse(r#"{"show_finished":true}"#);
+
+            assert!(state.show_finished);
+        }
+
+        #[test]
         fn should_default_what_the_file_leaves_out() {
             assert_eq!(parse("{}"), GuiState::default());
             assert_eq!(parse(r#"{"collapsed":{}}"#), GuiState::default());
@@ -147,8 +158,7 @@ mod tests {
 
         #[test]
         fn should_skip_what_a_later_version_adds() {
-            let state =
-                parse(r#"{"show_finished":true,"collapsed":{"pull_requests":[7],"ws":{}}}"#);
+            let state = parse(r#"{"last_side":{},"collapsed":{"pull_requests":[7],"ws":{}}}"#);
 
             assert_eq!(state, collapsed(&[7]));
         }

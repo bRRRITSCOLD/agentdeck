@@ -5,6 +5,7 @@ use agentdeck_core::{
     PrRef, PrState, RepositoryId, TaskId, TaskKind, TaskPlace, TaskStatus, WorkspaceId,
     pr_task_status,
 };
+use chrono::{DateTime, Utc};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 
@@ -56,17 +57,22 @@ pub fn open(conn: &Connection) -> Result<Vec<OpenPr>, DbError> {
 /// The kept PRs whose Repository PR sync has read, by Repository name, ignoring case, then
 /// number; only those of `filter.repository`, by the name GitHub gives it now, when it's set,
 /// and only those of the Repositories `filter.workspace` links, when that's set. A workspace
-/// that doesn't exist is [`DbError::UnknownReference`].
+/// that doesn't exist is [`DbError::UnknownReference`]. Finished PRs are left out unless
+/// `filter.finished` asks for them.
 pub fn list(conn: &Connection, filter: &PrFilter) -> Result<Vec<PullRequest>, DbError> {
     let mut sql = String::from(
         "SELECT p.number, p.url, p.state, p.draft, p.head_ref, p.base_ref, p.author, p.checks,
-           p.review, p.updated_at, p.unreachable_at IS NOT NULL AS unreachable, t.title,
+           p.review, p.updated_at, p.unreachable_at IS NOT NULL AS unreachable,
+           p.finished_at IS NOT NULL AS finished, t.title,
            r.id AS repository_id, r.full_name, r.url AS repository_url, r.private, r.archived
          FROM pull_requests p
          JOIN tasks t ON t.id = p.task_id
          JOIN repositories r ON r.id = p.repository_id
          WHERE p.base_ref IS NOT NULL",
     );
+    if !filter.finished.unwrap_or(false) {
+        sql.push_str(" AND p.finished_at IS NULL");
+    }
     let mut values: Vec<Value> = Vec::new();
     if let Some(repository) = &filter.repository {
         values.push(Value::Text(repository.to_string()));
@@ -116,14 +122,15 @@ fn listed(row: &Row<'_>) -> rusqlite::Result<PullRequest> {
         review: opt_text(row, "review")?,
         updated_at: row.get("updated_at")?,
         unreachable: row.get("unreachable")?,
+        finished: row.get("finished")?,
     })
 }
 
-/// Every PR stored as open, as last synced, but for those aged out or unreachable.
+/// Every PR stored as open, as last synced, but for those Finished or unreachable.
 pub fn open_current(conn: &Connection) -> Result<Vec<RemotePr>, DbError> {
     stored_where(
         conn,
-        "p.state = ?1 AND p.aged_out_at IS NULL AND p.unreachable_at IS NULL",
+        "p.state = ?1 AND p.finished_at IS NULL AND p.unreachable_at IS NULL",
     )
 }
 
@@ -134,12 +141,12 @@ pub fn open_prs(conn: &Connection) -> Result<Vec<RemotePr>, DbError> {
 
 /// Every PR stored as open whose task PR sync may still place ([`sync_places`]), as last
 /// synced, so it can be matched to a workspace again without asking GitHub; but for those
-/// aged out or unreachable, which storing would bring back.
+/// Finished or unreachable, which storing would bring back.
 pub fn inbox_open(conn: &Connection) -> Result<Vec<RemotePr>, DbError> {
     stored_where(
         conn,
         "p.state = ?1 AND t.workspace_id IS NULL AND p.workspace_picked_at IS NULL
-         AND p.aged_out_at IS NULL AND p.unreachable_at IS NULL",
+         AND p.finished_at IS NULL AND p.unreachable_at IS NULL",
     )
 }
 
@@ -159,18 +166,20 @@ fn is_picked(conn: &Connection, id: TaskId) -> Result<bool, DbError> {
     )?)
 }
 
-/// Ages out each stored open PR of `prs` (`(repo, number)`: ones GitHub hasn't updated within
-/// the cutoff), in one transaction: its task moves to `done`, once. One already aged out is
-/// left as it is, so a status the user picks after sticks. Returns the tasks that changed.
-pub fn age_out(conn: &mut Connection, prs: &[(String, i64)]) -> Result<Vec<TaskId>, DbError> {
+/// Finishes each stored open PR of `prs` (`(repo, number)`: ones GitHub hasn't updated
+/// within the cutoff), in one transaction: its task moves to `done`, once. One already Finished
+/// is left as it is, so a status the user picks after sticks, and so is one the GitHub
+/// sign-in can't see, which gets no Finished window. Returns the tasks that changed.
+pub fn finish_aged(conn: &mut Connection, prs: &[(String, i64)]) -> Result<Vec<TaskId>, DbError> {
     let tx = conn.transaction()?;
-    let aged_at = now();
+    let finished_at = now();
     let mut changed = Vec::new();
     for (repo, number) in prs {
         let marked = tx.execute(
-            "UPDATE pull_requests SET aged_out_at = ?3
-             WHERE repo = ?1 AND number = ?2 AND state = ?4 AND aged_out_at IS NULL",
-            params![repo, number, aged_at, PrState::Open.as_str()],
+            "UPDATE pull_requests SET finished_at = ?3
+             WHERE repo = ?1 AND number = ?2 AND state = ?4 AND finished_at IS NULL
+               AND unreachable_at IS NULL",
+            params![repo, number, finished_at, PrState::Open.as_str()],
         )?;
         let Some(task_id) = task_for(&tx, repo, *number)?.filter(|_| marked > 0) else {
             continue;
@@ -194,6 +203,46 @@ pub fn age_out(conn: &mut Connection, prs: &[(String, i64)]) -> Result<Vec<TaskI
     Ok(changed)
 }
 
+/// What [`prune`] deleted.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Pruned {
+    /// The PRs' tasks, deleted with them.
+    pub tasks: Vec<TaskId>,
+    /// The Repositories nothing references any more.
+    pub repositories: Vec<RepositoryId>,
+}
+
+/// Deletes each PR Finished at or before `before`, with its task, then each of their
+/// Repositories nothing references any more, in one transaction (spec §8). A PR the GitHub
+/// sign-in can't see gets no window: it is never deleted.
+pub fn prune(conn: &mut Connection, before: DateTime<Utc>) -> Result<Pruned, DbError> {
+    let tx = conn.transaction()?;
+    let rows: Vec<(TaskId, Option<u64>)> = {
+        let mut stmt = tx.prepare(
+            "SELECT task_id, repository_id FROM pull_requests
+             WHERE finished_at IS NOT NULL AND finished_at <= ?1 AND unreachable_at IS NULL
+             ORDER BY task_id",
+        )?;
+        let rows = stmt.query_map([super::stamp(before)], |row| {
+            Ok((text(row, "task_id")?, row.get(1)?))
+        })?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    let mut pruned = Pruned::default();
+    for (task, repository) in rows {
+        tasks::delete(&tx, task)?;
+        pruned.tasks.push(task);
+        if let Some(repository) = repository.map(RepositoryId::from)
+            && !pruned.repositories.contains(&repository)
+            && repositories::forget_if_unreferenced(&tx, repository)?
+        {
+            pruned.repositories.push(repository);
+        }
+    }
+    tx.commit()?;
+    Ok(pruned)
+}
+
 /// A stored PR that can be closed: its task, and `owner/name` and number as last synced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Closable {
@@ -205,7 +254,7 @@ pub struct Closable {
     pub number: i64,
 }
 
-/// Each of `prs`, in order, while it is stored open, aged out or not, and the GitHub sign-in
+/// Each of `prs`, in order, while it is stored open, Finished or not, and the GitHub sign-in
 /// can see it; `None` for a PR stored in another state, or not stored. A reference matches by
 /// the name its Repository had when last synced, ignoring case, as GitHub does.
 pub fn closable(conn: &Connection, prs: &[PrRef]) -> Result<Vec<Option<Closable>>, DbError> {
@@ -235,14 +284,14 @@ pub fn closable(conn: &Connection, prs: &[PrRef]) -> Result<Vec<Option<Closable>
         .collect()
 }
 
-/// Stores task `id`'s PR as closed, as GitHub closed it, no longer aged out, and moves the
-/// task to `done`, in one transaction, so no sync fetches it by number again. Returns whether
-/// anything changed: `false` when it was no longer stored open.
+/// Stores task `id`'s PR as closed, as GitHub closed it, and Finished from now unless it
+/// already was, and moves the task to `done`, in one transaction, so no sync fetches it by
+/// number again. Returns whether anything changed: `false` when it was no longer stored open.
 pub fn close(conn: &mut Connection, id: TaskId) -> Result<bool, DbError> {
     let tx = conn.transaction()?;
     let closed = tx.execute(
-        "UPDATE pull_requests SET state = ?2, synced_at = ?3, aged_out_at = NULL,
-           unreachable_at = NULL
+        "UPDATE pull_requests SET state = ?2, synced_at = ?3,
+           finished_at = COALESCE(finished_at, ?3), unreachable_at = NULL
          WHERE task_id = ?1 AND state = ?4",
         params![
             id.to_string(),
@@ -269,10 +318,10 @@ pub fn close(conn: &mut Connection, id: TaskId) -> Result<bool, DbError> {
     Ok(true)
 }
 
-/// Whether task `id`'s PR is aged out.
-fn is_aged_out(conn: &Connection, id: TaskId) -> Result<bool, DbError> {
+/// Whether task `id`'s PR is Finished.
+fn is_finished(conn: &Connection, id: TaskId) -> Result<bool, DbError> {
     Ok(conn.query_row(
-        "SELECT aged_out_at IS NOT NULL FROM pull_requests WHERE task_id = ?1",
+        "SELECT finished_at IS NOT NULL FROM pull_requests WHERE task_id = ?1",
         [id.to_string()],
         |row| row.get(0),
     )?)
@@ -464,12 +513,13 @@ fn store_one(
     let task = tasks::get(conn, task_id)?;
     let before = task.pr.as_ref().ok_or(DbError::NotFound("pull request"))?;
     let after = synced(pr, synced_at);
-    // An aged-out PR's task is done as a closed one's is, so GitHub showing it open again
-    // moves it back to review, as a reopen does. An unreachable PR's state wasn't seen, so it
-    // moves as a new PR's would: back to review while open, to done once merged or closed.
+    // A Finished PR's task is done as a closed one's is, so GitHub showing it open again
+    // within the cutoff moves it back to review, as a reopen does. An unreachable PR's state
+    // wasn't seen, so it moves as a new PR's would: back to review while open, to done once
+    // merged or closed.
     let before_state = if before.unreachable {
         None
-    } else if is_aged_out(conn, task_id)? {
+    } else if is_finished(conn, task_id)? {
         Some(PrState::Closed)
     } else {
         Some(before.state)
@@ -560,9 +610,10 @@ fn synced(pr: &RemotePr, synced_at: &str) -> TaskPr {
     }
 }
 
-/// Inserts or replaces `task`'s PR row, which is no longer aged out or unreachable. A PR
-/// GitHub showed with its Repository takes that Repository's name, its base branch and its
-/// author; one re-stored as last synced keeps what its row holds.
+/// Inserts or replaces `task`'s PR row, which is no longer unreachable. GitHub showed it within
+/// the cutoff, so it is Finished while merged or closed, from the first time it was stored so,
+/// and not while open. A PR GitHub showed with its Repository takes that Repository's name,
+/// its base branch and its author; one re-stored as last synced keeps what its row holds.
 fn write_row(
     conn: &Connection,
     task: TaskId,
@@ -573,13 +624,16 @@ fn write_row(
     conn.execute(
         "INSERT INTO pull_requests
            (task_id, repo, number, url, state, draft, head_ref, checks, review, updated_at,
-            synced_at, repository_id, base_ref, author)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            synced_at, repository_id, base_ref, author, finished_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                 CASE WHEN ?5 = ?16 THEN NULL ELSE ?11 END)
          ON CONFLICT (task_id) DO UPDATE SET
            repo = excluded.repo, url = excluded.url, state = excluded.state,
            draft = excluded.draft, head_ref = excluded.head_ref, checks = excluded.checks,
            review = excluded.review, updated_at = excluded.updated_at,
-           synced_at = excluded.synced_at, aged_out_at = NULL, unreachable_at = NULL,
+           synced_at = excluded.synced_at, unreachable_at = NULL,
+           finished_at = CASE WHEN excluded.state = ?16 THEN NULL
+                              ELSE COALESCE(finished_at, excluded.finished_at) END,
            repository_id = CASE WHEN ?15 THEN excluded.repository_id ELSE repository_id END,
            base_ref = CASE WHEN ?15 THEN excluded.base_ref ELSE base_ref END,
            author = CASE WHEN ?15 THEN excluded.author ELSE author END",
@@ -599,6 +653,7 @@ fn write_row(
             pr.base_ref,
             pr.author,
             read,
+            PrState::Open.as_str(),
         ],
     )?;
     Ok(())

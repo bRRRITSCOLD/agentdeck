@@ -254,7 +254,8 @@ mod pr_close {
         for close in &closes {
             close.assert_calls(1);
         }
-        assert_eq!(state(&env, SEVEN), "closed");
+        // A closed PR is Finished, which `pr ls` leaves out.
+        assert_eq!(env.json(&["pr", "ls"]), json!([]));
     }
 
     #[test]

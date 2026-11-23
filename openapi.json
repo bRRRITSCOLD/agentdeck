@@ -1195,6 +1195,11 @@
             "description": "A draft.",
             "type": "boolean"
           },
+          "finished": {
+            "default": false,
+            "description": "Whether it is Finished: merged, closed, or open but not updated within the age cutoff. PR sync deletes it 7 days after it became Finished (spec §8). Absent from an older daemon, which reads as false.",
+            "type": "boolean"
+          },
           "head_ref": {
             "description": "The branch it merges from.",
             "type": "string"
@@ -2600,6 +2605,15 @@
         "description": "its fields as last synced, by Repository name, then number. With `repository`, only that Repository's, by the name GitHub gives it now, ignoring case. A PR stored before Repositories were read is left out until PR sync reads it again.",
         "operationId": "pr_list",
         "parameters": [
+          {
+            "description": "Include Finished pull requests; without it they are left out.",
+            "in": "query",
+            "name": "finished",
+            "schema": {
+              "nullable": true,
+              "type": "boolean"
+            }
+          },
           {
             "description": "Only the pull requests of the Repository GitHub calls this now, `owner/name`, ignoring case.",
             "in": "query",

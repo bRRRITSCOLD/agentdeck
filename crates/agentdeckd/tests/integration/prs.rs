@@ -1771,6 +1771,7 @@ mod get_v1_prs {
                 review: Some(ReviewState::ChangesRequested),
                 updated_at: pr.updated_at.into(),
                 unreachable: false,
+                finished: false,
             }]
         );
     }
@@ -1923,7 +1924,9 @@ mod get_v1_prs {
         mock_updated_search(&github, TOKEN, &[merged]);
         sync(&daemon.client).await;
 
-        let prs = list(&daemon.client).await;
+        let prs = (daemon.client.pr_list().finished(true).send().await)
+            .expect("list PRs")
+            .into_inner();
         assert_eq!(prs.len(), 1, "{prs:?}");
         assert_eq!(prs[0].reference.to_string(), "acme/gizmos#7");
         assert_eq!(prs[0].state, PrState::Merged);
@@ -2381,4 +2384,333 @@ mod post_v1_prs_close {
         fetch.assert_calls(0);
         assert_eq!(task_of(&daemon.client, 7).await.status, TaskStatus::Done);
     }
+}
+
+mod finished {
+    use super::max_age::{mock_open, restarted_with_cutoff, task_of};
+    use super::*;
+
+    /// Every pull request the daemon keeps, Finished ones included.
+    async fn list_all(client: &Client) -> Vec<PullRequest> {
+        let response = client.pr_list().finished(true).send().await;
+        let response = response.expect("list PRs");
+        assert_eq!(response.status().as_u16(), 200);
+        response.into_inner()
+    }
+
+    /// The kept pull request numbered `number`, Finished or not.
+    async fn kept(client: &Client, number: u32) -> Option<PullRequest> {
+        (list_all(client).await)
+            .into_iter()
+            .find(|pr| pr.number == number)
+    }
+
+    /// The names of the Repositories agentdeck keeps.
+    async fn repositories(client: &Client) -> Vec<String> {
+        let response = client.repository_list().send().await;
+        (response.expect("list Repositories").into_inner().iter())
+            .map(|repository| repository.name.to_string())
+            .collect()
+    }
+
+    /// The numbers `GET /v1/prs` lists without Finished ones.
+    async fn unfinished(client: &Client) -> Vec<u32> {
+        list(client).await.iter().map(|pr| pr.number).collect()
+    }
+
+    /// Temp dirs for a daemon whose `gh` prints [`TOKEN`], whose every sync is full, and whose
+    /// Finished PRs are deleted once `keep_secs` have passed.
+    fn dirs_keeping_for(keep_secs: &str) -> TempDir {
+        let dirs = tempfile::tempdir().expect("a temp dir");
+        set_gh_token(dirs.path(), Some(TOKEN));
+        set_daemon_env(
+            dirs.path(),
+            &[
+                ("AGENTDECK_PR_FULL_SYNC_SECS", "0"),
+                ("AGENTDECK_PR_FINISHED_SECS", keep_secs),
+            ],
+        );
+        dirs
+    }
+
+    /// `pr`, merged.
+    fn merged(pr: Pr) -> Pr {
+        Pr {
+            state: "MERGED",
+            ..pr
+        }
+    }
+
+    /// `pr`, closed.
+    fn closed(pr: Pr) -> Pr {
+        Pr {
+            state: "CLOSED",
+            ..pr
+        }
+    }
+
+    #[tokio::test]
+    async fn should_finish_a_pr_github_shows_merged_and_leave_it_out_unless_asked_200() {
+        let github = MockServer::start_async().await;
+        let mut search = mock_search(&github, TOKEN, &[Pr::open(7), Pr::open(8)]);
+        let daemon = full_daemon(&github, Some(TOKEN)).await;
+        sync(&daemon.client).await;
+        assert!(!kept(&daemon.client, 7).await.expect("PR 7").finished);
+
+        search.delete();
+        mock_search(&github, TOKEN, &[Pr::open(8)]);
+        mock_fetch(&github, &[merged(Pr::open(7))]);
+        sync(&daemon.client).await;
+
+        let pr = kept(&daemon.client, 7).await.expect("PR 7, kept");
+        assert!(pr.finished);
+        assert_eq!(pr.state, PrState::Merged);
+        assert_eq!(unfinished(&daemon.client).await, [8]);
+        let not_asked = daemon.client.pr_list().finished(false).send().await;
+        let numbers: Vec<u32> = (not_asked.expect("list PRs").into_inner().iter())
+            .map(|pr| pr.number)
+            .collect();
+        assert_eq!(numbers, [8]);
+    }
+
+    #[tokio::test]
+    async fn should_finish_a_pr_an_incremental_sync_finds_closed_200() {
+        let github = MockServer::start_async().await;
+        let mut first = mock_list(&github, TOKEN, &[Pr::open(7)]);
+        let mut updated = mock_updated_search(&github, TOKEN, &[]);
+        let daemon = daemon(&github, Some(TOKEN)).await;
+        sync(&daemon.client).await;
+        first.delete();
+
+        updated.delete();
+        mock_updated_search(&github, TOKEN, &[closed(Pr::open(7))]);
+        sync(&daemon.client).await;
+
+        let pr = kept(&daemon.client, 7).await.expect("PR 7, kept");
+        assert!(pr.finished);
+        assert_eq!(pr.state, PrState::Closed);
+        assert_eq!(unfinished(&daemon.client).await, Vec::<u32>::new());
+    }
+
+    #[tokio::test]
+    async fn should_finish_an_open_pr_not_updated_within_the_cutoff_200() {
+        let github = MockServer::start_async().await;
+        let daemon = restarted_with_cutoff(&github, &[aged(7, 1), aged(8, 400)]).await;
+        mock_open(&github, &[aged(7, 1), aged(8, 400)]);
+        mock_fetch(&github, &[aged(7, 1)]);
+
+        set_gh_token(daemon.root(), Some(TOKEN));
+        sync(&daemon.client).await;
+
+        let old = kept(&daemon.client, 8).await.expect("PR 8, kept");
+        assert!(old.finished);
+        // Nothing changed on GitHub: the PR is still open.
+        assert_eq!(old.state, PrState::Open);
+        assert!(!kept(&daemon.client, 7).await.expect("PR 7").finished);
+        assert_eq!(unfinished(&daemon.client).await, [7]);
+    }
+
+    #[tokio::test]
+    async fn should_finish_a_pr_closed_from_agentdeck_at_once_200() {
+        let github = MockServer::start_async().await;
+        let pr = Pr::open(7);
+        mock_search(&github, TOKEN, std::slice::from_ref(&pr));
+        let daemon = full_daemon(&github, Some(TOKEN)).await;
+        sync(&daemon.client).await;
+        mock_node_ids(&github, std::slice::from_ref(&pr));
+        mock_close(&github, &pr);
+
+        let results = daemon
+            .client
+            .prs_close()
+            .body(PrClose {
+                prs: vec![reference(&pr)],
+            })
+            .send()
+            .await
+            .expect("close")
+            .into_inner()
+            .results;
+
+        assert!(results[0].ok);
+        let pr = kept(&daemon.client, 7).await.expect("PR 7, kept");
+        assert!(pr.finished);
+        assert_eq!(pr.state, PrState::Closed);
+    }
+
+    #[tokio::test]
+    async fn should_stop_finishing_a_pr_github_shows_open_again_200() {
+        let github = MockServer::start_async().await;
+        let mut first = mock_list(&github, TOKEN, &[Pr::open(7)]);
+        let mut updated = mock_updated_search(&github, TOKEN, &[]);
+        let daemon = daemon(&github, Some(TOKEN)).await;
+        sync(&daemon.client).await;
+        first.delete();
+        updated.delete();
+        let mut closing = mock_updated_search(&github, TOKEN, &[closed(Pr::open(7))]);
+        sync(&daemon.client).await;
+        assert!(kept(&daemon.client, 7).await.expect("PR 7").finished);
+
+        closing.delete();
+        mock_updated_search(&github, TOKEN, &[Pr::open(7)]);
+        sync(&daemon.client).await;
+
+        let pr = kept(&daemon.client, 7).await.expect("PR 7, kept");
+        assert!(!pr.finished);
+        assert_eq!(pr.state, PrState::Open);
+        assert_eq!(unfinished(&daemon.client).await, [7]);
+    }
+
+    #[tokio::test]
+    async fn should_stop_finishing_an_aged_pr_github_updates_again_200() {
+        let github = MockServer::start_async().await;
+        let daemon = restarted_with_cutoff(&github, &[aged(8, 400)]).await;
+        let mut stale = mock_open(&github, &[aged(8, 400)]);
+        set_gh_token(daemon.root(), Some(TOKEN));
+        sync(&daemon.client).await;
+        assert!(kept(&daemon.client, 8).await.expect("PR 8").finished);
+
+        stale.delete();
+        mock_open(&github, &[aged(8, 0)]);
+        mock_fetch(&github, &[aged(8, 0)]);
+        sync(&daemon.client).await;
+
+        assert!(!kept(&daemon.client, 8).await.expect("PR 8").finished);
+        assert_eq!(task_of(&daemon.client, 8).await.status, TaskStatus::Review);
+    }
+
+    #[tokio::test]
+    async fn should_keep_a_finished_pr_within_its_window_200() {
+        let github = MockServer::start_async().await;
+        let mut search = mock_search(&github, TOKEN, &[Pr::open(7)]);
+        let daemon = full_daemon(&github, Some(TOKEN)).await;
+        sync(&daemon.client).await;
+        search.delete();
+        mock_search(&github, TOKEN, &[]);
+        mock_fetch(&github, &[merged(Pr::open(7))]);
+
+        sync(&daemon.client).await;
+        sync(&daemon.client).await;
+
+        assert!(kept(&daemon.client, 7).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn should_delete_a_pr_and_the_repository_nothing_else_references_after_its_window_200() {
+        let github = MockServer::start_async().await;
+        let gadget = Pr {
+            repo: "acme/gadgets",
+            ..Pr::open(3)
+        };
+        let mut search = mock_search(&github, TOKEN, &[Pr::open(7), Pr::open(8), gadget.clone()]);
+        let daemon =
+            TestDaemon::start_with_github(dirs_keeping_for("0"), &github.url("/graphql")).await;
+        sync(&daemon.client).await;
+        let gadget_task = super::task_in(&daemon.client, "acme/gadgets", 3).await;
+        let mut ws = Ws::connect(&daemon).await;
+
+        search.delete();
+        mock_search(&github, TOKEN, &[Pr::open(8)]);
+        mock_fetch(&github, &[closed(gadget), merged(Pr::open(7))]);
+        sync(&daemon.client).await;
+
+        ws.until(|frame| match frame {
+            Frame::Message(ServerMessage::Changed {
+                entity: Entity::Repository,
+                id,
+            }) if id == repository_id("acme/gadgets").to_string() => Some(()),
+            _ => None,
+        })
+        .await;
+        let kept: Vec<String> = (list_all(&daemon.client).await.iter())
+            .map(|pr| pr.reference.to_string())
+            .collect();
+        assert_eq!(kept, ["acme/widgets#8"]);
+        // The PR's task goes with it.
+        assert!(!(pr_tasks(&daemon.client).await.iter()).any(|task| task.id == gadget_task.id));
+        assert_eq!(numbers(&daemon.client).await, [8]);
+        // acme/widgets keeps PR 8, so it stays; acme/gadgets has nothing left, so it goes.
+        assert_eq!(repositories(&daemon.client).await, ["acme/widgets"]);
+    }
+
+    #[tokio::test]
+    async fn should_keep_a_linked_repository_whose_prs_left_200() {
+        let github = MockServer::start_async().await;
+        let mut search = mock_search(&github, TOKEN, &[Pr::open(7)]);
+        let daemon =
+            TestDaemon::start_with_github(dirs_keeping_for("0"), &github.url("/graphql")).await;
+        sync(&daemon.client).await;
+        let web = (daemon.client.workspace_create())
+            .body(NewWorkspace {
+                name: "web".into(),
+                dir: None,
+            })
+            .send()
+            .await
+            .expect("create a workspace")
+            .into_inner();
+        (daemon.client.link_create())
+            .id(web.id)
+            .body(NewLink {
+                repository: "acme/widgets".parse().expect("a Repository"),
+            })
+            .send()
+            .await
+            .expect("link");
+
+        search.delete();
+        mock_search(&github, TOKEN, &[]);
+        mock_fetch(&github, &[merged(Pr::open(7))]);
+        sync(&daemon.client).await;
+
+        assert_eq!(kept(&daemon.client, 7).await, None);
+        assert_eq!(repositories(&daemon.client).await, ["acme/widgets"]);
+    }
+
+    #[tokio::test]
+    async fn should_keep_an_unreachable_pr_with_no_window_200() {
+        let github = MockServer::start_async().await;
+        let secret = Pr {
+            repo: "acme/secret",
+            ..aged(8, 400)
+        };
+        mock_search(&github, "gho_full", &[Pr::open(7), secret.clone()]);
+        mock_search(&github, "github_pat_narrow", &[Pr::open(7)]);
+        mock_hidden(&github, "github_pat_narrow", &secret);
+        let dirs = dirs_keeping_for("0");
+        set_gh_token(dirs.path(), Some("gho_full"));
+        let daemon = TestDaemon::start_with_github(dirs, &github.url("/graphql")).await;
+        sync(&daemon.client).await;
+        set_gh_token(daemon.root(), Some("github_pat_narrow"));
+        sync(&daemon.client).await;
+        assert!(kept(&daemon.client, 8).await.expect("PR 8").unreachable);
+
+        // Past the cutoff, with a window of none: an unreachable PR still stays.
+        set_daemon_env(
+            daemon.root(),
+            &[
+                ("AGENTDECK_PR_FULL_SYNC_SECS", "0"),
+                ("AGENTDECK_PR_FINISHED_SECS", "0"),
+                ("AGENTDECK_PR_MAX_AGE_DAYS", "90"),
+            ],
+        );
+        let (_, dirs) = daemon.terminate();
+        let daemon = TestDaemon::start_with_github(dirs, &github.url("/graphql")).await;
+        sync(&daemon.client).await;
+        sync(&daemon.client).await;
+
+        let pr = kept(&daemon.client, 8).await.expect("PR 8, kept");
+        assert!(pr.unreachable);
+        assert!(!pr.finished);
+        assert_eq!(pr.repository.name.to_string(), "acme/secret");
+    }
+}
+
+/// The task of `repo#number`.
+async fn task_in(client: &Client, repo: &str, number: i64) -> Task {
+    pr_tasks(client)
+        .await
+        .into_iter()
+        .find(|task| (task.pr.as_ref()).is_some_and(|pr| pr.repo == repo && pr.number == number))
+        .expect("the PR's task")
 }
