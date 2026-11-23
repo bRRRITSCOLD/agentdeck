@@ -1,10 +1,12 @@
 //! `agentdeck_client::repositories`: the Repositories and the Workspaces linking each, as the
-//! GUI reads them for the PR alert mute rule, against a real daemon with httpmock as GitHub.
-//! The GUI's fake API answers the same way (spec §12).
+//! GUI reads them for the PR alert mute rule, and the Links a Repository group's `…` menu makes
+//! and takes away, against a real daemon with httpmock as GitHub. The GUI's fake API answers
+//! the same way (spec §12).
 
-use agentdeck_client::repositories::{list, resolve};
+use agentdeck_client::Client;
+use agentdeck_client::repositories::{link, list, resolve, unlink};
 use agentdeck_client::types::{NewLink, NewWorkspace, Repository};
-use agentdeck_core::RepositoryId;
+use agentdeck_core::{RepositoryId, WorkspaceId};
 use httpmock::MockServer;
 
 use crate::support::TestDaemon;
@@ -42,9 +44,7 @@ mod list {
             .into_inner();
         (daemon.client.link_create())
             .id(web.id)
-            .body(NewLink {
-                repository: "acme/widgets".parse().expect("a Repository"),
-            })
+            .body(NewLink::named("acme/widgets".parse().expect("a Repository")))
             .send()
             .await
             .expect("link");
@@ -148,5 +148,100 @@ mod resolve {
             err.message,
             "GitHub can't see acme/nope. Check the name or your token's access."
         );
+    }
+}
+
+/// A Workspace named `name`, linking nothing.
+async fn workspace(client: &Client, name: &str) -> WorkspaceId {
+    (client.workspace_create())
+        .body(NewWorkspace {
+            name: name.into(),
+            link: Vec::new(),
+        })
+        .send()
+        .await
+        .expect("create a workspace")
+        .into_inner()
+        .id
+}
+
+/// `acme/widgets` as a client holds it, private.
+fn widgets() -> Repository {
+    Repository {
+        id: RepositoryId::from(repository_id("acme/widgets")),
+        name: "acme/widgets".parse().unwrap(),
+        url: "https://github.com/acme/widgets".into(),
+        private: true,
+        archived: false,
+    }
+}
+
+mod link {
+    use super::*;
+
+    #[tokio::test]
+    async fn should_link_and_answer_the_repository_with_the_workspaces_linking_it() {
+        let daemon = TestDaemon::start().await;
+        let web = workspace(&daemon.client, "web").await;
+
+        let linked = link(&daemon.client, web, &widgets()).await.expect("link");
+
+        assert_eq!((linked.id, linked.private), (widgets().id, true));
+        assert_eq!(linked.workspaces, [web]);
+    }
+
+    #[tokio::test]
+    async fn should_link_again_after_an_unlink_deleted_the_repository_signed_out() {
+        let daemon = TestDaemon::start().await;
+        let web = workspace(&daemon.client, "web").await;
+        link(&daemon.client, web, &widgets()).await.expect("link");
+        unlink(&daemon.client, web, widgets().id)
+            .await
+            .expect("unlink");
+        assert_eq!(list(&daemon.client).await.expect("list"), []);
+
+        link(&daemon.client, web, &widgets())
+            .await
+            .expect("link again");
+
+        let listed = list(&daemon.client).await.expect("list");
+        let names: Vec<_> = (listed.iter())
+            .map(|r| (r.name.to_string(), r.workspaces.clone()))
+            .collect();
+        assert_eq!(names, [("acme/widgets".to_owned(), vec![web])]);
+    }
+}
+
+mod unlink {
+    use super::*;
+
+    #[tokio::test]
+    async fn should_unlink_and_keep_a_repository_another_workspace_links() {
+        let daemon = TestDaemon::start().await;
+        let (web, api) = (
+            workspace(&daemon.client, "web").await,
+            workspace(&daemon.client, "api").await,
+        );
+        link(&daemon.client, web, &widgets()).await.expect("link");
+        link(&daemon.client, api, &widgets()).await.expect("link");
+
+        unlink(&daemon.client, web, widgets().id)
+            .await
+            .expect("unlink");
+
+        let listed = list(&daemon.client).await.expect("list");
+        assert_eq!(listed[0].workspaces, [api]);
+    }
+
+    #[tokio::test]
+    async fn should_fail_with_the_daemons_words_for_a_repository_it_does_not_link() {
+        let daemon = TestDaemon::start().await;
+        let web = workspace(&daemon.client, "web").await;
+
+        let err = unlink(&daemon.client, web, widgets().id)
+            .await
+            .expect_err("a refusal");
+
+        assert_eq!(err.code.as_deref(), Some("not_found"));
     }
 }

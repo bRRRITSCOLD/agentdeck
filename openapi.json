@@ -356,15 +356,39 @@
         "description": "A tab's split tree. Every pane appears once; [`Layout::split`] keeps it that way."
       },
       "NewLink": {
-        "description": "`POST /v1/workspaces/{id}/links`: the Repository to link.",
+        "description": "`POST /v1/workspaces/{id}/links`: the Repository to link, by name, or by GitHub's id with what the client holds of it.",
         "properties": {
+          "archived": {
+            "description": "Whether it is archived on GitHub, with `id`; false when absent.",
+            "nullable": true,
+            "type": "boolean"
+          },
+          "id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/RepositoryId"
+              }
+            ],
+            "description": "GitHub's id for it, as the client last read it (Undo after an unlink sends it). The Repository agentdeck keeps with this id is linked, whatever its name now; one it no longer keeps is stored again from `repository`, `url`, `private` and `archived`, without asking GitHub, so this works signed out.",
+            "nullable": true
+          },
+          "private": {
+            "description": "Whether it is private, with `id`; false when absent.",
+            "nullable": true,
+            "type": "boolean"
+          },
           "repository": {
             "allOf": [
               {
                 "$ref": "#/components/schemas/RepositoryName"
               }
             ],
-            "description": "The Repository's `owner/name` (or its GitHub URL). One agentdeck doesn't know by that name is looked up on GitHub first."
+            "description": "The Repository's `owner/name` (or its GitHub URL). Without `id`, one agentdeck doesn't know by that name is looked up on GitHub first."
+          },
+          "url": {
+            "description": "Its GitHub page, with `id`; `https://github.com/<repository>` when absent.",
+            "nullable": true,
+            "type": "string"
           }
         },
         "required": [
@@ -2444,7 +2468,7 @@
     },
     "/v1/workspaces/{id}/links": {
       "post": {
-        "description": "links it. A Repository agentdeck doesn't know by that name is looked up on GitHub first and stored, as `GET /v1/repositories/resolve` does; one GitHub doesn't show the sign-in is 400 `unknown_repository` and nothing is linked. Linking a pair already linked changes nothing. A Workspace that doesn't exist is 404 `not_found`. Sends `changed` for the Repository, then the Workspace, when the Link is new.",
+        "description": "links it. By name, a Repository agentdeck doesn't know by that name is looked up on GitHub first and stored, as `GET /v1/repositories/resolve` does; one GitHub doesn't show the sign-in is 400 `unknown_repository` and nothing is linked. With `id`, GitHub is never asked: the Repository kept with that id is linked, or, when none is, it is stored from what the client sent, so Undo after an unlink works signed out. Linking a pair already linked changes nothing. A Workspace that doesn't exist is 404 `not_found`. Sends `changed` for the Repository, then the Workspace, when the Link is new.",
         "operationId": "link_create",
         "parameters": [
           {

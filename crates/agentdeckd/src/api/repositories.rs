@@ -81,10 +81,12 @@ pub(crate) async fn repository_resolve(
 }
 
 /// Links the Workspace to a Repository and answers the Repository with every Workspace that
-/// links it. A Repository agentdeck doesn't know by that name is looked up on GitHub first
-/// and stored, as `GET /v1/repositories/resolve` does; one GitHub doesn't show the sign-in is
-/// 400 `unknown_repository` and nothing is linked. Linking a pair already linked changes
-/// nothing. A Workspace that doesn't exist is 404 `not_found`. Sends `changed` for the
+/// links it. By name, a Repository agentdeck doesn't know by that name is looked up on GitHub
+/// first and stored, as `GET /v1/repositories/resolve` does; one GitHub doesn't show the
+/// sign-in is 400 `unknown_repository` and nothing is linked. With `id`, GitHub is never
+/// asked: the Repository kept with that id is linked, or, when none is, it is stored from what
+/// the client sent, so Undo after an unlink works signed out. Linking a pair already linked
+/// changes nothing. A Workspace that doesn't exist is 404 `not_found`. Sends `changed` for the
 /// Repository, then the Workspace, when the Link is new.
 #[endpoint { method = POST, path = "/v1/workspaces/{id}/links" }]
 pub(crate) async fn link_create(
@@ -95,8 +97,28 @@ pub(crate) async fn link_create(
 ) -> Result<HttpResponseOk<RepositoryLinks>, HttpError> {
     let context = rqctx.context();
     let workspace = path.into_inner().id;
-    let name = body.into_inner().repository;
+    let NewLink {
+        repository: name,
+        id,
+        url,
+        private,
+        archived,
+    } = body.into_inner();
     let db = &context.db;
+    if let Some(id) = id {
+        let held = RemoteRepository {
+            id,
+            url: url.unwrap_or_else(|| format!("https://github.com/{name}")),
+            name,
+            private: private.unwrap_or(false),
+            archived: archived.unwrap_or(false),
+        };
+        let linked = db
+            .call(move |c| db::repositories::link_held(c, workspace, &held))
+            .await?;
+        announce(context, workspace, &linked);
+        return Ok(HttpResponseOk(linked.repository));
+    }
     let wanted = name.clone();
     let known = db
         .call(move |c| {
@@ -117,13 +139,18 @@ pub(crate) async fn link_create(
                 .await?
         }
     };
+    announce(context, workspace, &linked);
+    Ok(HttpResponseOk(linked.repository))
+}
+
+/// Sends `changed` for the Repository, then `workspace`, when `linked` changed anything.
+fn announce(context: &ApiContext, workspace: WorkspaceId, linked: &db::repositories::Linked) {
     if linked.changed {
         context
             .events
             .changed(Entity::Repository, linked.repository.id);
         context.events.changed(Entity::Workspace, workspace);
     }
-    Ok(HttpResponseOk(linked.repository))
 }
 
 /// A Link's path: the Workspace and the Repository it ties.

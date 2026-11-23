@@ -302,7 +302,7 @@ async fn repo(client: &Client, command: RepoCommand) -> anyhow::Result<Output> {
             let linked = client
                 .link_create()
                 .id(id)
-                .body(NewLink { repository: repo })
+                .body(NewLink::named(repo))
                 .send()
                 .await
                 .map_err(ApiError::from)?;

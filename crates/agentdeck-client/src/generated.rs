@@ -258,11 +258,23 @@ pub mod types {
             value.parse()
         }
     }
-    ///`POST /v1/workspaces/{id}/links`: the Repository to link.
+    ///`POST /v1/workspaces/{id}/links`: the Repository to link, by name, or by GitHub's id with what the client holds of it.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct NewLink {
-        ///The Repository's `owner/name` (or its GitHub URL). One agentdeck doesn't know by that name is looked up on GitHub first.
+        ///Whether it is archived on GitHub, with `id`; false when absent.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub archived: ::std::option::Option<bool>,
+        ///GitHub's id for it, as the client last read it (Undo after an unlink sends it). The Repository agentdeck keeps with this id is linked, whatever its name now; one it no longer keeps is stored again from `repository`, `url`, `private` and `archived`, without asking GitHub, so this works signed out.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub id: ::std::option::Option<agentdeck_core::RepositoryId>,
+        ///Whether it is private, with `id`; false when absent.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub private: ::std::option::Option<bool>,
+        ///The Repository's `owner/name` (or its GitHub URL). Without `id`, one agentdeck doesn't know by that name is looked up on GitHub first.
         pub repository: agentdeck_core::RepositoryName,
+        ///Its GitHub page, with `id`; `https://github.com/<repository>` when absent.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub url: ::std::option::Option<::std::string::String>,
     }
     impl NewLink {
         pub fn builder() -> builder::NewLink {
@@ -1598,17 +1610,61 @@ pub mod types {
         }
         #[derive(Clone, Debug)]
         pub struct NewLink {
+            archived: ::std::result::Result<::std::option::Option<bool>, ::std::string::String>,
+            id: ::std::result::Result<
+                ::std::option::Option<agentdeck_core::RepositoryId>,
+                ::std::string::String,
+            >,
+            private: ::std::result::Result<::std::option::Option<bool>, ::std::string::String>,
             repository:
                 ::std::result::Result<agentdeck_core::RepositoryName, ::std::string::String>,
+            url: ::std::result::Result<
+                ::std::option::Option<::std::string::String>,
+                ::std::string::String,
+            >,
         }
         impl ::std::default::Default for NewLink {
             fn default() -> Self {
                 Self {
+                    archived: Ok(Default::default()),
+                    id: Ok(Default::default()),
+                    private: Ok(Default::default()),
                     repository: Err("no value supplied for repository".to_string()),
+                    url: Ok(Default::default()),
                 }
             }
         }
         impl NewLink {
+            pub fn archived<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<bool>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.archived = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for archived: {e}"));
+                self
+            }
+            pub fn id<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<agentdeck_core::RepositoryId>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.id = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for id: {e}"));
+                self
+            }
+            pub fn private<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<bool>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.private = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for private: {e}"));
+                self
+            }
             pub fn repository<T>(mut self, value: T) -> Self
             where
                 T: ::std::convert::TryInto<agentdeck_core::RepositoryName>,
@@ -1619,6 +1675,16 @@ pub mod types {
                     .map_err(|e| format!("error converting supplied value for repository: {e}"));
                 self
             }
+            pub fn url<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<::std::string::String>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.url = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for url: {e}"));
+                self
+            }
         }
         impl ::std::convert::TryFrom<NewLink> for super::NewLink {
             type Error = super::error::ConversionError;
@@ -1626,14 +1692,22 @@ pub mod types {
                 value: NewLink,
             ) -> ::std::result::Result<Self, super::error::ConversionError> {
                 Ok(Self {
+                    archived: value.archived?,
+                    id: value.id?,
+                    private: value.private?,
                     repository: value.repository?,
+                    url: value.url?,
                 })
             }
         }
         impl ::std::convert::From<super::NewLink> for NewLink {
             fn from(value: super::NewLink) -> Self {
                 Self {
+                    archived: Ok(value.archived),
+                    id: Ok(value.id),
+                    private: Ok(value.private),
                     repository: Ok(value.repository),
+                    url: Ok(value.url),
                 }
             }
         }
@@ -4294,7 +4368,7 @@ impl Client {
     }
     ///Links the Workspace to a Repository and answers the Repository with every Workspace that
     ///
-    ///links it. A Repository agentdeck doesn't know by that name is looked up on GitHub first and stored, as `GET /v1/repositories/resolve` does; one GitHub doesn't show the sign-in is 400 `unknown_repository` and nothing is linked. Linking a pair already linked changes nothing. A Workspace that doesn't exist is 404 `not_found`. Sends `changed` for the Repository, then the Workspace, when the Link is new.
+    ///links it. By name, a Repository agentdeck doesn't know by that name is looked up on GitHub first and stored, as `GET /v1/repositories/resolve` does; one GitHub doesn't show the sign-in is 400 `unknown_repository` and nothing is linked. With `id`, GitHub is never asked: the Repository kept with that id is linked, or, when none is, it is stored from what the client sent, so Undo after an unlink works signed out. Linking a pair already linked changes nothing. A Workspace that doesn't exist is 404 `not_found`. Sends `changed` for the Repository, then the Workspace, when the Link is new.
     ///
     ///Sends a `POST` request to `/v1/workspaces/{id}/links`
     ///

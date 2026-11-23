@@ -59,8 +59,18 @@ async fn link(client: &Client, workspace: WorkspaceId, repository: &str) -> Repo
 }
 
 fn new_link(repository: &str) -> NewLink {
+    NewLink::named(repository.parse().expect("a Repository"))
+}
+
+/// A link by GitHub's id, with what the client holds of `repo` under `name`: as Undo after an
+/// unlink sends it.
+fn held_link(repo: RestRepo, name: &str) -> NewLink {
     NewLink {
-        repository: repository.parse().expect("a Repository"),
+        repository: name.parse().expect("a Repository"),
+        id: Some(RepositoryId::from(repo.id)),
+        url: Some(format!("https://github.com/{name}")),
+        private: Some(repo.private),
+        archived: Some(false),
     }
 }
 
@@ -346,6 +356,112 @@ mod post_v1_workspaces_links {
 
         assert_eq!(linked, listed(RestRepo::new(WIDGETS), &[web.id]));
         lookup.assert_calls(0);
+    }
+
+    mod by_id {
+        use super::*;
+
+        #[tokio::test]
+        async fn should_store_a_deleted_repository_again_from_what_the_client_holds_signed_out_200()
+         {
+            let daemon = TestDaemon::start().await;
+            let web = workspace(&daemon.client, "web").await;
+            let private = RestRepo {
+                private: true,
+                ..RestRepo::new(WIDGETS)
+            };
+            (daemon.client.link_create())
+                .id(web.id)
+                .body(held_link(private, WIDGETS))
+                .send()
+                .await
+                .expect("the first link by id");
+            unlink(&daemon.client, web.id, RepositoryId::from(private.id)).await;
+            assert_eq!(list(&daemon.client).await, [], "the unlink deleted it");
+            let (_, by_name) = error_response(
+                (daemon.client.link_create())
+                    .id(web.id)
+                    .body(new_link(WIDGETS))
+                    .send()
+                    .await,
+            );
+            assert_eq!(by_name.error_code.as_deref(), Some("not_signed_in"));
+
+            let response = (daemon.client.link_create())
+                .id(web.id)
+                .body(held_link(private, WIDGETS))
+                .send()
+                .await
+                .expect("link by id again");
+
+            assert_eq!(response.status().as_u16(), 200);
+            let expected = listed(private, &[web.id]);
+            assert_eq!(response.into_inner(), expected);
+            assert_eq!(list(&daemon.client).await, [expected]);
+        }
+
+        #[tokio::test]
+        async fn should_link_the_repository_it_keeps_by_that_id_under_its_name_now_200() {
+            let github = MockServer::start_async().await;
+            let daemon = synced(&github, &[Pr::open(7)]).await;
+            let web = workspace(&daemon.client, "web").await;
+
+            let linked = (daemon.client.link_create())
+                .id(web.id)
+                .body(held_link(RestRepo::new(WIDGETS), "acme/old-widgets"))
+                .send()
+                .await
+                .expect("link by id")
+                .into_inner();
+
+            assert_eq!(linked, listed(RestRepo::new(WIDGETS), &[web.id]));
+        }
+
+        #[tokio::test]
+        async fn should_tell_websocket_clients_the_repository_then_the_workspace_changed_200() {
+            let daemon = TestDaemon::start().await;
+            let web = workspace(&daemon.client, "web").await;
+            let mut ws = Ws::connect(&daemon).await;
+
+            (daemon.client.link_create())
+                .id(web.id)
+                .body(held_link(RestRepo::new(WIDGETS), WIDGETS))
+                .send()
+                .await
+                .expect("link by id");
+
+            assert_eq!(
+                next_link_change(&mut ws).await,
+                (Entity::Repository, repository_id(WIDGETS).to_string())
+            );
+            assert_eq!(
+                next_link_change(&mut ws).await,
+                (Entity::Workspace, web.id.to_string())
+            );
+        }
+
+        #[tokio::test]
+        async fn should_answer_404_for_a_workspace_that_does_not_exist_and_store_nothing() {
+            let daemon = TestDaemon::start().await;
+            let gone = workspace(&daemon.client, "gone").await;
+            (daemon.client.workspace_delete())
+                .id(gone.id)
+                .send()
+                .await
+                .expect("delete");
+
+            let (status, error) = error_response(
+                (daemon.client.link_create())
+                    .id(gone.id)
+                    .body(held_link(RestRepo::new(WIDGETS), WIDGETS))
+                    .send()
+                    .await,
+            );
+
+            assert_eq!(status, 404);
+            assert_eq!(error.error_code.as_deref(), Some("not_found"));
+            assert_eq!(list(&daemon.client).await, []);
+        }
     }
 
     #[tokio::test]
