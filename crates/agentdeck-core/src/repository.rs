@@ -166,6 +166,23 @@ pub(crate) fn github_path(text: &str) -> Option<&str> {
     Some(&path[..end])
 }
 
+/// A Workspace that links a Repository, as the PR alert mute rule sees it (spec §11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Linking {
+    /// The Workspace is Archived: it counts as linking nothing.
+    pub archived: bool,
+    /// The Workspace is Muted.
+    pub muted: bool,
+}
+
+/// Whether a Pull request alert for a Repository linked by `linking` is muted (spec §11):
+/// only when every unarchived Workspace linking it is Muted. A Repository linked by none, or
+/// only by Archived Workspaces, is Not in a workspace, and its Pull requests always alert.
+pub fn pr_alerts_muted(linking: impl IntoIterator<Item = Linking>) -> bool {
+    let mut unarchived = linking.into_iter().filter(|w| !w.archived).peekable();
+    unarchived.peek().is_some() && unarchived.all(|w| w.muted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,6 +297,39 @@ mod tests {
 
             assert_eq!(json, "1296269");
             assert_eq!(serde_json::from_str::<RepositoryId>(&json).unwrap(), id);
+        }
+    }
+
+    mod pr_alerts_muted {
+        use super::*;
+
+        fn linking(archived: bool, muted: bool) -> Linking {
+            Linking { archived, muted }
+        }
+
+        #[test]
+        fn should_mute_when_every_linking_workspace_is_muted() {
+            assert!(pr_alerts_muted([linking(false, true), linking(false, true)]));
+        }
+
+        #[test]
+        fn should_alert_while_one_linking_workspace_is_unmuted() {
+            assert!(!pr_alerts_muted([linking(false, true), linking(false, false)]));
+        }
+
+        #[test]
+        fn should_alert_for_a_repository_linked_nowhere() {
+            assert!(!pr_alerts_muted([]));
+        }
+
+        #[test]
+        fn should_alert_when_only_archived_muted_workspaces_link_it() {
+            assert!(!pr_alerts_muted([linking(true, true)]));
+        }
+
+        #[test]
+        fn should_leave_archived_workspaces_out_of_the_rule() {
+            assert!(pr_alerts_muted([linking(true, false), linking(false, true)]));
         }
     }
 }

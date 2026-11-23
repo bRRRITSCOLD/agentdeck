@@ -21,6 +21,7 @@ mod panes_client;
 mod prs;
 mod prs_client;
 mod repositories;
+mod repositories_client;
 mod settings;
 mod settings_client;
 mod support;
