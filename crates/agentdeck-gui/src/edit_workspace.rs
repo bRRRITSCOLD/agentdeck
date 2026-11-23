@@ -6,8 +6,9 @@
 //! one request; Cancel discards them, and nothing asks to confirm. Save, and Enter in the name,
 //! go ahead once the name isn't blank and something changed. A blank name, or the daemon's
 //! `invalid_name`, shows under the name; a Repository the daemon can't link shows under the
-//! picker, and any other failure toasts. Once saved it closes and emits [`Saved`]. The slug
-//! stays as it is. An archived workspace can be edited too.
+//! picker, and any other failure toasts. Once saved it closes and emits [`Saved`]; each
+//! Repository it unlinked counts as Not now for the workspace's Suggestions. The slug stays as
+//! it is. An archived workspace can be edited too.
 
 use std::sync::Arc;
 
@@ -26,6 +27,7 @@ use gpui::{
 use gpui_base::input::InputEvent;
 
 use crate::api::{Api, Change};
+use crate::gui_state;
 use crate::link_picker::{LinkPicker, Offer, Staging};
 use crate::workspace::failed;
 
@@ -185,6 +187,7 @@ impl EditWorkspaceDialog {
         };
         let typed = self.name.read(cx).value();
         let (link, unlink) = self.picker.read(cx).change();
+        let unlinked = unlink.clone();
         let change = Change {
             name: new_name(&typed, &target.name).map(str::to_owned),
             link,
@@ -199,6 +202,12 @@ impl EditWorkspaceDialog {
                 this.saving = false;
                 match saved {
                     Ok(()) => {
+                        // An unlink in the GUI counts as Not now for the Workspace's Suggestions.
+                        gui_state::update(cx, |state| {
+                            for repository in unlinked {
+                                state.dismiss(target.id, repository);
+                            }
+                        });
                         this.handle.close(window, cx);
                         cx.emit(Saved(target.id));
                     }
@@ -711,6 +720,49 @@ mod tests {
             assert!(cx.debug_bounds("picker error").is_some());
             assert_eq!(harness.problem(cx), None);
             assert_eq!(harness.rows(cx), [(WIDGETS.to_owned(), Staged::Unlinking)]);
+        }
+
+        #[gpui::test]
+        fn should_count_a_saved_unlink_as_not_now(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(cx);
+            harness.click("unlink acme/widgets", cx);
+
+            harness.save(cx);
+
+            let dismissed = cx.update(|_, cx| {
+                gui_state::read(cx, |s| s.is_dismissed(id(1), repository_id(WIDGETS)))
+            });
+            assert!(dismissed);
+        }
+
+        #[gpui::test]
+        fn should_not_count_an_unlink_cancelled_or_refused(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(cx);
+            harness.click("unlink acme/widgets", cx);
+            harness.api.fail_next("the daemon went away");
+
+            harness.save(cx);
+
+            let dismissed = cx.update(|_, cx| {
+                gui_state::read(cx, |s| s.is_dismissed(id(1), repository_id(WIDGETS)))
+            });
+            assert!(!dismissed);
+        }
+
+        #[gpui::test]
+        fn should_suggest_in_the_picker_what_was_told_not_now(cx: &mut TestAppContext) {
+            let mut snapshot = snapshot();
+            snapshot.suggestions.insert(
+                id(1),
+                vec![crate::overview::fixtures::suggestion("acme/infra")],
+            );
+            cx.update(|cx| {
+                gui_state::update(cx, |s| s.dismiss(id(1), repository_id("acme/infra")))
+            });
+
+            let (_harness, cx) = Harness::open_on(snapshot, true, cx);
+
+            assert!(cx.debug_bounds("suggested acme/infra").is_some());
         }
 
         #[gpui::test]

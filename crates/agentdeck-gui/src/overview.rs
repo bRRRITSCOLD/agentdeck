@@ -6,7 +6,9 @@
 //! a pure function the views render. Live `state` and `exit` messages patch the snapshot's
 //! pane states in place; anything else that changes is read again.
 
-use agentdeck_client::types::{PrSyncStatus, PullRequest, RepositoryLinks, Workspace};
+use std::collections::HashMap;
+
+use agentdeck_client::types::{PrSyncStatus, PullRequest, Repository, RepositoryLinks, Workspace};
 use agentdeck_core::{Agent, AgentState, PaneId, PrState, RepositoryId, WorkspaceId};
 use chrono::{DateTime, Utc};
 use gpui::SharedString;
@@ -41,6 +43,9 @@ pub struct Snapshot {
     /// Every Repository the daemon keeps, with the Workspaces linking it, archived ones
     /// included: what the PR alert mute rule reads (spec §11).
     pub repositories: Vec<RepositoryLinks>,
+    /// Each unarchived Workspace's Suggestions, by name, as the daemon works them out: not
+    /// filtered by what was dismissed (spec §11).
+    pub suggestions: HashMap<WorkspaceId, Vec<Repository>>,
 }
 
 /// A row's counts; a zero hides its count.
@@ -169,6 +174,19 @@ impl Snapshot {
         };
         (self.workspaces.iter())
             .filter(|w| w.archived_at.is_none() && links.workspaces.contains(&w.id))
+            .collect()
+    }
+
+    /// `workspace`'s Suggestions, by name, but for any it links by now: the daemon's next
+    /// word on them may not be read yet. None while it is archived.
+    pub fn suggested(&self, workspace: WorkspaceId) -> Vec<&Repository> {
+        let archived =
+            (self.workspaces.iter()).any(|w| w.id == workspace && w.archived_at.is_some());
+        if archived {
+            return Vec::new();
+        }
+        (self.suggestions.get(&workspace).into_iter().flatten())
+            .filter(|r| !self.links(workspace, r.id))
             .collect()
     }
 
@@ -356,6 +374,18 @@ pub(crate) mod fixtures {
             finished: false,
             updated_at: CREATED.into(),
             url: format!("https://github.com/{repo}/pull/{n}"),
+        }
+    }
+
+    /// Repository `repo` (`owner/name`) as a Suggestion carries it, public, with the id
+    /// [`repository_id`] gives it.
+    pub fn suggestion(repo: &str) -> Repository {
+        Repository {
+            archived: false,
+            id: repository_id(repo),
+            name: repo.parse().expect("owner/name"),
+            private: false,
+            url: format!("https://github.com/{repo}"),
         }
     }
 

@@ -38,6 +38,12 @@
 //! and **Edit workspace**. With no Repository linked it says so, with **Link repository**,
 //! which opens Edit workspace with its "Link a repository…" picker focused.
 //!
+//! Under its header, a Workspace's Pull requests shows its Suggestions in one strip
+//! ([`suggestion_strip`]), but for those dismissed in the GUI's state: **Link** links one at
+//! once by GitHub's id with a toast and Undo, its row going and its group appearing; **Not
+//! now** dismisses it for good. With no Repository linked, the strip sits under Link
+//! repository.
+//!
 //! The Pull requests view's header ends in Select, Show finished, when PRs last synced and
 //! **Sync now**, which runs a full sync and emits
 //! [`Synced`] once done, so the window can have the sidebar read again: a sync that changes no
@@ -53,7 +59,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agentdeck_client::types::{GhLogin, PullRequest};
+use agentdeck_client::types::{GhLogin, PullRequest, Repository};
 use agentdeck_core::{PrState, RepositoryId, WorkspaceId, pr_details, prs_details};
 use brrritscold_core_gpui::{
     ActiveTheme as _, Button, ButtonSize, ButtonVariant, DropdownMenu, DropdownMenuAlign,
@@ -75,6 +81,7 @@ use crate::gui_state;
 use crate::open_pr;
 use crate::overview::Snapshot;
 use crate::pr_table::{self, Linker};
+use crate::suggestion_strip;
 use crate::sync_parts::{self, OpenSettings, SETTINGS_TAIL, cutoff, logged_out_title};
 use crate::table::{self, Header, RowParts, SelectCell};
 use crate::top_bar::{EditWorkspace, LinkRepository};
@@ -347,6 +354,8 @@ pub struct PullRequestsView {
     highlight: Option<(PrKey, bool)>,
     /// Fades the highlight, then takes it off.
     _highlighting: Option<Task<()>>,
+    /// Suggestions linked from the strip, left out until the next snapshot shows the Link.
+    linked_here: BTreeSet<RepositoryId>,
     /// Redraws "Synced N min ago" as time passes.
     _tick: Task<()>,
 }
@@ -390,6 +399,7 @@ impl PullRequestsView {
             reveal_pending: false,
             highlight: None,
             _highlighting: None,
+            linked_here: BTreeSet::new(),
             _tick: tick,
         }
     }
@@ -487,7 +497,79 @@ impl PullRequestsView {
         self.close
             .update(cx, |close, cx| close.saw_closed(closed, cx));
         self.snapshot = snapshot;
+        self.linked_here.clear();
         cx.notify();
+    }
+
+    /// The Suggestions the strip shows: on a Workspace's Pull requests, its Suggestions as last
+    /// read but for those dismissed or just linked from the strip; none on the Pull requests
+    /// view.
+    pub fn suggestions(&self, cx: &App) -> Vec<Repository> {
+        let Scope::Workspace(workspace) = self.scope else {
+            return Vec::new();
+        };
+        gui_state::read(cx, |state| {
+            (self.snapshot.suggested(workspace).into_iter())
+                .filter(|r| !state.is_dismissed(workspace, r.id))
+                .filter(|r| !self.linked_here.contains(&r.id))
+                .cloned()
+                .collect()
+        })
+    }
+
+    /// Links the Workspace to Suggestion `repository` at once by GitHub's id, with a toast and
+    /// Undo ([`group_menu::link`]); its row goes once it is linked.
+    pub fn link_suggestion(
+        &mut self,
+        repository: Repository,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Scope::Workspace(id) = self.scope else {
+            return;
+        };
+        let workspace = Linker {
+            id,
+            name: self.workspace_name().unwrap_or_default(),
+        };
+        let this = cx.entity().downgrade();
+        let linked = repository.id;
+        group_menu::link(
+            self.api.clone(),
+            workspace,
+            repository,
+            move |_, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    this.linked_here.insert(linked);
+                    cx.notify();
+                });
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Not now: leaves `repository` out of the Workspace's Suggestions for good, remembered
+    /// across restarts.
+    pub fn not_now(&mut self, repository: RepositoryId, cx: &mut Context<Self>) {
+        let Scope::Workspace(workspace) = self.scope else {
+            return;
+        };
+        gui_state::update(cx, |state| state.dismiss(workspace, repository));
+        cx.notify();
+    }
+
+    /// The strip of [`Self::suggestions`], if any.
+    fn suggestion_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let this = cx.entity().downgrade();
+        let on_link: suggestion_strip::OnLink = Rc::new(move |repository, window, cx| {
+            let _ = this.update(cx, |this, cx| this.link_suggestion(repository, window, cx));
+        });
+        let this = cx.entity().downgrade();
+        let on_not_now: suggestion_strip::OnNotNow = Rc::new(move |repository, _, cx| {
+            let _ = this.update(cx, |this, cx| this.not_now(repository, cx));
+        });
+        suggestion_strip::strip(&self.suggestions(cx), on_link, on_not_now, cx)
     }
 
     /// The groups shown.
@@ -1036,6 +1118,9 @@ impl Render for PullRequestsView {
             .when_some(banner, |content, title| {
                 content.child(sync_parts::logged_out_banner("pull-requests", title, cx))
             })
+            // Penpot "Workspace · Pull requests · suggestions": the strip under the header,
+            // under Link repository while nothing is linked.
+            .children(self.suggestion_strip(cx))
             .map(|content| {
                 if self.shown.is_empty() && self.scope != Scope::All {
                     // Penpot "Workspace · no repositories": the header says it all.
@@ -1856,6 +1941,288 @@ mod tests {
 
                 assert_eq!((*link.borrow(), *edit.borrow()), (1, 0));
             }
+        }
+    }
+
+    /// The Suggestions strip on a Workspace's Pull requests (spec §11): Link at once with Undo,
+    /// Not now remembered, and the dismissals a GUI unlink records.
+    mod suggestions {
+        use super::*;
+        use crate::overview::fixtures::suggestion;
+
+        /// [`linked`], with `a` suggested website and infra, and `b` gadgets.
+        fn suggesting() -> Snapshot {
+            let mut snapshot = linked();
+            snapshot.suggestions.insert(
+                id(1),
+                vec![suggestion("acme/infra"), suggestion("acme/website")],
+            );
+            snapshot
+                .suggestions
+                .insert(id(2), vec![suggestion("acme/gadgets")]);
+            snapshot
+        }
+
+        fn last_notice(cx: &mut VisualTestContext) -> crate::notice::Notice {
+            cx.update(|_, cx| crate::notice::shown(cx).last().cloned().expect("a toast"))
+        }
+
+        fn dismissed(workspace: u32, repo: &str, cx: &mut VisualTestContext) -> bool {
+            cx.update(|_, cx| {
+                gui_state::read(cx, |state| {
+                    state.is_dismissed(id(workspace), repository_id(repo))
+                })
+            })
+        }
+
+        #[gpui::test]
+        fn should_stack_a_row_per_suggestion_in_one_strip(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open_in(a(), suggesting(), cx);
+
+            let strip = bounds("suggestions".into(), cx);
+            let infra = bounds("suggestion acme/infra".into(), cx);
+            let website = bounds("suggestion acme/website".into(), cx);
+            assert!(strip.contains(&infra.center()) && strip.contains(&website.center()));
+            assert!(
+                infra.bottom() <= website.top(),
+                "in order, one under the other"
+            );
+            assert!(shows("link suggestion acme/infra".into(), cx));
+            assert!(shows("not now acme/website".into(), cx));
+            assert!(!shows("suggestion acme/gadgets".into(), cx), "b's, not a's");
+        }
+
+        #[gpui::test]
+        fn should_sit_under_the_header_over_the_table(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open_in(a(), suggesting(), cx);
+
+            let strip = bounds("suggestions".into(), cx);
+            assert!(bounds("edit workspace".into(), cx).bottom() <= strip.top());
+            assert!(strip.bottom() <= bounds("pull requests table".into(), cx).top());
+        }
+
+        #[gpui::test]
+        fn should_show_one_suggestion_alone(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open_in(Scope::Workspace(id(2)), suggesting(), cx);
+
+            let strip = bounds("suggestions".into(), cx);
+            let row = bounds("suggestion acme/gadgets".into(), cx);
+            assert!(strip.contains(&row.center()));
+            assert!(strip.size.height < row.size.height * 2.);
+        }
+
+        #[gpui::test]
+        fn should_show_none_without_suggestions(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open_in(a(), linked(), cx);
+
+            assert!(!shows("suggestions".into(), cx));
+        }
+
+        #[gpui::test]
+        fn should_show_none_on_the_pull_requests_view(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open(suggesting(), cx);
+
+            assert!(!shows("suggestions".into(), cx));
+        }
+
+        #[gpui::test]
+        fn should_leave_out_what_the_workspace_links_by_now(cx: &mut TestAppContext) {
+            let mut snapshot = suggesting();
+            snapshot.repositories.push(links("acme/infra", &[id(1)]));
+            let (_harness, cx) = Harness::open_in(a(), snapshot, cx);
+
+            assert!(!shows("suggestion acme/infra".into(), cx));
+            assert!(shows("suggestion acme/website".into(), cx));
+        }
+
+        mod link {
+            use super::*;
+
+            #[gpui::test]
+            fn should_link_at_once_by_id_with_a_toast(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open_in(a(), suggesting(), cx);
+
+                click("link suggestion acme/website".into(), cx);
+
+                let links = harness.api.links.lock().unwrap().clone();
+                assert_eq!(links, [(id(1), suggestion("acme/website"))]);
+                assert_eq!(last_notice(cx).title, "Linked acme/website to a");
+                assert!(!shows("suggestion acme/website".into(), cx), "its row goes");
+                assert!(shows("suggestion acme/infra".into(), cx));
+                assert!(!dismissed(1, "acme/website", cx));
+            }
+
+            #[gpui::test]
+            fn should_show_its_group_once_the_link_is_read(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open_in(a(), suggesting(), cx);
+                click("link suggestion acme/website".into(), cx);
+
+                harness.show(harness.api.snapshot_now(), cx);
+
+                assert!(shows("group acme/website".into(), cx));
+                assert!(!shows("suggestion acme/website".into(), cx));
+            }
+
+            #[gpui::test]
+            fn should_unlink_it_on_undo_and_offer_it_again(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open_in(a(), suggesting(), cx);
+                click("link suggestion acme/website".into(), cx);
+
+                let undo = last_notice(cx).action.expect("an Undo");
+                cx.update(|window, cx| undo.run(window, cx));
+                cx.run_until_parked();
+                // The daemon works its Suggestions out again once the Link has gone.
+                harness.show(suggesting(), cx);
+
+                assert_eq!(
+                    *harness.api.unlinks.lock().unwrap(),
+                    [(id(1), repository_id("acme/website"))]
+                );
+                assert!(!dismissed(1, "acme/website", cx), "Undo isn't Not now");
+                assert!(shows("suggestion acme/website".into(), cx));
+            }
+
+            #[gpui::test]
+            fn should_toast_why_a_link_failed_and_keep_the_row(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open_in(a(), suggesting(), cx);
+                harness.api.fail_next("the daemon went away");
+
+                click("link suggestion acme/website".into(), cx);
+
+                assert_eq!(last_notice(cx).title, "Couldn't link acme/website to a");
+                assert!(shows("suggestion acme/website".into(), cx));
+            }
+        }
+
+        mod not_now {
+            use super::*;
+
+            #[gpui::test]
+            fn should_take_the_row_away_for_this_workspace_only(cx: &mut TestAppContext) {
+                let (harness, cx) = Harness::open_in(a(), suggesting(), cx);
+
+                click("not now acme/website".into(), cx);
+
+                assert!(!shows("suggestion acme/website".into(), cx));
+                assert!(shows("suggestion acme/infra".into(), cx));
+                assert!(harness.api.links.lock().unwrap().is_empty());
+                assert!(dismissed(1, "acme/website", cx));
+                assert!(!dismissed(2, "acme/website", cx));
+            }
+
+            #[gpui::test]
+            fn should_be_remembered_across_restarts(cx: &mut TestAppContext) {
+                let dir = tempfile::tempdir().expect("a temp dir");
+                let path = dir.path().join(gui_state::FILE);
+                cx.update(|cx| gui_state::init(Some(path.clone()), cx));
+                let (_harness, window) = Harness::open_in(a(), suggesting(), cx);
+                click("not now acme/website".into(), window);
+
+                // The next start reads the file again.
+                let saved = gui_state::load(&path);
+                assert!(saved.is_dismissed(id(1), repository_id("acme/website")));
+                cx.update(|cx| gui_state::init(Some(path), cx));
+                let (_harness, cx) = Harness::open_in(a(), suggesting(), cx);
+
+                assert!(!shows("suggestion acme/website".into(), cx));
+                assert!(shows("suggestion acme/infra".into(), cx));
+            }
+
+            #[gpui::test]
+            fn should_take_the_strip_away_with_its_last_row(cx: &mut TestAppContext) {
+                let (_harness, cx) = Harness::open_in(Scope::Workspace(id(2)), suggesting(), cx);
+
+                click("not now acme/gadgets".into(), cx);
+
+                assert!(!shows("suggestions".into(), cx));
+            }
+        }
+
+        #[gpui::test]
+        fn should_count_an_unlink_from_the_group_menu_as_not_now(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open_in(a(), linked(), cx);
+
+            click("group menu acme/widgets".into(), cx);
+            cx.simulate_keystrokes("down down down enter");
+            cx.run_until_parked();
+
+            assert!(dismissed(1, "acme/widgets", cx));
+            assert!(!dismissed(2, "acme/widgets", cx));
+        }
+
+        #[gpui::test]
+        fn should_not_count_a_failed_unlink(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open_in(a(), linked(), cx);
+            harness.api.fail_next("the daemon went away");
+
+            click("group menu acme/widgets".into(), cx);
+            cx.simulate_keystrokes("down down down enter");
+            cx.run_until_parked();
+
+            assert!(!dismissed(1, "acme/widgets", cx));
+        }
+
+        mod no_repositories {
+            use super::*;
+
+            /// Workspace `c` (4), linking nothing, suggested website and infra.
+            fn c() -> (Scope, Snapshot) {
+                let mut snapshot = linked();
+                snapshot.workspaces.push(workspace(4, "c"));
+                snapshot.suggestions.insert(
+                    id(4),
+                    vec![suggestion("acme/infra"), suggestion("acme/website")],
+                );
+                (Scope::Workspace(id(4)), snapshot)
+            }
+
+            #[gpui::test]
+            fn should_list_them_under_link_repository(cx: &mut TestAppContext) {
+                let (scope, snapshot) = c();
+                let (harness, cx) = Harness::open_in(scope, snapshot, cx);
+
+                let button = bounds("link repository".into(), cx);
+                let strip = bounds("suggestions".into(), cx);
+                assert!(button.bottom() <= strip.top());
+                assert!(shows("suggestion acme/infra".into(), cx));
+                assert!(shows("suggestion acme/website".into(), cx));
+                let lines = harness.view.read_with(cx, |view, cx| view.description(cx));
+                assert_eq!(lines, NO_REPOSITORIES);
+            }
+
+            #[gpui::test]
+            fn should_leave_out_those_told_not_now(cx: &mut TestAppContext) {
+                let (scope, snapshot) = c();
+                let (_harness, cx) = Harness::open_in(scope, snapshot, cx);
+
+                click("not now acme/infra".into(), cx);
+
+                assert!(!shows("suggestion acme/infra".into(), cx));
+                assert!(shows("suggestion acme/website".into(), cx));
+            }
+
+            #[gpui::test]
+            fn should_link_one_with_link(cx: &mut TestAppContext) {
+                let (scope, snapshot) = c();
+                let (harness, cx) = Harness::open_in(scope, snapshot, cx);
+
+                click("link suggestion acme/infra".into(), cx);
+                harness.show(harness.api.snapshot_now(), cx);
+
+                assert_eq!(last_notice(cx).title, "Linked acme/infra to c");
+                assert!(shows("group acme/infra".into(), cx));
+                assert!(!shows("link repository".into(), cx));
+            }
+        }
+
+        #[gpui::test]
+        fn should_show_none_for_an_archived_workspace(cx: &mut TestAppContext) {
+            let mut snapshot = suggesting();
+            snapshot.workspaces[0].archived_at = Some("2026-11-20T00:00:00Z".into());
+
+            let (_harness, cx) = Harness::open_in(a(), snapshot, cx);
+
+            assert!(!shows("suggestions".into(), cx));
         }
     }
 

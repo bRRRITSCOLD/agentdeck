@@ -456,15 +456,20 @@ async fn panes(client: Client, workspace: WorkspaceId) -> anyhow::Result<Workspa
     Ok(WorkspacePanes { tabs, panes })
 }
 
-/// Reads a [`Snapshot`]: the workspaces, then each live one's tabs and the panes in their
-/// layouts, then PR sync status, the pull requests and the Repositories with the Workspaces
-/// linking each.
+/// Reads a [`Snapshot`]: the workspaces, then each live one's Suggestions, tabs and the panes
+/// in their layouts, then PR sync status, the pull requests and the Repositories with the
+/// Workspaces linking each.
 async fn snapshot(client: Client) -> anyhow::Result<Snapshot> {
     let workspaces = (client.workspace_list().send().await)
         .map_err(ApiError::from)?
         .into_inner();
     let mut panes = Vec::new();
+    let mut suggestions = std::collections::HashMap::new();
     for workspace in workspaces.iter().filter(|w| w.archived_at.is_none()) {
+        suggestions.insert(
+            workspace.id,
+            agentdeck_client::repositories::suggestions(&client, workspace.id).await?,
+        );
         let tabs = client
             .tab_list()
             .id(workspace.id)
@@ -498,6 +503,7 @@ async fn snapshot(client: Client) -> anyhow::Result<Snapshot> {
         ),
         prs: agentdeck_client::prs::list(&client).await?,
         repositories: agentdeck_client::repositories::list(&client).await?,
+        suggestions,
     })
 }
 
@@ -822,6 +828,11 @@ pub(crate) mod fake {
                 if unlink.contains(&repository.id) {
                     repository.workspaces.retain(|w| *w != workspace);
                 }
+            }
+            if let Some(suggested) = snapshot.suggestions.get_mut(&workspace) {
+                suggested.retain(|r| {
+                    !(link.iter()).any(|n| n.to_string().eq_ignore_ascii_case(&r.name.to_string()))
+                });
             }
             let prs = snapshot.prs.clone();
             snapshot.repositories.retain(|repository| {
@@ -1177,6 +1188,9 @@ pub(crate) mod fake {
             let held = (snapshot.repositories.iter_mut()).find(|r| r.id == repository.id);
             if let Some(held) = held.filter(|r| !r.workspaces.contains(&workspace)) {
                 held.workspaces.push(workspace);
+            }
+            if let Some(suggested) = snapshot.suggestions.get_mut(&workspace) {
+                suggested.retain(|r| r.id != repository.id);
             }
             Task::ready(Ok(()))
         }
