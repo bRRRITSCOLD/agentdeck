@@ -43,9 +43,11 @@ pub struct Header {
     pub min_width: Pixels,
 }
 
-/// [`table`] for any columns: `header` over `rows`, `list`'s rows, as wide as the area allows
-/// and never narrower than its `min_width`, with the list's scrollbar just right of the area.
-/// Each frame tells `on_width` the area's width.
+/// A table: `header` over `rows`, `list`'s rows, as wide as the area allows and never narrower
+/// than its `min_width`, which a narrower area scrolls sideways, by a sideways wheel only. The
+/// list's scrollbar sits just right of the area, in the content's padding and outside that
+/// scroll, so it stays in view at any width; the header's unseen `ghost` keeps it level with the
+/// list. Each frame tells `on_width` the area's width.
 pub fn table_of(
     id: &'static str,
     selector: &'static str,
@@ -276,8 +278,9 @@ fn checks_mark(state: ChecksState) -> (UiChecksState, &'static str) {
     }
 }
 
-/// Penpot `Checks`: the icon and its word, as a PR row shows its checks. Running checks are drawn still, as a working agent's mark is
-/// ([`state_dot::mark`]).
+/// Penpot `Checks`: the icon and its word, as a PR row shows its checks. Running checks are
+/// drawn still, as a working agent's mark is
+/// ([`state_dot::mark`](crate::state_dot::mark)).
 pub fn checks(state: ChecksState) -> Checks {
     let (mark, word) = checks_mark(state);
     Checks::new(mark).label(word).spin(false)
