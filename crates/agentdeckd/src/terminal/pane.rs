@@ -15,6 +15,12 @@
 //! When the process exits, or the agent a shell pane hosts leaves the foreground, the pane
 //! turns off the terminal modes a killed program leaves on ([`reset_modes`]).
 //!
+//! A pane knows its current folder ([`Pane::refresh_folder`], spec §6): the folder its shell
+//! last reported with OSC 7, else its process's working directory from `/proc/<pid>/cwd`, else
+//! the one it last knew, which starts as the folder it launched in. It reads it again on the
+//! state timer's tick after it printed, at most once every [`FOLDER_EVERY`] while it keeps
+//! printing (a `cd` ends with a prompt), never while it is quiet; and whenever the daemon asks.
+//!
 //! Everything a chunk of output touches (the `Term`, the tail, the OSC scanner, the attached
 //! clients' queues) changes under one lock, [`Pane::live`]. An attach snapshots the `Term`
 //! and subscribes under that same lock, so no output falls between the snapshot and the live
@@ -27,11 +33,13 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use agentdeck_core::state::osc::file_uri;
 use agentdeck_core::state::{
     Foreground, LastOutput, Observation, OscScanner, RuleSet, StateTracker, hosted_agent, screen,
 };
@@ -59,7 +67,7 @@ use crate::events::Events;
 pub struct Launch {
     /// The program and its arguments; `argv[0]` is looked up on the env's `PATH`.
     pub argv: Vec<String>,
-    /// The working directory; it must exist.
+    /// The working directory; it must exist. The pane's folder until it moves.
     pub cwd: PathBuf,
     /// The whole environment: nothing else is inherited. Build it with
     /// [`pane_env`].
@@ -146,7 +154,12 @@ pub struct Observed {
     pub state: Option<(AgentState, String)>,
     /// The agent the shell pane hosts now, when that changed.
     pub hosted: Option<Option<Agent>>,
+    /// The pane's current folder, when it moved since it was last read.
+    pub folder: Option<PathBuf>,
 }
+
+/// How often, at most, a pane that keeps printing has its folder read again (spec §6).
+const FOLDER_EVERY: Duration = Duration::from_secs(1);
 
 /// When `input` reaches the PTY.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -300,10 +313,21 @@ pub struct Status {
     pub hosted: Option<Agent>,
 }
 
-/// Called once when the pane's process exits, with its exit code and last title, before the
-/// pane reads as exited: the daemon saves the exit in it, so nothing sees `exited` before the
-/// pane's row says so (spec §7).
-pub type OnExit = Box<dyn FnOnce(PaneId, Option<i64>, String) + Send>;
+/// How a pane's process ended, for the daemon to save.
+#[derive(Debug)]
+pub struct Ended {
+    /// Its exit code, when it could be read.
+    pub code: Option<i64>,
+    /// The title it last set.
+    pub title: String,
+    /// Its current folder, when its last OSC 7 moved it since it was last read.
+    pub folder: Option<PathBuf>,
+}
+
+/// Called once when the pane's process exits, with how it ended, before the pane reads as
+/// exited: the daemon saves the exit in it, so nothing sees `exited` before the pane's row
+/// says so (spec §7).
+pub type OnExit = Box<dyn FnOnce(PaneId, Ended) + Send>;
 
 /// A live pane.
 pub struct Pane {
@@ -319,6 +343,8 @@ pub struct Pane {
     /// Whether [`Pane::stop`] signalled the pane's own process, so its exit is no failed
     /// resume to start afresh from (spec §6).
     stopped: AtomicBool,
+    /// Whether its process has been waited for, after which its pid may name another process.
+    reaped: AtomicBool,
 }
 
 /// Everything one chunk of output changes, behind [`Pane::live`].
@@ -340,6 +366,12 @@ struct Live {
     task: Option<TaskId>,
     exit_code: Option<i64>,
     fanout: Fanout,
+    /// The last known folder (spec §6).
+    folder: PathBuf,
+    /// Whether it printed since its folder was last read on a tick.
+    folder_due: bool,
+    /// When its folder was last read on a tick, on the daemon's clock.
+    folder_read_at: Option<Duration>,
 }
 
 /// Hands the `Term`'s events (titles, query answers) back to the pane after each chunk.
@@ -422,6 +454,9 @@ impl Pane {
                 task: launch.task,
                 exit_code: None,
                 fanout: Fanout::default(),
+                folder: launch.cwd.clone(),
+                folder_due: false,
+                folder_read_at: None,
             }),
             master: Mutex::new(pair.master),
             input,
@@ -429,6 +464,7 @@ impl Pane {
             events,
             started: Instant::now(),
             stopped: AtomicBool::new(false),
+            reaped: AtomicBool::new(false),
         });
 
         let thread = |role: &str| std::thread::Builder::new().name(format!("pane-{role}-{id}"));
@@ -473,6 +509,7 @@ impl Pane {
                     .wait()
                     .ok()
                     .map(|status| i64::from(status.exit_code()));
+                waiting.reaped.store(true, Ordering::SeqCst);
                 // A reader that ended without saying so is done reading too.
                 let held = matches!(
                     pty_closed.recv_timeout(EXIT_GRACE),
@@ -526,6 +563,7 @@ impl Pane {
         }
         live.tail.push(bytes);
         live.osc.feed(bytes);
+        live.folder_due = true;
         live.parser.advance(&mut live.term, bytes);
         live.last_output.printed(self.started.elapsed());
         live.fanout.output(bytes);
@@ -558,8 +596,17 @@ impl Pane {
     /// on, publishes `exited` and `exit` and drops queued input. `on_exit` runs outside the
     /// lock, since it waits on the database.
     fn exit(&self, code: Option<i64>, on_exit: OnExit) {
-        let title = self.live().title.clone();
-        on_exit(self.id, code, title);
+        let ended = {
+            let mut live = self.live();
+            // The process is gone, so only its last OSC 7 can have moved it.
+            let folder = self.moved(&mut live, false);
+            Ended {
+                code,
+                title: live.title.clone(),
+                folder,
+            }
+        };
+        on_exit(self.id, ended);
         let mut live = self.live();
         reset_modes(&mut live);
         live.queued.clear();
@@ -589,13 +636,16 @@ impl Pane {
         let leader = self.master().process_group_leader();
         let foreground = leader.and_then(foreground);
         let mut live = self.live();
+        let mut observed = Observed {
+            folder: self.folder_on_tick(&mut live, now),
+            ..Observed::default()
+        };
         if live.hosting.is_some()
             && let Some(leader) = leader
         {
             // The shell leads its own process group: it is in front when no command is.
             live.last_output.shell_in_front(Some(leader) == self.pid);
         }
-        let mut observed = Observed::default();
         if let Some(hosted) = foreground
             .as_ref()
             .and_then(|fg| self.rehost(&mut live, fg))
@@ -629,6 +679,44 @@ impl Pane {
         }
         observed.state = Some((state, live.title.clone()));
         observed
+    }
+
+    /// Reads the folder again on a tick at `now` if the pane printed since the last read, at
+    /// most once every [`FOLDER_EVERY`]; returns it when it moved.
+    fn folder_on_tick(&self, live: &mut Live, now: Duration) -> Option<PathBuf> {
+        let rested = (live.folder_read_at).is_none_or(|at| now.saturating_sub(at) >= FOLDER_EVERY);
+        if !live.folder_due || !rested {
+            return None;
+        }
+        live.folder_due = false;
+        live.folder_read_at = Some(now);
+        self.moved(live, true)
+    }
+
+    /// Reads the pane's current folder now (spec §6) and returns it when it moved since it was
+    /// last read; the pane knows it from then on.
+    pub fn refresh_folder(&self) -> Option<PathBuf> {
+        let mut live = self.live();
+        self.moved(&mut live, true)
+    }
+
+    /// The pane's last known folder.
+    pub fn folder(&self) -> PathBuf {
+        self.live().folder.clone()
+    }
+
+    /// The pane's current folder, when it differs from the last known one, which it becomes.
+    /// The folder its shell last reported with OSC 7 wins; else, with `proc` and while its
+    /// process runs, its working directory from `/proc/<pid>/cwd`; else it hasn't moved.
+    fn moved(&self, live: &mut Live, proc: bool) -> Option<PathBuf> {
+        let reported = (live.osc.reported_cwd()).and_then(|uri| file_uri(uri, this_host()));
+        let running = proc && !self.reaped.load(Ordering::SeqCst);
+        let current = reported.or_else(|| self.pid.filter(|_| running).and_then(process_cwd))?;
+        if current == live.folder {
+            return None;
+        }
+        live.folder = current.clone();
+        Some(current)
     }
 
     /// Hosts the agent `foreground` is, if that changed: switches to its rules (or back to
@@ -940,6 +1028,28 @@ fn foreground(leader: i32) -> Option<Foreground> {
     })
 }
 
+/// Process `pid`'s working directory, from `/proc`: `None` once it can't be read. A directory
+/// removed since reads as its old path.
+fn process_cwd(pid: i32) -> Option<PathBuf> {
+    let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
+    let removed = cwd
+        .to_str()
+        .and_then(|text| text.strip_suffix(" (deleted)"));
+    Some(removed.map_or_else(|| cwd.clone(), PathBuf::from))
+}
+
+/// This machine's hostname, read once, which an OSC 7 URI from a shell here may name.
+fn this_host() -> Option<&'static str> {
+    static HOST: OnceLock<Option<String>> = OnceLock::new();
+    HOST.get_or_init(|| {
+        std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .ok()
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty())
+    })
+    .as_deref()
+}
+
 /// How long the waiter gives the reader to reach the end of the output once the process has
 /// exited, before it records the exit and hangs up on what still holds the PTY; and how long
 /// it then gives that SIGHUP before it kills what still holds the PTY (spec §7).
@@ -1116,8 +1226,8 @@ mod integration_tests {
             let mut feed = events.subscribe();
             let (exited, on_exit_called) = channel();
             let (release, released) = channel::<()>();
-            let on_exit: OnExit = Box::new(move |_, code, _| {
-                exited.send(code).expect("the test waits for on_exit");
+            let on_exit: OnExit = Box::new(move |_, ended: Ended| {
+                exited.send(ended.code).expect("the test waits for on_exit");
                 released.recv().expect("the test releases on_exit");
             });
             let id = uuid::Uuid::now_v7().into();

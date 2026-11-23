@@ -1,7 +1,10 @@
 //! What a program can send besides its title that `alacritty_terminal` ignores: OSC 9;4
 //! progress and OSC 7501 program status, for the agent state, and the OSC 7 working directory,
-//! for the attach snapshot. [`OscScanner`] reads them from the raw output and keeps the latest
-//! of each.
+//! for the attach snapshot and a Pane's current folder. [`OscScanner`] reads them from the raw
+//! output and keeps the latest of each; [`file_uri`] reads the local path an OSC 7 (or OSC 8)
+//! `file://` URI names.
+
+use std::path::PathBuf;
 
 use crate::text_enum::text_enum;
 
@@ -122,6 +125,49 @@ fn progress_from_code(code: &[u8]) -> Option<Progress> {
     })
 }
 
+/// The local path a `file://` URI names, when its host is empty, `localhost` or `host` (this
+/// machine); `None` for another host or another scheme. A shell reports its folder with OSC 7
+/// as such a URI, percent-encoded.
+pub fn file_uri(uri: &str, host: Option<&str>) -> Option<PathBuf> {
+    let (scheme, rest) = uri.split_once(':')?;
+    let rest = rest.strip_prefix("//")?;
+    if !scheme.eq_ignore_ascii_case("file") {
+        return None;
+    }
+    let (authority, path) = rest.split_at(rest.find('/')?);
+    let local = authority.is_empty()
+        || authority.eq_ignore_ascii_case("localhost")
+        || host.is_some_and(|host| authority.eq_ignore_ascii_case(host));
+    if !local {
+        return None;
+    }
+    let path = path.split(['#', '?']).next()?;
+    String::from_utf8(percent_decode(path))
+        .ok()
+        .map(PathBuf::from)
+}
+
+/// `text` with each `%XX` turned into its byte; a `%` not followed by two hex digits is kept.
+fn percent_decode(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |at: usize| bytes.get(at).and_then(|b| (*b as char).to_digit(16));
+        match (bytes[i], hex(i + 1), hex(i + 2)) {
+            (b'%', Some(high), Some(low)) => {
+                decoded.push((high * 16 + low) as u8);
+                i += 3;
+            }
+            (byte, _, _) => {
+                decoded.push(byte);
+                i += 1;
+            }
+        }
+    }
+    decoded
+}
+
 /// The `state=` value of an OSC 7501 field list (`key=value` pairs joined by `:`).
 fn program_state_field(fields: &[u8]) -> Option<&str> {
     std::str::from_utf8(fields)
@@ -140,6 +186,47 @@ mod tests {
             scanner.feed(chunk);
         }
         scanner
+    }
+
+    mod file_uri {
+        use super::*;
+
+        #[test]
+        fn should_take_an_empty_host_localhost_or_this_host() {
+            for uri in [
+                "file:///etc/hosts",
+                "file://localhost/etc/hosts",
+                "file://Box/etc/hosts",
+                "FILE:///etc/hosts",
+            ] {
+                assert_eq!(
+                    file_uri(uri, Some("box")),
+                    Some("/etc/hosts".into()),
+                    "{uri}"
+                );
+            }
+        }
+
+        #[test]
+        fn should_refuse_another_host() {
+            assert_eq!(file_uri("file://elsewhere/etc/hosts", Some("box")), None);
+            assert_eq!(file_uri("file://elsewhere/etc/hosts", None), None);
+        }
+
+        #[test]
+        fn should_decode_percent_escapes_and_drop_a_fragment() {
+            assert_eq!(
+                file_uri("file:///w/my%20notes.md#top", None),
+                Some("/w/my notes.md".into())
+            );
+        }
+
+        #[test]
+        fn should_refuse_another_scheme_or_no_path() {
+            for uri in ["https://box/etc/hosts", "file://box", "file:", "/etc/hosts"] {
+                assert_eq!(file_uri(uri, Some("box")), None, "{uri}");
+            }
+        }
     }
 
     mod osc_scanner {

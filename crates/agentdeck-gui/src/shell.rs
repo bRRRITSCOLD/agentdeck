@@ -673,8 +673,8 @@ impl Shell {
         }
     }
 
-    /// Opens the new agent dialog on `workspace`, offering its root and the repos in it, with
-    /// `task` picked.
+    /// Opens the new agent dialog on `workspace`, offering the focused pane's folder while the
+    /// workspace is shown, its root and the repos in it, with `task` picked.
     fn open_new_agent(
         &mut self,
         workspace: WorkspaceId,
@@ -689,12 +689,20 @@ impl Shell {
         let Some(row) = (sidebar.overview().workspaces.iter()).find(|w| w.id == workspace) else {
             return;
         };
+        // Where a new pane in the workspace starts, while it is shown (spec §11).
+        let shown = (self.workspace.as_ref()).filter(|view| view.read(cx).workspace() == workspace);
+        let folder = shown.map_or_else(
+            || row.dir.to_string(),
+            |view| view.read(cx).new_pane_folder(window, cx),
+        );
         let target = Target {
             id: row.id,
             name: row.name.clone(),
-            dir: row.dir.clone(),
+            folder: folder.clone().into(),
         };
-        let folders = new_agent::folders(&row.dir, new_agent::repos_in(&row.dir));
+        let home = std::env::home_dir();
+        let repos = new_agent::repos_in(&row.dir);
+        let folders = new_agent::folders(&row.dir, repos, &folder, home.as_deref());
         let snapshot = sidebar.snapshot().clone();
         dialog.update(cx, |dialog, cx| {
             dialog.open(target, folders, snapshot, window, cx);
@@ -1386,6 +1394,31 @@ mod tests {
 
                 let dialog = shell.read_with(cx, |shell, _| shell.new_agent.clone().unwrap());
                 assert!(dialog.read_with(cx, |d, _| d.is_open()));
+            }
+
+            #[gpui::test]
+            fn should_start_the_new_agent_in_the_focused_panes_folder(cx: &mut TestAppContext) {
+                let connector = Rc::new(FakeConnector::default());
+                let api = workspace_with_a_pane();
+                api.set_panes(vec![agentdeck_client::types::Pane {
+                    folder: "/srv/notes".into(),
+                    ..crate::pane::fixtures::shell_pane(7, id(1))
+                }]);
+                let _remote = connector.then_connect_to(api);
+                let shell = open(connector, cx);
+                let window = cx.windows()[0];
+
+                window
+                    .update(cx, |_, window, cx| {
+                        window.dispatch_action(Box::new(NewAgent), cx)
+                    })
+                    .unwrap();
+                cx.run_until_parked();
+
+                let dialog = shell.read_with(cx, |shell, _| shell.new_agent.clone().unwrap());
+                let (folder, offered) = dialog.read_with(cx, |d, _| d.folders());
+                assert_eq!(folder, "/srv/notes");
+                assert_eq!(offered[0].path, "/srv/notes");
             }
 
             #[gpui::test]

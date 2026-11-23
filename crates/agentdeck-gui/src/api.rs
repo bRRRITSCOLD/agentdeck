@@ -947,9 +947,10 @@ pub(crate) mod fake {
             crate::overview::fixtures::id(100 + *made)
         }
 
-        /// Adds a shell pane in `tab`, unplaced.
+        /// Adds a shell pane in `tab`, unplaced, in `cwd`.
         fn spawn_shell(&self, tab: TabId, cwd: String) -> PaneId {
             let pane = Pane {
+                folder: cwd.clone(),
                 cwd,
                 ..crate::pane::fixtures::shell_pane(0, tab)
             };

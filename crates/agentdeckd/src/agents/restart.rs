@@ -92,13 +92,14 @@ impl Restarter {
             Respawn::Again(agent, argv) => (Some(agent), argv),
         };
         let shell = agent.is_none().then(|| argv.clone());
+        let folder = cwd.to_string_lossy().into_owned();
         let (pane, workspace) = self
             .db
             .call(move |c| {
                 if let Some(shell) = shell {
                     db::panes::become_shell(c, id, &shell)?;
                 }
-                db::panes::respawned(c, id, None)?;
+                db::panes::respawned(c, id, &folder, None)?;
                 Ok((db::panes::get(c, id)?, db::panes::workspace_of(c, id)?))
             })
             .await?;
@@ -117,6 +118,7 @@ impl Restarter {
     /// new launch prompt, whose comments are then marked delivered to it.
     async fn fresh(&self, id: PaneId, agent: Agent, cwd: PathBuf) -> Result<Pane, RestartError> {
         let claims = self.claims.clone();
+        let folder = cwd.to_string_lossy().into_owned();
         let (pane, workspace, argv, prompted) = self
             .db
             .call(move |c| {
@@ -134,7 +136,7 @@ impl Restarter {
                 let prompt = launch_prompt(task.as_ref(), &instructions, &comments);
                 let launch = launch(agent, prompt).expect("claude and codex launch");
                 let started = (launch.argv.as_slice(), launch.session_id.as_deref());
-                db::panes::respawned(c, id, Some(started))?;
+                db::panes::respawned(c, id, &folder, Some(started))?;
                 Ok((db::panes::get(c, id)?, workspace, launch.argv, comments))
             })
             .await?;

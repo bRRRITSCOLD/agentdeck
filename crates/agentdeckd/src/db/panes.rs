@@ -8,14 +8,17 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use super::{DbError, exists, new_id, now, opt_text, text};
 use crate::model::{NewPane, Pane};
 
-const COLUMNS: &str = "id, tab_id, kind, agent, hosted_agent, argv, cwd, session_id, task_id, \
-                       state, title, exit_code, created_at";
+const COLUMNS: &str = "id, tab_id, kind, agent, hosted_agent, argv, cwd, folder, session_id, \
+                       task_id, state, title, exit_code, created_at";
 
 fn from_row(row: &Row<'_>) -> rusqlite::Result<Pane> {
     let argv: String = row.get("argv")?;
     let argv = serde_json::from_str(&argv).map_err(|err| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, err.into())
     })?;
+    let cwd: String = row.get("cwd")?;
+    // NULL until a read differs from where it started: `cwd` then (spec §3).
+    let folder: Option<String> = row.get("folder")?;
     Ok(Pane {
         id: text(row, "id")?,
         tab_id: text(row, "tab_id")?,
@@ -23,7 +26,8 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Pane> {
         agent: opt_text(row, "agent")?,
         hosted_agent: opt_text(row, "hosted_agent")?,
         argv,
-        cwd: row.get("cwd")?,
+        folder: folder.unwrap_or_else(|| cwd.clone()),
+        cwd,
         session_id: row.get("session_id")?,
         task_id: opt_text(row, "task_id")?,
         state: text(row, "state")?,
@@ -206,6 +210,16 @@ pub fn set_state(
     Ok(())
 }
 
+/// Records pane `id`'s last known folder (spec §6): where it is now, or `None` for the folder
+/// it launched in, `cwd`.
+pub fn set_folder(conn: &Connection, id: PaneId, folder: Option<&str>) -> Result<(), DbError> {
+    conn.execute(
+        "UPDATE panes SET folder = ?2 WHERE id = ?1",
+        params![id.to_string(), folder],
+    )?;
+    Ok(())
+}
+
 /// Records the agent a shell pane hosts now, or `None` once it hosts none (spec §7).
 pub fn set_hosted_agent(
     conn: &Connection,
@@ -269,16 +283,19 @@ pub fn become_shell(conn: &Connection, id: PaneId, argv: &[String]) -> Result<Pa
     get(conn, id)
 }
 
-/// Starts pane `id`'s state over as it is spawned again (spec §4): `unknown`, no exit code,
-/// no hosted agent. A fresh launch passes the `argv` and `session_id` it starts with.
+/// Starts pane `id`'s state over as it is spawned again in `folder` (spec §4): `unknown`, no
+/// exit code, no hosted agent, its last known folder `folder`. A fresh launch passes the
+/// `argv` and `session_id` it starts with.
 pub fn respawned(
     conn: &Connection,
     id: PaneId,
+    folder: &str,
     fresh: Option<(&[String], Option<&str>)>,
 ) -> Result<(), DbError> {
     conn.execute(
-        "UPDATE panes SET state = 'unknown', exit_code = NULL, hosted_agent = NULL WHERE id = ?1",
-        [id.to_string()],
+        "UPDATE panes SET state = 'unknown', exit_code = NULL, hosted_agent = NULL, folder = ?2
+         WHERE id = ?1",
+        params![id.to_string(), folder],
     )?;
     if let Some((argv, session_id)) = fresh {
         conn.execute(
