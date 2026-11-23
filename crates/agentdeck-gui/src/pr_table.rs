@@ -2,8 +2,8 @@
 //! row per pull request and a header per Repository group. A row is Penpot's `TaskRow`
 //! (`wide`) without its status picker: the PR's state icon, its title, its reference, a draft
 //! badge, its checks and review, and its `…` menu. Only the reference is a link, to the PR on
-//! GitHub. A group header is Penpot's `GroupHeader` followed by who links the Repository:
-//! "Not in a workspace" until Links come.
+//! GitHub. A group header is Penpot's `GroupHeader` followed by who links the Repository: each
+//! Workspace by name, a link to its Pull requests, or "Not in a workspace".
 //!
 //! A Finished row is drawn as any other: its state icon shows GitHub's state, merged, closed,
 //! or open for one past the age cutoff (Penpot "Pull requests · show finished").
@@ -17,8 +17,10 @@
 //! The fixed column widths are [`Columns`]'. The table has no column to drop: the window's
 //! least width is derived from it in Select mode, so it fits whole.
 
+use std::rc::Rc;
+
 use agentdeck_client::types::PullRequest;
-use agentdeck_core::PrState;
+use agentdeck_core::{PrState, WorkspaceId};
 use brrritscold_core_gpui::{
     ActiveTheme as _, Badge, BadgeVariant, Icon, IconName, Tooltip, TooltipContent,
 };
@@ -36,7 +38,7 @@ use crate::table::{self, Columns, RowParts, SelectCell, UNREACHABLE};
 pub type OnToggle = Box<dyn Fn(&mut Window, &mut App) + 'static>;
 
 /// What a Repository group's header says in place of the Workspaces linking it, while none
-/// does.
+/// does (archived ones link nothing).
 pub const NOT_IN_A_WORKSPACE: &str = "Not in a workspace";
 
 /// The table's least width: every column, the title at its least, the `space.3` gaps and the
@@ -91,22 +93,72 @@ pub fn columns(select: SelectCell, cx: &App) -> Div {
         .child(table::cell(Columns::MENU))
 }
 
+/// A Workspace linking a group's Repository, as its header names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Linker {
+    /// The Workspace.
+    pub id: WorkspaceId,
+    /// Its name.
+    pub name: SharedString,
+}
+
+/// What a click on a Workspace's name in a group header does: open that Workspace's Pull
+/// requests.
+pub type OnWorkspace = Rc<dyn Fn(WorkspaceId, &mut Window, &mut App) + 'static>;
+
 /// A Repository group's header: Penpot's `GroupHeader` (its `select` in Select mode, a
 /// chevron, `label` and a count badge of its PRs), which runs `on_toggle` when clicked but for
-/// its checkbox, then [`NOT_IN_A_WORKSPACE`] in sm `muted-foreground`, `space.2` after it.
-/// `key` names it: tests find it as `group <key>`, and its workspaces as
-/// `group workspaces <key>`.
+/// its checkbox, then, `space.2` after it in sm `muted-foreground`, who links the Repository:
+/// each Workspace in `workspaces` by name, `·` apart, a link to its Pull requests that runs
+/// `on_workspace` (underlined on hover, as a PR's reference), or [`NOT_IN_A_WORKSPACE`] with
+/// none. `key` names it: tests find it as `group <key>`, its workspaces as
+/// `group workspaces <key>` and each one's link as `workspace link <key> <name>`.
+#[allow(clippy::too_many_arguments)]
 pub fn group_header(
     key: SharedString,
     label: SharedString,
     count: usize,
     collapsed: bool,
     select: SelectCell,
+    workspaces: &[Linker],
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_workspace: OnWorkspace,
     cx: &App,
 ) -> AnyElement {
     let s = cx.theme().semantic();
-    let workspaces = key.clone();
+    let selector = key.clone();
+    let names = div()
+        .debug_selector(move || format!("group workspaces {selector}"))
+        .flex()
+        .min_w_0()
+        .text_size(font_size::SM)
+        .text_color(s.muted_foreground);
+    let names = match workspaces {
+        [] => names.child(NOT_IN_A_WORKSPACE),
+        workspaces => names.children(workspaces.iter().enumerate().flat_map(|(ix, w)| {
+            let id = w.id;
+            let on_workspace = on_workspace.clone();
+            let selector = format!("workspace link {key} {}", w.name);
+            let link = div()
+                .id(SharedString::from(format!("workspace-link-{key}-{id}")))
+                .debug_selector(move || selector)
+                .flex_none()
+                .whitespace_nowrap()
+                .cursor_pointer()
+                .hover(|style| style.underline())
+                .on_click(move |_, window, cx| on_workspace(id, window, cx))
+                .child(w.name.clone())
+                .into_any_element();
+            let dot = (ix > 0).then(|| {
+                div()
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .child("\u{a0}·\u{a0}")
+                    .into_any_element()
+            });
+            dot.into_iter().chain([link])
+        })),
+    };
     div()
         .flex()
         .flex_none()
@@ -115,13 +167,7 @@ pub fn group_header(
         .child(table::group_header(
             key, label, count, collapsed, select, on_toggle, cx,
         ))
-        .child(
-            div()
-                .debug_selector(move || format!("group workspaces {workspaces}"))
-                .text_size(font_size::SM)
-                .text_color(s.muted_foreground)
-                .child(NOT_IN_A_WORKSPACE),
-        )
+        .child(names)
         .into_any_element()
 }
 

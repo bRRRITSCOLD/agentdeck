@@ -7,7 +7,7 @@
 //! pane states in place; anything else that changes is read again.
 
 use agentdeck_client::types::{PrSyncStatus, PullRequest, RepositoryLinks, Workspace};
-use agentdeck_core::{Agent, AgentState, PaneId, PrState, WorkspaceId};
+use agentdeck_core::{Agent, AgentState, PaneId, PrState, RepositoryId, WorkspaceId};
 use chrono::{DateTime, Utc};
 use gpui::SharedString;
 
@@ -64,6 +64,9 @@ pub struct WorkspaceRow {
     pub archived: bool,
     /// Whether its notifications are muted.
     pub muted: bool,
+    /// Its counts: open pull requests in the Repositories it links, as the Pull requests
+    /// view counts them; none while archived, since an archived Workspace links nothing.
+    pub counts: Counts,
 }
 
 /// Where PR sync stands, for the Pull requests view's header.
@@ -157,10 +160,36 @@ impl Snapshot {
         }
     }
 
+    /// The Workspaces linking `repository`, as the views count them (spec §11): Archived ones
+    /// link nothing, so they are left out. In the sidebar's order, oldest first. None means the
+    /// Repository is Not in a workspace.
+    pub fn linking(&self, repository: RepositoryId) -> Vec<&Workspace> {
+        let Some(links) = (self.repositories.iter()).find(|links| links.id == repository) else {
+            return Vec::new();
+        };
+        (self.workspaces.iter())
+            .filter(|w| w.archived_at.is_none() && links.workspaces.contains(&w.id))
+            .collect()
+    }
+
+    /// Whether `workspace` links `repository` and isn't archived.
+    pub fn links(&self, workspace: WorkspaceId, repository: RepositoryId) -> bool {
+        self.linking(repository).iter().any(|w| w.id == workspace)
+    }
+
     /// The sidebar's content.
     pub fn overview(&self) -> Overview {
+        let counted =
+            |pr: &&PullRequest| pr.state == PrState::Open && !pr.unreachable && !pr.finished;
         let row = |workspace: &Workspace| {
             let archived = workspace.archived_at.is_some();
+            let prs = match archived {
+                true => 0,
+                false => (self.prs.iter())
+                    .filter(counted)
+                    .filter(|pr| self.links(workspace.id, pr.repository.id))
+                    .count(),
+            };
             WorkspaceRow {
                 id: workspace.id,
                 name: workspace.name.clone().into(),
@@ -172,6 +201,7 @@ impl Snapshot {
                 ),
                 archived,
                 muted: workspace.muted,
+                counts: Counts { prs },
             }
         };
         let (archived, workspaces): (Vec<_>, Vec<_>) = self
@@ -180,9 +210,7 @@ impl Snapshot {
             .map(row)
             .partition(|row| row.archived);
         let pull_requests = Counts {
-            prs: (self.prs.iter())
-                .filter(|pr| pr.state == PrState::Open && !pr.unreachable && !pr.finished)
-                .count(),
+            prs: self.prs.iter().filter(counted).count(),
         };
         let Some(status) = &self.pr_sync else {
             return Overview {
@@ -501,6 +529,141 @@ mod tests {
                 assert_eq!(name(1).as_deref(), Some("a"));
                 assert_eq!(name(2).as_deref(), Some("old"));
                 assert_eq!(name(3), None);
+            }
+        }
+
+        mod workspace_counts {
+            use super::*;
+
+            fn archived(n: u32, name: &str) -> Workspace {
+                Workspace {
+                    archived_at: Some("2026-11-12T01:00:00Z".into()),
+                    ..workspace(n, name)
+                }
+            }
+
+            /// `a` links widgets and gadgets, `b` links widgets, `old` (archived) links gizmos.
+            fn linked() -> Snapshot {
+                Snapshot {
+                    workspaces: vec![workspace(1, "a"), workspace(2, "b"), archived(3, "old")],
+                    repositories: vec![
+                        links("acme/widgets", &[id(1), id(2)]),
+                        links("acme/gadgets", &[id(1)]),
+                        links("acme/gizmos", &[id(3)]),
+                    ],
+                    ..Snapshot::default()
+                }
+            }
+
+            fn counts(snapshot: &Snapshot) -> Vec<(String, usize)> {
+                let overview = snapshot.overview();
+                (overview.workspaces.iter())
+                    .chain(&overview.archived)
+                    .map(|row| (row.name.to_string(), row.counts.prs))
+                    .collect()
+            }
+
+            #[test]
+            fn should_count_the_open_prs_in_each_workspaces_linked_repositories() {
+                let snapshot = Snapshot {
+                    prs: vec![
+                        pull_request(1, "acme/widgets"),
+                        pull_request(2, "acme/widgets"),
+                        pull_request(3, "acme/gadgets"),
+                        pull_request(4, "acme/elsewhere"),
+                    ],
+                    ..linked()
+                };
+
+                assert_eq!(
+                    counts(&snapshot),
+                    [("a".into(), 3), ("b".into(), 2), ("old".into(), 0)]
+                );
+            }
+
+            #[test]
+            fn should_leave_out_finished_unreachable_and_closed_prs() {
+                let snapshot = Snapshot {
+                    prs: vec![
+                        PullRequest {
+                            draft: true,
+                            ..pull_request(1, "acme/gadgets")
+                        },
+                        PullRequest {
+                            finished: true,
+                            ..pull_request(2, "acme/gadgets")
+                        },
+                        PullRequest {
+                            unreachable: true,
+                            ..pull_request(3, "acme/gadgets")
+                        },
+                        PullRequest {
+                            state: PrState::Merged,
+                            finished: true,
+                            ..pull_request(4, "acme/gadgets")
+                        },
+                    ],
+                    ..linked()
+                };
+
+                assert_eq!(counts(&snapshot)[0], ("a".into(), 1));
+            }
+
+            #[test]
+            fn should_count_nothing_for_an_archived_workspace() {
+                let snapshot = Snapshot {
+                    prs: vec![pull_request(1, "acme/gizmos")],
+                    ..linked()
+                };
+
+                assert_eq!(counts(&snapshot)[2], ("old".into(), 0));
+            }
+        }
+
+        mod linking {
+            use super::*;
+
+            #[test]
+            fn should_list_the_workspaces_linking_a_repository_in_the_sidebars_order() {
+                let snapshot = Snapshot {
+                    workspaces: vec![workspace(1, "a"), workspace(2, "b")],
+                    repositories: vec![links("acme/widgets", &[id(2), id(1)])],
+                    ..Snapshot::default()
+                };
+
+                let names: Vec<_> = (snapshot.linking(repository_id("acme/widgets")).iter())
+                    .map(|w| w.name.clone())
+                    .collect();
+
+                assert_eq!(names, ["a", "b"]);
+            }
+
+            #[test]
+            fn should_count_an_archived_workspace_as_linking_nothing() {
+                let snapshot = Snapshot {
+                    workspaces: vec![
+                        workspace(1, "a"),
+                        Workspace {
+                            archived_at: Some("2026-11-12T01:00:00Z".into()),
+                            ..workspace(2, "old")
+                        },
+                    ],
+                    repositories: vec![
+                        links("acme/widgets", &[id(1), id(2)]),
+                        links("acme/gizmos", &[id(2)]),
+                    ],
+                    ..Snapshot::default()
+                };
+
+                let names = |repo| -> Vec<String> {
+                    (snapshot.linking(repository_id(repo)).iter())
+                        .map(|w| w.name.clone())
+                        .collect()
+                };
+                assert_eq!(names("acme/widgets"), ["a"]);
+                assert!(names("acme/gizmos").is_empty());
+                assert!(names("acme/unknown").is_empty());
+                assert!(!snapshot.links(id(2), repository_id("acme/widgets")));
             }
         }
 

@@ -57,6 +57,9 @@ actions!(
         Paste,
         /// Runs a dialog's primary button: Enter in a dialog with no text field to take it.
         ConfirmDialog,
+        /// Shows the other side of the workspace shown: its Pull requests from its Panes, or
+        /// back.
+        ToggleSide,
     ]
 );
 
@@ -126,6 +129,12 @@ fn bindings(cx: &App) -> Vec<KeyBinding> {
         (
             "secondary-shift-w".into(),
             Box::new(ClosePane),
+            workspace.clone(),
+        ),
+        // p for Pull requests.
+        (
+            "secondary-shift-p".into(),
+            Box::new(ToggleSide),
             workspace.clone(),
         ),
         ("secondary-shift-c".into(), Box::new(Copy), terminal.clone()),
@@ -210,6 +219,7 @@ mod tests {
                 .on_action(self.record(|_: &ClosePane| "close pane".into()))
                 .on_action(self.record(|_: &Copy| "copy".into()))
                 .on_action(self.record(|_: &Paste| "paste".into()))
+                .on_action(self.record(|_: &ToggleSide| "toggle side".into()))
                 .child(focused)
         }
     }
@@ -273,6 +283,12 @@ mod tests {
                 ),
                 ["new tab", "split right", "split down", "close pane"]
             );
+        }
+
+        #[gpui::test]
+        fn should_toggle_a_workspaces_side_on_secondary_shift_p(cx: &mut TestAppContext) {
+            assert_eq!(typed("secondary-shift-p", cx), ["toggle side"]);
+            assert_eq!(typed_in(false, "secondary-shift-p", cx), ["toggle side"]);
         }
 
         #[gpui::test]
