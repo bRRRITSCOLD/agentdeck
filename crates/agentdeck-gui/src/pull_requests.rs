@@ -536,10 +536,19 @@ impl PullRequestsView {
                     .text_size(font_size::SM)
                     .text_color(s.muted_foreground);
                 match line.strip_suffix(SETTINGS_TAIL) {
+                    // The lead wraps in what the header leaves it, "Settings." after its last
+                    // line.
                     Some(lead) => line_div
                         .flex()
-                        .flex_wrap()
-                        .child(SharedString::from(lead.to_owned()))
+                        .items_end()
+                        .child(
+                            div()
+                                .debug_selector(move || {
+                                    format!("pull requests description {ix} lead")
+                                })
+                                .min_w_0()
+                                .child(SharedString::from(lead.to_owned())),
+                        )
                         .child(sync_parts::settings_link("pull-requests", cx))
                         .child(".")
                         .into_any_element(),
@@ -603,13 +612,16 @@ impl PullRequestsView {
                     .child(synced),
             )
             .child(
-                div().flex_none().debug_selector(|| "sync now".into()).child(
-                    Button::new("sync-now")
-                        .variant(ButtonVariant::Outline)
-                        .label("Sync now")
-                        .disabled(self.syncing)
-                        .on_click(cx.listener(|this, _, window, cx| this.sync(window, cx))),
-                ),
+                div()
+                    .flex_none()
+                    .debug_selector(|| "sync now".into())
+                    .child(
+                        Button::new("sync-now")
+                            .variant(ButtonVariant::Outline)
+                            .label("Sync now")
+                            .disabled(self.syncing)
+                            .on_click(cx.listener(|this, _, window, cx| this.sync(window, cx))),
+                    ),
             )
     }
 }
@@ -1582,9 +1594,17 @@ mod tests {
             let synced = bounds("pull requests synced".into(), cx);
             let sync_now = bounds("sync now".into(), cx);
 
-            assert!(description.right() <= select.left(), "{description:?} {select:?}");
+            let lead = bounds("pull requests description 1 lead".into(), cx);
+            assert!(
+                description.right() <= select.left(),
+                "{description:?} {select:?}"
+            );
+            assert!(lead.right() <= select.left(), "{lead:?} {select:?}");
             assert!(synced.right() < sync_now.left(), "{synced:?} {sync_now:?}");
-            assert!(sync_now.right() <= width - space::S6, "{sync_now:?} in {width:?}");
+            assert!(
+                sync_now.right() <= width - space::S6,
+                "{sync_now:?} in {width:?}"
+            );
         }
 
         #[gpui::test]
