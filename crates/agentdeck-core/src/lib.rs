@@ -32,7 +32,9 @@ pub use daemon::{API_VERSION, DaemonInfo};
 pub use id::{PaneId, TabId, WorkspaceId};
 pub use layout::{Layout, LayoutError, Ratio, SplitDirection};
 pub use pane::{Agent, PaneKind};
-pub use pr::{ChecksState, NotAPr, PrRef, PrState, ReviewState, pr_details, prs_details};
+pub use pr::{
+    ChecksState, NotAPr, PrRef, PrState, ReviewState, Yours, pr_details, prs_details, why_yours,
+};
 pub use repository::{Linking, NotARepository, RepositoryId, RepositoryName, pr_alerts_muted};
 pub use state::AgentState;
 pub use text_enum::UnknownValue;

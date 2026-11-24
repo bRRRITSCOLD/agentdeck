@@ -145,6 +145,44 @@ text_enum! {
     }
 }
 
+text_enum! {
+    /// Why a pull request is yours (spec §8): PR sync keeps the ones you authored, the ones
+    /// where your review is requested and the ones assigned to you. One can be yours several
+    /// ways at once, and an open one that is yours no way at all is Finished.
+    pub enum Yours ("why it's yours") {
+        /// You opened it.
+        Authored => "authored",
+        /// Its review requests name you.
+        ReviewRequested => "review_requested",
+        /// Its assignees include you.
+        Assigned => "assigned",
+    }
+}
+
+/// Why a pull request is yours, the signed-in `login`'s (spec §8), in [`Yours::ALL`]'s order,
+/// as GitHub shows it: its `author`'s login (`None` once that account is gone), the logins
+/// its review requests name (a team's request names no login) and its assignees' logins.
+/// Logins match ignoring case, as GitHub's do. Empty when it is none of these.
+pub fn why_yours<'a>(
+    login: &str,
+    author: Option<&str>,
+    requested: impl IntoIterator<Item = &'a str>,
+    assignees: impl IntoIterator<Item = &'a str>,
+) -> Vec<Yours> {
+    let me = |other: &str| other.eq_ignore_ascii_case(login);
+    let authored = author.is_some_and(me);
+    let requested = requested.into_iter().any(me);
+    let assigned = assignees.into_iter().any(me);
+    [
+        (authored, Yours::Authored),
+        (requested, Yours::ReviewRequested),
+        (assigned, Yours::Assigned),
+    ]
+    .into_iter()
+    .filter_map(|(yes, why)| yes.then_some(why))
+    .collect()
+}
+
 /// What **Copy PR details** puts on the clipboard for one pull request (spec §11): three lines
 /// of plain text that also read as markdown. Its reference and title, its GitHub page, then the
 /// branch it merges from and the one it merges into:
@@ -326,6 +364,75 @@ mod tests {
         fn should_use_the_spec_column_values() {
             let texts: Vec<_> = ReviewState::ALL.iter().map(|s| s.as_str()).collect();
             assert_eq!(texts, ["approved", "changes_requested", "review_required"]);
+        }
+    }
+
+    mod yours {
+        use super::*;
+
+        #[test]
+        fn should_use_the_spec_column_values() {
+            let texts: Vec<_> = Yours::ALL.iter().map(|s| s.as_str()).collect();
+            assert_eq!(texts, ["authored", "review_requested", "assigned"]);
+        }
+    }
+
+    mod why_yours {
+        use super::*;
+
+        const NOBODY: [&str; 0] = [];
+
+        #[test]
+        fn should_be_authored_when_you_opened_it() {
+            assert_eq!(
+                why_yours("octocat", Some("octocat"), NOBODY, NOBODY),
+                [Yours::Authored]
+            );
+        }
+
+        #[test]
+        fn should_be_review_requested_when_a_request_names_you() {
+            assert_eq!(
+                why_yours("octocat", Some("hubot"), ["monalisa", "octocat"], NOBODY),
+                [Yours::ReviewRequested]
+            );
+        }
+
+        #[test]
+        fn should_be_assigned_when_you_are_an_assignee() {
+            assert_eq!(
+                why_yours("octocat", Some("hubot"), NOBODY, ["octocat"]),
+                [Yours::Assigned]
+            );
+        }
+
+        #[test]
+        fn should_give_every_way_it_is_yours_in_order() {
+            assert_eq!(
+                why_yours("octocat", Some("octocat"), ["octocat"], ["hubot", "octocat"]),
+                [Yours::Authored, Yours::ReviewRequested, Yours::Assigned]
+            );
+        }
+
+        #[test]
+        fn should_match_logins_ignoring_case() {
+            assert_eq!(
+                why_yours("OctoCat", Some("octocat"), ["OCTOCAT"], ["octoCat"]),
+                [Yours::Authored, Yours::ReviewRequested, Yours::Assigned]
+            );
+        }
+
+        #[test]
+        fn should_be_none_once_your_review_and_assignment_are_gone() {
+            assert_eq!(
+                why_yours("octocat", Some("hubot"), ["monalisa"], ["hubot"]),
+                []
+            );
+        }
+
+        #[test]
+        fn should_not_be_authored_when_its_authors_account_is_gone() {
+            assert_eq!(why_yours("octocat", None, NOBODY, NOBODY), []);
         }
     }
 }
