@@ -42,8 +42,8 @@ use brrritscold_core_gpui::{
     ActiveTheme as _, Alert, AlertAction, AlertDescription, AlertDialog, AlertDialogAction,
     AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter,
     AlertDialogHeader, AlertDialogTitle, AlertTitle, AlertVariant, Button, ButtonSize,
-    ButtonVariant, Checkbox, DialogHandle, Field, FieldContent, FieldOrientation, IconName, Label,
-    Separator, SeparatorOrientation,
+    ButtonVariant, Checkbox, DialogHandle, Field, FieldContent, FieldLabel, FieldOrientation,
+    IconName, Separator, SeparatorOrientation,
 };
 use brrritscold_core_gpui_tokens::primitive::space;
 use futures_util::future::{self, Either};
@@ -305,7 +305,7 @@ impl Shell {
                         .id(SharedString::from(format!("{id}-label")))
                         .cursor_pointer()
                         .on_click(move |_, _, cx| tick_label(!on, cx))
-                        .child(Label::new().child(label)),
+                        .child(FieldLabel::new().child(label)),
                 ),
             )
     }
@@ -3547,6 +3547,28 @@ mod tests {
 
             let ticked = harness.shell.read_with(cx, |shell, _| shell.stop_agents);
             assert!(ticked);
+        }
+
+        /// Penpot "Quit · agents running" (#288): each option is a Field whose label is a
+        /// `Field/Label`, core-react's FieldLabel (`leading-snug`, 19.25px), the options
+        /// `space.3` apart and `space.6` above the buttons. Each top is as core-react lays
+        /// it out, within the pixel GPUI snaps to; Penpot draws each label 20px tall, so its
+        /// lines sit 0.75px lower per option (32 and 76).
+        #[gpui::test]
+        fn should_space_the_options_and_buttons_by_their_field_labels(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(daemon(vec![agent(1)], true), cx);
+            harness.press_quit(cx);
+            let top = |selector: &'static str, cx: &mut VisualTestContext| {
+                let at = cx.debug_bounds(selector);
+                f32::from(at.unwrap_or_else(|| panic!("{selector} shown")).top())
+            };
+
+            let dont_ask = top("quit dont ask again", cx);
+            let stop = top("quit stop agents", cx) - dont_ask;
+            let buttons = top("quit confirm", cx) - dont_ask;
+
+            assert!((stop - 31.25).abs() <= 1., "Stop the agents {stop}px down");
+            assert!((buttons - 74.5).abs() <= 1., "the buttons {buttons}px down");
         }
 
         #[gpui::test]

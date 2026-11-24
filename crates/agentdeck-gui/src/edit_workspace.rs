@@ -16,7 +16,7 @@ use agentdeck_client::ApiError;
 use agentdeck_core::WorkspaceId;
 use brrritscold_core_gpui::{
     Button, ButtonVariant, Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter,
-    DialogHandle, DialogHeader, DialogTitle, Field, FieldError, Input, InputState, Label,
+    DialogHandle, DialogHeader, DialogTitle, Field, FieldError, FieldLabel, Input, InputState,
 };
 use brrritscold_core_gpui_tokens::primitive::space;
 use gpui::prelude::FluentBuilder as _;
@@ -239,11 +239,17 @@ impl EditWorkspaceDialog {
             .flex_col()
             .gap(space::S4)
             .child(
-                Field::new().child(Label::new().child("Name")).child(
-                    div()
-                        .debug_selector(|| "edit workspace name".into())
-                        .child(Input::new(&self.name).aria_invalid(problem.is_some())),
-                ),
+                Field::new()
+                    .child(
+                        div()
+                            .debug_selector(|| "edit workspace name label".into())
+                            .child(FieldLabel::new().child("Name")),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "edit workspace name".into())
+                            .child(Input::new(&self.name).aria_invalid(problem.is_some())),
+                    ),
             )
             .when_some(problem, |form, why| {
                 form.child(
@@ -626,6 +632,55 @@ mod tests {
             cx.simulate_input("terminal");
             harness.save(cx);
             assert_eq!(harness.renames(), [(id(2), "terminal".to_owned())]);
+        }
+    }
+
+    /// Where the form's lines sit (#405), against Penpot "Screens · Dialogs" → "Edit
+    /// workspace": each line's top below the Name label's top, as core-react lays it out,
+    /// within the pixel GPUI snaps to. Penpot draws each `leading-snug` label 20px tall
+    /// where code has 19.25, so its lines sit 0.75px lower (input 32, rows 106). The
+    /// header above is core-gpui's, and the test platform's text widths wrap its
+    /// description differently, so the form is measured from its own first line.
+    mod layout {
+        use super::*;
+
+        /// The Name input's top: the label is a `Field/Label`, core-react's FieldLabel
+        /// (`leading-snug`, 19.25px), then the Field's `gap-3`.
+        const NAME_INPUT: f32 = 31.25;
+        /// The linked rows' top: the 36px input, the form's `space.4`, the Repositories
+        /// label (a plain `Label`, `leading-none`, 14px), then the picker's `space.2`.
+        const REPOSITORY_ROWS: f32 = 105.25;
+
+        fn assert_below_the_name_label(
+            selector: &'static str,
+            expected: f32,
+            cx: &mut VisualTestContext,
+        ) {
+            let label = cx
+                .debug_bounds("edit workspace name label")
+                .expect("the Name label");
+            let at = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} shown"));
+            let app = f32::from(at.top() - label.top());
+            assert!(
+                (app - expected).abs() <= 1.,
+                "{selector}: {app}px below the Name label's top, expected {expected}px"
+            );
+        }
+
+        #[gpui::test]
+        fn should_place_the_name_input_under_a_field_label(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open(cx);
+
+            assert_below_the_name_label("edit workspace name", NAME_INPUT, cx);
+        }
+
+        #[gpui::test]
+        fn should_place_the_repositories_under_the_name_field(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open(cx);
+
+            assert_below_the_name_label("repository rows", REPOSITORY_ROWS, cx);
         }
     }
 
