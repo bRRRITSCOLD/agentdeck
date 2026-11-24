@@ -2897,11 +2897,12 @@ mod repositories_by_id {
         let mut listing = mock_search(&github, TOKEN, &[Pr::open(7)]);
         let daemon = full_daemon(&github, Some(TOKEN)).await;
         sync(&daemon.client).await;
+        link(&daemon.client, &github).await;
 
         listing.delete();
         mock_search(&github, TOKEN, &[]);
         mock_hidden(&github, TOKEN, &Pr::open(7));
-        mock_rest_repo_by_id_missing(&github, widgets_id());
+        let by_id = mock_rest_repo_by_id_missing(&github, widgets_id());
         sync(&daemon.client).await;
 
         let pr = pr_numbered(&daemon.client, 7).await;
@@ -2909,6 +2910,8 @@ mod repositories_by_id {
         assert_eq!(pr.state, PrState::Open);
         let repositories = repositories(&daemon.client).await;
         assert_eq!(names_and_marks(&repositories), [(WIDGETS.to_owned(), true)]);
+        // Read once: as its PR's Repository, not again as a linked one.
+        by_id.assert_calls(1);
     }
 
     /// Each Repository's name and whether it is Unreachable.

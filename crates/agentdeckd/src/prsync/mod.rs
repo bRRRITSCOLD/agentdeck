@@ -635,8 +635,8 @@ impl PrSync {
             .partition(|pr| older_than(&pr.updated_at, cutoff));
         self.finish_aged(aged.iter().map(RemotePr::key).collect())
             .await?;
-        // The Repositories GitHub showed this sync, with a PR in the list or a search (the
-        // details fetched are theirs), then with a PR fetched or by id.
+        // The Repositories this sync has read: GitHub showed them with a PR in the list or a
+        // search (the details fetched are theirs), then with a PR fetched, or was asked by id.
         let mut read: BTreeSet<RepositoryId> =
             (tally.seen.iter()).map(|pr| pr.repository).collect();
         let left = self.fetch_left(token, &left, &mut read).await?;
@@ -650,7 +650,7 @@ impl PrSync {
     /// asked (none, or another Repository's: its name was taken after a rename agentdeck
     /// hadn't seen). One GitHub shows under a new name is stored so, and those PRs are fetched
     /// again under it; one it doesn't show is marked Unreachable, and they are missing. Adds
-    /// every Repository GitHub showed to `read`.
+    /// every Repository GitHub showed, or was asked about by id, to `read`.
     async fn fetch_left(
         &self,
         token: &str,
@@ -691,8 +691,8 @@ impl PrSync {
         Ok(fetched)
     }
 
-    /// Reads by GitHub's id every Repository a Workspace links that this full sync didn't
-    /// find in `read`, so a linked Repository with no PR GitHub showed still follows a rename,
+    /// Reads by GitHub's id every Repository a Workspace links that this full sync hasn't read
+    /// (`read`), so a linked Repository with no PR GitHub showed still follows a rename,
     /// a lost access (Unreachable, its Links kept) and a regained one (spec §8).
     async fn read_linked(
         &self,
@@ -713,7 +713,8 @@ impl PrSync {
 
     /// Reads each of `ids` by GitHub's id and stores what GitHub says: its name, URL, private
     /// and archived now, or, for one it doesn't show, the Unreachable mark; tells clients which
-    /// changed. Adds those GitHub showed to `read`, and returns them.
+    /// changed. Adds every one of `ids` to `read`, so none is asked about twice in a sync, and
+    /// returns those GitHub showed.
     async fn read_by_id(
         &self,
         token: &str,
@@ -725,11 +726,9 @@ impl PrSync {
         let mut found = Vec::new();
         let mut unreachable = Vec::new();
         for (id, answer) in ids.into_iter().zip(answers) {
+            read.insert(id);
             match answer {
-                Some(repository) => {
-                    read.insert(id);
-                    found.push(repository);
-                }
+                Some(repository) => found.push(repository),
                 None => unreachable.push(id),
             }
         }
