@@ -3,7 +3,8 @@
 //!
 //! It says what deleting does when the workspace has any: its Repositories are unlinked and
 //! its running panes stopped. No folder is touched: a workspace has none. Delete workspace
-//! stays disabled until the name is typed exactly. It emits [`DeleteEvent`] for the window.
+//! stays disabled until the name is typed exactly. Once deleted, the GUI forgets what it kept
+//! of the workspace in its own state ([`gui_state`]). It emits [`DeleteEvent`] for the window.
 
 use std::sync::Arc;
 
@@ -21,6 +22,7 @@ use gpui::{
 use gpui_base::input::InputEvent;
 
 use crate::api::Api;
+use crate::gui_state;
 use crate::overview::Snapshot;
 use crate::workspace::failed;
 
@@ -155,6 +157,8 @@ impl DeleteWorkspaceDialog {
                 this.deleting = false;
                 match deleted {
                     Ok(()) => {
+                        // What the GUI kept of it would never be read again.
+                        gui_state::forget_workspace(cx, target.id);
                         this.handle.close(window, cx);
                         cx.emit(DeleteEvent::Deleted(target.id));
                     }
@@ -294,13 +298,17 @@ impl Render for DeleteWorkspaceDialog {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::collections::BTreeSet;
+    use std::path::PathBuf;
     use std::rc::Rc;
 
+    use agentdeck_core::RepositoryId;
     use brrritscold_core_gpui::Root;
     use gpui::{TestAppContext, VisualTestContext};
 
     use super::*;
     use crate::api::fake::FakeApi;
+    use crate::gui_state::{self, GuiState, Side};
     use crate::notice;
     use crate::overview::fixtures::{id, workspace};
 
@@ -482,6 +490,53 @@ mod tests {
             assert!(harness.events.borrow().is_empty());
             let shown = cx.update(|_, cx| notice::shown(cx));
             assert_eq!(shown.last().unwrap().title, "Couldn't delete tabs-a11y");
+        }
+
+        /// A side, a collapsed group and a dismissal for each of Workspaces `ns`, saved to a
+        /// `gui.json` the GUI reads and writes; the temp dir holds it.
+        fn remember(ns: &[u32], cx: &mut TestAppContext) -> (tempfile::TempDir, PathBuf) {
+            let dir = tempfile::tempdir().expect("a temp dir");
+            let path = dir.path().join(gui_state::FILE);
+            gui_state::save(&path, &remembering(ns)).expect("save");
+            cx.update(|cx| gui_state::init(Some(path.clone()), cx));
+            (dir, path)
+        }
+
+        fn remembering(ns: &[u32]) -> GuiState {
+            let mut state = GuiState::default();
+            for &n in ns {
+                state.set_side(id(n), Side::PullRequests);
+                (state.collapsed).set_workspace(id(n), RepositoryId::from(7), true);
+                state.dismiss(id(n), RepositoryId::from(8));
+            }
+            state
+        }
+
+        #[gpui::test]
+        fn should_forget_what_the_gui_kept_of_the_deleted_workspace(cx: &mut TestAppContext) {
+            let (_dir, path) = remember(&[1, 2], cx);
+            let (harness, cx) = Harness::new(Arc::new(FakeApi::with(snapshot())), cx);
+            harness.open(cx);
+            harness.type_name("tabs-a11y", cx);
+
+            harness.delete(cx);
+
+            assert_eq!(gui_state::load(&path), remembering(&[2]));
+            let kept = cx.update(|_, cx| gui_state::read(cx, GuiState::workspaces));
+            assert_eq!(kept, BTreeSet::from([id(2)]));
+        }
+
+        #[gpui::test]
+        fn should_forget_nothing_when_the_delete_fails(cx: &mut TestAppContext) {
+            let (_dir, path) = remember(&[1, 2], cx);
+            let (harness, cx) = Harness::new(Arc::new(FakeApi::with(snapshot())), cx);
+            harness.open(cx);
+            harness.type_name("tabs-a11y", cx);
+            harness.api.fail_next("connection refused");
+
+            harness.delete(cx);
+
+            assert_eq!(gui_state::load(&path), remembering(&[1, 2]));
         }
 
         #[gpui::test]
