@@ -11,6 +11,10 @@
 //! The state is a GPUI [`Global`] that `main` sets with [`init`]; a view reads it with
 //! [`read`] and changes it with [`update`], which writes the file at once. Without [`init`]
 //! (a view test that doesn't ask for it) the state lives in memory only.
+//!
+//! What it keeps by Workspace id goes with the Workspace: [`forget_workspace`] once the GUI
+//! deletes one, [`keep_workspaces`] once a read lists them all. Repository ids stay, since a
+//! Repository comes back with the same GitHub id once linked again.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -34,7 +38,8 @@ pub struct GuiState {
     /// The side each Workspace showed last; a Workspace not named here opens on its Panes.
     pub last_side: BTreeMap<WorkspaceId, Side>,
     /// The Repositories each Workspace's Suggestions leave out, by GitHub's id: told Not now,
-    /// or unlinked in the GUI. Never forgotten; the picker's Suggested section ignores them.
+    /// or unlinked in the GUI. Forgotten only with the Workspace; the picker's Suggested
+    /// section ignores them.
     pub dismissed: BTreeMap<WorkspaceId, BTreeSet<RepositoryId>>,
 }
 
@@ -84,6 +89,22 @@ impl GuiState {
     /// Whether `workspace`'s Suggestions leave `repository` out.
     pub fn is_dismissed(&self, workspace: WorkspaceId, repository: RepositoryId) -> bool {
         (self.dismissed.get(&workspace)).is_some_and(|ids| ids.contains(&repository))
+    }
+
+    /// The Workspaces it remembers anything of.
+    pub fn workspaces(&self) -> BTreeSet<WorkspaceId> {
+        let sides = self.last_side.keys();
+        let collapsed = self.collapsed.workspaces.keys();
+        let dismissed = self.dismissed.keys();
+        sides.chain(collapsed).chain(dismissed).copied().collect()
+    }
+
+    /// Forgets all it remembers of `workspace`: its side, its collapsed groups and its
+    /// dismissed Suggestions.
+    pub fn forget_workspace(&mut self, workspace: WorkspaceId) {
+        self.last_side.remove(&workspace);
+        self.collapsed.workspaces.remove(&workspace);
+        self.dismissed.remove(&workspace);
     }
 }
 
@@ -199,6 +220,31 @@ pub fn update(cx: &mut App, f: impl FnOnce(&mut GuiState)) {
     }
 }
 
+/// Forgets `workspace`, once it is deleted.
+pub fn forget_workspace(cx: &mut App, workspace: WorkspaceId) {
+    forget_workspaces(cx, BTreeSet::from([workspace]));
+}
+
+/// Forgets every Workspace `listed` doesn't hold: those deleted since. `listed` must be a
+/// successful read of every Workspace, archived ones included. The file is written only when
+/// a Workspace was forgotten.
+pub fn keep_workspaces(cx: &mut App, listed: &BTreeSet<WorkspaceId>) {
+    let gone = read(cx, |state| &state.workspaces() - listed);
+    forget_workspaces(cx, gone);
+}
+
+/// Forgets each of `gone`, writing the file once; not at all when it remembers none of them.
+fn forget_workspaces(cx: &mut App, gone: BTreeSet<WorkspaceId>) {
+    if read(cx, |state| state.workspaces().is_disjoint(&gone)) {
+        return;
+    }
+    update(cx, |state| {
+        for workspace in gone {
+            state.forget_workspace(workspace);
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use gpui::TestAppContext;
@@ -281,10 +327,6 @@ mod tests {
     mod side {
         use super::*;
 
-        fn ws(n: u32) -> WorkspaceId {
-            format!("00000000-0000-7000-8000-{n:012}").parse().unwrap()
-        }
-
         #[test]
         fn should_open_a_workspace_not_seen_before_on_its_panes() {
             assert_eq!(GuiState::default().side(ws(1)), Side::Panes);
@@ -319,10 +361,6 @@ mod tests {
 
     mod dismissed {
         use super::*;
-
-        fn ws(n: u32) -> WorkspaceId {
-            format!("00000000-0000-7000-8000-{n:012}").parse().unwrap()
-        }
 
         #[test]
         fn should_dismiss_a_repository_for_one_workspace_only() {
@@ -370,6 +408,51 @@ mod tests {
         }
     }
 
+    /// Workspace `n`'s id.
+    fn ws(n: u32) -> WorkspaceId {
+        format!("00000000-0000-7000-8000-{n:012}").parse().unwrap()
+    }
+
+    /// What the GUI keeps for Workspaces `ns`: a side, a collapsed group and a dismissal
+    /// each, beside a collapsed group on the Pull requests view and Show finished.
+    fn remembering(ns: &[u32]) -> GuiState {
+        let mut state = collapsed(&[7]);
+        state.show_finished = true;
+        for &n in ns {
+            state.set_side(ws(n), Side::PullRequests);
+            state
+                .collapsed
+                .set_workspace(ws(n), RepositoryId::from(7), true);
+            state.dismiss(ws(n), RepositoryId::from(8));
+        }
+        state
+    }
+
+    mod forget_workspace {
+        use super::*;
+
+        #[test]
+        fn should_forget_its_side_collapsed_groups_and_dismissals_only() {
+            let mut state = remembering(&[1, 2]);
+
+            state.forget_workspace(ws(1));
+
+            assert_eq!(state, remembering(&[2]));
+        }
+
+        #[test]
+        fn should_name_every_workspace_it_remembers_anything_of() {
+            let mut state = remembering(&[]);
+            state.set_side(ws(1), Side::PullRequests);
+            state
+                .collapsed
+                .set_workspace(ws(2), RepositoryId::from(7), true);
+            state.dismiss(ws(3), RepositoryId::from(8));
+
+            assert_eq!(state.workspaces(), BTreeSet::from([ws(1), ws(2), ws(3)]));
+        }
+    }
+
     mod save {
         use super::*;
 
@@ -412,6 +495,45 @@ mod tests {
             cx.update(|cx| init(Some(path.clone()), cx));
             let read_back = cx.read(|cx| read(cx, Clone::clone));
             assert_eq!(read_back, collapsed(&[7]));
+        }
+
+        #[gpui::test]
+        fn should_write_the_file_back_without_a_forgotten_workspace(cx: &mut TestAppContext) {
+            let dir = tempfile::tempdir().expect("a temp dir");
+            let path = dir.path().join(FILE);
+            save(&path, &remembering(&[1, 2])).expect("save");
+            cx.update(|cx| init(Some(path.clone()), cx));
+
+            cx.update(|cx| forget_workspace(cx, ws(1)));
+
+            assert_eq!(load(&path), remembering(&[2]));
+        }
+
+        #[gpui::test]
+        fn should_write_the_file_back_with_only_the_workspaces_listed(cx: &mut TestAppContext) {
+            let dir = tempfile::tempdir().expect("a temp dir");
+            let path = dir.path().join(FILE);
+            save(&path, &remembering(&[1, 2, 3])).expect("save");
+            cx.update(|cx| init(Some(path.clone()), cx));
+
+            cx.update(|cx| keep_workspaces(cx, &BTreeSet::from([ws(2), ws(4)])));
+
+            assert_eq!(load(&path), remembering(&[2]));
+            assert_eq!(cx.read(|cx| read(cx, Clone::clone)), remembering(&[2]));
+        }
+
+        #[gpui::test]
+        fn should_not_write_when_every_workspace_is_listed(cx: &mut TestAppContext) {
+            let dir = tempfile::tempdir().expect("a temp dir");
+            let path = dir.path().join(FILE);
+            cx.update(|cx| init(Some(path.clone()), cx));
+
+            cx.update(|cx| keep_workspaces(cx, &BTreeSet::from([ws(1)])));
+
+            assert!(
+                !path.exists(),
+                "nothing was forgotten, so nothing is written"
+            );
         }
 
         #[gpui::test]

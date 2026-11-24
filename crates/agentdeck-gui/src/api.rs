@@ -596,6 +596,8 @@ pub(crate) mod fake {
         made: Mutex<u32>,
         /// Why the next write fails, if it should.
         failure: Mutex<Option<anyhow::Error>>,
+        /// Why the next snapshot read fails, if it should.
+        read_failure: Mutex<Option<anyhow::Error>>,
         /// The workspaces asked for, in order.
         pub made_workspaces: Mutex<Vec<Request>>,
         /// The PR syncs asked for, in order: whether each was full.
@@ -706,6 +708,11 @@ pub(crate) mod fake {
         /// Fails the next write with `reason`, changing nothing.
         pub fn fail_next(&self, reason: &str) {
             *self.failure.lock().unwrap() = Some(anyhow::Error::msg(reason.to_owned()));
+        }
+
+        /// Fails the next snapshot read with `reason`.
+        pub fn fail_next_read(&self, reason: &str) {
+            *self.read_failure.lock().unwrap() = Some(anyhow::Error::msg(reason.to_owned()));
         }
 
         /// Fails the next write as the daemon refuses one: `message`, with `code`.
@@ -930,6 +937,9 @@ pub(crate) mod fake {
     impl Api for FakeApi {
         fn snapshot(&self, _cx: &App) -> Task<anyhow::Result<Snapshot>> {
             *self.reads.lock().unwrap() += 1;
+            if let Some(err) = self.read_failure.lock().unwrap().take() {
+                return Task::ready(Err(err));
+            }
             Task::ready(Ok(self.snapshot.lock().unwrap().clone()))
         }
 

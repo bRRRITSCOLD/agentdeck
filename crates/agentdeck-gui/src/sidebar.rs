@@ -8,7 +8,9 @@
 //!
 //! It reads a [`Snapshot`] through the session's [`Api`] when it opens and again whenever the
 //! daemon reports a `changed`; `state` and `exit` messages patch pane states in place. What
-//! changed that the user should hear about goes to the window as [`Alerts`] (spec §11).
+//! changed that the user should hear about goes to the window as [`Alerts`] (spec §11). Each
+//! successful read makes the GUI forget, in its own state ([`gui_state`]), the Workspaces it no
+//! longer lists: deleted from the CLI, another client, or while the GUI was closed.
 //!
 //! The workspace list draws only the rows in view, through GPUI's [`list`]: drawing every row
 //! made each redraw cost more the more workspaces there were (#199). The window follows its
@@ -33,6 +35,7 @@ use gpui::{
 use crate::api::Api;
 use crate::connection::{Connection, DaemonEvent};
 use crate::count::Count;
+use crate::gui_state;
 use crate::notifications::{self, Alert, PrBatch, Reattached};
 use crate::overview::{Counts, Overview, Snapshot};
 use crate::rereads::Rereads;
@@ -299,6 +302,10 @@ impl SidebarView {
                         let now = cx.background_executor().now();
                         this.reattached.retain(&mut alerts, &snapshot, now);
                         alerts.extend(this.prs.read(&this.snapshot, &snapshot));
+                        // Only a read that succeeded lists every Workspace, so only it can tell
+                        // which ones were deleted, wherever that happened.
+                        let listed = (snapshot.workspaces.iter()).map(|w| w.id).collect();
+                        gui_state::keep_workspaces(cx, &listed);
                         this.overview = snapshot.overview();
                         this.snapshot = snapshot;
                         this.error = None;
@@ -662,6 +669,7 @@ impl Render for SidebarView {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::rc::Rc;
     use std::time::Duration;
 
@@ -719,8 +727,12 @@ mod tests {
 
     /// Opens a `Root` window on a sidebar whose daemon answers with `snapshot`.
     fn open(snapshot: Snapshot, cx: &mut TestAppContext) -> Open {
+        open_over(Arc::new(FakeApi::with(snapshot)), cx)
+    }
+
+    /// Opens a `Root` window on a sidebar over `api`.
+    fn open_over(api: Arc<FakeApi>, cx: &mut TestAppContext) -> Open {
         cx.update(brrritscold_core_gpui::init);
-        let api = Arc::new(FakeApi::with(snapshot));
         let connector = Rc::new(FakeConnector::default());
         let remote = connector.then_connect_to(api.clone());
         let (connection, sidebar) = cx.update(|cx| {
@@ -1195,6 +1207,118 @@ mod tests {
             });
 
             assert_eq!(open.selection(), Selection::Workspace(id(1)));
+        }
+    }
+
+    /// What the GUI keeps for each Workspace in its own state (spec §11): forgotten once a
+    /// read no longer lists the Workspace, and only then.
+    mod gui_state {
+        use std::collections::BTreeSet;
+
+        use agentdeck_client::types::Workspace;
+        use agentdeck_core::RepositoryId;
+
+        use super::*;
+        use crate::gui_state::{self, GuiState, Side};
+
+        /// A side, a collapsed group and a dismissal for each of Workspaces `ns`.
+        fn remembering(ns: &[u32]) -> GuiState {
+            let mut state = GuiState::default();
+            for &n in ns {
+                state.set_side(id(n), Side::PullRequests);
+                (state.collapsed).set_workspace(id(n), RepositoryId::from(7), true);
+                state.dismiss(id(n), RepositoryId::from(8));
+            }
+            state
+        }
+
+        /// Saves `state` to a `gui.json` the GUI then reads and writes; the temp dir holds it.
+        fn remember(state: &GuiState, cx: &mut TestAppContext) -> (tempfile::TempDir, PathBuf) {
+            let dir = tempfile::tempdir().expect("a temp dir");
+            let path = dir.path().join(gui_state::FILE);
+            gui_state::save(&path, state).expect("save");
+            cx.update(|cx| gui_state::init(Some(path.clone()), cx));
+            (dir, path)
+        }
+
+        fn remembered(open: &mut Open) -> BTreeSet<WorkspaceId> {
+            open.cx
+                .update(|_, cx| gui_state::read(cx, GuiState::workspaces))
+        }
+
+        #[gpui::test]
+        fn should_forget_on_its_first_read_the_workspaces_deleted_meanwhile(
+            cx: &mut TestAppContext,
+        ) {
+            let (_dir, path) = remember(&remembering(&[1, 2, 3]), cx);
+
+            let mut open = open(two_workspaces(), cx);
+
+            assert_eq!(remembered(&mut open), BTreeSet::from([id(1), id(2)]));
+            assert_eq!(gui_state::load(&path), remembering(&[1, 2]));
+        }
+
+        #[gpui::test]
+        fn should_forget_a_workspace_deleted_elsewhere_on_the_next_read(cx: &mut TestAppContext) {
+            let (_dir, path) = remember(&remembering(&[1, 2]), cx);
+            let mut open = open(two_workspaces(), cx);
+            let mut without_b = two_workspaces();
+            without_b.workspaces.pop();
+            open.api.set(without_b);
+
+            open.send(ServerMessage::Changed {
+                entity: Changed::Workspace,
+                id: id::<WorkspaceId>(2).to_string(),
+            });
+
+            assert_eq!(remembered(&mut open), BTreeSet::from([id(1)]));
+            assert_eq!(gui_state::load(&path), remembering(&[1]));
+        }
+
+        #[gpui::test]
+        fn should_keep_an_archived_workspace(cx: &mut TestAppContext) {
+            let (_dir, path) = remember(&remembering(&[1, 3]), cx);
+            let mut snapshot = two_workspaces();
+            snapshot.workspaces.push(Workspace {
+                archived_at: Some("2026-11-13T00:00:00Z".into()),
+                ..workspace(3, "old")
+            });
+
+            let mut open = open(snapshot, cx);
+
+            assert_eq!(remembered(&mut open), BTreeSet::from([id(1), id(3)]));
+            assert_eq!(gui_state::load(&path), remembering(&[1, 3]));
+        }
+
+        #[gpui::test]
+        fn should_forget_nothing_before_its_first_read_succeeds(cx: &mut TestAppContext) {
+            let (_dir, path) = remember(&remembering(&[1, 2]), cx);
+            let api = FakeApi::with(Snapshot::default());
+            api.fail_next_read("connection refused");
+            let api = Arc::new(api);
+
+            let mut open = open_over(api, cx);
+
+            assert!(open.sidebar.read_with(open.cx, |s, _| s.error.is_some()));
+            assert_eq!(remembered(&mut open), BTreeSet::from([id(1), id(2)]));
+            assert_eq!(gui_state::load(&path), remembering(&[1, 2]));
+        }
+
+        #[gpui::test]
+        fn should_forget_nothing_on_a_failed_read(cx: &mut TestAppContext) {
+            let (_dir, path) = remember(&remembering(&[1, 2]), cx);
+            let mut open = open(two_workspaces(), cx);
+            open.api.set(Snapshot::default());
+            open.api.fail_next_read("connection refused");
+
+            open.send(ServerMessage::Changed {
+                entity: Changed::Workspace,
+                id: id::<WorkspaceId>(2).to_string(),
+            });
+
+            assert!(open.sidebar.read_with(open.cx, |s, _| s.error.is_some()));
+            assert_eq!(remembered(&mut open), BTreeSet::from([id(1), id(2)]));
+            assert_eq!(gui_state::load(&path), remembering(&[1, 2]));
         }
     }
 
