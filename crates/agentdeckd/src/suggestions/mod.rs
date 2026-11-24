@@ -259,8 +259,9 @@ impl Suggestions {
 /// The Repository a git repo's remote names, by the name in lower case, for each of `folders`
 /// that is in one.
 fn worked_in(folders: &[String]) -> BTreeMap<String, RepositoryName> {
+    let env = remotes::GitEnv::from_env();
     (folders.iter())
-        .filter_map(|folder| remotes::repository_of(&PathBuf::from(folder)))
+        .filter_map(|folder| remotes::repository_of(&PathBuf::from(folder), &env))
         .map(|name| (name.to_string().to_lowercase(), name))
         .collect()
 }
