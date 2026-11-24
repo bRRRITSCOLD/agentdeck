@@ -18,7 +18,7 @@ use crate::support::github::{
 };
 use crate::support::terminal::{eventually, in_state, sh};
 use crate::support::ws::{Frame, Ws};
-use crate::support::{TestDaemon, error_response};
+use crate::support::{TestDaemon, error_response, set_daemon_env};
 
 const TOKEN: &str = "gho_test";
 const WIDGETS: &str = "acme/widgets";
@@ -254,7 +254,8 @@ mod get_v1_workspaces_suggestions {
 
     /// Remotes git sees only through its config files beyond the repo's own: includes,
     /// `includeIf` and `insteadOf`. Each fixture is checked with `git remote get-url` too, so
-    /// it means to git what the test says it does.
+    /// it means to git what the test says it does. Without a `git` that answers, the repo's
+    /// own `config` file still does.
     mod git_config {
         use super::*;
 
@@ -284,6 +285,86 @@ mod get_v1_workspaces_suggestions {
                 .expect("a UTF-8 URL")
                 .trim()
                 .to_owned()
+        }
+
+        /// [`signed_in`], with the `PATH` that `path` makes from the daemon's temp root.
+        async fn signed_in_on_path(
+            github: &MockServer,
+            path: impl FnOnce(&Path) -> String,
+        ) -> TestDaemon {
+            mock_viewer(github, TOKEN, "octocat", None);
+            let dirs = tempfile::tempdir().expect("a temp dir");
+            set_gh_token(dirs.path(), Some(TOKEN));
+            let path = path(dirs.path());
+            set_daemon_env(dirs.path(), &[("PATH", &path)]);
+            TestDaemon::start_with_github(dirs, &github.url("/graphql")).await
+        }
+
+        /// `dir` holding links to the programs a Pane and the stub `gh` run, and no `git`.
+        fn without_git(dir: &Path) -> PathBuf {
+            std::fs::create_dir_all(dir).expect("making the dir");
+            for program in ["sh", "sleep", "cat", "dirname"] {
+                let found = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+                    .map(|entry| entry.join(program))
+                    .find(|path| path.is_file())
+                    .unwrap_or_else(|| panic!("{program} on PATH"));
+                std::os::unix::fs::symlink(found, dir.join(program)).expect("linking it");
+            }
+            dir.to_owned()
+        }
+
+        #[tokio::test]
+        async fn should_read_the_repos_own_config_without_git_200() {
+            let github = MockServer::start_async().await;
+            mock_rest_repo(&github, TOKEN, WIDGETS, RestRepo::new(WIDGETS));
+            let daemon = signed_in_on_path(&github, |root| {
+                let no_git = without_git(&root.join("no-git"));
+                format!("{}:{}", root.join("bin").display(), no_git.display())
+            })
+            .await;
+            assert!(!daemon.root().join("no-git/git").exists());
+            let dir = repo(
+                &daemon,
+                "widgets",
+                &[("origin", "https://github.com/acme/widgets")],
+            );
+            let (web, tab) = workspace(&daemon.client, "web").await;
+
+            working_in(&daemon.client, tab, &dir).await;
+
+            assert_eq!(names(&daemon.client, web.id).await, [WIDGETS]);
+        }
+
+        #[tokio::test]
+        async fn should_read_the_repos_own_config_when_git_hangs_200() {
+            let github = MockServer::start_async().await;
+            mock_rest_repo(&github, TOKEN, WIDGETS, RestRepo::new(WIDGETS));
+            let daemon = signed_in_on_path(&github, |root| {
+                let hang = root.join("hang");
+                write(&hang.join("git"), "#!/bin/sh\nexec sleep 30\n");
+                std::fs::set_permissions(
+                    hang.join("git"),
+                    std::os::unix::fs::PermissionsExt::from_mode(0o755),
+                )
+                .expect("making the stub git executable");
+                format!(
+                    "{}:{}:{}",
+                    root.join("bin").display(),
+                    hang.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                )
+            })
+            .await;
+            let dir = repo(
+                &daemon,
+                "widgets",
+                &[("origin", "https://github.com/acme/widgets")],
+            );
+            let (web, tab) = workspace(&daemon.client, "web").await;
+
+            working_in(&daemon.client, tab, &dir).await;
+
+            assert_eq!(names(&daemon.client, web.id).await, [WIDGETS]);
         }
 
         #[tokio::test]
