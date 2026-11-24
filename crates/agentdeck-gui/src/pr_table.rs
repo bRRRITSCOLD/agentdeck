@@ -41,6 +41,10 @@ pub type OnToggle = Box<dyn Fn(&mut Window, &mut App) + 'static>;
 /// does (archived ones link nothing).
 pub const NOT_IN_A_WORKSPACE: &str = "Not in a workspace";
 
+/// What an Unreachable Repository's group header says in place of the Workspaces linking it
+/// (spec §11; Penpot "Screens · Main" → "Pull requests · unreachable repository").
+pub const UNREACHABLE_REPOSITORY: &str = "Unreachable: can't sync, PRs may be out of date";
+
 /// The table's least width: every column, the title at its least, the `space.3` gaps and the
 /// rows' `space.2` padding, and with `select` the `Select` layer's. Narrower than any window
 /// the sidebar leaves room for.
@@ -111,9 +115,10 @@ pub type OnWorkspace = Rc<dyn Fn(WorkspaceId, &mut Window, &mut App) + 'static>;
 /// its checkbox, then, `space.2` after it in sm `muted-foreground`, who links the Repository:
 /// each Workspace in `workspaces` by name, `·` apart, a link to its Pull requests that runs
 /// `on_workspace` (underlined on hover, as a PR's reference), or [`NOT_IN_A_WORKSPACE`] with
-/// none, then, pushed right into the rows' `Menu` column, its `menu`. `key` names it: tests
-/// find it as `group <key>`, its workspaces as `group workspaces <key>` and each one's link as
-/// `workspace link <key> <name>`.
+/// none; [`UNREACHABLE_REPOSITORY`] instead of either while `unreachable`. Then, pushed right
+/// into the rows' `Menu` column, its `menu`. `key` names it: tests find it as `group <key>`,
+/// its workspaces as `group workspaces <key>`, each one's link as `workspace link <key>
+/// <name>`, and the Unreachable words as `group unreachable <key>`.
 #[allow(clippy::too_many_arguments)]
 pub fn group_header(
     key: SharedString,
@@ -122,6 +127,7 @@ pub fn group_header(
     collapsed: bool,
     select: SelectCell,
     workspaces: &[Linker],
+    unreachable: bool,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_workspace: OnWorkspace,
     menu: Option<AnyElement>,
@@ -137,6 +143,16 @@ pub fn group_header(
         .text_size(font_size::SM)
         .text_color(s.muted_foreground);
     let names = match workspaces {
+        _ if unreachable => {
+            let selector = format!("group unreachable {key}");
+            names.child(
+                div()
+                    .debug_selector(move || selector)
+                    .min_w_0()
+                    .truncate()
+                    .child(UNREACHABLE_REPOSITORY),
+            )
+        }
         [] => names.child(NOT_IN_A_WORKSPACE),
         workspaces => names.children(workspaces.iter().enumerate().flat_map(|(ix, w)| {
             let id = w.id;

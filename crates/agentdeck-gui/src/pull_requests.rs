@@ -6,7 +6,8 @@
 //! Groups go linked Repositories first, then those Not in a workspace, each alphabetically by
 //! the Repository's name. A group's header names the Workspaces linking its Repository (archived
 //! ones link nothing), each a link to that Workspace's Pull requests ([`OpenWorkspace`]), or
-//! reads "Not in a workspace". On the Pull requests view a group with no PR to show is left out;
+//! reads "Not in a workspace"; an Unreachable Repository's reads "Unreachable: can't sync, PRs
+//! may be out of date" instead (Penpot "Pull requests · unreachable repository"). On the Pull requests view a group with no PR to show is left out;
 //! on a Workspace's Pull requests every linked Repository shows, one with none to show over a
 //! muted "No open PRs" row. A group collapses at a click, remembered per view and per
 //! Repository across restarts in the GUI's own state ([`gui_state`]).
@@ -199,6 +200,8 @@ pub struct Group {
     /// The Workspaces linking it, archived ones left out, in the sidebar's order; none while
     /// it is Not in a workspace.
     pub workspaces: Vec<Linker>,
+    /// Whether it is Unreachable: the GitHub sign-in can't see it, so its PRs can't sync.
+    pub unreachable: bool,
 }
 
 /// The groups of `snapshot`'s PRs a list over `scope` shows, its PRs by number: one per
@@ -228,6 +231,7 @@ pub fn groups(
         label: name.name().to_owned().into(),
         prs: Vec::new(),
         workspaces: Vec::new(),
+        unreachable: false,
     };
     let mut groups: Vec<Group> = Vec::new();
     for pr in (snapshot.prs.iter()).filter(shown) {
@@ -250,6 +254,8 @@ pub fn groups(
         }
     }
     for group in &mut groups {
+        group.unreachable = (snapshot.repositories.iter())
+            .any(|links| links.id == group.repository && links.unreachable);
         group.workspaces = (snapshot.linking(group.repository).into_iter())
             .map(|w| Linker {
                 id: w.id,
@@ -296,6 +302,8 @@ enum Item {
         selectable: Vec<PrKey>,
         /// The Workspaces linking it.
         workspaces: Vec<Linker>,
+        /// Whether it is Unreachable.
+        unreachable: bool,
     },
     /// A PR.
     Row(Box<PullRequest>),
@@ -319,6 +327,7 @@ fn items(groups: &[Group], collapsed: &BTreeSet<RepositoryId>) -> Vec<Item> {
                 .map(PrKey::of)
                 .collect(),
             workspaces: group.workspaces.clone(),
+            unreachable: group.unreachable,
         });
         if folded {
             continue;
@@ -698,6 +707,7 @@ impl PullRequestsView {
                 collapsed,
                 selectable,
                 workspaces,
+                unreachable,
             }) => {
                 let repository = *repository;
                 let select = close_prs::select_all(&self.close, name, selectable.clone(), cx);
@@ -713,6 +723,7 @@ impl PullRequestsView {
                     *collapsed,
                     select,
                     workspaces,
+                    *unreachable,
                     cx.listener(move |this, _, _, cx| this.toggle(repository, cx)),
                     on_workspace,
                     menu,
@@ -2740,6 +2751,66 @@ mod tests {
             let copied = cx.read_from_clipboard().and_then(|item| item.text());
             assert!(copied.is_some_and(|text| text.starts_with("acme/secret#5: PR 5\n")));
             assert!(!harness.asking(cx));
+        }
+    }
+
+    /// An Unreachable Repository's group (spec §11): its header says it can't sync in place of
+    /// the Workspaces linking it, on both views.
+    mod unreachable_repository {
+        use super::*;
+
+        /// [`linked`] with `acme/widgets` and `acme/tools`, both linked by `a`, Unreachable.
+        fn with_unreachable() -> Snapshot {
+            let mut snapshot = linked();
+            for links in &mut snapshot.repositories {
+                let name = links.name.to_string();
+                links.unreachable = name == "acme/widgets" || name == "acme/tools";
+            }
+            snapshot
+        }
+
+        #[test]
+        fn should_mark_its_group_and_keep_it_among_the_linked_ones() {
+            let groups = groups(&with_unreachable(), Scope::All, false, None);
+
+            let marked: Vec<(String, bool)> = (groups.iter())
+                .map(|g| (g.label.to_string(), g.unreachable))
+                .collect();
+            assert_eq!(
+                marked,
+                [
+                    ("widgets".to_owned(), true),
+                    ("apples".to_owned(), false),
+                    ("gadgets".to_owned(), false),
+                    ("zebra".to_owned(), false),
+                ]
+            );
+        }
+
+        #[gpui::test]
+        fn should_say_it_cannot_sync_in_place_of_the_workspaces_linking_it(
+            cx: &mut TestAppContext,
+        ) {
+            let (_harness, cx) = Harness::open(with_unreachable(), cx);
+
+            let header = bounds("group acme/widgets".into(), cx);
+            let said = bounds("group unreachable acme/widgets".into(), cx);
+            assert!(said.left() > header.right(), "{said:?} after {header:?}");
+            assert!(!shows("workspace link acme/widgets a".into(), cx));
+            assert!(!shows("group unreachable acme/apples".into(), cx));
+            assert_eq!(
+                pr_table::UNREACHABLE_REPOSITORY,
+                "Unreachable: can't sync, PRs may be out of date"
+            );
+        }
+
+        #[gpui::test]
+        fn should_say_so_on_a_workspaces_pull_requests_too(cx: &mut TestAppContext) {
+            let (_harness, cx) = Harness::open_in(a(), with_unreachable(), cx);
+
+            assert!(shows("group unreachable acme/tools".into(), cx));
+            assert!(shows("no open prs acme/tools".into(), cx));
+            assert!(shows("group unreachable acme/widgets".into(), cx));
         }
     }
 
