@@ -1,31 +1,19 @@
-//! Which Repository a folder's git repo works in (spec §3 Suggestions): its `upstream` remote
-//! when that is on GitHub, else its `origin`; any other remote is ignored.
-//!
-//! The remotes are read straight from the repo's `config` file, with no `git` process: the
-//! folder or the nearest folder above it holding `.git`, a directory, or a file naming the
-//! git dir (`gitdir: …`, as a worktree or a submodule has), whose `commondir` leads a worktree
-//! to the main repo's config. `include` and `includeIf` files, and `url.<base>.insteadOf`
-//! rewrites, aren't followed: a remote that only they make a GitHub URL suggests nothing.
+//! The fallback for when `git` can't answer (spec §3 Suggestions): the remotes read straight
+//! from the repo's `config` file. The repo is the folder or the nearest folder above it holding
+//! `.git`, a directory, or a file naming the git dir (`gitdir: …`, as a worktree or a submodule
+//! has), whose `commondir` leads a worktree to the main repo's config. Only that file is read:
+//! `include` and `includeIf` files, the user's global config and `url.<base>.insteadOf`
+//! rewrites aren't, so a remote that only they make a GitHub URL suggests nothing here.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use agentdeck_core::RepositoryName;
-
-/// The Repository the git repo holding `folder` works in: its `upstream` remote when that is on
-/// GitHub, else its `origin` when that is. `None` outside a git repo, or when neither is.
-pub fn repository_of(folder: &Path) -> Option<RepositoryName> {
+/// Each remote's URL by its name, from the `config` file of the git repo holding `folder`.
+/// `None` outside a git repo, or when the file can't be read.
+pub fn remote_urls_of(folder: &Path) -> Option<HashMap<String, String>> {
     let config = std::fs::read_to_string(config_file(folder)?).ok()?;
-    pick(&remote_urls(&config))
+    Some(remote_urls(&config))
 }
-
-/// `upstream` when it is on GitHub, else `origin` when it is.
-fn pick(remotes: &HashMap<String, String>) -> Option<RepositoryName> {
-    ["upstream", "origin"]
-        .into_iter()
-        .find_map(|remote| RepositoryName::from_remote_url(remotes.get(remote)?))
-}
-
 /// The `config` file of the git repo holding `folder`, looking up from it.
 fn config_file(folder: &Path) -> Option<PathBuf> {
     folder.ancestors().find_map(|dir| {
@@ -146,10 +134,6 @@ mod tests {
         urls
     }
 
-    fn picked(text: &str) -> Option<String> {
-        pick(&remote_urls(text)).map(|name| name.to_string())
-    }
-
     mod remote_urls {
         use super::*;
 
@@ -234,40 +218,16 @@ mod tests {
         }
     }
 
-    mod pick {
-        use super::*;
-
-        #[test]
-        fn should_prefer_upstream_on_github() {
-            let config = "[remote \"origin\"]\nurl = git@github.com:me/widgets.git\n\
-                          [remote \"upstream\"]\nurl = https://github.com/acme/widgets.git\n";
-
-            assert_eq!(picked(config).as_deref(), Some("acme/widgets"));
-        }
-
-        #[test]
-        fn should_take_origin_when_upstream_is_not_on_github() {
-            let config = "[remote \"origin\"]\nurl = git@github.com:me/widgets.git\n\
-                          [remote \"upstream\"]\nurl = https://gitlab.com/acme/widgets.git\n";
-
-            assert_eq!(picked(config).as_deref(), Some("me/widgets"));
-        }
-
-        #[test]
-        fn should_ignore_every_other_remote() {
-            let config = "[remote \"fork\"]\nurl = https://github.com/me/widgets\n\
-                          [remote \"origin\"]\nurl = https://gitlab.com/acme/widgets\n";
-
-            assert_eq!(picked(config), None);
-        }
-    }
-
-    mod repository_of {
+    mod remote_urls_of {
         use super::*;
 
         fn write(path: &Path, text: &str) {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, text).unwrap();
+        }
+
+        fn origin(folder: &Path) -> Option<String> {
+            remote_urls_of(folder)?.remove("origin")
         }
 
         const ORIGIN: &str = "[remote \"origin\"]\n\turl = https://github.com/acme/widgets\n";
@@ -280,8 +240,8 @@ mod tests {
             std::fs::create_dir_all(&deep).unwrap();
 
             assert_eq!(
-                repository_of(&deep).map(|n| n.to_string()).as_deref(),
-                Some("acme/widgets")
+                origin(&deep).as_deref(),
+                Some("https://github.com/acme/widgets")
             );
         }
 
@@ -302,10 +262,8 @@ mod tests {
             );
 
             assert_eq!(
-                repository_of(&dir.path().join("wt"))
-                    .map(|n| n.to_string())
-                    .as_deref(),
-                Some("acme/widgets")
+                origin(&dir.path().join("wt")).as_deref(),
+                Some("https://github.com/acme/widgets")
             );
         }
 
@@ -319,10 +277,8 @@ mod tests {
             );
 
             assert_eq!(
-                repository_of(&dir.path().join("lib"))
-                    .map(|n| n.to_string())
-                    .as_deref(),
-                Some("acme/widgets")
+                origin(&dir.path().join("lib")).as_deref(),
+                Some("https://github.com/acme/widgets")
             );
         }
 
@@ -330,7 +286,7 @@ mod tests {
         fn should_find_none_outside_a_repo() {
             let dir = tempfile::tempdir().unwrap();
 
-            assert_eq!(repository_of(dir.path()), None);
+            assert_eq!(remote_urls_of(dir.path()), None);
         }
     }
 }

@@ -19,7 +19,7 @@
 
 pub mod remotes;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -259,8 +259,10 @@ impl Suggestions {
 /// The Repository a git repo's remote names, by the name in lower case, for each of `folders`
 /// that is in one.
 fn worked_in(folders: &[String]) -> BTreeMap<String, RepositoryName> {
-    (folders.iter())
-        .filter_map(|folder| remotes::repository_of(&PathBuf::from(folder)))
+    let git = remotes::Git::default();
+    let folders: BTreeSet<&String> = folders.iter().collect();
+    (folders.into_iter())
+        .filter_map(|folder| remotes::repository_of(&PathBuf::from(folder), &git))
         .map(|name| (name.to_string().to_lowercase(), name))
         .collect()
 }
