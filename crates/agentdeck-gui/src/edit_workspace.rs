@@ -27,6 +27,7 @@ use gpui::{
 use gpui_base::input::InputEvent;
 
 use crate::api::{Api, Change};
+use crate::connection::Connection;
 use crate::gui_state;
 use crate::link_picker::{LinkPicker, Offer, Staging};
 use crate::workspace::failed;
@@ -84,8 +85,14 @@ pub struct EditWorkspaceDialog {
 impl EventEmitter<Saved> for EditWorkspaceDialog {}
 
 impl EditWorkspaceDialog {
-    /// A closed dialog that renames workspaces through `api`.
-    pub fn new(api: Arc<dyn Api>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// A closed dialog that renames workspaces through `api`, its picker following
+    /// `connection`'s events.
+    pub fn new(
+        api: Arc<dyn Api>,
+        connection: &Entity<Connection>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let name = cx.new(|cx| InputState::new(window, cx));
         let _name = cx.subscribe_in(&name, window, |this, _, event, window, cx| match event {
             InputEvent::PressEnter { .. } => this.save(window, cx),
@@ -95,7 +102,7 @@ impl EditWorkspaceDialog {
             }
             InputEvent::Focus | InputEvent::Blur => {}
         });
-        let picker = cx.new(|cx| LinkPicker::new(api.clone(), window, cx));
+        let picker = cx.new(|cx| LinkPicker::new(api.clone(), connection, window, cx));
         let _picker = cx.subscribe(&picker, |_, _, _: &Staging, cx| cx.notify());
         EditWorkspaceDialog {
             api,
@@ -357,10 +364,13 @@ mod tests {
         ) -> (Harness, &mut VisualTestContext) {
             cx.update(brrritscold_core_gpui::init);
             let api = Arc::new(FakeApi::with(snapshot));
+            let connector = std::rc::Rc::new(crate::connection::fake::FakeConnector::default());
+            let _remote = connector.then_connect_to(api.clone());
+            let connection = cx.update(|cx| cx.new(|cx| Connection::new(connector, cx)));
             let mut dialog = None;
             let window = cx.add_window(|window, cx| {
                 let api: Arc<dyn Api> = api.clone();
-                let view = cx.new(|cx| EditWorkspaceDialog::new(api, window, cx));
+                let view = cx.new(|cx| EditWorkspaceDialog::new(api, &connection, window, cx));
                 dialog = Some(view.clone());
                 Root::new(view, window, cx)
             });

@@ -85,6 +85,128 @@ pub fn mock_rest_repo_missing<'a>(server: &'a MockServer, asked: &str) -> Mock<'
     })
 }
 
+/// `count` repositories a user can reach, as `GET /user/repos` sorts them: `acme/repo-000`,
+/// `acme/repo-001`…, every 7th private.
+pub fn user_repos(count: usize) -> Vec<RestRepo> {
+    (0..count)
+        .map(|i| RestRepo {
+            private: i % 7 == 0,
+            ..RestRepo::new(Box::leak(format!("acme/repo-{i:03}").into_boxed_str()))
+        })
+        .collect()
+}
+
+/// The `Link` header GitHub sends with page `page` of `last` of `GET /user/repos` on `server`:
+/// `next` and `last` before the last page, `prev` and `first` after the first.
+fn user_repos_link(server: &MockServer, page: u32, last: u32) -> String {
+    let url = |page: u32| {
+        format!(
+            "<{}?sort=full_name&direction=asc&per_page=100&page={page}>",
+            server.url("/user/repos")
+        )
+    };
+    let mut links = Vec::new();
+    if page > 1 {
+        links.push(format!("{}; rel=\"prev\"", url(page - 1)));
+    }
+    if page < last {
+        links.push(format!("{}; rel=\"next\"", url(page + 1)));
+        links.push(format!("{}; rel=\"last\"", url(last)));
+    }
+    if page > 1 {
+        links.push(format!("{}; rel=\"first\"", url(1)));
+    }
+    links.join(", ")
+}
+
+/// `GET /user/repos?sort=full_name&direction=asc&per_page=100&page=<page>` with `token`,
+/// answered after `delay` with `repos`' page `page` (from 1) and its `Link` header.
+pub fn mock_user_repos_page<'a>(
+    server: &'a MockServer,
+    token: &str,
+    repos: &[RestRepo],
+    page: u32,
+    delay: Duration,
+) -> Mock<'a> {
+    let last = repos.len().div_ceil(100).max(1) as u32;
+    let start = (page as usize - 1) * 100;
+    let body: Vec<Value> = (repos.iter().skip(start).take(100))
+        .map(|repo| {
+            let (owner, name) = repo.name.split_once('/').expect("owner/name");
+            json!({
+                "id": repo.id,
+                "node_id": "R_kgDOtest",
+                "name": name,
+                "full_name": repo.name,
+                "owner": { "login": owner },
+                "html_url": repo.url(),
+                "private": repo.private,
+                "archived": false,
+                "default_branch": "main"
+            })
+        })
+        .collect();
+    let link = user_repos_link(server, page, last);
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/user/repos")
+            .query_param("sort", "full_name")
+            .query_param("direction", "asc")
+            .query_param("per_page", "100")
+            .query_param("page", page.to_string())
+            .header("authorization", format!("Bearer {token}"))
+            .header("x-github-api-version", "2022-11-28");
+        let then = then.status(200).delay(delay).json_body(Value::Array(body));
+        if !link.is_empty() {
+            then.header("link", link);
+        }
+    })
+}
+
+/// Every page of `repos` for `token`, answered at once, by page from 1.
+pub fn mock_user_repos<'a>(
+    server: &'a MockServer,
+    token: &str,
+    repos: &[RestRepo],
+) -> Vec<Mock<'a>> {
+    let last = repos.len().div_ceil(100).max(1) as u32;
+    (1..=last)
+        .map(|page| mock_user_repos_page(server, token, repos, page, Duration::ZERO))
+        .collect()
+}
+
+/// `GET /user/repos` page `page` answered `status` with GitHub's JSON error `message`, and
+/// `headers`.
+pub fn mock_user_repos_failing<'a>(
+    server: &'a MockServer,
+    page: u32,
+    status: u16,
+    message: &str,
+    headers: &[(&str, &str)],
+) -> Mock<'a> {
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/user/repos")
+            .query_param("page", page.to_string());
+        let mut then = then.status(status).json_body(json!({
+            "message": message,
+            "documentation_url": "https://docs.github.com/rest"
+        }));
+        for (name, value) in headers {
+            then = then.header(*name, *value);
+        }
+    })
+}
+
+/// GitHub's repository search, which agentdeck never calls: any request to it.
+pub fn mock_search_repositories(server: &MockServer) -> Mock<'_> {
+    server.mock(|when, then| {
+        when.path("/search/repositories");
+        then.status(200)
+            .json_body(json!({ "total_count": 0, "items": [] }));
+    })
+}
+
 /// The stub `gh auth token`: prints `<root>/gh-token`, or fails as a logged-out `gh` does.
 const STUB_GH: &str = r#"#!/bin/sh
 [ "$1 $2" = "auth token" ] || { echo "stub gh: unsupported: $*" >&2; exit 2; }

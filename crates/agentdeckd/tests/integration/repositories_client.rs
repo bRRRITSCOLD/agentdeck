@@ -4,16 +4,19 @@
 //! the same way (spec §12).
 
 use agentdeck_client::Client;
-use agentdeck_client::repositories::{link, list, resolve, unlink};
-use agentdeck_client::types::{NewLink, NewWorkspace, Repository};
+use agentdeck_client::repositories::{
+    github_list, link, list, refresh_github_list, resolve, unlink,
+};
+use agentdeck_client::types::{GithubListStatus, NewLink, NewWorkspace, Repository};
 use agentdeck_core::{RepositoryId, WorkspaceId};
 use httpmock::MockServer;
 
 use crate::support::TestDaemon;
 use crate::support::github::{
-    Pr, RestRepo, mock_rest_repo, mock_rest_repo_missing, mock_search, mock_viewer, repository_id,
-    set_gh_token,
+    Pr, RestRepo, mock_rest_repo, mock_rest_repo_missing, mock_search, mock_user_repos,
+    mock_viewer, repository_id, set_gh_token, user_repos,
 };
+use crate::support::terminal::eventually;
 
 const TOKEN: &str = "gho_test";
 
@@ -347,5 +350,66 @@ mod suggestions {
             .expect_err("a refusal");
 
         assert_eq!(err.code.as_deref(), Some("not_found"));
+    }
+}
+
+mod github_list {
+    use super::*;
+
+    #[tokio::test]
+    async fn should_read_what_a_refresh_loaded_with_its_progress() {
+        let github = MockServer::start_async().await;
+        mock_viewer(&github, TOKEN, "octocat", None);
+        let repos = user_repos(130);
+        mock_user_repos(&github, TOKEN, &repos);
+        let dirs = tempfile::tempdir().expect("a temp dir");
+        set_gh_token(dirs.path(), Some(TOKEN));
+        let daemon = TestDaemon::start_with_github(dirs, &github.url("/graphql")).await;
+        assert_eq!(
+            github_list(&daemon.client).await.expect("read").status,
+            GithubListStatus::NotLoaded
+        );
+
+        refresh_github_list(&daemon.client).await.expect("refresh");
+
+        let read = eventually("the list loaded", || async {
+            let read = github_list(&daemon.client).await.expect("read");
+            (read.status == GithubListStatus::Loaded).then_some(read)
+        })
+        .await;
+        assert_eq!((read.loaded, read.total), (130, Some(130)));
+        let names: Vec<String> = (read.repositories.iter())
+            .map(|r| r.name.to_string())
+            .collect();
+        let wanted: Vec<String> = repos.iter().map(|r| r.name.to_owned()).collect();
+        assert_eq!(names, wanted);
+        assert_eq!(read.repositories[0].private, repos[0].private);
+    }
+
+    #[tokio::test]
+    async fn should_read_signed_out_after_a_refresh_without_a_token() {
+        let daemon = TestDaemon::start().await;
+
+        refresh_github_list(&daemon.client).await.expect("refresh");
+
+        let read = eventually("signed out", || async {
+            let read = github_list(&daemon.client).await.expect("read");
+            (read.status == GithubListStatus::SignedOut).then_some(read)
+        })
+        .await;
+        assert!(read.repositories.is_empty());
+    }
+
+    #[tokio::test]
+    async fn should_fail_with_the_daemons_words_when_it_refuses_the_token() {
+        let daemon = TestDaemon::start().await;
+        let stranger =
+            agentdeck_client::authenticated(&daemon.base_url(), "not-the-token").expect("a client");
+
+        let read = github_list(&stranger).await.expect_err("a refusal");
+        let refreshed = refresh_github_list(&stranger).await.expect_err("a refusal");
+
+        assert_eq!(read.code.as_deref(), Some("unauthorized"));
+        assert_eq!(refreshed.code.as_deref(), Some("unauthorized"));
     }
 }

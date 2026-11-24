@@ -260,6 +260,55 @@ impl Github {
         Ok(Some(repository.into()))
     }
 
+    /// Page `page` (from 1) of every repository the token's user can reach, read with the
+    /// REST API's `GET /user/repos?sort=full_name&direction=asc&per_page=100`: owned,
+    /// collaborator and organisation ones, by `owner/name`. Tried again after each of
+    /// `RETRY_WAITS` while it fails for a reason that may pass.
+    pub async fn user_repos_page(&self, token: &str, page: u32) -> Result<ReposPage, GithubError> {
+        retrying(GithubError::may_pass, || {
+            self.user_repos_page_once(token, page)
+        })
+        .await
+    }
+
+    /// [`Github::user_repos_page`], once.
+    async fn user_repos_page_once(&self, token: &str, page: u32) -> Result<ReposPage, GithubError> {
+        let url = format!("{}/user/repos", self.rest);
+        let response = self
+            .http
+            .get(url)
+            .query(&[
+                ("sort", "full_name"),
+                ("direction", "asc"),
+                ("per_page", &REPOS_PAGE_SIZE.to_string()),
+                ("page", &page.to_string()),
+            ])
+            .bearer_auth(token)
+            .header("accept", "application/vnd.github+json")
+            .header("x-github-api-version", REST_API_VERSION)
+            .send()
+            .await?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(GithubError::Unauthorized);
+        }
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(GithubError::Status {
+                status: status.as_u16(),
+                message: message(&body),
+            });
+        }
+        let last = (response.headers().get(reqwest::header::LINK))
+            .and_then(|link| link.to_str().ok())
+            .and_then(last_page);
+        let repositories: Vec<RestRepository> = response.json().await?;
+        Ok(ReposPage {
+            repositories: repositories.into_iter().map(Into::into).collect(),
+            last,
+        })
+    }
+
     /// Who `token` belongs to, and its scopes. A token GitHub rejects is
     /// [`GithubError::Unauthorized`].
     pub async fn viewer(&self, token: &str) -> Result<Viewer, GithubError> {
@@ -543,7 +592,35 @@ where
     }
 }
 
-/// A Repository as the REST API's `GET /repos/{owner}/{repo}` answers it.
+/// Repositories per page of `GET /user/repos`: the most GitHub gives.
+pub const REPOS_PAGE_SIZE: u32 = 100;
+
+/// One page of `GET /user/repos`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ReposPage {
+    /// The page's repositories, in GitHub's order.
+    pub repositories: Vec<RemoteRepository>,
+    /// The last page's number, from the `Link` header's `rel="last"`; `None` when there's
+    /// none, as on the last page itself.
+    pub last: Option<u32>,
+}
+
+/// The `page` of the `rel="last"` URL in a `Link` header; `None` when it has none, or one
+/// that can't be read.
+fn last_page(header: &str) -> Option<u32> {
+    header.split(',').find_map(|link| {
+        let (url, params) = link.trim().split_once(';')?;
+        let last = (params.split(';')).any(|param| param.trim() == "rel=\"last\"");
+        if !last {
+            return None;
+        }
+        let url = reqwest::Url::parse(url.trim().strip_prefix('<')?.strip_suffix('>')?).ok()?;
+        let page = url.query_pairs().find(|(key, _)| key == "page")?.1;
+        page.parse().ok()
+    })
+}
+
+/// A Repository as the REST API's `GET /repos/{owner}/{repo}` and `GET /user/repos` answer it.
 #[derive(Deserialize)]
 struct RestRepository {
     id: u64,
@@ -1113,6 +1190,45 @@ mod tests {
                 "nodes": nodes
             }
         })
+    }
+
+    mod last_page {
+        use super::*;
+
+        #[test]
+        fn should_read_the_last_pages_number_from_the_link_header() {
+            let header = "<https://api.github.com/user/repos?sort=full_name&direction=asc\
+                          &per_page=100&page=2>; rel=\"next\", \
+                          <https://api.github.com/user/repos?sort=full_name&direction=asc\
+                          &per_page=100&page=12>; rel=\"last\"";
+
+            assert_eq!(last_page(header), Some(12));
+        }
+
+        #[test]
+        fn should_find_it_wherever_it_sits_among_the_links() {
+            let header = "<https://api.github.com/user/repos?page=12&per_page=100>; rel=\"last\", \
+                          <https://api.github.com/user/repos?page=1&per_page=100>; rel=\"first\"";
+
+            assert_eq!(last_page(header), Some(12));
+        }
+
+        #[test]
+        fn should_be_none_on_the_last_page_itself() {
+            let header = "<https://api.github.com/user/repos?per_page=100&page=11>; rel=\"prev\", \
+                          <https://api.github.com/user/repos?per_page=100&page=1>; rel=\"first\"";
+
+            assert_eq!(last_page(header), None);
+        }
+
+        #[test]
+        fn should_be_none_for_a_link_it_cannot_read() {
+            assert_eq!(last_page("<not a url>; rel=\"last\""), None);
+            assert_eq!(
+                last_page("<https://api.github.com/user/repos>; rel=\"last\""),
+                None
+            );
+        }
     }
 
     mod parse_scopes {

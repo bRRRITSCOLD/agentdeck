@@ -218,6 +218,11 @@ pub enum Entity {
     /// Its id is the Workspace's. It came with `API_VERSION` 26; an older client skips the
     /// message.
     Suggestions,
+    /// `/v1/github/repositories`: the GitHub repository list the Link picker offers changed,
+    /// as a page of it arrived, its load began, finished or failed, or the sign-in changed.
+    /// Its id is always `list`. It came with `API_VERSION` 27; an older client skips the
+    /// message.
+    GithubRepositories,
 }
 
 #[cfg(test)]
@@ -399,6 +404,13 @@ mod tests {
                     },
                     json!({"t": "changed", "entity": "suggestions",
                            "id": "019a0000-0000-7000-8000-000000000001"}),
+                ),
+                (
+                    ServerMessage::Changed {
+                        entity: Entity::GithubRepositories,
+                        id: "list".into(),
+                    },
+                    json!({"t": "changed", "entity": "github_repositories", "id": "list"}),
                 ),
                 (
                     ServerMessage::Lagged { channel: 3 },

@@ -388,11 +388,13 @@ impl Shell {
                 if self.sidebar.is_none() {
                     let api = session.api.clone();
                     let connection = self.connection.clone();
-                    let dialog = cx.new(|cx| NewWorkspaceDialog::new(api.clone(), window, cx));
+                    let dialog =
+                        cx.new(|cx| NewWorkspaceDialog::new(api.clone(), &connection, window, cx));
                     let pull_requests =
                         cx.new(|cx| PullRequestsView::new(api.clone(), Scope::All, cx));
                     let new_agent = cx.new(|_| NewAgentDialog::new(api.clone()));
-                    let edit = cx.new(|cx| EditWorkspaceDialog::new(api.clone(), window, cx));
+                    let edit =
+                        cx.new(|cx| EditWorkspaceDialog::new(api.clone(), &connection, window, cx));
                     let delete = cx.new(|cx| DeleteWorkspaceDialog::new(api.clone(), window, cx));
                     let settings =
                         cx.new(|cx| SettingsView::new(api.clone(), &connection, window, cx));

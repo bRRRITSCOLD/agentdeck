@@ -7,6 +7,7 @@ mod auth;
 mod daemon;
 mod folders;
 mod github_auth;
+mod github_list;
 mod health;
 mod hosted;
 mod keyring;

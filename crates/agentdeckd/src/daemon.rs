@@ -14,6 +14,7 @@ use crate::config::{self, Config};
 use crate::db::Db;
 use crate::events::Events;
 use crate::github_auth::{self, GithubAuth, device, keyring};
+use crate::github_list::GithubList;
 use crate::instance::Instance;
 use crate::paths::Paths;
 use crate::prsync::{self, PrSync};
@@ -105,6 +106,7 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
         github.clone(),
     );
     suggestions.watch();
+    let github_list = GithubList::new(events.clone(), credentials.clone(), github.clone());
     let token = auth::new_token();
     let context = ApiContext {
         db,
@@ -117,6 +119,7 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
         terminals: terminals.clone(),
         events,
         suggestions,
+        github_list,
     };
     let config = ConfigDropshot {
         bind_address: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),

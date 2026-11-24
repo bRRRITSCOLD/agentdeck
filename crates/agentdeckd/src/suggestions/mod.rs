@@ -320,7 +320,11 @@ impl Due {
                     Err(_) => self.all = true,
                 },
                 Entity::Repository => self.all = true,
-                Entity::PrSync | Entity::Settings | Entity::PullRequest | Entity::Suggestions => {}
+                Entity::PrSync
+                | Entity::Settings
+                | Entity::PullRequest
+                | Entity::Suggestions
+                | Entity::GithubRepositories => {}
             },
             ServerMessage::GithubAuth { .. } => self.all = true,
             _ => {}
