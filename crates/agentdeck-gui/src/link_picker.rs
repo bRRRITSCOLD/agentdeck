@@ -21,7 +21,7 @@
 //! github_repositories` reads it again, so its pages show as they arrive with "Loading your
 //! repositories… 400 of about 1,100" under them. A list that failed to load reads "Couldn't
 //! load your repositories." with Retry, and the other sections and typed names keep working.
-//! The list draws only the rows in view, through GPUI's [`list`](gpui::list): about 1,100
+//! The list draws only the rows in view, through GPUI's [`list`]: about 1,100
 //! rows drawn whole would make every frame slow.
 
 use std::cell::Cell;
