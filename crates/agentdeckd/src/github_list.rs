@@ -8,6 +8,13 @@
 //! 12 requests. Each page is served as it arrives while no list is held; once one is, a
 //! refresh runs quietly under it and replaces it whole. One load runs at a time.
 //!
+//! A held list keeps each page's `ETag`, and a refresh asks for every page but the first with
+//! `If-None-Match`: GitHub's `304` costs nothing against the rate limit and keeps the page
+//! held. Page 1 is always read whole, since a `304` carries no `Link` header and the page
+//! count may have changed. Each page stands alone: a `304` says that page reads as held, so a
+//! repository added or removed, which shifts the pages after it, just has those pages answer
+//! whole, and the list stays exact without reading the rest unconditionally.
+//!
 //! The list is kept in memory for the run, for the sign-in it was read with: when the token
 //! changes, it is dropped and, if a client had asked for it, loaded again. Every change to it
 //! or its progress sends `changed github_repositories`. `search/repositories` is never called:
@@ -21,7 +28,9 @@ use futures_util::{StreamExt as _, TryStreamExt as _};
 use crate::events::Events;
 use crate::github_auth::{GithubAuth, NoToken};
 use crate::model::{GithubListStatus, GithubRepositoryList, Repository};
-use crate::prsync::github::{Github, GithubError, REPOS_PAGE_SIZE, RemoteRepository, ReposPage};
+use crate::prsync::github::{
+    Github, GithubError, REPOS_PAGE_SIZE, RemoteRepository, ReposPage, ReposRead,
+};
 
 /// How many pages after the first are read at once.
 const PAGES_IN_FLIGHT: usize = 4;
@@ -42,6 +51,22 @@ struct Inner {
     state: Mutex<State>,
 }
 
+/// One page of a list loaded whole, with the `ETag` GitHub sent it with.
+#[derive(Clone)]
+struct HeldPage {
+    etag: Option<String>,
+    repositories: Vec<Repository>,
+}
+
+impl From<ReposPage> for HeldPage {
+    fn from(read: ReposPage) -> HeldPage {
+        HeldPage {
+            etag: read.etag,
+            repositories: read.repositories.into_iter().map(repository).collect(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct State {
     /// Bumped when the sign-in changes, so a load from before stores nothing.
@@ -50,8 +75,8 @@ struct State {
     loading: bool,
     /// Whether a client has asked for the list since the sign-in last changed.
     asked: bool,
-    /// The last list loaded whole.
-    held: Option<Vec<Repository>>,
+    /// The last list loaded whole, by page from 1.
+    held: Option<Vec<HeldPage>>,
     /// While no list is held, the first load's pages that have arrived, by number from 1.
     pages: Vec<Option<Vec<Repository>>>,
     /// The first load's last page number, once page 1 has answered.
@@ -66,7 +91,13 @@ impl State {
     /// The list as `GET /v1/github/repositories` answers it.
     fn list(&self) -> GithubRepositoryList {
         let (status, repositories, total) = match &self.held {
-            Some(held) => (GithubListStatus::Loaded, held.clone(), Some(len(held))),
+            Some(held) => {
+                let repositories: Vec<Repository> = (held.iter())
+                    .flat_map(|page| page.repositories.iter().cloned())
+                    .collect();
+                let total = Some(len(&repositories));
+                (GithubListStatus::Loaded, repositories, total)
+            }
             None if self.loading => {
                 let repositories: Vec<Repository> =
                     self.pages.iter().flatten().flatten().cloned().collect();
@@ -141,7 +172,7 @@ impl GithubList {
     /// reads signed out; with a token GitHub rejects, failed.
     pub async fn refresh(&self) {
         let token = self.inner.auth.current_token().await;
-        let (generation, quiet) = {
+        let (generation, quiet, kept) = {
             let mut state = self.state();
             state.asked = true;
             if state.loading {
@@ -175,14 +206,15 @@ impl GithubList {
                     };
                 }
             }
-            (state.generation, quiet)
+            let kept = (state.held.clone()).filter(|_| quiet).unwrap_or_default();
+            (state.generation, quiet, kept)
         };
         if !quiet {
             self.changed();
         }
         if let Ok(token) = token {
             let this = self.clone();
-            tokio::spawn(async move { this.load(generation, token).await });
+            tokio::spawn(async move { this.load(generation, token, kept).await });
         }
     }
 
@@ -205,10 +237,10 @@ impl GithubList {
     }
 
     /// Reads every page with `token` and keeps the list, unless the sign-in changed meanwhile.
-    /// A list held already is replaced whole, and a failure keeps it, saying why; either sends
-    /// `changed` only when what clients read differs.
-    async fn load(&self, generation: u64, token: String) {
-        let loaded = self.read_pages(generation, token).await;
+    /// A list held already (`kept`, by page) is replaced whole, and a failure keeps it, saying
+    /// why; either sends `changed` only when what clients read differs.
+    async fn load(&self, generation: u64, token: String, kept: Vec<HeldPage>) {
+        let loaded = self.read_pages(generation, token, &kept).await;
         let changed = {
             let mut state = self.state();
             if state.generation != generation {
@@ -235,25 +267,34 @@ impl GithubList {
         }
     }
 
-    /// Every page, in order: page 1, then the last, then those between. While no list is held,
-    /// each is kept as it arrives.
+    /// Every page, in order: page 1, then the last, then those between. Each page after the
+    /// first that `kept` holds is asked for only if it changed, and kept as it was if not.
+    /// While no list is held, each is kept as it arrives.
     async fn read_pages(
         &self,
         generation: u64,
         token: String,
-    ) -> Result<Vec<Repository>, GithubError> {
+        kept: &[HeldPage],
+    ) -> Result<Vec<HeldPage>, GithubError> {
         let (first, token) = self.first_page(token).await?;
         let last = first.last.unwrap_or(1).max(1);
-        let mut pages: Vec<Option<Vec<Repository>>> = vec![None; last as usize];
-        self.arrived(generation, &mut pages, 1, first, Some(last));
+        let mut pages: Vec<Option<HeldPage>> = vec![None; last as usize];
+        self.arrived(generation, &mut pages, 1, first.into(), Some(last));
         let order = (last > 1).then_some(last).into_iter().chain(2..last);
         let github = &self.inner.github;
         let token = token.as_str();
         let mut reads = futures_util::stream::iter(order.map(|page| async move {
-            github
-                .user_repos_page(token, page)
-                .await
-                .map(|read| (page, read))
+            let kept = kept.get(page as usize - 1);
+            let etag = kept.and_then(|kept| kept.etag.as_deref());
+            let read = match github.user_repos_page(token, page, etag).await? {
+                ReposRead::Page(read) => read.into(),
+                // Only a page asked for with a kept page's ETag answers 304.
+                ReposRead::NotModified => kept.cloned().ok_or(GithubError::Status {
+                    status: 304,
+                    message: None,
+                })?,
+            };
+            Ok((page, read))
         }))
         .buffer_unordered(PAGES_IN_FLIGHT);
         while let Some((page, read)) = reads.try_next().await.inspect_err(|err| {
@@ -263,26 +304,34 @@ impl GithubList {
         })? {
             self.arrived(generation, &mut pages, page, read, None);
         }
-        Ok(pages.into_iter().flatten().flatten().collect())
+        Ok(pages.into_iter().flatten().collect())
     }
 
-    /// Page 1 and the token that read it: a 401 reads the token's sources again and tries
-    /// once more, then counts the token as rejected.
+    /// Page 1, read whole for its `Link` header, and the token that read it: a 401 reads the
+    /// token's sources again and tries once more, then counts the token as rejected.
     async fn first_page(&self, token: String) -> Result<(ReposPage, String), GithubError> {
         let github = &self.inner.github;
-        match github.user_repos_page(&token, 1).await {
+        let whole = |read| match read {
+            ReposRead::Page(page) => Ok(page),
+            // Never asked with an ETag, so never answered 304.
+            ReposRead::NotModified => Err(GithubError::Status {
+                status: 304,
+                message: None,
+            }),
+        };
+        match github.user_repos_page(&token, 1, None).await {
             Err(GithubError::Unauthorized) => {
                 let fresh =
                     (self.inner.auth.reread().await).map_err(|_| GithubError::Unauthorized)?;
-                match github.user_repos_page(&fresh, 1).await {
+                match github.user_repos_page(&fresh, 1, None).await {
                     Err(GithubError::Unauthorized) => {
                         self.inner.auth.rejected();
                         Err(GithubError::Unauthorized)
                     }
-                    read => read.map(|page| (page, fresh)),
+                    read => whole(read?).map(|page| (page, fresh)),
                 }
             }
-            read => read.map(|page| (page, token)),
+            read => whole(read?).map(|page| (page, token)),
         }
     }
 
@@ -291,18 +340,17 @@ impl GithubList {
     fn arrived(
         &self,
         generation: u64,
-        pages: &mut [Option<Vec<Repository>>],
+        pages: &mut [Option<HeldPage>],
         page: u32,
-        read: ReposPage,
+        read: HeldPage,
         last: Option<u32>,
     ) {
-        let read: Vec<Repository> = read.repositories.into_iter().map(repository).collect();
         let at = page as usize - 1;
         {
             let mut state = self.state();
             if state.generation == generation && state.held.is_none() {
                 state.pages.resize(pages.len(), None);
-                state.pages[at] = Some(read.clone());
+                state.pages[at] = Some(read.repositories.clone());
                 if last.is_some() {
                     state.last = last;
                 }
