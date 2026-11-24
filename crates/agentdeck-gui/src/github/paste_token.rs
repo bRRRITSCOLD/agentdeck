@@ -12,7 +12,7 @@ use agentdeck_client::ApiError;
 use agentdeck_client::types::GithubAuthInfo;
 use brrritscold_core_gpui::{
     Button, ButtonVariant, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHandle,
-    DialogHeader, DialogTitle, Field, FieldError, Input, InputState, Label,
+    DialogHeader, DialogTitle, Field, FieldError, FieldLabel, Input, InputState,
 };
 use brrritscold_core_gpui_tokens::primitive::space;
 use gpui::prelude::FluentBuilder as _;
@@ -174,7 +174,7 @@ impl Render for PasteTokenDialog {
             .flex_col()
             .gap(space::S4)
             .child(
-                Field::new().child(Label::new().child("Token")).child(
+                Field::new().child(FieldLabel::new().child("Token")).child(
                     div()
                         .debug_selector(|| "paste token input".into())
                         .child(Input::new(&self.token).aria_invalid(error.is_some())),

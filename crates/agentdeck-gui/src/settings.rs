@@ -28,8 +28,9 @@ use agentdeck_client::types::{
 use agentdeck_core::opener::{FileOpener, OpenerError};
 use agentdeck_core::ws::{Entity as Changed, ServerMessage};
 use brrritscold_core_gpui::{
-    ActiveTheme as _, Field, FieldContent, FieldDescription, FieldError, FieldOrientation, Input,
-    InputState, Label, Select, SelectContent, SelectItem, SelectTrigger, Switch, Theme,
+    ActiveTheme as _, Field, FieldContent, FieldDescription, FieldError, FieldLabel,
+    FieldOrientation, Input, InputState, Select, SelectContent, SelectItem, SelectTrigger, Switch,
+    Theme,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
@@ -503,7 +504,7 @@ impl SettingsView {
                 }
             }));
         Field::new()
-            .child(Label::new().child("Theme"))
+            .child(FieldLabel::new().child("Theme"))
             .child(
                 // Penpot fits the trigger to its value, so the field doesn't stretch it.
                 div()
@@ -521,7 +522,7 @@ impl SettingsView {
     fn days_field(&self) -> gpui::AnyElement {
         let error = self.days_error().cloned();
         Field::new()
-            .child(Label::new().child("Sync PRs updated in the last (days)"))
+            .child(FieldLabel::new().child("Sync PRs updated in the last (days)"))
             .child(
                 div()
                     .debug_selector(|| "settings days".into())
@@ -562,7 +563,7 @@ impl SettingsView {
             .content(
                 FieldContent::new()
                     .min_w_0()
-                    .child(Label::new().child("Ask before quitting while agents run"))
+                    .child(FieldLabel::new().child("Ask before quitting while agents run"))
                     .child(FieldDescription::new(CONFIRM_QUIT_DESCRIPTION)),
             );
         div()
@@ -575,7 +576,7 @@ impl SettingsView {
     fn opener_field(&self) -> gpui::AnyElement {
         let error = self.opener_error().cloned();
         Field::new()
-            .child(Label::new().child("Open file paths with"))
+            .child(FieldLabel::new().child("Open file paths with"))
             .child(
                 div()
                     .debug_selector(|| "settings opener".into())

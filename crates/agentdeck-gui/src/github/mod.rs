@@ -17,7 +17,7 @@ use agentdeck_client::types::{GithubAuthInfo, TokenEnvVar, TokenSource};
 use agentdeck_core::ws::ServerMessage;
 use brrritscold_core_gpui::{
     ActiveTheme as _, Button, ButtonSize, ButtonVariant, Field, FieldDescription, FieldError,
-    Input, InputState, Label,
+    FieldLabel, Input, InputState,
 };
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
 use gpui::prelude::FluentBuilder as _;
@@ -489,7 +489,7 @@ impl GithubSection {
         let blank = self.client_id.read(cx).value().trim().is_empty();
         let error = self.client_id_error.clone();
         Field::new()
-            .child(Label::new().child("OAuth client ID"))
+            .child(FieldLabel::new().child("OAuth client ID"))
             .child(
                 div()
                     .flex()

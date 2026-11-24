@@ -13,8 +13,8 @@ use agentdeck_client::ApiError;
 use agentdeck_core::{RepositoryName, WorkspaceId};
 use brrritscold_core_gpui::{
     Button, ButtonVariant, Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter,
-    DialogHandle, DialogHeader, DialogTitle, Field, FieldDescription, FieldError, Input,
-    InputState, Label,
+    DialogHandle, DialogHeader, DialogTitle, Field, FieldDescription, FieldError, FieldLabel,
+    Input, InputState,
 };
 use brrritscold_core_gpui_tokens::primitive::space;
 use gpui::prelude::FluentBuilder as _;
@@ -181,7 +181,7 @@ impl NewWorkspaceDialog {
             .child(
                 div().debug_selector(|| "name field".into()).child(
                     Field::new()
-                        .child(Label::new().child("Name"))
+                        .child(FieldLabel::new().child("Name"))
                         .child(Input::new(&self.name).aria_invalid(problem.is_some()))
                         .child(FieldDescription::new(NAME_HINT))
                         .when_some(problem, |field, why| field.child(FieldError::new(why))),

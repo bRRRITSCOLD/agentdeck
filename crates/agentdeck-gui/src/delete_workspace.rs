@@ -11,7 +11,7 @@ use std::sync::Arc;
 use agentdeck_core::{AgentState, WorkspaceId};
 use brrritscold_core_gpui::{
     ActiveTheme as _, Button, ButtonVariant, Dialog, DialogClose, DialogContent, DialogDescription,
-    DialogFooter, DialogHandle, DialogHeader, DialogTitle, Field, Input, InputState, Label,
+    DialogFooter, DialogHandle, DialogHeader, DialogTitle, Field, FieldLabel, Input, InputState,
 };
 use brrritscold_core_gpui_tokens::primitive::space;
 use gpui::prelude::FluentBuilder as _;
@@ -255,7 +255,9 @@ impl Render for DeleteWorkspaceDialog {
                             )
                             .child(
                                 Field::new()
-                                    .child(Label::new().child(format!("Type {name} to confirm")))
+                                    .child(
+                                        FieldLabel::new().child(format!("Type {name} to confirm")),
+                                    )
                                     .child(Input::new(&self.confirm)),
                             ),
                     )

@@ -16,8 +16,8 @@ use agentdeck_client::ApiError;
 use agentdeck_core::{Agent, PaneId, TabId, WorkspaceId};
 use brrritscold_core_gpui::{
     Button, ButtonVariant, Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter,
-    DialogHandle, DialogHeader, DialogTitle, Field, FieldDescription, Label, Select, SelectContent,
-    SelectItem, SelectTrigger,
+    DialogHandle, DialogHeader, DialogTitle, Field, FieldDescription, FieldLabel, Select,
+    SelectContent, SelectItem, SelectTrigger,
 };
 use brrritscold_core_gpui_tokens::primitive::space;
 use gpui::{
@@ -238,7 +238,7 @@ impl NewAgentDialog {
 
     fn field(label: &'static str, select: Select, description: Option<String>) -> impl IntoElement {
         Field::new()
-            .child(Label::new().child(label))
+            .child(FieldLabel::new().child(label))
             .child(select)
             .children(description.map(FieldDescription::new))
     }
