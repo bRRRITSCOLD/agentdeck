@@ -108,6 +108,17 @@ pub fn mock_repo_missing<'a>(server: &'a MockServer, repo: &str) -> Mock<'a> {
     })
 }
 
+/// The REST API's `GET /repositories/{id}` for `repo`'s id, answered 404 as for a Repository
+/// deleted, or one the token can no longer see.
+pub fn mock_repo_by_id_missing<'a>(server: &'a MockServer, repo: &str) -> Mock<'a> {
+    server.mock(|when, then| {
+        when.method(GET)
+            .path(format!("/repositories/{}", repository_id(repo)));
+        then.status(404)
+            .json_body(json!({ "message": "Not Found" }));
+    })
+}
+
 /// The mocks [`mock_open_prs`] answers a sync with.
 pub struct OpenPrs<'a> {
     /// The list of open PRs you authored, which a full sync reads.

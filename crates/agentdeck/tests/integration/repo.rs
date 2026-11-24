@@ -5,7 +5,9 @@ use std::ffi::OsString;
 use httpmock::MockServer;
 use serde_json::{Value, json};
 
-use crate::support::github::{Pr, mock_open_prs, mock_repo, mock_repo_missing, repository_id};
+use crate::support::github::{
+    Pr, mock_open_prs, mock_repo, mock_repo_by_id_missing, mock_repo_missing, repository_id,
+};
 use crate::support::{TestEnv, text};
 
 const TOKEN: &str = "gho_test";
@@ -89,6 +91,43 @@ mod repo_ls {
                 "workspaces": [text(&web, "id")]
             }])
         );
+    }
+
+    /// A linked Repository GitHub no longer shows the sign-in, once `pr sync` read it by id.
+    fn unreachable_widgets(github: &MockServer) -> TestEnv {
+        let env = showing(github, &[WIDGETS]);
+        mock_open_prs(github, TOKEN, &[]);
+        mock_repo_by_id_missing(github, WIDGETS);
+        env.workspace("web");
+        env.ok(&["repo", "link", WIDGETS, "--ws", "web"]);
+        let status = env.json(&["pr", "sync"]);
+        assert_eq!(status["last_error"], Value::Null, "{status}");
+        env
+    }
+
+    #[test]
+    fn should_mark_a_repository_github_no_longer_shows_unreachable_and_keep_its_link() {
+        let github = MockServer::start();
+        let env = unreachable_widgets(&github);
+
+        let stdout = env.ok(&["repo", "ls"]);
+
+        assert_eq!(
+            stdout,
+            "REPOSITORY                  WORKSPACES\n\
+             acme/widgets (unreachable)  web\n"
+        );
+    }
+
+    #[test]
+    fn should_say_it_is_unreachable_with_json() {
+        let github = MockServer::start();
+        let env = unreachable_widgets(&github);
+
+        let repositories = env.json(&["repo", "ls"]);
+
+        assert_eq!(repositories[0]["name"], WIDGETS);
+        assert_eq!(repositories[0]["unreachable"], true);
     }
 
     #[test]
