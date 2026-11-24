@@ -173,7 +173,11 @@ mod get_v1_github_repositories {
             assert_eq!(read.status, GithubListStatus::Loading);
             assert_eq!(read.total, Some(250));
             let expected = [named(&repos[..100]), named(&repos[200..])].concat();
-            assert_eq!(names(&read), expected, "in GitHub's order, page 2 still to come");
+            assert_eq!(
+                names(&read),
+                expected,
+                "in GitHub's order, page 2 still to come"
+            );
         }
 
         #[tokio::test]
@@ -296,7 +300,10 @@ mod post_v1_github_repositories_refresh {
             refresh(&daemon.client).await;
             let read = until_status(&daemon.client, GithubListStatus::Failed).await;
 
-            assert_eq!(read.error.as_deref(), Some("GitHub answered 502: Server Error"));
+            assert_eq!(
+                read.error.as_deref(),
+                Some("GitHub answered 502: Server Error")
+            );
             assert!(read.repositories.is_empty());
             assert_eq!(broken.calls_async().await, 3);
             broken.delete_async().await;
@@ -333,7 +340,13 @@ mod post_v1_github_repositories_refresh {
         #[tokio::test]
         async fn should_fail_when_github_answers_too_many_requests_429_204() {
             let github = MockServer::start_async().await;
-            mock_user_repos_failing(&github, 1, 429, "Too Many Requests", &[("retry-after", "60")]);
+            mock_user_repos_failing(
+                &github,
+                1,
+                429,
+                "Too Many Requests",
+                &[("retry-after", "60")],
+            );
             let daemon = signed_in(&github).await;
 
             refresh(&daemon.client).await;
@@ -357,7 +370,10 @@ mod post_v1_github_repositories_refresh {
             refresh(&daemon.client).await;
             let read = until_status(&daemon.client, GithubListStatus::Failed).await;
 
-            assert_eq!(read.error.as_deref(), Some("GitHub answered 403: Forbidden"));
+            assert_eq!(
+                read.error.as_deref(),
+                Some("GitHub answered 403: Forbidden")
+            );
             assert_eq!((read.loaded, read.total), (0, None));
             assert!(read.repositories.is_empty());
         }

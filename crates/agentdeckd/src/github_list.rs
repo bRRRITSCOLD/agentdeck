@@ -250,7 +250,10 @@ impl GithubList {
         let github = &self.inner.github;
         let token = token.as_str();
         let mut reads = futures_util::stream::iter(order.map(|page| async move {
-            github.user_repos_page(token, page).await.map(|read| (page, read))
+            github
+                .user_repos_page(token, page)
+                .await
+                .map(|read| (page, read))
         }))
         .buffer_unordered(PAGES_IN_FLIGHT);
         while let Some((page, read)) = reads.try_next().await.inspect_err(|err| {
@@ -269,8 +272,8 @@ impl GithubList {
         let github = &self.inner.github;
         match github.user_repos_page(&token, 1).await {
             Err(GithubError::Unauthorized) => {
-                let fresh = (self.inner.auth.reread().await)
-                    .map_err(|_| GithubError::Unauthorized)?;
+                let fresh =
+                    (self.inner.auth.reread().await).map_err(|_| GithubError::Unauthorized)?;
                 match github.user_repos_page(&fresh, 1).await {
                     Err(GithubError::Unauthorized) => {
                         self.inner.auth.rejected();

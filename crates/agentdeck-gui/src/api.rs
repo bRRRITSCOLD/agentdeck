@@ -5,8 +5,8 @@
 use agentdeck_client::daemon::Daemon;
 use agentdeck_client::panes::{self, pane_if_any};
 use agentdeck_client::types::{
-    DeviceSignIn, GithubAuthInfo, GithubClientIdBody, GithubTokenBody, Pane, PaneRun, PrClose,
-    PrCloseResult, Repository, Settings, SettingsPatch, Tab,
+    DeviceSignIn, GithubAuthInfo, GithubClientIdBody, GithubRepositoryList, GithubTokenBody, Pane,
+    PaneRun, PrClose, PrCloseResult, Repository, Settings, SettingsPatch, Tab,
 };
 pub use agentdeck_client::workspaces::Change;
 use agentdeck_client::{ApiError, Client};
@@ -97,6 +97,15 @@ pub trait Api: Send + Sync {
         name: RepositoryName,
         cx: &App,
     ) -> Task<anyhow::Result<Repository>>;
+
+    /// Every GitHub repository the sign-in can reach, as the daemon holds it now, with how far
+    /// loading them has got (spec §8): the picker's All your repositories.
+    fn github_repositories(&self, cx: &App) -> Task<anyhow::Result<GithubRepositoryList>>;
+
+    /// Asks the daemon to load the GitHub repository list again, as a picker does when it
+    /// opens and on Retry. Answers before GitHub does: the pages come with `changed
+    /// github_repositories` events.
+    fn refresh_github_repositories(&self, cx: &App) -> Task<anyhow::Result<()>>;
 
     /// Links `workspace` to `repository` by GitHub's id, as the view holds it (spec §4): the
     /// Repository the daemon keeps with that id, or, when an unlink took it meanwhile, one
@@ -310,6 +319,20 @@ impl Api for Daemon {
         let client = self.client.clone();
         runtime::spawn(cx, async move {
             Ok(agentdeck_client::repositories::resolve(&client, &name).await?)
+        })
+    }
+
+    fn github_repositories(&self, cx: &App) -> Task<anyhow::Result<GithubRepositoryList>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            Ok(agentdeck_client::repositories::github_list(&client).await?)
+        })
+    }
+
+    fn refresh_github_repositories(&self, cx: &App) -> Task<anyhow::Result<()>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            Ok(agentdeck_client::repositories::refresh_github_list(&client).await?)
         })
     }
 
@@ -604,6 +627,12 @@ pub(crate) mod fake {
         github_repositories: Mutex<HashMap<String, Repository>>,
         /// The names looked up on GitHub, in order.
         pub resolved: Mutex<Vec<RepositoryName>>,
+        /// The GitHub repository list as the daemon holds it; loaded, and empty, when unset.
+        github_list: Mutex<Option<GithubRepositoryList>>,
+        /// Why reading the GitHub repository list fails, while it does.
+        github_list_failure: Mutex<Option<String>>,
+        /// How many times the GitHub repository list was asked to load again.
+        pub github_list_refreshes: Mutex<usize>,
         /// The workspaces deleted, in order.
         pub deleted: Mutex<Vec<WorkspaceId>>,
         /// The settings; the daemon's defaults when unset.
@@ -753,6 +782,22 @@ pub(crate) mod fake {
         /// Answers later reads of the GitHub auth with `auth`.
         pub fn set_github(&self, auth: GithubAuthInfo) {
             *self.github.lock().unwrap() = Some(auth);
+        }
+
+        /// Answers later reads of the GitHub repository list with `list`.
+        pub fn set_github_list(&self, list: GithubRepositoryList) {
+            *self.github_list.lock().unwrap() = Some(list);
+        }
+
+        /// Fails every read of the GitHub repository list with `reason`, or (with `None`)
+        /// stops failing them.
+        pub fn fail_github_list(&self, reason: Option<&str>) {
+            *self.github_list_failure.lock().unwrap() = reason.map(str::to_owned);
+        }
+
+        /// How many times the GitHub repository list was asked to load again.
+        pub fn github_list_refreshes(&self) -> usize {
+            *self.github_list_refreshes.lock().unwrap()
         }
 
         /// Makes GitHub show `repository`: a typed name resolves to it, and linking it by
@@ -1154,6 +1199,25 @@ pub(crate) mod fake {
                 return Task::ready(Err(err));
             }
             Task::ready(self.github(&name))
+        }
+
+        fn github_repositories(&self, _cx: &App) -> Task<anyhow::Result<GithubRepositoryList>> {
+            if let Some(reason) = self.github_list_failure.lock().unwrap().clone() {
+                return Task::ready(Err(anyhow::Error::msg(reason)));
+            }
+            let list = self.github_list.lock().unwrap().clone();
+            Task::ready(Ok(list.unwrap_or_else(|| GithubRepositoryList {
+                status: agentdeck_client::types::GithubListStatus::Loaded,
+                loaded: 0,
+                total: None,
+                error: None,
+                repositories: Vec::new(),
+            })))
+        }
+
+        fn refresh_github_repositories(&self, _cx: &App) -> Task<anyhow::Result<()>> {
+            *self.github_list_refreshes.lock().unwrap() += 1;
+            Task::ready(Ok(()))
         }
 
         fn link_repository(

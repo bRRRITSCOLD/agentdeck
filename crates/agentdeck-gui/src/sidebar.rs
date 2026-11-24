@@ -236,6 +236,11 @@ impl SidebarView {
                 let now = cx.background_executor().now();
                 self.reattached.attached(*pane, *state, now);
             }
+            // The GitHub repository list is the Link picker's own read, page by page.
+            DaemonEvent::Message(ServerMessage::Changed {
+                entity: agentdeck_core::ws::Entity::GithubRepositories,
+                ..
+            }) => {}
             // On `resync` the connection missed events: the read is diffed against what the
             // sidebar held, so a change made meanwhile still alerts.
             DaemonEvent::Message(ServerMessage::Changed { .. } | ServerMessage::Resync) => {
@@ -1321,6 +1326,18 @@ mod tests {
 
             assert!(open.api.reads() <= 3, "{} reads", open.api.reads());
             assert!(open.shows("row c"));
+        }
+
+        #[gpui::test]
+        fn should_not_read_again_as_the_github_repository_list_loads(cx: &mut TestAppContext) {
+            let mut open = open(two_workspaces(), cx);
+
+            open.send(ServerMessage::Changed {
+                entity: Changed::GithubRepositories,
+                id: "list".into(),
+            });
+
+            assert_eq!(open.api.reads(), 1);
         }
 
         #[gpui::test]

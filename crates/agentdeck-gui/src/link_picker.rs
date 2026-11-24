@@ -9,10 +9,20 @@
 //! counts the open PRs that would leave the Workspace.
 //!
 //! The picker lists Suggested (the Workspace's Suggestions, Not now or not), then From your
-//! pull requests (the Repositories of your kept PRs, but for those Suggested), leaving out what
-//! the Workspace links and Unreachable ones; typing filters both. Typed text naming a
-//! Repository (`owner/name` or its GitHub URL) that isn't listed offers a "Link owner/name" row,
-//! which asks GitHub ([`Api::resolve_repository`]); signed out, typed names are off.
+//! pull requests (the Repositories of your kept PRs, but for those Suggested), then All your
+//! repositories (every GitHub repository the sign-in can reach, but for those listed above),
+//! leaving out what the Workspace links and Unreachable ones; typing filters all three. Typed
+//! text naming a Repository (`owner/name` or its GitHub URL) that isn't listed offers a
+//! "Link owner/name" row, which asks GitHub ([`Api::resolve_repository`]); signed out, typed
+//! names and All your repositories are off.
+//!
+//! All your repositories is the daemon's GitHub repository list: each [`LinkPicker::reset`]
+//! (a dialog opening) asks the daemon to load it again, and each `changed
+//! github_repositories` reads it again, so its pages show as they arrive with "Loading your
+//! repositories… 400 of about 1,100" under them. A list that failed to load reads "Couldn't
+//! load your repositories." with Retry, and the other sections and typed names keep working.
+//! The list draws only the rows in view, through GPUI's [`list`](gpui::list): about 1,100
+//! rows drawn whole would make every frame slow.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -20,23 +30,28 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use agentdeck_client::ApiError;
+use agentdeck_client::types::{GithubListStatus, GithubRepositoryList};
+use agentdeck_core::ws::{Entity as Changed, ServerMessage};
 use agentdeck_core::{PrState, RepositoryId, RepositoryName, WorkspaceId};
 use brrritscold_core_gpui::{
     ActiveTheme as _, Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, FieldError, Icon,
     IconName, Input, InputState, Label,
 };
-use brrritscold_core_gpui_tokens::primitive::{font_size, shadow, space};
+use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, shadow, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Anchor, App, AppContext as _, Bounds, BoxShadow, Context, Entity, EventEmitter,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, canvas, div, point,
-    px,
+    Anchor, AnyElement, App, AppContext as _, Bounds, BoxShadow, Context, Entity, EventEmitter,
+    InteractiveElement as _, IntoElement, ListOffset, ListState, ParentElement as _, Pixels,
+    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window,
+    canvas, div, list, point, px,
 };
 use gpui_base::input::InputEvent;
 
 use crate::api::Api;
+use crate::connection::{Connection, DaemonEvent};
 use crate::overview::Snapshot;
+use crate::rereads::Rereads;
+use crate::table;
 use crate::workspace::failed;
 
 /// The picker's placeholder.
@@ -47,6 +62,18 @@ pub const SUGGESTED: &str = "Suggested";
 
 /// The heading over the Repositories of your kept PRs.
 pub const FROM_PRS: &str = "From your pull requests";
+
+/// The heading over every GitHub repository the sign-in can reach, after the other sections.
+pub const ALL_REPOSITORIES: &str = "All your repositories";
+
+/// What All your repositories says while its list loads, before page 1 has answered.
+pub const LOADING: &str = "Loading your repositories…";
+
+/// What All your repositories says when its list didn't load; [`RETRY`] follows it.
+pub const COULD_NOT_LOAD: &str = "Couldn't load your repositories.";
+
+/// What loads the list again after it didn't load.
+pub const RETRY: &str = "Retry";
 
 /// What the list says in place of typed names while signed out of GitHub.
 pub const SIGNED_OUT: &str = "Sign in to GitHub to find more repositories.";
@@ -84,6 +111,8 @@ pub struct Offer {
     pub open_prs: HashMap<RepositoryId, usize>,
     /// Whether GitHub accepts the token, so typed names can be looked up.
     pub signed_in: bool,
+    /// Every Repository agentdeck keeps that the GitHub sign-in can't see any more.
+    pub unreachable: Vec<RepositoryId>,
 }
 
 impl Offer {
@@ -123,14 +152,117 @@ impl Offer {
         // Unknown until PR status is read: let GitHub answer for the token.
         let signed_in = (snapshot.pr_sync.as_ref())
             .is_none_or(|s| s.login != agentdeck_client::types::GhLogin::LoggedOut);
+        let unreachable = (repositories.iter())
+            .filter(|r| r.unreachable)
+            .map(|r| r.id)
+            .collect();
         Offer {
             linked,
             suggested,
             from_prs,
             open_prs,
             signed_in,
+            unreachable,
         }
     }
+}
+
+/// All your repositories, as last read from the daemon's GitHub repository list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GithubList {
+    /// Loading: the repositories loaded so far, in GitHub's order, how many that is, and about
+    /// how many there are in all (unknown before page 1 answers).
+    Loading {
+        repositories: Vec<Choice>,
+        loaded: u32,
+        total: Option<u32>,
+    },
+    /// Every repository, in GitHub's order.
+    Loaded(Vec<Choice>),
+    /// The list didn't load: GitHub failed, or the daemon couldn't be asked.
+    Failed,
+    /// The daemon has no GitHub token to list with.
+    SignedOut,
+}
+
+impl Default for GithubList {
+    fn default() -> Self {
+        GithubList::Loading {
+            repositories: Vec::new(),
+            loaded: 0,
+            total: None,
+        }
+    }
+}
+
+impl GithubList {
+    /// What the daemon's `list` holds for the picker. A list not loaded yet reads as loading:
+    /// the picker has just asked for it.
+    pub fn read(list: GithubRepositoryList) -> GithubList {
+        let choices = |list: GithubRepositoryList| {
+            (list.repositories.into_iter())
+                .map(|r| Choice {
+                    id: r.id,
+                    name: r.name,
+                    private: r.private,
+                    unreachable: false,
+                })
+                .collect()
+        };
+        match list.status {
+            GithubListStatus::Loaded => GithubList::Loaded(choices(list)),
+            GithubListStatus::Failed => GithubList::Failed,
+            GithubListStatus::SignedOut => GithubList::SignedOut,
+            GithubListStatus::NotLoaded | GithubListStatus::Loading => GithubList::Loading {
+                loaded: list.loaded,
+                total: list.total,
+                repositories: choices(list),
+            },
+        }
+    }
+
+    /// The repositories it holds now.
+    fn repositories(&self) -> &[Choice] {
+        match self {
+            GithubList::Loading { repositories, .. } | GithubList::Loaded(repositories) => {
+                repositories
+            }
+            GithubList::Failed | GithubList::SignedOut => &[],
+        }
+    }
+}
+
+/// The line under All your repositories while it loads: "Loading your repositories… 400 of
+/// about 1,100", the total rounded to the hundred; before page 1 answers, no count.
+pub fn loading_line(loaded: u32, total: Option<u32>) -> String {
+    match total.filter(|_| loaded > 0) {
+        Some(total) => {
+            let about = if total >= 100 {
+                (total + 50) / 100 * 100
+            } else {
+                total
+            };
+            format!(
+                "{LOADING} {} of about {}",
+                thousands(loaded),
+                thousands(about)
+            )
+        }
+        None => LOADING.to_owned(),
+    }
+}
+
+/// `n` with a comma between each group of three digits: `1,104`.
+fn thousands(n: u32) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
 }
 
 /// Where a row of the list stands until the dialog saves.
@@ -160,6 +292,8 @@ pub enum Entry {
     Suggested(Choice),
     /// A Repository of your kept PRs.
     Pick(Choice),
+    /// A GitHub repository the sign-in can reach: All your repositories.
+    All(Choice),
     /// "Link owner/name": a typed Repository the list doesn't hold.
     Typed(RepositoryName),
 }
@@ -185,19 +319,76 @@ pub struct LinkPicker {
     lookup: Option<Task<()>>,
     /// The field's bounds last frame: the list is as wide.
     field: Rc<Cell<Bounds<Pixels>>>,
+    /// All your repositories, as last read.
+    github: GithubList,
+    /// Whether a dialog has opened the picker, so `changed github_repositories` reads the list.
+    following: bool,
+    /// Asking the daemon to load the list again.
+    github_refresh: Option<Task<()>>,
+    /// Reading the list.
+    github_read: Option<Task<()>>,
+    github_rereads: Rereads,
+    /// The open list's rows, drawn only where in view.
+    rows_list: ListState,
+    /// What the open list showed last frame.
+    shown: Vec<Item>,
     _input: Subscription,
+    _events: Subscription,
+}
+
+/// A row of the open list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Item {
+    /// A section's heading: its words and how tests find it.
+    Heading(&'static str, &'static str),
+    /// A Repository to pick.
+    Choice(Entry),
+    /// "Loading your repositories… 400 of about 1,100".
+    Loading(String),
+    /// "Couldn't load your repositories." and Retry.
+    Failed,
+    /// "No repositories match.".
+    NoMatch,
+}
+
+/// Heights of the open list's rows, as Penpot `agentdeck/LinkPickerList` lays them out: a
+/// ComboboxLabel (`py-1.5 text-xs`), a ComboboxItem (`py-1.5 text-sm`) and ComboboxEmpty
+/// (`py-2 text-sm`). The list is as tall as its rows, up to [`MAX_LIST_HEIGHT`].
+const HEADING_HEIGHT: Pixels = px(30.);
+const ITEM_HEIGHT: Pixels = px(33.);
+const NO_MATCH_HEIGHT: Pixels = px(37.);
+
+/// ComboboxList's `max-h-[calc(var(--spacing-72)-var(--spacing-9))]`: past it, the rows
+/// scroll.
+const MAX_LIST_HEIGHT: Pixels = px(252.);
+
+impl Item {
+    fn height(&self) -> Pixels {
+        match self {
+            Item::Heading(..) | Item::Loading(_) | Item::Failed => HEADING_HEIGHT,
+            Item::Choice(_) => ITEM_HEIGHT,
+            Item::NoMatch => NO_MATCH_HEIGHT,
+        }
+    }
 }
 
 impl EventEmitter<Staging> for LinkPicker {}
 
 impl LinkPicker {
-    /// An empty part that asks GitHub through `api`.
-    pub fn new(api: Arc<dyn Api>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// An empty part that asks GitHub through `api`, reading the GitHub repository list again
+    /// on `connection`'s `changed github_repositories`.
+    pub fn new(
+        api: Arc<dyn Api>,
+        connection: &Entity<Connection>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(PLACEHOLDER));
         let _input = cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
             InputEvent::Change => {
                 this.problem = None;
                 this.open = true;
+                this.rows_list.scroll_to(ListOffset::default());
                 cx.notify();
             }
             InputEvent::Focus => {
@@ -210,6 +401,16 @@ impl LinkPicker {
             }
             InputEvent::PressEnter { .. } => this.pick_first(window, cx),
         });
+        let _events = cx.subscribe(connection, |this, _, event, cx| match event {
+            DaemonEvent::Message(
+                ServerMessage::Changed {
+                    entity: Changed::GithubRepositories,
+                    ..
+                }
+                | ServerMessage::Resync,
+            ) if this.following => this.read_github(cx),
+            _ => {}
+        });
         LinkPicker {
             api,
             input,
@@ -221,7 +422,15 @@ impl LinkPicker {
             focus: false,
             lookup: None,
             field: Rc::new(Cell::new(Bounds::default())),
+            github: GithubList::default(),
+            following: false,
+            github_refresh: None,
+            github_read: None,
+            github_rereads: Rereads::default(),
+            rows_list: table::list_state(),
+            shown: Vec::new(),
             _input,
+            _events,
         }
     }
 
@@ -241,8 +450,72 @@ impl LinkPicker {
         self.focus = false;
         self.input
             .update(cx, |input, cx| input.set_value("", window, cx));
+        self.following = true;
+        self.refresh_github(cx);
         cx.emit(Staging);
         cx.notify();
+    }
+
+    /// Asks the daemon to load the GitHub repository list again, then reads it: what each
+    /// opening and Retry do. A list held already keeps showing; the daemon refreshes it
+    /// quietly.
+    fn refresh_github(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.github, GithubList::Loaded(_)) {
+            self.github = GithubList::default();
+        }
+        let refreshing = self.api.refresh_github_repositories(cx);
+        self.github_refresh = Some(cx.spawn(async move |this, cx| {
+            let refreshed = refreshing.await;
+            let _ = this.update(cx, |this, cx| match refreshed {
+                Ok(()) => this.read_github(cx),
+                Err(err) => {
+                    tracing::warn!("asking for the GitHub repository list: {err:#}");
+                    this.github = GithubList::Failed;
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    /// Reads the GitHub repository list, once more after a read running now if one does.
+    fn read_github(&mut self, cx: &mut Context<Self>) {
+        if !self.github_rereads.ask() {
+            return;
+        }
+        let reading = self.api.github_repositories(cx);
+        self.github_read = Some(cx.spawn(async move |this, cx| {
+            let read = reading.await;
+            let _ = this.update(cx, |this, cx| {
+                this.github = match read {
+                    Ok(list) => GithubList::read(list),
+                    Err(err) => {
+                        tracing::warn!("reading the GitHub repository list: {err:#}");
+                        GithubList::Failed
+                    }
+                };
+                if this.github_rereads.landed() {
+                    this.read_github(cx);
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Retry under a list that didn't load.
+    fn retry(&mut self, cx: &mut Context<Self>) {
+        self.refresh_github(cx);
+        cx.notify();
+    }
+
+    /// All your repositories, as last read.
+    #[cfg(test)]
+    pub fn github(&self) -> &GithubList {
+        &self.github
+    }
+
+    /// Whether All your repositories and typed names are on: GitHub accepts the token.
+    fn signed_in(&self) -> bool {
+        self.offer.signed_in && self.github != GithubList::SignedOut
     }
 
     /// Gives the field the keyboard on the next draw, its list open.
@@ -293,13 +566,29 @@ impl LinkPicker {
             .filter(|c| !self.offer.suggested.iter().any(|s| s.id == c.id))
             .filter(offered)
             .collect();
+        let signed_in = self.signed_in();
+        // Every Repository listed above, whether or not it passes the filter, and every one
+        // the sign-in can't see.
+        let above: std::collections::HashSet<RepositoryId> = (self.offer.suggested.iter())
+            .chain(&self.offer.from_prs)
+            .map(|c| c.id)
+            .chain(self.offer.unreachable.iter().copied())
+            .collect();
+        let all: Vec<&Choice> = match signed_in {
+            true => (self.github.repositories().iter())
+                .filter(|c| !above.contains(&c.id))
+                .filter(offered)
+                .collect(),
+            false => Vec::new(),
+        };
         let mut entries: Vec<Entry> = (suggested.iter())
             .map(|c| Entry::Suggested((*c).clone()))
             .chain(picks.iter().map(|c| Entry::Pick((*c).clone())))
+            .chain(all.iter().map(|c| Entry::All((*c).clone())))
             .collect();
-        if let Some(named) = named.filter(|_| self.offer.signed_in) {
+        if let Some(named) = named.filter(|_| signed_in) {
             let same = |name: &RepositoryName| same_name(name, &named);
-            let listed = (suggested.iter().chain(&picks)).any(|c| same(&c.name))
+            let listed = (suggested.iter().chain(&picks).chain(&all)).any(|c| same(&c.name))
                 || self.rows.iter().any(|r| same(&r.repository.name));
             if !listed {
                 entries.push(Entry::Typed(named));
@@ -467,7 +756,9 @@ impl LinkPicker {
     /// Enter in the field: picks the list's first entry.
     fn pick_first(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.entries(cx).into_iter().next() {
-            Some(Entry::Suggested(choice) | Entry::Pick(choice)) => self.pick(choice, window, cx),
+            Some(Entry::Suggested(choice) | Entry::Pick(choice) | Entry::All(choice)) => {
+                self.pick(choice, window, cx)
+            }
             Some(Entry::Typed(name)) => self.pick_typed(name, window, cx),
             None => {}
         }
@@ -562,41 +853,68 @@ impl LinkPicker {
             })
     }
 
-    /// The open list (Penpot `agentdeck/LinkPickerList`), drawn as core-gpui's
-    /// `ComboboxContent`: Suggested, From your pull requests, the typed row, then the last
-    /// line.
-    fn list(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let s = cx.theme().semantic();
+    /// The open list's rows for what is typed now: Suggested, From your pull requests, All
+    /// your repositories with its loading or failed line, the typed row, or "No repositories
+    /// match.".
+    fn items(&self, cx: &App) -> Vec<Item> {
         let entries = self.entries(cx);
-        let suggested: Vec<Choice> = (entries.iter())
-            .filter_map(|e| match e {
-                Entry::Suggested(choice) => Some(choice.clone()),
-                Entry::Pick(_) | Entry::Typed(_) => None,
-            })
-            .collect();
-        let picks: Vec<Choice> = (entries.iter())
-            .filter_map(|e| match e {
-                Entry::Pick(choice) => Some(choice.clone()),
-                Entry::Suggested(_) | Entry::Typed(_) => None,
-            })
-            .collect();
-        let typed = entries.iter().find_map(|e| match e {
-            Entry::Typed(name) => Some(name.clone()),
-            Entry::Suggested(_) | Entry::Pick(_) => None,
-        });
-        let mut shadows = vec![BoxShadow {
-            color: s.foreground.opacity(0.1),
-            offset: point(px(0.), px(0.)),
-            blur_radius: px(0.),
-            spread_radius: px(1.),
-            inset: false,
-        }];
-        shadows.extend_from_slice(shadow::MD);
+        let mut items = Vec::new();
+        let section = |heading: Option<Item>, rows: Vec<Item>, items: &mut Vec<Item>| {
+            if !rows.is_empty() {
+                items.extend(heading);
+                items.extend(rows);
+            }
+        };
+        let of = |keep: fn(&Entry) -> bool| -> Vec<Item> {
+            (entries.iter())
+                .filter(|e| keep(e))
+                .map(|e| Item::Choice(e.clone()))
+                .collect()
+        };
+        section(
+            Some(Item::Heading(SUGGESTED, "suggested")),
+            of(|e| matches!(e, Entry::Suggested(_))),
+            &mut items,
+        );
+        section(
+            Some(Item::Heading(FROM_PRS, "from your pull requests")),
+            of(|e| matches!(e, Entry::Pick(_))),
+            &mut items,
+        );
+        let mut all = of(|e| matches!(e, Entry::All(_)));
+        if self.signed_in() {
+            match &self.github {
+                GithubList::Loading { loaded, total, .. } => {
+                    all.push(Item::Loading(loading_line(*loaded, *total)))
+                }
+                GithubList::Failed => all.push(Item::Failed),
+                GithubList::Loaded(_) | GithubList::SignedOut => {}
+            }
+        }
+        section(
+            Some(Item::Heading(ALL_REPOSITORIES, "all your repositories")),
+            all,
+            &mut items,
+        );
+        section(None, of(|e| matches!(e, Entry::Typed(_))), &mut items);
+        if items.is_empty() {
+            items.push(Item::NoMatch);
+        }
+        items
+    }
+
+    /// Row `ix` of the open list, as [`Self::list`] last listed them.
+    fn item(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let s = cx.theme().semantic();
+        let Some(item) = self.shown.get(ix).cloned() else {
+            return div().into_any_element();
+        };
         // ComboboxItem: flex items-center gap-2 rounded-sm py-1.5 pr-8 pl-2 text-sm,
         // hover:bg-accent
-        let item = |id: SharedString| {
+        let row = |id: SharedString| {
             div()
                 .id(id)
+                .h(ITEM_HEIGHT)
                 .flex()
                 .items_center()
                 .gap(space::S2)
@@ -609,6 +927,132 @@ impl LinkPicker {
                 .hover(|d| d.bg(s.accent).text_color(s.accent_foreground))
         };
         // ComboboxLabel: px-2 py-1.5 text-xs text-muted-foreground
+        let line = || {
+            div()
+                .h(HEADING_HEIGHT)
+                .flex()
+                .items_center()
+                .px(space::S2)
+                .py(space::S1_5)
+                .text_size(font_size::XS)
+                .text_color(s.muted_foreground)
+        };
+        match item {
+            Item::Heading(text, selector) => line()
+                .debug_selector(move || selector.into())
+                .child(text)
+                .into_any_element(),
+            Item::Loading(text) => line()
+                .debug_selector(|| "loading your repositories".into())
+                .child(text)
+                .into_any_element(),
+            Item::Failed => div()
+                .debug_selector(|| "could not load".into())
+                .h(HEADING_HEIGHT)
+                .flex()
+                .items_center()
+                .child(line().child(COULD_NOT_LOAD))
+                .child(
+                    // Drawn as core-gpui's link xs Button (text-primary hover:underline h-6 px-2
+                    // text-xs font-medium), without its focus: a button taking the keyboard
+                    // would blur the field, closing the list before the click lands.
+                    div()
+                        .id("retry-github-list")
+                        .debug_selector(|| "retry".into())
+                        .h(space::S6)
+                        .flex()
+                        .items_center()
+                        .px(space::S2)
+                        .rounded(s.radius_md)
+                        .text_size(font_size::XS)
+                        .font_weight(font_weight::MEDIUM)
+                        .text_color(s.primary)
+                        .cursor_pointer()
+                        .hover(|d| d.underline())
+                        .child(RETRY)
+                        .on_click(cx.listener(|this, _, _, cx| this.retry(cx))),
+                )
+                .into_any_element(),
+            // ComboboxEmpty: flex w-full justify-center py-2 text-sm text-muted-foreground
+            Item::NoMatch => div()
+                .debug_selector(|| "no match".into())
+                .h(NO_MATCH_HEIGHT)
+                .flex()
+                .items_center()
+                .w_full()
+                .justify_center()
+                .py(space::S2)
+                .text_size(font_size::SM)
+                .text_color(s.muted_foreground)
+                .child(NO_MATCH)
+                .into_any_element(),
+            Item::Choice(Entry::Typed(name)) => {
+                let busy = (self.looking_up.as_ref()).is_some_and(|n| same_name(n, &name));
+                let label = match busy {
+                    true => format!("Looking up {name}…"),
+                    false => format!("Link {name}"),
+                };
+                row("link-typed".into())
+                    .debug_selector(|| "link typed".into())
+                    .child(Icon::new(IconName::Plus).size(px(14.)))
+                    .child(label)
+                    .when(busy, |d| d.opacity(0.5))
+                    .when(!busy, |d| {
+                        d.on_click(cx.listener(move |this, _, window, cx| {
+                            this.pick_typed(name.clone(), window, cx)
+                        }))
+                    })
+                    .into_any_element()
+            }
+            Item::Choice(Entry::Suggested(choice)) => self.choice(row, "suggested", choice, cx),
+            Item::Choice(Entry::Pick(choice)) => self.choice(row, "pick", choice, cx),
+            Item::Choice(Entry::All(choice)) => self.choice(row, "all", choice, cx),
+        }
+    }
+
+    /// A Repository's row in section `kind`, as tests find it (`all acme/widgets`): a lock if
+    /// private, then its name; a click picks it.
+    fn choice(
+        &self,
+        row: impl Fn(SharedString) -> gpui::Stateful<gpui::Div>,
+        kind: &'static str,
+        choice: Choice,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let muted = cx.theme().semantic().muted_foreground;
+        let name = choice.name.to_string();
+        let selector = format!("{kind} {name}");
+        row(SharedString::from(format!("{kind}-{}", choice.id)))
+            .debug_selector(move || selector.clone())
+            .when(choice.private, |d| d.child(lock(&name, muted)))
+            .child(name)
+            .on_click(cx.listener(move |this, _, window, cx| this.pick(choice.clone(), window, cx)))
+            .into_any_element()
+    }
+
+    /// The open list (Penpot `agentdeck/LinkPickerList`), drawn as core-gpui's
+    /// `ComboboxContent`: its rows ([`Self::items`]), as tall as they are up to
+    /// [`MAX_LIST_HEIGHT`] and scrolling past it, then the last line.
+    fn list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let s = cx.theme().semantic();
+        let items = self.items(cx);
+        if items != self.shown {
+            table::relist(&self.rows_list, items.len());
+            self.shown = items;
+        }
+        let height = (self.shown.iter())
+            .map(Item::height)
+            .fold(px(0.), |sum, h| sum + h)
+            .min(MAX_LIST_HEIGHT);
+        let mut shadows = vec![BoxShadow {
+            color: s.foreground.opacity(0.1),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(0.),
+            spread_radius: px(1.),
+            inset: false,
+        }];
+        shadows.extend_from_slice(shadow::MD);
+        // ComboboxLabel: px-2 py-1.5 text-xs text-muted-foreground
         let line = |text: &'static str, selector: &'static str| {
             div()
                 .debug_selector(move || selector.into())
@@ -618,7 +1062,6 @@ impl LinkPicker {
                 .text_color(s.muted_foreground)
                 .child(text)
         };
-        let looking_up = self.looking_up.clone();
         div()
             .debug_selector(|| "picker list".into())
             .id("link-picker-list")
@@ -634,72 +1077,20 @@ impl LinkPicker {
             .bg(s.popover)
             .text_color(s.popover_foreground)
             .shadow(shadows)
-            .when(!suggested.is_empty(), |list| {
-                list.child(line(SUGGESTED, "suggested"))
-                    .children(suggested.into_iter().map(|choice| {
-                        let name = choice.name.to_string();
-                        let selector = format!("suggested {name}");
-                        item(SharedString::from(format!("suggested-{}", choice.id)))
-                            .debug_selector(move || selector.clone())
-                            .when(choice.private, |d| d.child(lock(&name, s.muted_foreground)))
-                            .child(name)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.pick(choice.clone(), window, cx)
-                            }))
-                    }))
-            })
-            .when(!picks.is_empty(), |list| {
-                list.child(line(FROM_PRS, "from your pull requests"))
-                    .children(picks.into_iter().map(|choice| {
-                        let name = choice.name.to_string();
-                        let selector = format!("pick {name}");
-                        item(SharedString::from(format!("pick-{}", choice.id)))
-                            .debug_selector(move || selector.clone())
-                            .when(choice.private, |d| d.child(lock(&name, s.muted_foreground)))
-                            .child(name)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.pick(choice.clone(), window, cx)
-                            }))
-                    }))
-            })
-            .when_some(typed, |list, name| {
-                let busy = looking_up.as_ref().is_some_and(|n| same_name(n, &name));
-                let label = match busy {
-                    true => format!("Looking up {name}…"),
-                    false => format!("Link {name}"),
-                };
-                list.child(
-                    item("link-typed".into())
-                        .debug_selector(|| "link typed".into())
-                        .child(Icon::new(IconName::Plus).size(px(14.)))
-                        .child(label)
-                        .when(busy, |d| d.opacity(0.5))
-                        .when(!busy, |d| {
-                            d.on_click(cx.listener(move |this, _, window, cx| {
-                                this.pick_typed(name.clone(), window, cx)
-                            }))
-                        }),
-                )
-            })
-            .when(entries.is_empty(), |list| {
-                // ComboboxEmpty: flex w-full justify-center py-2 text-sm text-muted-foreground
-                list.child(
-                    div()
-                        .debug_selector(|| "no match".into())
-                        .flex()
-                        .w_full()
-                        .justify_center()
-                        .py(space::S2)
-                        .text_size(font_size::SM)
-                        .text_color(s.muted_foreground)
-                        .child(NO_MATCH),
-                )
-            })
+            .child(
+                div().h(height).child(
+                    list(
+                        self.rows_list.clone(),
+                        cx.processor(|this, ix, _, cx| this.item(ix, cx)),
+                    )
+                    .size_full(),
+                ),
+            )
             .child(
                 // ComboboxSeparator: -mx-1 my-1 h-px bg-border
                 div().mx(-space::S1).my(space::S1).h(px(1.)).bg(s.border),
             )
-            .child(match self.offer.signed_in {
+            .child(match self.signed_in() {
                 true => line(NOT_LISTED, "not listed"),
                 false => line(SIGNED_OUT, "signed out"),
             })
@@ -805,12 +1196,16 @@ impl Render for LinkPicker {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::rc::Rc;
+
     use agentdeck_client::types::PullRequest;
+    use agentdeck_client::ws::{self, Remote};
     use brrritscold_core_gpui::Root;
     use gpui::{Focusable as _, Modifiers, TestAppContext, VisualTestContext};
 
     use super::*;
     use crate::api::fake::FakeApi;
+    use crate::connection::fake::FakeConnector;
     use crate::overview::fixtures::{id, links, pr_sync, pull_request, repository_id, suggestion};
 
     const WIDGETS: &str = "acme/widgets";
@@ -932,6 +1327,13 @@ pub(crate) mod tests {
         }
 
         #[test]
+        fn should_hold_every_kept_repository_github_cannot_see() {
+            let offer = Offer::read(&snapshot(), None);
+
+            assert_eq!(offer.unreachable, [repository_id(LOST)]);
+        }
+
+        #[test]
         fn should_be_signed_out_only_while_github_rejects_the_token() {
             let mut snapshot = snapshot();
             assert!(Offer::read(&snapshot, None).signed_in);
@@ -945,6 +1347,27 @@ pub(crate) mod tests {
     pub(crate) struct Harness {
         pub api: Arc<FakeApi>,
         pub picker: Entity<LinkPicker>,
+        /// Plays the daemon's socket.
+        pub remote: Remote,
+        _connection: Entity<Connection>,
+    }
+
+    /// The daemon's GitHub repository list, loaded whole with `repos`.
+    pub(crate) fn loaded(repos: &[Choice]) -> GithubRepositoryList {
+        GithubRepositoryList {
+            status: GithubListStatus::Loaded,
+            loaded: repos.len() as u32,
+            total: Some(repos.len() as u32),
+            error: None,
+            repositories: repos.iter().map(as_repository).collect(),
+        }
+    }
+
+    fn as_repository(choice: &Choice) -> agentdeck_client::types::Repository {
+        agentdeck_client::types::Repository {
+            private: choice.private,
+            ..repository(&choice.name.to_string())
+        }
     }
 
     /// Widgets and a private gadgets linked, widgets with 2 open PRs and gadgets with 1; your
@@ -969,20 +1392,36 @@ pub(crate) mod tests {
             ],
             open_prs: HashMap::from([(repository_id(WIDGETS), 2), (repository_id(GADGETS), 1)]),
             signed_in: true,
+            unreachable: vec![repository_id(LOST)],
         }
     }
 
     impl Harness {
+        /// A picker opened on `offer`, whose daemon's GitHub repository list is loaded and
+        /// holds nothing.
         pub(crate) fn open(
             offer: Offer,
             cx: &mut TestAppContext,
         ) -> (Harness, &mut VisualTestContext) {
+            Harness::open_with(offer, loaded(&[]), cx)
+        }
+
+        /// A picker opened on `offer`, whose daemon's GitHub repository list reads `github`.
+        pub(crate) fn open_with(
+            offer: Offer,
+            github: GithubRepositoryList,
+            cx: &mut TestAppContext,
+        ) -> (Harness, &mut VisualTestContext) {
             cx.update(brrritscold_core_gpui::init);
             let api = Arc::new(FakeApi::default());
+            api.set_github_list(github);
+            let connector = Rc::new(FakeConnector::default());
+            let remote = connector.then_connect_to(api.clone());
+            let connection = cx.update(|cx| cx.new(|cx| Connection::new(connector, cx)));
             let mut picker = None;
             let window = cx.add_window(|window, cx| {
                 let api: Arc<dyn Api> = api.clone();
-                let view = cx.new(|cx| LinkPicker::new(api, window, cx));
+                let view = cx.new(|cx| LinkPicker::new(api, &connection, window, cx));
                 picker = Some(view.clone());
                 Root::new(view, window, cx)
             });
@@ -990,9 +1429,26 @@ pub(crate) mod tests {
             cx.update(|window, _| window.activate_window());
             let picker = picker.unwrap();
             cx.update(|window, cx| picker.update(cx, |p, cx| p.reset(offer, window, cx)));
-            let harness = Harness { api, picker };
+            let harness = Harness {
+                api,
+                picker,
+                remote,
+                _connection: connection,
+            };
             harness.settle(cx);
             (harness, cx)
+        }
+
+        /// The daemon says its GitHub repository list changed.
+        pub(crate) fn github_changed(&self, cx: &mut VisualTestContext) {
+            self.remote
+                .events
+                .try_send(ws::Event::Message(ServerMessage::Changed {
+                    entity: Changed::GithubRepositories,
+                    id: "list".into(),
+                }))
+                .unwrap();
+            self.settle(cx);
         }
 
         pub(crate) fn settle(&self, cx: &mut VisualTestContext) {
@@ -1053,6 +1509,7 @@ pub(crate) mod tests {
             .map(|e| match e {
                 Entry::Suggested(choice) => format!("Suggested {}", choice.name),
                 Entry::Pick(choice) => choice.name.to_string(),
+                Entry::All(choice) => format!("All {}", choice.name),
                 Entry::Typed(name) => format!("Link {name}"),
             })
             .collect()
@@ -1445,6 +1902,310 @@ pub(crate) mod tests {
             assert!(cx.debug_bounds("link typed").is_none());
             harness.type_in("tools", cx);
             assert_eq!(picks(&harness.entries(cx)), ["acme/tools"]);
+        }
+    }
+
+    mod all_repositories {
+        use super::*;
+
+        fn private(repo: &str) -> Choice {
+            Choice {
+                private: true,
+                ..choice(repo)
+            }
+        }
+
+        /// What GitHub lists: tools and secrets (also your PRs'), widgets (linked), lost
+        /// (Unreachable) and three only GitHub lists, api, billing (private) and docs.
+        fn github() -> Vec<Choice> {
+            vec![
+                choice("acme/api"),
+                private("acme/billing"),
+                choice("acme/docs"),
+                choice(LOST),
+                private(SECRETS),
+                choice("acme/tools"),
+                choice(WIDGETS),
+            ]
+        }
+
+        fn shows(selector: &str, cx: &mut VisualTestContext) -> bool {
+            cx.debug_bounds(selector.to_owned().leak()).is_some()
+        }
+
+        fn loading(repos: &[Choice], total: Option<u32>) -> GithubRepositoryList {
+            GithubRepositoryList {
+                status: GithubListStatus::Loading,
+                total,
+                ..loaded(repos)
+            }
+        }
+
+        fn status(status: GithubListStatus) -> GithubRepositoryList {
+            GithubRepositoryList {
+                status,
+                ..loaded(&[])
+            }
+        }
+
+        #[gpui::test]
+        fn should_list_them_after_the_other_sections_but_those_listed_linked_or_unreachable(
+            cx: &mut TestAppContext,
+        ) {
+            let (harness, cx) = Harness::open_with(offer(), loaded(&github()), cx);
+            harness.type_in("", cx);
+
+            assert_eq!(
+                picks(&harness.entries(cx)),
+                [
+                    SECRETS,
+                    "acme/tools",
+                    "All acme/api",
+                    "All acme/billing",
+                    "All acme/docs"
+                ]
+            );
+            let from_prs = cx.debug_bounds("pick acme/tools").expect("tools");
+            let heading = cx
+                .debug_bounds("all your repositories")
+                .expect("its heading");
+            let first = cx.debug_bounds("all acme/api").expect("api");
+            assert!(from_prs.bottom() <= heading.top());
+            assert!(heading.bottom() <= first.top());
+            assert!(shows("lock acme/billing", cx));
+            assert!(!shows("lock acme/api", cx));
+            assert!(shows("not listed", cx));
+            assert!(!shows("loading your repositories", cx));
+        }
+
+        #[gpui::test]
+        fn should_ask_the_daemon_to_load_them_again_each_time_it_opens(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open_with(offer(), loaded(&github()), cx);
+            assert_eq!(harness.api.github_list_refreshes(), 1);
+
+            cx.update(|window, cx| {
+                harness
+                    .picker
+                    .update(cx, |p, cx| p.reset(offer(), window, cx))
+            });
+            harness.settle(cx);
+
+            assert_eq!(harness.api.github_list_refreshes(), 2);
+        }
+
+        #[gpui::test]
+        fn should_filter_them_as_you_type(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open_with(offer(), loaded(&github()), cx);
+
+            harness.type_in("BILL", cx);
+
+            assert_eq!(picks(&harness.entries(cx)), ["All acme/billing"]);
+        }
+
+        #[gpui::test]
+        fn should_stage_one_picked_from_the_list(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open_with(offer(), loaded(&github()), cx);
+            harness.type_in("docs", cx);
+
+            harness.click("all acme/docs", cx);
+
+            assert_eq!(
+                harness.rows(cx).last(),
+                Some(&("acme/docs".to_owned(), Staged::Linking))
+            );
+            assert_eq!(harness.change(cx), (vec!["acme/docs".to_owned()], vec![]));
+        }
+
+        #[gpui::test]
+        fn should_pick_one_on_enter(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open_with(offer(), loaded(&github()), cx);
+            harness.type_in("api", cx);
+
+            cx.simulate_keystrokes("enter");
+            harness.settle(cx);
+
+            assert_eq!(
+                harness.rows(cx).last(),
+                Some(&("acme/api".to_owned(), Staged::Linking))
+            );
+        }
+
+        #[gpui::test]
+        fn should_offer_no_typed_row_for_a_name_it_lists(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open_with(offer(), loaded(&github()), cx);
+
+            harness.type_in("https://github.com/acme/billing", cx);
+
+            assert_eq!(picks(&harness.entries(cx)), ["All acme/billing"]);
+            assert!(!shows("link typed", cx));
+        }
+
+        #[gpui::test]
+        fn should_show_what_has_loaded_and_how_far_loading_has_got(cx: &mut TestAppContext) {
+            let (harness, cx) =
+                Harness::open_with(offer(), loading(&github()[..2], Some(1_104)), cx);
+            harness.type_in("", cx);
+
+            assert_eq!(
+                picks(&harness.entries(cx)),
+                [SECRETS, "acme/tools", "All acme/api", "All acme/billing"]
+            );
+            let line = cx
+                .debug_bounds("loading your repositories")
+                .expect("the loading line");
+            let last = cx.debug_bounds("all acme/billing").expect("billing");
+            assert!(last.bottom() <= line.top());
+            let read = harness.picker.read_with(cx, |p, _| p.github().clone());
+            assert_eq!(
+                read,
+                GithubList::Loading {
+                    repositories: vec![choice("acme/api"), private("acme/billing")],
+                    loaded: 2,
+                    total: Some(1_104),
+                }
+            );
+        }
+
+        #[gpui::test]
+        fn should_say_it_is_loading_before_the_first_page(cx: &mut TestAppContext) {
+            let (harness, cx) =
+                Harness::open_with(offer(), status(GithubListStatus::NotLoaded), cx);
+            harness.type_in("", cx);
+
+            assert!(shows("all your repositories", cx));
+            assert!(shows("loading your repositories", cx));
+            assert!(!shows("no match", cx));
+        }
+
+        #[gpui::test]
+        fn should_read_them_again_as_pages_arrive(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open_with(offer(), loading(&github()[..1], Some(300)), cx);
+            harness.type_in("", cx);
+            assert_eq!(picks(&harness.entries(cx))[2..], ["All acme/api"]);
+
+            harness.api.set_github_list(loaded(&github()));
+            harness.github_changed(cx);
+
+            assert_eq!(
+                picks(&harness.entries(cx))[2..],
+                ["All acme/api", "All acme/billing", "All acme/docs"]
+            );
+            assert!(!shows("loading your repositories", cx));
+        }
+
+        #[gpui::test]
+        fn should_say_it_could_not_load_them_and_keep_the_rest_working(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open_with(offer(), status(GithubListStatus::Failed), cx);
+            harness.type_in("", cx);
+
+            assert_eq!(picks(&harness.entries(cx)), [SECRETS, "acme/tools"]);
+            assert!(shows("all your repositories", cx));
+            assert!(shows("could not load", cx));
+            assert!(shows("retry", cx));
+            assert!(shows("not listed", cx));
+            harness.type_in("octo/hello", cx);
+            assert_eq!(picks(&harness.entries(cx)), ["Link octo/hello"]);
+        }
+
+        #[gpui::test]
+        fn should_say_it_could_not_load_them_when_the_daemon_cannot_be_read(
+            cx: &mut TestAppContext,
+        ) {
+            let (harness, cx) = Harness::open_with(offer(), loaded(&github()), cx);
+            harness.api.fail_github_list(Some("connection refused"));
+
+            harness.github_changed(cx);
+            harness.type_in("", cx);
+
+            assert!(shows("could not load", cx));
+            assert_eq!(picks(&harness.entries(cx)), [SECRETS, "acme/tools"]);
+        }
+
+        #[gpui::test]
+        fn should_load_them_again_on_retry(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open_with(offer(), status(GithubListStatus::Failed), cx);
+            harness.type_in("", cx);
+            harness.api.set_github_list(loaded(&github()));
+
+            harness.click("retry", cx);
+
+            assert_eq!(harness.api.github_list_refreshes(), 2);
+            assert!(!shows("could not load", cx));
+            assert!(shows("all acme/api", cx));
+        }
+
+        #[gpui::test]
+        fn should_be_replaced_by_sign_in_while_signed_out(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open_with(
+                Offer {
+                    signed_in: false,
+                    ..offer()
+                },
+                loaded(&github()),
+                cx,
+            );
+            harness.type_in("", cx);
+
+            assert_eq!(picks(&harness.entries(cx)), [SECRETS, "acme/tools"]);
+            assert!(!shows("all your repositories", cx));
+            assert!(shows("signed out", cx));
+            assert!(!shows("not listed", cx));
+        }
+
+        #[gpui::test]
+        fn should_be_replaced_by_sign_in_when_the_daemon_has_no_token(cx: &mut TestAppContext) {
+            let (harness, cx) =
+                Harness::open_with(offer(), status(GithubListStatus::SignedOut), cx);
+            harness.type_in("", cx);
+
+            assert!(!shows("all your repositories", cx));
+            assert!(shows("signed out", cx));
+        }
+
+        #[gpui::test]
+        fn should_draw_only_the_rows_in_view_of_a_long_list(cx: &mut TestAppContext) {
+            let many: Vec<Choice> = (0..1_100)
+                .map(|i| choice(&format!("acme/repo-{i:04}")))
+                .collect();
+            let (harness, cx) = Harness::open_with(offer(), loaded(&many), cx);
+            harness.type_in("", cx);
+
+            assert_eq!(harness.entries(cx).len(), 2 + 1_100);
+            assert!(shows("all acme/repo-0000", cx));
+            assert!(!shows("all acme/repo-1099", cx));
+            let list = cx.debug_bounds("picker list").expect("the list");
+            assert!(list.size.height < px(320.), "{:?}", list.size.height);
+            assert!(shows("not listed", cx));
+        }
+    }
+
+    mod loading_line {
+        use super::*;
+
+        #[test]
+        fn should_count_what_loaded_of_about_the_total_to_the_hundred() {
+            assert_eq!(
+                loading_line(400, Some(1_104)),
+                "Loading your repositories… 400 of about 1,100"
+            );
+            assert_eq!(
+                loading_line(1_000, Some(1_150)),
+                "Loading your repositories… 1,000 of about 1,200"
+            );
+        }
+
+        #[test]
+        fn should_say_no_count_before_page_one() {
+            assert_eq!(loading_line(0, None), "Loading your repositories…");
+            assert_eq!(loading_line(0, Some(300)), "Loading your repositories…");
+        }
+
+        #[test]
+        fn should_count_a_list_under_a_hundred_exactly() {
+            assert_eq!(
+                loading_line(40, Some(64)),
+                "Loading your repositories… 40 of about 64"
+            );
         }
     }
 }

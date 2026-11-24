@@ -265,7 +265,10 @@ impl Github {
     /// collaborator and organisation ones, by `owner/name`. Tried again after each of
     /// `RETRY_WAITS` while it fails for a reason that may pass.
     pub async fn user_repos_page(&self, token: &str, page: u32) -> Result<ReposPage, GithubError> {
-        retrying(GithubError::may_pass, || self.user_repos_page_once(token, page)).await
+        retrying(GithubError::may_pass, || {
+            self.user_repos_page_once(token, page)
+        })
+        .await
     }
 
     /// [`Github::user_repos_page`], once.
@@ -1221,7 +1224,10 @@ mod tests {
         #[test]
         fn should_be_none_for_a_link_it_cannot_read() {
             assert_eq!(last_page("<not a url>; rel=\"last\""), None);
-            assert_eq!(last_page("<https://api.github.com/user/repos>; rel=\"last\""), None);
+            assert_eq!(
+                last_page("<https://api.github.com/user/repos>; rel=\"last\""),
+                None
+            );
         }
     }
 
