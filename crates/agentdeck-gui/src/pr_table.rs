@@ -1,9 +1,9 @@
 //! The Pull requests view's table (spec §11), Penpot "Screens · Main" → "Pull requests": a
-//! row per pull request and a header per Repository group. A row is Penpot's `TaskRow`
-//! (`wide`) without its status picker: the PR's state icon, its title, its reference, a draft
-//! badge, its checks and review, and its `…` menu. Only the reference is a link, to the PR on
-//! GitHub. A group header is Penpot's `GroupHeader` followed by who links the Repository: each
-//! Workspace by name, a link to its Pull requests, or "Not in a workspace".
+//! row per pull request and a header per Repository group. A row is Penpot's `PrRow`
+//! (`wide`): the PR's state icon, its title, its reference, a draft badge, its checks and
+//! review, and its `…` menu. Only the reference is a link, to the PR on GitHub. A group header
+//! is Penpot's `GroupHeader` followed by who links the Repository: each Workspace by name, a
+//! link to its Pull requests, or "Not in a workspace".
 //!
 //! A Finished row is drawn as any other: its state icon shows GitHub's state, merged, closed,
 //! or open for one past the age cutoff (Penpot "Pull requests · show finished").
@@ -278,7 +278,7 @@ fn kept(cell: Div) -> Div {
     cell.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
-/// Penpot `TaskRow` (`wide`) as the Pull requests view draws a PR: its `Select` layer in
+/// Penpot `PrRow` (`wide`) as the Pull requests view draws a PR: its `Select` layer in
 /// Select mode, state icon, title, reference, draft badge, checks, review and `Menu` layer
 /// (`parts`), `space.3` apart, padded `space.2`, at half opacity while the GitHub sign-in can't
 /// see it. A click on the reference runs `on_open`; with `on_toggle` (Select mode, a row that

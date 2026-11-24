@@ -19,7 +19,7 @@ A Repository that no Workspace links, counting only Workspaces that aren't archi
 _Avoid_: Unlinked, orphan, unassigned
 
 **Pull request**:
-A GitHub pull request you authored, were asked to review, or are assigned. It belongs to exactly one Repository, and GitHub is the only source of its state.
+A GitHub pull request you authored, were asked by name to review, or are assigned. It belongs to exactly one Repository, and GitHub is the only source of its state.
 _Avoid_: PR task, task
 
 **Finished**:

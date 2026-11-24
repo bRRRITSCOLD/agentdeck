@@ -83,7 +83,7 @@ use crate::open_pr;
 use crate::overview::Snapshot;
 use crate::pr_table::{self, Linker};
 use crate::suggestion_strip;
-use crate::sync_parts::{self, OpenSettings, SETTINGS_TAIL, cutoff, logged_out_title};
+use crate::sync_parts::{self, OpenSettings, cutoff, logged_out_title};
 use crate::table::{self, Header, RowParts, SelectCell};
 use crate::top_bar::{EditWorkspace, LinkRepository};
 use crate::workspace::failed;
@@ -91,11 +91,13 @@ use crate::workspace::failed;
 /// How often "Synced N min ago" is redrawn.
 const SYNCED_TICK: Duration = Duration::from_secs(30);
 
-/// The description's first line.
-const ABOUT: &str = "Your open PRs, by repository.";
+/// The description's first line. It ends saying PR sync finds the review requests that name
+/// you, not those to your teams (spec §8, Whose PRs).
+const ABOUT: &str = "Your open PRs, by repository. Review requests to your teams aren't included.";
 
 /// The description's first line while Show finished is on.
-const ABOUT_FINISHED: &str = "Your open and finished PRs, by repository.";
+const ABOUT_FINISHED: &str =
+    "Your open and finished PRs, by repository. Review requests to your teams aren't included.";
 
 /// How long a row a PR alert's click landed on stays highlighted before it fades.
 pub const HIGHLIGHT_HOLD: Duration = Duration::from_secs(2);
@@ -365,6 +367,8 @@ pub struct PullRequestsView {
     _highlighting: Option<Task<()>>,
     /// Suggestions linked from the strip, left out until the next snapshot shows the Link.
     linked_here: BTreeSet<RepositoryId>,
+    /// The cutoff line's "Settings" link.
+    settings_link: sync_parts::SettingsLink,
     /// Redraws "Synced N min ago" as time passes.
     _tick: Task<()>,
 }
@@ -409,6 +413,7 @@ impl PullRequestsView {
             highlight: None,
             _highlighting: None,
             linked_here: BTreeSet::new(),
+            settings_link: sync_parts::SettingsLink::default(),
             _tick: tick,
         }
     }
@@ -681,7 +686,11 @@ impl PullRequestsView {
                 "open"
             };
             return vec![
-                format!("Your {which} PRs from the repositories {name} links.").into(),
+                format!(
+                    "Your {which} PRs from the repositories {name} links. \
+                     Review requests to your teams aren't included."
+                )
+                .into(),
                 LINK_OR_UNLINK.into(),
             ];
         }
@@ -817,6 +826,12 @@ impl PullRequestsView {
         ))
     }
 
+    /// The cutoff line's "Settings" link.
+    #[cfg(test)]
+    pub fn settings_link(&self) -> &sync_parts::SettingsLink {
+        &self.settings_link
+    }
+
     /// Penpot `Header`: heading and description, a spacer, Select (disabled with no PR to
     /// show), Show finished, when PRs last synced, "Sync now", `space.3` apart. The heading and
     /// description take what the rest leave, the description wrapping, so the header fits the
@@ -833,25 +848,11 @@ impl PullRequestsView {
                     .debug_selector(move || format!("pull requests description {ix}"))
                     .text_size(font_size::SM)
                     .text_color(s.muted_foreground);
-                match line.strip_suffix(SETTINGS_TAIL) {
-                    // The lead wraps in what the header leaves it, "Settings." after its last
-                    // line.
-                    Some(lead) => line_div
-                        .flex()
-                        .items_end()
-                        .child(
-                            div()
-                                .debug_selector(move || {
-                                    format!("pull requests description {ix} lead")
-                                })
-                                .min_w_0()
-                                .child(SharedString::from(lead.to_owned())),
-                        )
-                        .child(sync_parts::settings_link("pull-requests", cx))
-                        .child(".")
-                        .into_any_element(),
-                    None => line_div.child(line).into_any_element(),
-                }
+                // One text each, wrapping in what the header leaves it, the cutoff line's
+                // "Settings" a link inline.
+                line_div
+                    .child(self.settings_link.line("pull-requests-cutoff", line, cx))
+                    .into_any_element()
             })
             .collect();
         div()
@@ -1203,6 +1204,7 @@ mod tests {
     use crate::overview::fixtures::{
         id, links, pr_status, pr_sync, pull_request, repository_id, workspace,
     };
+    use crate::sync_parts::SETTINGS_TAIL;
 
     struct Harness {
         api: Arc<FakeApi>,
@@ -1303,6 +1305,23 @@ mod tests {
         let at = bounds(selector, cx).center();
         cx.simulate_click(at, Modifiers::default());
         cx.run_until_parked();
+    }
+
+    /// The cutoff line's text as last drawn, and where its "Settings" starts in it.
+    fn cutoff_text(harness: &Harness, cx: &mut VisualTestContext) -> (gpui::TextLayout, usize) {
+        harness.draw(cx);
+        let layout = harness
+            .view
+            .read_with(cx, |view, _| view.settings_link().layout());
+        let start = (layout.text().rfind(SETTINGS_TAIL)).expect("the cutoff line names Settings");
+        (layout, start)
+    }
+
+    /// A point inside the cutoff line's "Settings", as last drawn.
+    fn settings_link(harness: &Harness, cx: &mut VisualTestContext) -> gpui::Point<gpui::Pixels> {
+        let (layout, start) = cutoff_text(harness, cx);
+        let top_left = layout.position_for_index(start).expect("Settings drawn");
+        top_left + point(px(8.), layout.line_height() / 2.)
     }
 
     fn toasts(cx: &mut VisualTestContext) -> Vec<String> {
@@ -1850,7 +1869,8 @@ mod tests {
             assert_eq!(
                 lines,
                 [
-                    "Your open PRs from the repositories a links.",
+                    "Your open PRs from the repositories a links. \
+                     Review requests to your teams aren't included.",
                     "Link or unlink repositories in Edit workspace."
                 ]
             );
@@ -2870,7 +2890,11 @@ mod tests {
 
             let lines = harness.view.read_with(cx, |view, cx| view.description(cx));
             assert_eq!(lines[0], ABOUT_FINISHED);
-            assert_eq!(ABOUT_FINISHED, "Your open and finished PRs, by repository.");
+            assert_eq!(
+                ABOUT_FINISHED,
+                "Your open and finished PRs, by repository. \
+                 Review requests to your teams aren't included."
+            );
         }
 
         #[gpui::test]
@@ -2901,18 +2925,42 @@ mod tests {
 
         /// The view at the width the narrowest window leaves it beside the sidebar, in Select
         /// mode, its widest.
-        fn narrowest(cx: &mut TestAppContext) -> &mut VisualTestContext {
-            let (_harness, cx) = Harness::open(prs(), cx);
+        fn narrowest(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
             let (width, height) = crate::window_state::MIN_SIZE;
             let width = px(width) - crate::sidebar::WIDTH - px(1.);
             cx.simulate_resize(size(width, px(height)));
             click("pull-requests select".into(), cx);
-            cx
+            (harness, cx)
+        }
+
+        #[gpui::test]
+        fn should_flow_the_settings_link_inline_as_the_cutoff_line_wraps(cx: &mut TestAppContext) {
+            let (harness, cx) = narrowest(cx);
+            let (layout, start) = cutoff_text(&harness, cx);
+
+            assert!(
+                layout.wrapped_text().lines().count() > 1,
+                "the cutoff line wraps at the narrowest window: {:?}",
+                layout.wrapped_text()
+            );
+            // "Settings" follows "in " on its line, as in one paragraph.
+            let link = layout.position_for_index(start).expect("Settings drawn");
+            let space = layout
+                .position_for_index(start - 1)
+                .expect("the space drawn");
+            assert_eq!(link.y, space.y, "{link:?} on the line of {space:?}");
+            assert!(link.x - space.x < px(12.), "{link:?} right after {space:?}");
+
+            let at = settings_link(&harness, cx);
+            cx.simulate_click(at, Modifiers::default());
+            cx.run_until_parked();
+            assert_eq!(*harness.settings.borrow(), 1);
         }
 
         #[gpui::test]
         fn should_fit_the_header_whole(cx: &mut TestAppContext) {
-            let cx = narrowest(cx);
+            let (_harness, cx) = narrowest(cx);
             let width = cx.update(|window, _| window.viewport_size().width);
 
             let description = bounds("pull requests description 1".into(), cx);
@@ -2920,12 +2968,10 @@ mod tests {
             let synced = bounds("pull requests synced".into(), cx);
             let sync_now = bounds("sync now".into(), cx);
 
-            let lead = bounds("pull requests description 1 lead".into(), cx);
             assert!(
                 description.right() <= select.left(),
                 "{description:?} {select:?}"
             );
-            assert!(lead.right() <= select.left(), "{lead:?} {select:?}");
             assert!(synced.right() < sync_now.left(), "{synced:?} {sync_now:?}");
             assert!(
                 sync_now.right() <= width - space::S6,
@@ -2935,7 +2981,7 @@ mod tests {
 
         #[gpui::test]
         fn should_fit_the_table_whole(cx: &mut TestAppContext) {
-            let cx = narrowest(cx);
+            let (_harness, cx) = narrowest(cx);
             let width = cx.update(|window, _| window.viewport_size().width);
 
             let review = bounds("pr column Review".into(), cx);
@@ -3064,12 +3110,44 @@ mod tests {
             assert_eq!(
                 lines,
                 [
-                    ABOUT,
-                    "PRs not updated in the last 90 days are left out; change that in Settings."
+                    "Your open PRs, by repository. Review requests to your teams aren't included.",
+                    "PRs not updated in the last 90 days are finished and leave within 7 days; \
+                     change that in Settings."
                 ]
             );
-            click("pull-requests settings link".into(), cx);
+            let at = settings_link(&harness, cx);
+            cx.simulate_click(at, Modifiers::default());
+            cx.run_until_parked();
             assert_eq!(*harness.settings.borrow(), 1);
+        }
+
+        #[gpui::test]
+        fn should_open_settings_only_from_the_settings_link(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            let (layout, _) = cutoff_text(&harness, cx);
+
+            let lead = layout.position_for_index(4).expect("the lead drawn");
+            cx.simulate_click(lead + point(px(2.), px(4.)), Modifiers::default());
+            cx.run_until_parked();
+
+            assert_eq!(*harness.settings.borrow(), 0);
+        }
+
+        #[gpui::test]
+        fn should_underline_the_settings_link_only_while_hovered(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(prs(), cx);
+            let hovered = |cx: &mut VisualTestContext| {
+                harness
+                    .view
+                    .read_with(cx, |view, _| view.settings_link().hovered())
+            };
+
+            let at = settings_link(&harness, cx);
+            cx.simulate_mouse_move(at, None, Modifiers::default());
+            assert!(hovered(cx));
+
+            cx.simulate_mouse_move(point(px(1.), px(1.)), None, Modifiers::default());
+            assert!(!hovered(cx));
         }
     }
 
