@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use agentdeck_core::{Agent, AgentState, PaneId, WorkspaceId};
+use agentdeck_core::{Agent, AgentState, PaneId, TabId, WorkspaceId};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::{DbError, new_id, now, opt_text, text};
@@ -58,6 +58,28 @@ pub fn workspace_of(conn: &Connection, id: PaneId) -> Result<WorkspaceId, DbErro
     )
     .optional()?
     .ok_or(DbError::NotFound("pane"))
+}
+
+/// The current folder of every pane in Workspace `workspace`'s tabs, exited ones included:
+/// its last known `folder`, else the `cwd` it launched in (spec §3), each once.
+pub fn folders_in(conn: &Connection, workspace: WorkspaceId) -> Result<Vec<String>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT COALESCE(p.folder, p.cwd) FROM panes p JOIN tabs t ON t.id = p.tab_id
+         WHERE t.workspace_id = ?1 ORDER BY 1",
+    )?;
+    let rows = stmt.query_map([workspace.to_string()], |row| row.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// The Workspace tab `id` is in; `None` once the tab is gone.
+pub fn workspace_of_tab(conn: &Connection, id: TabId) -> Result<Option<WorkspaceId>, DbError> {
+    Ok(conn
+        .query_row(
+            "SELECT workspace_id FROM tabs WHERE id = ?1",
+            [id.to_string()],
+            |row| text(row, "workspace_id"),
+        )
+        .optional()?)
 }
 
 /// Adds a pane to its tab, before its process starts: `argv` is what will be launched and

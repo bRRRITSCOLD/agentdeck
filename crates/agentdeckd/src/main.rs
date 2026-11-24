@@ -18,6 +18,7 @@ mod logging;
 mod model;
 mod paths;
 mod prsync;
+mod suggestions;
 mod terminal;
 
 use std::process::ExitCode;

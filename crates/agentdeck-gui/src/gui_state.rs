@@ -1,11 +1,12 @@
 //! The GUI's own state, kept across restarts in `$XDG_STATE_HOME/agentdeck/gui.json`, beside
 //! `window.json` (spec §11): GUI-only, never the daemon's. It holds which Repository groups
 //! are collapsed, per view (the Pull requests view, and each Workspace's Pull requests), whether
-//! Show finished is on, and the side each Workspace last showed.
+//! Show finished is on, the side each Workspace last showed, and the Suggestions dismissed for
+//! each Workspace: told Not now, or unlinked in the GUI.
 //!
 //! Every field is optional in the file, and a field the GUI doesn't know is skipped, so a later
-//! version adds its own (dismissed Suggestions) without breaking an older file, and an older GUI
-//! reads a newer file. A missing or broken file reads as the defaults.
+//! version adds its own without breaking an older file, and an older GUI reads a newer file. A
+//! missing or broken file reads as the defaults.
 //!
 //! The state is a GPUI [`Global`] that `main` sets with [`init`]; a view reads it with
 //! [`read`] and changes it with [`update`], which writes the file at once. Without [`init`]
@@ -32,6 +33,9 @@ pub struct GuiState {
     pub show_finished: bool,
     /// The side each Workspace showed last; a Workspace not named here opens on its Panes.
     pub last_side: BTreeMap<WorkspaceId, Side>,
+    /// The Repositories each Workspace's Suggestions leave out, by GitHub's id: told Not now,
+    /// or unlinked in the GUI. Never forgotten; the picker's Suggested section ignores them.
+    pub dismissed: BTreeMap<WorkspaceId, BTreeSet<RepositoryId>>,
 }
 
 /// A Workspace's two sides, switched in its top bar (spec §11).
@@ -67,6 +71,19 @@ impl GuiState {
             Side::Panes => self.last_side.remove(&workspace),
             Side::PullRequests => self.last_side.insert(workspace, side),
         };
+    }
+
+    /// Leaves `repository` out of `workspace`'s Suggestions from now on.
+    pub fn dismiss(&mut self, workspace: WorkspaceId, repository: RepositoryId) {
+        self.dismissed
+            .entry(workspace)
+            .or_default()
+            .insert(repository);
+    }
+
+    /// Whether `workspace`'s Suggestions leave `repository` out.
+    pub fn is_dismissed(&self, workspace: WorkspaceId, repository: RepositoryId) -> bool {
+        (self.dismissed.get(&workspace)).is_some_and(|ids| ids.contains(&repository))
     }
 }
 
@@ -223,7 +240,7 @@ mod tests {
 
         #[test]
         fn should_skip_what_a_later_version_adds() {
-            let state = parse(r#"{"dismissed":[],"collapsed":{"pull_requests":[7],"ws":{}}}"#);
+            let state = parse(r#"{"later":[],"collapsed":{"pull_requests":[7],"ws":{}}}"#);
 
             assert_eq!(state, collapsed(&[7]));
         }
@@ -294,6 +311,39 @@ mod tests {
 
             assert!(
                 json.contains(r#""00000000-0000-7000-8000-000000000001":"pull_requests""#),
+                "{json}"
+            );
+            assert_eq!(parse(&json), state);
+        }
+    }
+
+    mod dismissed {
+        use super::*;
+
+        fn ws(n: u32) -> WorkspaceId {
+            format!("00000000-0000-7000-8000-{n:012}").parse().unwrap()
+        }
+
+        #[test]
+        fn should_dismiss_a_repository_for_one_workspace_only() {
+            let mut state = GuiState::default();
+
+            state.dismiss(ws(1), RepositoryId::from(7));
+
+            assert!(state.is_dismissed(ws(1), RepositoryId::from(7)));
+            assert!(!state.is_dismissed(ws(2), RepositoryId::from(7)));
+            assert!(!state.is_dismissed(ws(1), RepositoryId::from(8)));
+        }
+
+        #[test]
+        fn should_write_each_workspaces_pairs_by_id() {
+            let mut state = GuiState::default();
+            state.dismiss(ws(1), RepositoryId::from(1296269));
+
+            let json = serde_json::to_string(&state).unwrap();
+
+            assert!(
+                json.contains(r#""dismissed":{"00000000-0000-7000-8000-000000000001":[1296269]}"#),
                 "{json}"
             );
             assert_eq!(parse(&json), state);

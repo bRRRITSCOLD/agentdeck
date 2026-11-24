@@ -8,8 +8,9 @@
 //! request ([`LinkPicker::change`]): an unlinked row stays crossed out with Undo, and a note
 //! counts the open PRs that would leave the Workspace.
 //!
-//! The picker lists From your pull requests (the Repositories of your kept PRs), leaving out
-//! what the Workspace links and Unreachable ones; typing filters it. Typed text naming a
+//! The picker lists Suggested (the Workspace's Suggestions, Not now or not), then From your
+//! pull requests (the Repositories of your kept PRs, but for those Suggested), leaving out what
+//! the Workspace links and Unreachable ones; typing filters both. Typed text naming a
 //! Repository (`owner/name` or its GitHub URL) that isn't listed offers a "Link owner/name" row,
 //! which asks GitHub ([`Api::resolve_repository`]); signed out, typed names are off.
 
@@ -41,6 +42,9 @@ use crate::workspace::failed;
 /// The picker's placeholder.
 pub const PLACEHOLDER: &str = "Link a repository…";
 
+/// The heading over the Workspace's Suggestions, first in the list.
+pub const SUGGESTED: &str = "Suggested";
+
 /// The heading over the Repositories of your kept PRs.
 pub const FROM_PRS: &str = "From your pull requests";
 
@@ -71,6 +75,8 @@ pub struct Choice {
 pub struct Offer {
     /// The Repositories it links now, by name ignoring case.
     pub linked: Vec<Choice>,
+    /// Its Suggestions, by name, dismissed ones included: opening the picker is deliberate.
+    pub suggested: Vec<Choice>,
     /// The Repositories of your kept PRs, by name ignoring case.
     pub from_prs: Vec<Choice>,
     /// Each Repository's open PRs, counted as the sidebar counts them: drafts in, Unreachable
@@ -105,11 +111,21 @@ impl Offer {
             .filter(|r| snapshot.prs.iter().any(|pr| pr.repository.id == r.id))
             .map(|r| choice(r))
             .collect();
+        let suggested = (workspace.into_iter())
+            .flat_map(|w| snapshot.suggested(w))
+            .map(|r| Choice {
+                id: r.id,
+                name: r.name.clone(),
+                private: r.private,
+                unreachable: false,
+            })
+            .collect();
         // Unknown until PR status is read: let GitHub answer for the token.
         let signed_in = (snapshot.pr_sync.as_ref())
             .is_none_or(|s| s.login != agentdeck_client::types::GhLogin::LoggedOut);
         Offer {
             linked,
+            suggested,
             from_prs,
             open_prs,
             signed_in,
@@ -140,6 +156,8 @@ pub struct Row {
 /// An entry of the open list, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
+    /// One of the Workspace's Suggestions.
+    Suggested(Choice),
     /// A Repository of your kept PRs.
     Pick(Choice),
     /// "Link owner/name": a typed Repository the list doesn't hold.
@@ -267,14 +285,21 @@ impl LinkPicker {
             .as_ref()
             .map_or_else(|| typed.to_lowercase(), |n| n.to_string().to_lowercase());
         let held = |id: RepositoryId| self.rows.iter().any(|r| r.repository.id == id);
+        let offered = |c: &&Choice| {
+            !c.unreachable && !held(c.id) && c.name.to_string().to_lowercase().contains(&filter)
+        };
+        let suggested: Vec<&Choice> = self.offer.suggested.iter().filter(offered).collect();
         let picks: Vec<&Choice> = (self.offer.from_prs.iter())
-            .filter(|c| !c.unreachable && !held(c.id))
-            .filter(|c| c.name.to_string().to_lowercase().contains(&filter))
+            .filter(|c| !self.offer.suggested.iter().any(|s| s.id == c.id))
+            .filter(offered)
             .collect();
-        let mut entries: Vec<Entry> = picks.iter().map(|c| Entry::Pick((*c).clone())).collect();
+        let mut entries: Vec<Entry> = (suggested.iter())
+            .map(|c| Entry::Suggested((*c).clone()))
+            .chain(picks.iter().map(|c| Entry::Pick((*c).clone())))
+            .collect();
         if let Some(named) = named.filter(|_| self.offer.signed_in) {
             let same = |name: &RepositoryName| same_name(name, &named);
-            let listed = picks.iter().any(|c| same(&c.name))
+            let listed = (suggested.iter().chain(&picks)).any(|c| same(&c.name))
                 || self.rows.iter().any(|r| same(&r.repository.name));
             if !listed {
                 entries.push(Entry::Typed(named));
@@ -442,7 +467,7 @@ impl LinkPicker {
     /// Enter in the field: picks the list's first entry.
     fn pick_first(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.entries(cx).into_iter().next() {
-            Some(Entry::Pick(choice)) => self.pick(choice, window, cx),
+            Some(Entry::Suggested(choice) | Entry::Pick(choice)) => self.pick(choice, window, cx),
             Some(Entry::Typed(name)) => self.pick_typed(name, window, cx),
             None => {}
         }
@@ -538,19 +563,26 @@ impl LinkPicker {
     }
 
     /// The open list (Penpot `agentdeck/LinkPickerList`), drawn as core-gpui's
-    /// `ComboboxContent`: From your pull requests, the typed row, then the last line.
+    /// `ComboboxContent`: Suggested, From your pull requests, the typed row, then the last
+    /// line.
     fn list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
         let entries = self.entries(cx);
+        let suggested: Vec<Choice> = (entries.iter())
+            .filter_map(|e| match e {
+                Entry::Suggested(choice) => Some(choice.clone()),
+                Entry::Pick(_) | Entry::Typed(_) => None,
+            })
+            .collect();
         let picks: Vec<Choice> = (entries.iter())
             .filter_map(|e| match e {
                 Entry::Pick(choice) => Some(choice.clone()),
-                Entry::Typed(_) => None,
+                Entry::Suggested(_) | Entry::Typed(_) => None,
             })
             .collect();
         let typed = entries.iter().find_map(|e| match e {
             Entry::Typed(name) => Some(name.clone()),
-            Entry::Pick(_) => None,
+            Entry::Suggested(_) | Entry::Pick(_) => None,
         });
         let mut shadows = vec![BoxShadow {
             color: s.foreground.opacity(0.1),
@@ -602,6 +634,20 @@ impl LinkPicker {
             .bg(s.popover)
             .text_color(s.popover_foreground)
             .shadow(shadows)
+            .when(!suggested.is_empty(), |list| {
+                list.child(line(SUGGESTED, "suggested"))
+                    .children(suggested.into_iter().map(|choice| {
+                        let name = choice.name.to_string();
+                        let selector = format!("suggested {name}");
+                        item(SharedString::from(format!("suggested-{}", choice.id)))
+                            .debug_selector(move || selector.clone())
+                            .when(choice.private, |d| d.child(lock(&name, s.muted_foreground)))
+                            .child(name)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.pick(choice.clone(), window, cx)
+                            }))
+                    }))
+            })
             .when(!picks.is_empty(), |list| {
                 list.child(line(FROM_PRS, "from your pull requests"))
                     .children(picks.into_iter().map(|choice| {
@@ -765,7 +811,7 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::api::fake::FakeApi;
-    use crate::overview::fixtures::{id, links, pr_sync, pull_request, repository_id};
+    use crate::overview::fixtures::{id, links, pr_sync, pull_request, repository_id, suggestion};
 
     const WIDGETS: &str = "acme/widgets";
     const GADGETS: &str = "acme/gadgets";
@@ -861,6 +907,31 @@ pub(crate) mod tests {
         }
 
         #[test]
+        fn should_offer_the_workspaces_suggestions_but_what_it_links_by_now() {
+            let mut snapshot = snapshot();
+            snapshot
+                .workspaces
+                .push(crate::overview::fixtures::workspace(1, "web"));
+            let private = agentdeck_client::types::Repository {
+                private: true,
+                ..suggestion("acme/infra")
+            };
+            snapshot.suggestions.insert(
+                id(1),
+                vec![private, suggestion("acme/website"), suggestion(WIDGETS)],
+            );
+
+            let offer = Offer::read(&snapshot, Some(id(1)));
+
+            let infra = Choice {
+                private: true,
+                ..choice("acme/infra")
+            };
+            assert_eq!(offer.suggested, [infra, choice("acme/website")]);
+            assert_eq!(Offer::read(&snapshot, None).suggested, []);
+        }
+
+        #[test]
         fn should_be_signed_out_only_while_github_rejects_the_token() {
             let mut snapshot = snapshot();
             assert!(Offer::read(&snapshot, None).signed_in);
@@ -885,6 +956,7 @@ pub(crate) mod tests {
         };
         Offer {
             linked: vec![private(GADGETS), choice(WIDGETS)],
+            suggested: Vec::new(),
             from_prs: vec![
                 private(GADGETS),
                 Choice {
@@ -979,6 +1051,7 @@ pub(crate) mod tests {
     fn picks(entries: &[Entry]) -> Vec<String> {
         (entries.iter())
             .map(|e| match e {
+                Entry::Suggested(choice) => format!("Suggested {}", choice.name),
                 Entry::Pick(choice) => choice.name.to_string(),
                 Entry::Typed(name) => format!("Link {name}"),
             })
@@ -1252,6 +1325,102 @@ pub(crate) mod tests {
             });
             assert!(focused);
             assert!(harness.picker.read_with(cx, |p, _| p.is_open()));
+        }
+    }
+
+    mod suggested {
+        use super::*;
+
+        /// [`offer`] with the Suggestions website, then infra, which you also have PRs in.
+        fn suggesting() -> Offer {
+            Offer {
+                suggested: vec![choice("acme/infra"), choice("acme/website")],
+                from_prs: [offer().from_prs, vec![choice("acme/infra")]].concat(),
+                ..offer()
+            }
+        }
+
+        fn shows(selector: &str, cx: &mut VisualTestContext) -> bool {
+            cx.debug_bounds(selector.to_owned().leak()).is_some()
+        }
+
+        #[gpui::test]
+        fn should_list_the_suggestions_first_then_your_prs_repositories(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(suggesting(), cx);
+
+            assert_eq!(
+                harness.entries(cx),
+                [
+                    Entry::Suggested(choice("acme/infra")),
+                    Entry::Suggested(choice("acme/website")),
+                    Entry::Pick(Choice {
+                        private: true,
+                        ..choice(SECRETS)
+                    }),
+                    Entry::Pick(choice("acme/tools")),
+                ]
+            );
+        }
+
+        #[gpui::test]
+        fn should_head_them_suggested_above_from_your_pull_requests(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(suggesting(), cx);
+            harness.type_in("", cx);
+
+            let suggested = cx.debug_bounds("suggested").expect("the Suggested heading");
+            let first = cx.debug_bounds("suggested acme/infra").expect("infra");
+            let from_prs = cx
+                .debug_bounds("from your pull requests")
+                .expect("its heading");
+            assert!(suggested.bottom() <= first.top());
+            assert!(first.bottom() <= from_prs.top());
+            assert!(!shows("pick acme/infra", cx), "listed once, as Suggested");
+        }
+
+        #[gpui::test]
+        fn should_stage_a_suggestion_picked_from_the_list(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(suggesting(), cx);
+            harness.type_in("", cx);
+
+            let at = cx.debug_bounds("suggested acme/website").expect("website");
+            cx.simulate_click(at.center(), Modifiers::default());
+            harness.settle(cx);
+
+            assert_eq!(
+                harness.rows(cx).last(),
+                Some(&("acme/website".to_owned(), Staged::Linking))
+            );
+            assert!(
+                !harness
+                    .entries(cx)
+                    .contains(&Entry::Suggested(choice("acme/website")))
+            );
+        }
+
+        #[gpui::test]
+        fn should_filter_them_as_you_type(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(suggesting(), cx);
+
+            harness.type_in("WEB", cx);
+
+            assert_eq!(
+                harness.entries(cx),
+                [Entry::Suggested(choice("acme/website"))]
+            );
+        }
+
+        #[gpui::test]
+        fn should_pick_the_first_suggestion_on_enter(cx: &mut TestAppContext) {
+            let (harness, cx) = Harness::open(suggesting(), cx);
+            harness.type_in("acme", cx);
+
+            cx.simulate_keystrokes("enter");
+            harness.settle(cx);
+
+            assert_eq!(
+                harness.rows(cx).last(),
+                Some(&("acme/infra".to_owned(), Staged::Linking))
+            );
         }
     }
 

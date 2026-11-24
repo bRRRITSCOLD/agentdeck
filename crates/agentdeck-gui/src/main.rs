@@ -35,6 +35,7 @@ mod shell;
 mod sidebar;
 mod state_dir;
 mod state_dot;
+mod suggestion_strip;
 mod sync_parts;
 mod table;
 mod terminal;

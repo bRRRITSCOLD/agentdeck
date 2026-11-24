@@ -21,6 +21,7 @@ mod repositories;
 mod repositories_client;
 mod settings;
 mod settings_client;
+mod suggestions;
 mod support;
 mod tabs;
 mod version;

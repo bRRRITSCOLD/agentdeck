@@ -17,6 +17,7 @@ use crate::github_auth::{self, GithubAuth, device, keyring};
 use crate::instance::Instance;
 use crate::paths::Paths;
 use crate::prsync::{self, PrSync};
+use crate::suggestions::Suggestions;
 use crate::terminal::Terminals;
 use crate::{agents, auth, logging};
 
@@ -97,6 +98,13 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
     agents::resume::resume_panes(&restarter)
         .await
         .map_err(|err| anyhow::anyhow!("resuming panes: {err}"))?;
+    let suggestions = Suggestions::new(
+        db.clone(),
+        events.clone(),
+        credentials.clone(),
+        github.clone(),
+    );
+    suggestions.watch();
     let token = auth::new_token();
     let context = ApiContext {
         db,
@@ -108,6 +116,7 @@ async fn serve(paths: &Paths, instance: &Instance) -> anyhow::Result<()> {
         settings,
         terminals: terminals.clone(),
         events,
+        suggestions,
     };
     let config = ConfigDropshot {
         bind_address: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),

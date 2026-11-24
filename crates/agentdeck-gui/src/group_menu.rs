@@ -30,6 +30,7 @@ use gpui::{
 };
 
 use crate::api::Api;
+use crate::gui_state;
 use crate::notice::{Notice, NoticeAction};
 use crate::overview::Snapshot;
 use crate::pr_table::Linker;
@@ -184,6 +185,7 @@ pub fn menu(
                                         api.clone(),
                                         workspace.clone(),
                                         repository.clone(),
+                                        |_, _| {},
                                         window,
                                         cx,
                                     );
@@ -230,11 +232,14 @@ pub fn menu(
         .into_any_element()
 }
 
-/// Links `workspace` to `repository` at once and toasts it, with an Undo that unlinks it.
+/// Links `workspace` to `repository` at once and toasts it, with an Undo that unlinks it;
+/// `linked` runs once it is linked. Undo doesn't dismiss a Suggestion: it puts things back as
+/// they were.
 pub fn link(
     api: Arc<dyn Api>,
     workspace: Linker,
     repository: Repository,
+    linked: impl FnOnce(&mut Window, &mut App) + 'static,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -243,6 +248,7 @@ pub fn link(
         let name = repository.name.to_string();
         match done {
             Ok(()) => {
+                linked(window, cx);
                 let undo = NoticeAction::new("Undo", {
                     let (workspace, id) = (workspace.clone(), repository.id);
                     move |window, cx| {
@@ -266,7 +272,8 @@ pub fn link(
 }
 
 /// Unlinks the Workspace whose Pull requests `target` is on from its Repository at once, and
-/// toasts it with an Undo that links it again by GitHub's id.
+/// toasts it with an Undo that links it again by GitHub's id. The unlink counts as Not now:
+/// the Workspace's Suggestions leave the Repository out from then on.
 pub fn unlink(api: Arc<dyn Api>, target: Target, window: &mut Window, cx: &mut App) {
     let Some(workspace) = target.workspace.clone() else {
         return;
@@ -276,6 +283,8 @@ pub fn unlink(api: Arc<dyn Api>, target: Target, window: &mut Window, cx: &mut A
         let name = target.repository.name.to_string();
         match done {
             Ok(()) => {
+                let (id, repository) = (workspace.id, target.repository.id);
+                gui_state::update(cx, |state| state.dismiss(id, repository));
                 let undo = NoticeAction::new("Undo", {
                     let (workspace, repository) = (workspace.clone(), target.repository.clone());
                     move |window, cx| {

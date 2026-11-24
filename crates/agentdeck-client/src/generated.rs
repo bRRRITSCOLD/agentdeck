@@ -4404,6 +4404,23 @@ impl Client {
     pub fn link_delete(&self) -> builder::LinkDelete<'_> {
         builder::LinkDelete::new(self)
     }
+    ///Workspace `id`'s Suggestions (spec §3): the Repositories its Panes work in that it doesn't
+    ///
+    ///link, each as GitHub showed it when this run first asked about its name, by name ignoring case. A Pane counts at its current folder, an exited one at its last known folder; its git repo's `upstream` remote counts when it is on GitHub, else its `origin`. A Repository other Workspaces link is still suggested; one GitHub can't see never is; signed out, only one agentdeck keeps is. An archived Workspace has none. Not filtered by what the GUI was told Not now. A Workspace that doesn't exist is 404 `not_found`.
+    ///
+    ///Sends a `GET` request to `/v1/workspaces/{id}/suggestions`
+    ///
+    ///Arguments:
+    ///- `id`: The entity's id.
+    ///```ignore
+    ///let response = client.suggestion_list()
+    ///    .id(id)
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn suggestion_list(&self) -> builder::SuggestionList<'_> {
+        builder::SuggestionList::new(self)
+    }
     ///A workspace's tabs, in position order
     ///
     ///Sends a `GET` request to `/v1/workspaces/{id}/tabs`
@@ -6748,6 +6765,76 @@ pub mod builder {
             let response = result?;
             match response.status().as_u16() {
                 204u16 => Ok(ResponseValue::empty(response)),
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::suggestion_list`]
+    ///
+    ///[`Client::suggestion_list`]: super::Client::suggestion_list
+    #[derive(Debug, Clone)]
+    pub struct SuggestionList<'a> {
+        client: &'a super::Client,
+        id: Result<agentdeck_core::WorkspaceId, String>,
+    }
+    impl<'a> SuggestionList<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self {
+                client: client,
+                id: Err("id was not initialized".to_string()),
+            }
+        }
+        pub fn id<V>(mut self, value: V) -> Self
+        where
+            V: std::convert::TryInto<agentdeck_core::WorkspaceId>,
+        {
+            self.id = value.try_into().map_err(|_| {
+                "conversion to `agentdeck_core :: WorkspaceId` for id failed".to_string()
+            });
+            self
+        }
+        ///Sends a `GET` request to `/v1/workspaces/{id}/suggestions`
+        pub async fn send(
+            self,
+        ) -> Result<ResponseValue<::std::vec::Vec<types::Repository>>, Error<types::Error>>
+        {
+            let Self { client, id } = self;
+            let id = id.map_err(Error::InvalidRequest)?;
+            let url = format!(
+                "{}/v1/workspaces/{}/suggestions",
+                client.baseurl,
+                encode_path(&id.to_string()),
+            );
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .get(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "suggestion_list",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                200u16 => ResponseValue::from_response(response).await,
                 400u16..=499u16 => Err(Error::ErrorResponse(
                     ResponseValue::from_response(response).await?,
                 )),

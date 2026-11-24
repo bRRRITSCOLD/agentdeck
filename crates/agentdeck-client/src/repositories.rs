@@ -1,6 +1,7 @@
 //! Repositories as the GUI reads them (spec §4 `GET /v1/repositories`, §11 Notifications),
 //! and the Links a Repository group's `…` menu makes and takes away (spec §4
-//! `/v1/workspaces/{id}/links`, §11 Pull requests view).
+//! `/v1/workspaces/{id}/links`, §11 Pull requests view), and each Workspace's Suggestions
+//! (`/v1/workspaces/{id}/suggestions`).
 
 use agentdeck_core::{RepositoryId, RepositoryName, WorkspaceId};
 
@@ -14,6 +15,26 @@ use crate::{ApiError, Client};
 pub async fn list(client: &Client) -> Result<Vec<RepositoryLinks>, ApiError> {
     match client.repository_list().send().await {
         Ok(repositories) => Ok(repositories.into_inner()),
+        Err(err) => match ApiError::from(err) {
+            ApiError {
+                message,
+                code: None,
+            } if message == OLDER_DAEMON => Ok(Vec::new()),
+            err => Err(err),
+        },
+    }
+}
+
+/// Workspace `workspace`'s Suggestions (spec §3): the Repositories its Panes work in that it
+/// doesn't link, by name, each as GitHub showed it, so the GUI links one by its id. Not
+/// filtered by what the GUI was told Not now. A daemon older than the route has none to give,
+/// and lists none rather than failing.
+pub async fn suggestions(
+    client: &Client,
+    workspace: WorkspaceId,
+) -> Result<Vec<Repository>, ApiError> {
+    match client.suggestion_list().id(workspace).send().await {
+        Ok(suggestions) => Ok(suggestions.into_inner()),
         Err(err) => match ApiError::from(err) {
             ApiError {
                 message,

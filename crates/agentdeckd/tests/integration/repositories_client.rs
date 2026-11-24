@@ -247,3 +247,105 @@ mod unlink {
         assert_eq!(err.code.as_deref(), Some("not_found"));
     }
 }
+
+mod suggestions {
+    use agentdeck_client::repositories::suggestions;
+    use agentdeck_client::types::{NewPane, NewTab};
+    use agentdeck_core::PaneKind;
+
+    use super::*;
+    use crate::support::git::git;
+
+    #[tokio::test]
+    async fn should_list_what_the_workspaces_panes_work_in_and_it_does_not_link() {
+        let github = MockServer::start_async().await;
+        mock_viewer(&github, TOKEN, "octocat", None);
+        mock_rest_repo(
+            &github,
+            TOKEN,
+            "acme/widgets",
+            RestRepo::new("acme/widgets"),
+        );
+        let dirs = tempfile::tempdir().expect("a temp dir");
+        set_gh_token(dirs.path(), Some(TOKEN));
+        let daemon = TestDaemon::start_with_github(dirs, &github.url("/graphql")).await;
+        let dir = daemon.new_dir("widgets");
+        git(&dir, &["init", "--quiet"]);
+        git(
+            &dir,
+            &["remote", "add", "origin", "git@github.com:acme/widgets.git"],
+        );
+        let web = (daemon.client.workspace_create())
+            .body(NewWorkspace {
+                name: "web".into(),
+                link: Vec::new(),
+            })
+            .send()
+            .await
+            .expect("create a workspace")
+            .into_inner();
+        let tab = (daemon.client.tab_create())
+            .id(web.id)
+            .body(NewTab {
+                title: "tab".into(),
+                layout: None,
+            })
+            .send()
+            .await
+            .expect("create a tab")
+            .into_inner();
+        (daemon.client.pane_create())
+            .body(NewPane {
+                tab_id: tab.id,
+                kind: PaneKind::Shell,
+                agent: None,
+                argv: Some(vec!["sleep".into(), "600".into()]),
+                cwd: dir.to_str().expect("a UTF-8 path").to_owned(),
+            })
+            .send()
+            .await
+            .expect("spawn a pane");
+
+        let suggested = suggestions(&daemon.client, web.id)
+            .await
+            .expect("list Suggestions");
+
+        assert_eq!(
+            suggested,
+            [Repository {
+                id: RepositoryId::from(repository_id("acme/widgets")),
+                name: "acme/widgets".parse().unwrap(),
+                url: "https://github.com/acme/widgets".into(),
+                private: false,
+                archived: false,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn should_list_none_on_a_daemon_older_than_the_route() {
+        let daemon = TestDaemon::start().await;
+        let older = agentdeck_client::authenticated(
+            &format!("{}/later", daemon.base_url()),
+            &daemon.info.token,
+        )
+        .expect("a client");
+        let workspace: WorkspaceId = "019a0000-0000-7000-8000-000000000001".parse().unwrap();
+
+        let suggested = suggestions(&older, workspace).await.expect("no failure");
+
+        assert_eq!(suggested, []);
+    }
+
+    #[tokio::test]
+    async fn should_fail_with_the_daemons_words_for_a_workspace_that_does_not_exist() {
+        let daemon = TestDaemon::start().await;
+        let workspace: WorkspaceId = "019a0000-0000-7000-8000-000000000001".parse().unwrap();
+
+        let err = suggestions(&daemon.client, workspace)
+            .await
+            .expect_err("a refusal");
+
+        assert_eq!(err.code.as_deref(), Some("not_found"));
+    }
+}
