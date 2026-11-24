@@ -161,15 +161,50 @@ fn user_repos_link(server: &MockServer, page: u32, last: u32) -> String {
     links.join(", ")
 }
 
+/// One page of `GET /user/repos` as GitHub answers it: [`UserReposPage::full`] with the page,
+/// its `ETag` and `Link` header, unless the request's `If-None-Match` is that `ETag`, which
+/// [`UserReposPage::not_modified`] answers `304` with no body or `Link`, as GitHub does.
+pub struct UserReposPage<'a> {
+    pub full: Mock<'a>,
+    pub not_modified: Mock<'a>,
+}
+
+impl UserReposPage<'_> {
+    /// Requests for the page, answered either way.
+    pub async fn calls_async(&self) -> usize {
+        self.full.calls_async().await + self.not_modified.calls_async().await
+    }
+
+    /// Requests answered `304 Not Modified`.
+    pub async fn not_modified_async(&self) -> usize {
+        self.not_modified.calls_async().await
+    }
+
+    /// Stops answering the page, as when GitHub's content for it changes.
+    pub async fn delete_async(&mut self) {
+        self.full.delete_async().await;
+        self.not_modified.delete_async().await;
+    }
+}
+
+/// The `ETag` GitHub would send with `body`: weak, and the same for the same content.
+fn etag(body: &Value) -> String {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    body.to_string().hash(&mut hasher);
+    format!("W/\"{:016x}\"", hasher.finish())
+}
+
 /// `GET /user/repos?sort=full_name&direction=asc&per_page=100&page=<page>` with `token`,
-/// answered after `delay` with `repos`' page `page` (from 1) and its `Link` header.
+/// answered after `delay` with `repos`' page `page` (from 1), its `ETag` and `Link` header,
+/// or `304` when the request's `If-None-Match` is that `ETag`.
 pub fn mock_user_repos_page<'a>(
     server: &'a MockServer,
     token: &str,
     repos: &[RestRepo],
     page: u32,
     delay: Duration,
-) -> Mock<'a> {
+) -> UserReposPage<'a> {
     let last = repos.len().div_ceil(100).max(1) as u32;
     let start = (page as usize - 1) * 100;
     let body: Vec<Value> = (repos.iter().skip(start).take(100))
@@ -188,8 +223,10 @@ pub fn mock_user_repos_page<'a>(
             })
         })
         .collect();
+    let body = Value::Array(body);
+    let etag = etag(&body);
     let link = user_repos_link(server, page, last);
-    server.mock(|when, then| {
+    let request = |when: httpmock::When| {
         when.method(GET)
             .path("/user/repos")
             .query_param("sort", "full_name")
@@ -197,12 +234,25 @@ pub fn mock_user_repos_page<'a>(
             .query_param("per_page", "100")
             .query_param("page", page.to_string())
             .header("authorization", format!("Bearer {token}"))
-            .header("x-github-api-version", "2022-11-28");
-        let then = then.status(200).delay(delay).json_body(Value::Array(body));
+            .header("x-github-api-version", "2022-11-28")
+    };
+    let full = server.mock(|when, then| {
+        let current = etag.clone();
+        request(when).is_false(move |request| {
+            (request.headers().get("if-none-match")).is_some_and(|sent| sent == current.as_str())
+        });
+        let then = (then.status(200).delay(delay))
+            .header("etag", &etag)
+            .json_body(body);
         if !link.is_empty() {
             then.header("link", link);
         }
-    })
+    });
+    let not_modified = server.mock(|when, then| {
+        request(when).header("if-none-match", &etag);
+        then.status(304).delay(delay).header("etag", &etag);
+    });
+    UserReposPage { full, not_modified }
 }
 
 /// Every page of `repos` for `token`, answered at once, by page from 1.
@@ -210,7 +260,7 @@ pub fn mock_user_repos<'a>(
     server: &'a MockServer,
     token: &str,
     repos: &[RestRepo],
-) -> Vec<Mock<'a>> {
+) -> Vec<UserReposPage<'a>> {
     let last = repos.len().div_ceil(100).max(1) as u32;
     (1..=last)
         .map(|page| mock_user_repos_page(server, token, repos, page, Duration::ZERO))

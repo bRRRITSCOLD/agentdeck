@@ -373,19 +373,31 @@ impl Github {
 
     /// Page `page` (from 1) of every repository the token's user can reach, read with the
     /// REST API's `GET /user/repos?sort=full_name&direction=asc&per_page=100`: owned,
-    /// collaborator and organisation ones, by `owner/name`. Tried again after each of
-    /// `RETRY_WAITS` while it fails for a reason that may pass.
-    pub async fn user_repos_page(&self, token: &str, page: u32) -> Result<ReposPage, GithubError> {
+    /// collaborator and organisation ones, by `owner/name`. With `etag`, the `ETag` the page
+    /// came with before, it is asked for only if it changed (`If-None-Match`), and GitHub's
+    /// `304`, which costs nothing against the rate limit, is [`ReposRead::NotModified`]. Tried
+    /// again after each of `RETRY_WAITS` while it fails for a reason that may pass.
+    pub async fn user_repos_page(
+        &self,
+        token: &str,
+        page: u32,
+        etag: Option<&str>,
+    ) -> Result<ReposRead, GithubError> {
         retrying(GithubError::may_pass, || {
-            self.user_repos_page_once(token, page)
+            self.user_repos_page_once(token, page, etag)
         })
         .await
     }
 
     /// [`Github::user_repos_page`], once.
-    async fn user_repos_page_once(&self, token: &str, page: u32) -> Result<ReposPage, GithubError> {
+    async fn user_repos_page_once(
+        &self,
+        token: &str,
+        page: u32,
+        etag: Option<&str>,
+    ) -> Result<ReposRead, GithubError> {
         let url = format!("{}/user/repos", self.rest);
-        let response = self
+        let mut request = self
             .http
             .get(url)
             .query(&[
@@ -396,12 +408,17 @@ impl Github {
             ])
             .bearer_auth(token)
             .header("accept", "application/vnd.github+json")
-            .header("x-github-api-version", REST_API_VERSION)
-            .send()
-            .await?;
+            .header("x-github-api-version", REST_API_VERSION);
+        if let Some(etag) = etag {
+            request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+        }
+        let response = request.send().await?;
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
             return Err(GithubError::Unauthorized);
+        }
+        if status == reqwest::StatusCode::NOT_MODIFIED && etag.is_some() {
+            return Ok(ReposRead::NotModified);
         }
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
@@ -410,14 +427,19 @@ impl Github {
                 message: message(&body),
             });
         }
-        let last = (response.headers().get(reqwest::header::LINK))
-            .and_then(|link| link.to_str().ok())
-            .and_then(last_page);
+        let header = |name| {
+            (response.headers().get(name))
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        let last = header(reqwest::header::LINK).as_deref().and_then(last_page);
+        let etag = header(reqwest::header::ETAG);
         let repositories: Vec<RestRepository> = response.json().await?;
-        Ok(ReposPage {
+        Ok(ReposRead::Page(ReposPage {
             repositories: repositories.into_iter().map(Into::into).collect(),
             last,
-        })
+            etag,
+        }))
     }
 
     /// Who `token` belongs to, and its scopes. A token GitHub rejects is
@@ -718,6 +740,17 @@ pub struct ReposPage {
     /// The last page's number, from the `Link` header's `rel="last"`; `None` when there's
     /// none, as on the last page itself.
     pub last: Option<u32>,
+    /// The page's `ETag`, to ask for it again only if it changed.
+    pub etag: Option<String>,
+}
+
+/// What `GET /user/repos` answered for one page.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReposRead {
+    /// The page, read whole.
+    Page(ReposPage),
+    /// `304 Not Modified`: the page is as it was when it came with the `ETag` sent.
+    NotModified,
 }
 
 /// The `page` of the `rel="last"` URL in a `Link` header; `None` when it has none, or one
