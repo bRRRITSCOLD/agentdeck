@@ -257,7 +257,7 @@ fn thousands(n: u32) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, digit) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(digit);
@@ -343,8 +343,6 @@ enum Item {
     Heading(&'static str, &'static str),
     /// A Repository to pick.
     Choice(Entry),
-    /// "Loading your repositories… 400 of about 1,100".
-    Loading(String),
     /// "Couldn't load your repositories." and Retry.
     Failed,
     /// "No repositories match.".
@@ -365,7 +363,7 @@ const MAX_LIST_HEIGHT: Pixels = px(252.);
 impl Item {
     fn height(&self) -> Pixels {
         match self {
-            Item::Heading(..) | Item::Loading(_) | Item::Failed => HEADING_HEIGHT,
+            Item::Heading(..) | Item::Failed => HEADING_HEIGHT,
             Item::Choice(_) => ITEM_HEIGHT,
             Item::NoMatch => NO_MATCH_HEIGHT,
         }
@@ -854,8 +852,7 @@ impl LinkPicker {
     }
 
     /// The open list's rows for what is typed now: Suggested, From your pull requests, All
-    /// your repositories with its loading or failed line, the typed row, or "No repositories
-    /// match.".
+    /// your repositories or its failed line, the typed row, or "No repositories match.".
     fn items(&self, cx: &App) -> Vec<Item> {
         let entries = self.entries(cx);
         let mut items = Vec::new();
@@ -882,14 +879,8 @@ impl LinkPicker {
             &mut items,
         );
         let mut all = of(|e| matches!(e, Entry::All(_)));
-        if self.signed_in() {
-            match &self.github {
-                GithubList::Loading { loaded, total, .. } => {
-                    all.push(Item::Loading(loading_line(*loaded, *total)))
-                }
-                GithubList::Failed => all.push(Item::Failed),
-                GithubList::Loaded(_) | GithubList::SignedOut => {}
-            }
+        if self.signed_in() && self.github == GithubList::Failed {
+            all.push(Item::Failed);
         }
         section(
             Some(Item::Heading(ALL_REPOSITORIES, "all your repositories")),
@@ -897,10 +888,21 @@ impl LinkPicker {
             &mut items,
         );
         section(None, of(|e| matches!(e, Entry::Typed(_))), &mut items);
-        if items.is_empty() {
+        if items.is_empty() && self.loading().is_none() {
             items.push(Item::NoMatch);
         }
         items
+    }
+
+    /// The line under the rows while All your repositories loads: "Loading your
+    /// repositories… 400 of about 1,100".
+    fn loading(&self) -> Option<String> {
+        match &self.github {
+            GithubList::Loading { loaded, total, .. } if self.signed_in() => {
+                Some(loading_line(*loaded, *total))
+            }
+            _ => None,
+        }
     }
 
     /// Row `ix` of the open list, as [`Self::list`] last listed them.
@@ -940,10 +942,6 @@ impl LinkPicker {
         match item {
             Item::Heading(text, selector) => line()
                 .debug_selector(move || selector.into())
-                .child(text)
-                .into_any_element(),
-            Item::Loading(text) => line()
-                .debug_selector(|| "loading your repositories".into())
                 .child(text)
                 .into_any_element(),
             Item::Failed => div()
@@ -1032,7 +1030,8 @@ impl LinkPicker {
 
     /// The open list (Penpot `agentdeck/LinkPickerList`), drawn as core-gpui's
     /// `ComboboxContent`: its rows ([`Self::items`]), as tall as they are up to
-    /// [`MAX_LIST_HEIGHT`] and scrolling past it, then the last line.
+    /// [`MAX_LIST_HEIGHT`] and scrolling past it, the loading line under them, so it shows
+    /// however far they scroll, then the last line.
     fn list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
         let items = self.items(cx);
@@ -1086,6 +1085,17 @@ impl LinkPicker {
                     .size_full(),
                 ),
             )
+            .when_some(self.loading(), |list, text| {
+                list.child(
+                    div()
+                        .debug_selector(|| "loading your repositories".into())
+                        .px(space::S2)
+                        .py(space::S1_5)
+                        .text_size(font_size::XS)
+                        .text_color(s.muted_foreground)
+                        .child(text),
+                )
+            })
             .child(
                 // ComboboxSeparator: -mx-1 my-1 h-px bg-border
                 div().mx(-space::S1).my(space::S1).h(px(1.)).bg(s.border),
@@ -2072,7 +2082,6 @@ pub(crate) mod tests {
                 Harness::open_with(offer(), status(GithubListStatus::NotLoaded), cx);
             harness.type_in("", cx);
 
-            assert!(shows("all your repositories", cx));
             assert!(shows("loading your repositories", cx));
             assert!(!shows("no match", cx));
         }
@@ -2176,6 +2185,31 @@ pub(crate) mod tests {
             let list = cx.debug_bounds("picker list").expect("the list");
             assert!(list.size.height < px(320.), "{:?}", list.size.height);
             assert!(shows("not listed", cx));
+        }
+    }
+
+    mod long_list {
+        use super::*;
+
+        #[gpui::test]
+        fn should_keep_the_loading_line_in_view_under_rows_that_scroll(cx: &mut TestAppContext) {
+            let many: Vec<Choice> = (0..400)
+                .map(|i| choice(&format!("acme/repo-{i:04}")))
+                .collect();
+            let list = GithubRepositoryList {
+                status: GithubListStatus::Loading,
+                total: Some(1_104),
+                ..loaded(&many)
+            };
+            let (harness, cx) = Harness::open_with(offer(), list, cx);
+            harness.type_in("", cx);
+
+            let line = cx
+                .debug_bounds("loading your repositories")
+                .expect("the loading line, in view");
+            let footer = cx.debug_bounds("not listed").expect("the last line");
+            assert!(line.bottom() <= footer.top());
+            assert!(cx.debug_bounds("all acme/repo-0399").is_none());
         }
     }
 
