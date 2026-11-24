@@ -38,13 +38,7 @@ mod repo_ls {
     fn should_list_each_repository_with_the_workspaces_linking_it() {
         let github = MockServer::start();
         mock_repo(&github, TOKEN, WIDGETS);
-        let env = synced(
-            &github,
-            &[Pr {
-                repo: GADGETS,
-                number: 9,
-            }],
-        );
+        let env = synced(&github, &[Pr::open(GADGETS, 9)]);
         env.workspace("web");
         env.workspace("api");
         env.ok(&["repo", "link", WIDGETS, "--ws", "web"]);
@@ -213,13 +207,7 @@ mod repo_unlink {
     #[test]
     fn should_keep_a_repository_one_of_your_pull_requests_belongs_to() {
         let github = MockServer::start();
-        let env = synced(
-            &github,
-            &[Pr {
-                repo: WIDGETS,
-                number: 7,
-            }],
-        );
+        let env = synced(&github, &[Pr::open(WIDGETS, 7)]);
         env.workspace("web");
         env.ok(&["repo", "link", WIDGETS, "--ws", "web"]);
 

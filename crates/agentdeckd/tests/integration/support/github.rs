@@ -12,6 +12,9 @@ use httpmock::prelude::*;
 use httpmock::{Mock, MockServer};
 use serde_json::{Value, json};
 
+/// The signed-in login in these tests: GitHub answers each query for PRs as this viewer.
+pub const ME: &str = "octocat";
+
 /// A GraphQL endpoint nothing listens on, for daemons that aren't testing PR sync.
 pub const UNREACHABLE: &str = "http://127.0.0.1:9/graphql";
 
@@ -266,6 +269,10 @@ pub struct Pr {
     pub checks: Option<&'static str>,
     pub review: Option<&'static str>,
     pub updated_at: &'static str,
+    /// The logins its review requests name (a team's names none).
+    pub requested: &'static [&'static str],
+    /// Its assignees' logins.
+    pub assignees: &'static [&'static str],
 }
 
 /// The id GitHub gives Repository `repo` in these tests: the same for the same name.
@@ -278,8 +285,8 @@ pub fn repository_id(repo: &str) -> u64 {
 }
 
 impl Pr {
-    /// An open PR on `acme/widgets` from `feat/sync` into `main`, opened by `octocat`, with no
-    /// checks and no review.
+    /// An open PR on `acme/widgets` from `feat/sync` into `main`, opened by [`ME`], with no
+    /// checks, no review, no review requests and no assignees.
     pub fn open(number: i64) -> Pr {
         Pr {
             repo: "acme/widgets",
@@ -295,6 +302,16 @@ impl Pr {
             checks: None,
             review: None,
             updated_at: "2026-11-01T10:00:00Z",
+            requested: &[],
+            assignees: &[],
+        }
+    }
+
+    /// Open PR `number` that someone else opened and that is yours only as `pr` makes it.
+    pub fn theirs(number: i64) -> Pr {
+        Pr {
+            author: Some("hubot"),
+            ..Pr::open(number)
         }
     }
 
@@ -334,6 +351,12 @@ impl Pr {
             "baseRefName": self.base_ref,
             "updatedAt": self.updated_at,
             "author": self.author.map(|login| json!({ "login": login })),
+            "reviewRequests": { "nodes": self.requested.iter()
+                .map(|login| json!({ "requestedReviewer": { "login": login } }))
+                .collect::<Vec<_>>() },
+            "assignees": { "nodes": self.assignees.iter()
+                .map(|login| json!({ "login": login }))
+                .collect::<Vec<_>>() },
             "repository": {
                 // A `BigInt`, which GraphQL writes as a string.
                 "fullDatabaseId": self.repository_id().to_string(),
@@ -388,13 +411,15 @@ pub fn mock_search<'a>(server: &'a MockServer, token: &str, prs: &[Pr]) -> Listi
 }
 
 /// The list of the viewer's open PRs, one page with `prs` for `token`, and their details by
-/// number. An incremental search doesn't match it.
+/// number; the full sync's searches for PRs where your review is requested or that are
+/// assigned to you find none. An incremental search doesn't match it.
 pub fn mock_list<'a>(server: &'a MockServer, token: &str, prs: &[Pr]) -> Listing<'a> {
     let list = mock_list_page(server, token, prs, None, None, prs.len(), Duration::ZERO);
-    let others = prs
+    let mut others: Vec<Mock<'a>> = prs
         .chunks(BATCH)
         .map(|batch| mock_fetch(server, batch))
         .collect();
+    others.extend(mock_open_searches(server, token, &[], &[]));
     Listing { list, others }
 }
 
@@ -418,7 +443,7 @@ pub fn mock_list_page<'a>(
             .body_includes("pullRequests(")
             .json_body_includes(json!({ "variables": { "after": after } }).to_string());
         then.status(200).delay(delay).json_body(json!({
-            "data": { "viewer": { "pullRequests": {
+            "data": { "viewer": { "login": ME, "pullRequests": {
                 "totalCount": total,
                 "pageInfo": { "hasNextPage": next.is_some(), "endCursor": next },
                 "nodes": nodes
@@ -427,23 +452,141 @@ pub fn mock_list_page<'a>(
     })
 }
 
-/// The incremental search for the viewer's PRs updated since the last sync, answered with
-/// `prs` for `token`.
+/// Every incremental search for the viewer's PRs updated since the last sync (authored,
+/// review requested and assigned alike), answered with `prs` for `token`.
 pub fn mock_updated_search<'a>(server: &'a MockServer, token: &str, prs: &[Pr]) -> Mock<'a> {
-    let nodes: Vec<Value> = prs.iter().map(Pr::node).collect();
     server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
             .header("authorization", format!("Bearer {token}"))
             .body_includes("search(")
             .body_includes("updated:>=");
-        then.status(200).json_body(json!({
-            "data": { "search": {
+        then.status(200).json_body(search_body(prs));
+    })
+}
+
+/// Whose PRs a search asks for, by its qualifier.
+#[derive(Clone, Copy, Debug)]
+pub enum Whose {
+    /// `author:@me`.
+    Authored,
+    /// `user-review-requested:@me`.
+    ReviewRequested,
+    /// `assignee:@me`.
+    Assigned,
+}
+
+impl Whose {
+    fn qualifier(self) -> &'static str {
+        match self {
+            Whose::Authored => "author:@me",
+            Whose::ReviewRequested => "user-review-requested:@me",
+            Whose::Assigned => "assignee:@me",
+        }
+    }
+}
+
+/// A full sync's search for `whose` open PRs, most recently updated first, answered with
+/// `prs` (one page) for `token`.
+pub fn mock_open_search<'a>(
+    server: &'a MockServer,
+    token: &str,
+    whose: Whose,
+    prs: &[Pr],
+) -> Mock<'a> {
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .header("authorization", format!("Bearer {token}"))
+            .body_includes("search(")
+            .body_includes("is:open")
+            .body_includes("sort:updated-desc")
+            .body_includes(whose.qualifier());
+        then.status(200).json_body(search_body(prs));
+    })
+}
+
+/// A full sync's searches for open PRs where your review is requested, answered with
+/// `requested`, and assigned to you, answered with `assigned`.
+pub fn mock_open_searches<'a>(
+    server: &'a MockServer,
+    token: &str,
+    requested: &[Pr],
+    assigned: &[Pr],
+) -> Vec<Mock<'a>> {
+    vec![
+        mock_open_search(server, token, Whose::ReviewRequested, requested),
+        mock_open_search(server, token, Whose::Assigned, assigned),
+    ]
+}
+
+/// An incremental search for `whose` PRs updated since the last sync, answered with `prs`
+/// for `token`.
+pub fn mock_since_search<'a>(
+    server: &'a MockServer,
+    token: &str,
+    whose: Whose,
+    prs: &[Pr],
+) -> Mock<'a> {
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/graphql")
+            .header("authorization", format!("Bearer {token}"))
+            .body_includes("search(")
+            .body_includes("updated:>=")
+            .body_includes(whose.qualifier());
+        then.status(200).json_body(search_body(prs));
+    })
+}
+
+/// The viewer's PRs, each way they are yours, however the daemon asks for `token`: the list
+/// and the open searches (a full sync) with `authored`, `requested` and `assigned`, every
+/// incremental search finding none, and each PR's details by number. Create it before any
+/// other mock of the same searches, since the first mock that matches answers.
+pub fn mock_yours<'a>(
+    server: &'a MockServer,
+    token: &str,
+    authored: &[Pr],
+    requested: &[Pr],
+    assigned: &[Pr],
+) -> Listing<'a> {
+    let mut others = mock_open_searches(server, token, requested, assigned);
+    for whose in [Whose::Authored, Whose::ReviewRequested, Whose::Assigned] {
+        others.push(mock_since_search(server, token, whose, &[]));
+    }
+    // The list's new PRs are fetched together, in its order; the rest one at a time.
+    others.extend(
+        authored
+            .chunks(BATCH)
+            .map(|batch| mock_fetch(server, batch)),
+    );
+    for pr in requested.iter().chain(assigned) {
+        others.push(mock_fetch(server, std::slice::from_ref(pr)));
+    }
+    let list = mock_list_page(
+        server,
+        token,
+        authored,
+        None,
+        None,
+        authored.len(),
+        Duration::ZERO,
+    );
+    Listing { list, others }
+}
+
+/// A search's response body: one page holding `prs`, as [`ME`] sees them.
+fn search_body(prs: &[Pr]) -> Value {
+    let nodes: Vec<Value> = prs.iter().map(Pr::node).collect();
+    json!({
+        "data": {
+            "viewer": { "login": ME },
+            "search": {
                 "issueCount": nodes.len(),
                 "pageInfo": { "hasNextPage": false, "endCursor": null },
                 "nodes": nodes
-            } }
-        }));
+            }
+        }
     })
 }
 
@@ -452,11 +595,12 @@ pub fn mock_updated_search<'a>(server: &'a MockServer, token: &str, prs: &[Pr]) 
 pub fn mock_fetch<'a>(server: &'a MockServer, prs: &[Pr]) -> Mock<'a> {
     let first = &prs[0];
     let (owner, name) = first.repo.split_once('/').expect("owner/name");
-    let data: serde_json::Map<String, Value> = prs
+    let mut data: serde_json::Map<String, Value> = prs
         .iter()
         .enumerate()
         .map(|(i, pr)| (format!("p{i}"), json!({ "pullRequest": pr.node() })))
         .collect();
+    data.insert("viewer".into(), json!({ "login": ME }));
     server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
@@ -485,7 +629,7 @@ pub fn mock_hidden<'a>(server: &'a MockServer, token: &str, pr: &Pr) -> Mock<'a>
                 json!({ "variables": { "o0": owner, "r0": name, "n0": pr.number } }).to_string(),
             );
         then.status(200).json_body(json!({
-            "data": { "p0": null },
+            "data": { "viewer": { "login": ME }, "p0": null },
             "errors": [ { "type": "NOT_FOUND", "path": [ "p0" ], "message": message } ]
         }));
     })
@@ -559,7 +703,8 @@ pub fn mock_viewer<'a>(
         when.method(POST)
             .path("/graphql")
             .header("authorization", format!("Bearer {token}"))
-            .body_includes("viewer { login }");
+            // The token check alone: queries for PRs ask for the viewer's login too.
+            .json_body_includes(json!({ "query": "query { viewer { login } }" }).to_string());
         let then = then
             .status(200)
             .json_body(json!({ "data": { "viewer": { "login": login } } }));

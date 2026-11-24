@@ -272,7 +272,7 @@ pub(crate) mod fixtures {
         PrSyncStatus, PullRequest, Repository, RepositoryLinks, Workspace,
     };
     use agentdeck_core::{
-        AgentState, PaneId, PrRef, PrState, RepositoryId, RepositoryName, WorkspaceId,
+        AgentState, PaneId, PrRef, PrState, RepositoryId, RepositoryName, WorkspaceId, Yours,
     };
 
     use super::{PaneState, Snapshot};
@@ -374,6 +374,7 @@ pub(crate) mod fixtures {
             finished: false,
             updated_at: CREATED.into(),
             url: format!("https://github.com/{repo}/pull/{n}"),
+            yours: vec![Yours::Authored],
         }
     }
 

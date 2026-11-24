@@ -8,15 +8,17 @@ use agentdeck_client::types::{
     GhLogin, NewLink, NewWorkspace, PrClose, PrCloseResult, PrSyncProgress, PrSyncStage,
     PrSyncStatus, PullRequest, Repository,
 };
-use agentdeck_core::{ChecksState, PrRef, PrState, RepositoryId, RepositoryName, ReviewState};
+use agentdeck_core::{
+    ChecksState, PrRef, PrState, RepositoryId, RepositoryName, ReviewState, Yours,
+};
 use httpmock::{Mock, MockServer};
 
 use agentdeck_core::ws::{Entity, ServerMessage};
 
 use crate::support::github::{
-    BATCH, Pr, days_ago, mock_close, mock_close_refused, mock_fetch, mock_hidden, mock_list,
-    mock_list_page, mock_node_ids, mock_search, mock_unauthorized, mock_updated_search,
-    mock_viewer, repository_id, set_gh_token,
+    BATCH, ME, Pr, days_ago, mock_close, mock_close_refused, mock_fetch, mock_hidden, mock_list,
+    mock_list_page, mock_node_ids, mock_open_searches, mock_search, mock_unauthorized,
+    mock_updated_search, mock_viewer, repository_id, set_gh_token,
 };
 use crate::support::ws::{Frame, Ws};
 use crate::support::{TestDaemon, set_daemon_env};
@@ -712,6 +714,7 @@ mod full {
         let daemon = full_daemon(&github, Some(TOKEN)).await;
         sync(&daemon.client).await;
         first.delete();
+        mock_open_searches(&github, TOKEN, &[], &[]);
 
         let changed = Pr {
             updated_at: "2026-11-02T10:00:00Z",
@@ -757,6 +760,7 @@ mod full {
             1,
             Duration::ZERO,
         );
+        mock_open_searches(&github, TOKEN, &[], &[]);
         github.mock(|when, then| {
             when.body_includes("pullRequest(");
             then.status(200)
@@ -794,6 +798,7 @@ mod full {
             1,
             Duration::ZERO,
         );
+        mock_open_searches(&github, TOKEN, &[], &[]);
         github.mock(|when, then| {
             when.body_includes("pullRequest(");
             then.status(200)
@@ -860,6 +865,7 @@ mod asked_full {
             1,
             Duration::from_millis(800),
         );
+        mock_open_searches(&github, TOKEN, &[], &[]);
         mock_fetch(&github, &[Pr::open(7)]);
         let updated = mock_updated_search(&github, TOKEN, &[]);
         let daemon = daemon(&github, Some(TOKEN)).await;
@@ -1092,8 +1098,10 @@ mod max_age {
         TestDaemon::start_with_github(dirs, &github.url("/graphql")).await
     }
 
-    /// GitHub's list of open PRs, most recently updated first, as one page.
+    /// GitHub's list of open PRs, most recently updated first, as one page; the searches for
+    /// PRs where your review is requested or that are assigned to you find none.
     pub(super) fn mock_open<'a>(github: &'a MockServer, prs: &[Pr]) -> Mock<'a> {
+        mock_open_searches(github, TOKEN, &[], &[]);
         mock_list_page(github, TOKEN, prs, None, None, prs.len(), Duration::ZERO)
     }
 
@@ -1120,6 +1128,7 @@ mod max_age {
         );
         mock_fetch(&github, &[aged(7, 1)]);
         let old = mock_fetch(&github, &[aged(8, 400)]);
+        mock_open_searches(&github, TOKEN, &[], &[]);
         let daemon =
             TestDaemon::start_with_github(dirs_with_cutoff("90"), &github.url("/graphql")).await;
 
@@ -1230,6 +1239,7 @@ mod progress {
             Duration::ZERO,
         );
         mock_list_page(github, TOKEN, &[Pr::open(2)], Some("c1"), None, 2, delay);
+        mock_open_searches(github, TOKEN, &[], &[]);
         mock_fetch(github, &[Pr::open(1), Pr::open(2)]);
         daemon(github, Some(TOKEN)).await
     }
@@ -1378,7 +1388,7 @@ mod get_v1_prs {
     }
 
     #[tokio::test]
-    async fn should_list_each_pr_with_its_reference_repository_and_fields_200() {
+    async fn should_list_each_pr_with_its_reference_repository_fields_and_why_it_is_yours_200() {
         let github = MockServer::start_async().await;
         let pr = Pr {
             private: true,
@@ -1386,6 +1396,7 @@ mod get_v1_prs {
             head_ref: "fix/sync",
             base_ref: "release/1.2",
             author: Some("hubot"),
+            assignees: &[ME],
             checks: Some("FAILURE"),
             review: Some("CHANGES_REQUESTED"),
             ..Pr::open(7)
@@ -1413,6 +1424,7 @@ mod get_v1_prs {
                 head_ref: "fix/sync".into(),
                 base_ref: "release/1.2".into(),
                 author: Some("hubot".into()),
+                yours: vec![Yours::Assigned],
                 checks: Some(ChecksState::Failure),
                 review: Some(ReviewState::ChangesRequested),
                 updated_at: pr.updated_at.into(),
@@ -1425,8 +1437,10 @@ mod get_v1_prs {
     #[tokio::test]
     async fn should_list_no_author_for_a_pr_whose_account_is_gone_200() {
         let github = MockServer::start_async().await;
+        // Yours as its reviewer, since no one is its author.
         let ghost = Pr {
             author: None,
+            requested: &[ME],
             ..Pr::open(7)
         };
         let daemon = synced(&github, &[ghost]).await;
@@ -2383,5 +2397,323 @@ mod finished {
         assert!(pr.unreachable);
         assert!(!pr.finished);
         assert_eq!(pr.repository.name.to_string(), "acme/secret");
+    }
+}
+
+/// Why each kept PR is yours (spec §8): the PRs where your review is requested and those
+/// assigned to you sync beside the ones you authored, by the same full and incremental rules
+/// and the same age cutoff, and one that stops being yours is Finished.
+mod yours {
+    use super::*;
+    use crate::support::github::{Whose, mock_since_search, mock_yours};
+
+    /// Someone else's PR `number` whose review requests name you.
+    fn requested(number: i64) -> Pr {
+        Pr {
+            requested: &[ME],
+            ..Pr::theirs(number)
+        }
+    }
+
+    /// Someone else's PR `number` assigned to you.
+    fn assigned(number: i64) -> Pr {
+        Pr {
+            assignees: &[ME],
+            ..Pr::theirs(number)
+        }
+    }
+
+    /// `pr` with its checks passed and no review awaited, so no sync fetches it again for
+    /// those.
+    fn settled(pr: Pr) -> Pr {
+        Pr {
+            checks: Some("SUCCESS"),
+            ..pr
+        }
+    }
+
+    /// `pr` last updated on GitHub `days` ago.
+    fn updated(pr: Pr, days: i64) -> Pr {
+        Pr {
+            updated_at: days_ago(days),
+            ..pr
+        }
+    }
+
+    /// Why kept PR `number` of `acme/widgets` is yours, and whether it is Finished.
+    async fn why(client: &Client, number: u32) -> (Vec<Yours>, bool) {
+        let pr = pr_numbered(client, number).await;
+        (pr.yours, pr.finished)
+    }
+
+    /// Every incremental search finding `authored`, `requested` and `assigned`, each by its
+    /// own qualifier.
+    fn mock_since<'a>(
+        github: &'a MockServer,
+        authored: &[Pr],
+        requested: &[Pr],
+        assigned: &[Pr],
+    ) -> Vec<Mock<'a>> {
+        vec![
+            mock_since_search(github, TOKEN, Whose::Authored, authored),
+            mock_since_search(github, TOKEN, Whose::ReviewRequested, requested),
+            mock_since_search(github, TOKEN, Whose::Assigned, assigned),
+        ]
+    }
+
+    /// Temp dirs for a daemon whose `gh` prints [`TOKEN`], with `env` set too.
+    fn dirs_with(env: &[(&str, &str)]) -> TempDir {
+        let dirs = tempfile::tempdir().expect("a temp dir");
+        set_gh_token(dirs.path(), Some(TOKEN));
+        set_daemon_env(dirs.path(), env);
+        dirs
+    }
+
+    mod full_sync {
+        use super::*;
+
+        #[tokio::test]
+        async fn should_keep_prs_you_authored_are_asked_to_review_or_are_assigned_200() {
+            let github = MockServer::start_async().await;
+            mock_yours(
+                &github,
+                TOKEN,
+                &[Pr::open(7)],
+                &[requested(8)],
+                &[assigned(9)],
+            );
+            let daemon = full_daemon(&github, Some(TOKEN)).await;
+
+            let status = sync(&daemon.client).await;
+
+            assert_eq!(status.last_error, None);
+            assert_eq!(why(&daemon.client, 7).await, (vec![Yours::Authored], false));
+            assert_eq!(
+                why(&daemon.client, 8).await,
+                (vec![Yours::ReviewRequested], false)
+            );
+            assert_eq!(why(&daemon.client, 9).await, (vec![Yours::Assigned], false));
+            let listed: Vec<u32> = list(&daemon.client)
+                .await
+                .iter()
+                .map(|pr| pr.number)
+                .collect();
+            assert_eq!(listed, [7, 8, 9]);
+        }
+
+        #[tokio::test]
+        async fn should_give_every_way_a_pr_is_yours_once_200() {
+            let github = MockServer::start_async().await;
+            let every_way = Pr {
+                requested: &[ME],
+                assignees: &["hubot", ME],
+                ..Pr::open(7)
+            };
+            let all = std::slice::from_ref(&every_way);
+            mock_yours(&github, TOKEN, all, all, all);
+            let daemon = full_daemon(&github, Some(TOKEN)).await;
+
+            sync(&daemon.client).await;
+
+            assert_eq!(kept_prs(&daemon.client).await.len(), 1);
+            assert_eq!(
+                why(&daemon.client, 7).await,
+                (
+                    vec![Yours::Authored, Yours::ReviewRequested, Yours::Assigned],
+                    false
+                )
+            );
+        }
+
+        #[tokio::test]
+        async fn should_leave_out_review_requests_and_assignments_older_than_the_cutoff_200() {
+            let github = MockServer::start_async().await;
+            mock_yours(
+                &github,
+                TOKEN,
+                &[],
+                &[updated(requested(8), 1), updated(requested(10), 400)],
+                &[updated(assigned(9), 1), updated(assigned(11), 400)],
+            );
+            let dirs = dirs_with(&[
+                ("AGENTDECK_PR_FULL_SYNC_SECS", "0"),
+                ("AGENTDECK_PR_MAX_AGE_DAYS", "90"),
+            ]);
+            let daemon = TestDaemon::start_with_github(dirs, &github.url("/graphql")).await;
+
+            sync(&daemon.client).await;
+
+            assert_eq!(numbers(&daemon.client).await, [8, 9]);
+        }
+    }
+
+    mod incremental {
+        use super::*;
+
+        /// A daemon past its first, full sync of `requested` and `assigned`, whose next sync is
+        /// incremental; the first sync's mocks are deleted.
+        async fn synced(github: &MockServer, requested: &[Pr], assigned: &[Pr]) -> TestDaemon {
+            let mut first = mock_yours(github, TOKEN, &[], requested, assigned);
+            let daemon = daemon(github, Some(TOKEN)).await;
+            sync(&daemon.client).await;
+            first.delete();
+            daemon
+        }
+
+        #[tokio::test]
+        async fn should_add_prs_you_were_asked_to_review_or_assigned_since_the_last_sync_200() {
+            let github = MockServer::start_async().await;
+            let daemon = synced(&github, &[], &[]).await;
+            let searches = mock_since(
+                &github,
+                &[settled(Pr::open(7))],
+                &[settled(requested(8))],
+                &[settled(assigned(9))],
+            );
+
+            let status = sync(&daemon.client).await;
+
+            assert_eq!(status.last_error, None);
+            for search in &searches {
+                search.assert_calls(1);
+            }
+            assert_eq!(why(&daemon.client, 7).await, (vec![Yours::Authored], false));
+            assert_eq!(
+                why(&daemon.client, 8).await,
+                (vec![Yours::ReviewRequested], false)
+            );
+            assert_eq!(why(&daemon.client, 9).await, (vec![Yours::Assigned], false));
+        }
+
+        #[tokio::test]
+        async fn should_leave_out_review_requests_and_assignments_older_than_the_cutoff_200() {
+            let github = MockServer::start_async().await;
+            let mut first = mock_yours(&github, TOKEN, &[], &[], &[]);
+            let dirs = dirs_with(&[("AGENTDECK_PR_MAX_AGE_DAYS", "90")]);
+            let daemon = TestDaemon::start_with_github(dirs, &github.url("/graphql")).await;
+            sync(&daemon.client).await;
+            first.delete();
+            mock_since(
+                &github,
+                &[],
+                &[updated(requested(8), 1), updated(requested(10), 400)],
+                &[updated(assigned(9), 1), updated(assigned(11), 400)],
+            );
+
+            sync(&daemon.client).await;
+
+            assert_eq!(numbers(&daemon.client).await, [8, 9]);
+        }
+    }
+
+    mod no_longer_yours {
+        use super::*;
+
+        #[tokio::test]
+        async fn should_finish_a_pr_whose_review_you_submitted_at_the_next_sync_200() {
+            let github = MockServer::start_async().await;
+            let waiting = settled(requested(8));
+            let mut first = mock_yours(&github, TOKEN, &[], std::slice::from_ref(&waiting), &[]);
+            let daemon = daemon(&github, Some(TOKEN)).await;
+            sync(&daemon.client).await;
+            first.delete();
+            // Reviewed: the request no longer names you, so no search finds it.
+            mock_since(&github, &[], &[], &[]);
+            let fetch = mock_fetch(&github, &[settled(Pr::theirs(8))]);
+
+            sync(&daemon.client).await;
+
+            assert!(fetch.calls() >= 1);
+            assert_eq!(why(&daemon.client, 8).await, (vec![], true));
+            assert_eq!(pr_numbered(&daemon.client, 8).await.state, PrState::Open);
+            assert!(list(&daemon.client).await.is_empty());
+        }
+
+        #[tokio::test]
+        async fn should_finish_a_pr_you_were_unassigned_from_at_a_full_sync_200() {
+            let github = MockServer::start_async().await;
+            let mut first = mock_yours(&github, TOKEN, &[], &[], &[assigned(9)]);
+            let daemon = full_daemon(&github, Some(TOKEN)).await;
+            sync(&daemon.client).await;
+            first.delete();
+            mock_yours(&github, TOKEN, &[], &[], &[]);
+            mock_fetch(&github, &[Pr::theirs(9)]);
+
+            sync(&daemon.client).await;
+
+            assert_eq!(why(&daemon.client, 9).await, (vec![], true));
+        }
+
+        #[tokio::test]
+        async fn should_not_finish_a_pr_you_authored_when_its_review_request_goes_200() {
+            let github = MockServer::start_async().await;
+            let mine = Pr {
+                requested: &[ME],
+                ..Pr::open(7)
+            };
+            let mut first = mock_yours(
+                &github,
+                TOKEN,
+                std::slice::from_ref(&mine),
+                std::slice::from_ref(&mine),
+                &[],
+            );
+            let daemon = full_daemon(&github, Some(TOKEN)).await;
+            sync(&daemon.client).await;
+            first.delete();
+            mock_yours(&github, TOKEN, &[Pr::open(7)], &[], &[]);
+
+            sync(&daemon.client).await;
+
+            assert_eq!(why(&daemon.client, 7).await, (vec![Yours::Authored], false));
+        }
+
+        #[tokio::test]
+        async fn should_delete_it_once_the_finished_window_has_passed_200() {
+            let github = MockServer::start_async().await;
+            let mut first = mock_yours(&github, TOKEN, &[], &[requested(8)], &[]);
+            let dirs = dirs_with(&[
+                ("AGENTDECK_PR_FULL_SYNC_SECS", "0"),
+                ("AGENTDECK_PR_FINISHED_SECS", "0"),
+            ]);
+            let daemon = TestDaemon::start_with_github(dirs, &github.url("/graphql")).await;
+            sync(&daemon.client).await;
+            assert_eq!(numbers(&daemon.client).await, [8]);
+            first.delete();
+            mock_yours(&github, TOKEN, &[], &[], &[]);
+            mock_fetch(&github, &[Pr::theirs(8)]);
+
+            sync(&daemon.client).await;
+
+            assert_eq!(numbers(&daemon.client).await, Vec::<u32>::new());
+            let repositories = (daemon.client.repository_list().send().await)
+                .expect("list Repositories")
+                .into_inner();
+            assert!(repositories.is_empty(), "{repositories:?}");
+        }
+
+        #[tokio::test]
+        async fn should_stop_being_finished_once_it_is_yours_again_200() {
+            let github = MockServer::start_async().await;
+            let mut first = mock_yours(&github, TOKEN, &[], &[requested(8)], &[]);
+            let daemon = full_daemon(&github, Some(TOKEN)).await;
+            sync(&daemon.client).await;
+            first.delete();
+            let mut reviewed = mock_yours(&github, TOKEN, &[], &[], &[]);
+            let mut fetch = mock_fetch(&github, &[Pr::theirs(8)]);
+            sync(&daemon.client).await;
+            assert_eq!(why(&daemon.client, 8).await, (vec![], true));
+            reviewed.delete();
+            fetch.delete();
+            // Asked again, after changes.
+            mock_yours(&github, TOKEN, &[], &[requested(8)], &[]);
+
+            sync(&daemon.client).await;
+
+            assert_eq!(
+                why(&daemon.client, 8).await,
+                (vec![Yours::ReviewRequested], false)
+            );
+        }
     }
 }

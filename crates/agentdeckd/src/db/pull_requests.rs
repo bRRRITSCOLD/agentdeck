@@ -5,7 +5,7 @@
 //! Repository's PRs stay the same PRs, and another Repository taking its old name never
 //! collides with them. A PR's name is its Repository's name now.
 
-use agentdeck_core::{PrRef, PrState, RepositoryId};
+use agentdeck_core::{PrRef, PrState, RepositoryId, Yours};
 use chrono::{DateTime, Utc};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
@@ -16,7 +16,8 @@ use crate::prsync::github::{PrKey, RemotePr, RemoteRepository};
 
 /// Every column a stored PR is read back from, its Repository's included, for [`remote`].
 const STORED: &str = "p.number, p.title, p.url, p.state, p.draft, p.head_ref, p.base_ref,
-    p.author, p.checks, p.review, p.updated_at, p.unreachable_at IS NOT NULL AS unreachable,
+    p.author, p.authored, p.review_requested, p.assigned, p.checks, p.review, p.updated_at,
+    p.unreachable_at IS NOT NULL AS unreachable,
     p.finished_at IS NOT NULL AS finished, r.id AS repository_id, r.full_name,
     r.url AS repository_url, r.private, r.archived";
 
@@ -88,12 +89,29 @@ fn listed(row: &Row<'_>) -> rusqlite::Result<PullRequest> {
         head_ref: row.get("head_ref")?,
         base_ref: row.get("base_ref")?,
         author: row.get("author")?,
+        yours: yours(row)?,
         checks: opt_text(row, "checks")?,
         review: opt_text(row, "review")?,
         updated_at: row.get("updated_at")?,
         unreachable: row.get("unreachable")?,
         finished: row.get("finished")?,
     })
+}
+
+/// Why a PR row is yours, in [`Yours::ALL`]'s order, from its `authored`, `review_requested`
+/// and `assigned` columns.
+fn yours(row: &Row<'_>) -> rusqlite::Result<Vec<Yours>> {
+    let mut yours = Vec::new();
+    for (column, why) in [
+        ("authored", Yours::Authored),
+        ("review_requested", Yours::ReviewRequested),
+        ("assigned", Yours::Assigned),
+    ] {
+        if row.get(column)? {
+            yours.push(why);
+        }
+    }
+    Ok(yours)
 }
 
 /// Every PR stored as open, as last synced, but for those Finished or unreachable.
@@ -304,6 +322,7 @@ fn remote(row: &Row<'_>) -> rusqlite::Result<Kept> {
             head_ref: row.get("head_ref")?,
             base_ref: row.get("base_ref")?,
             author: row.get("author")?,
+            yours: yours(row)?,
             checks: opt_text(row, "checks")?,
             review: opt_text(row, "review")?,
             updated_at: row.get("updated_at")?,
@@ -376,22 +395,26 @@ pub fn store(
 }
 
 /// Inserts or replaces `pr`'s row, which is no longer unreachable. GitHub showed it within
-/// the cutoff, so it is Finished while merged or closed, from the first time it was stored so,
-/// and not while open.
+/// the cutoff, so it is Finished while merged or closed, or open but yours no way (spec §8),
+/// from the first time it was stored so; not while open and yours.
 fn write_row(conn: &Connection, pr: &RemotePr, synced_at: &str) -> Result<(), DbError> {
+    let has = |why: Yours| pr.yours.contains(&why);
+    let kept = pr.state == PrState::Open && !pr.yours.is_empty();
     conn.execute(
         "INSERT INTO pull_requests
            (repository_id, number, title, url, state, draft, head_ref, base_ref, author, checks,
-            review, updated_at, synced_at, finished_at)
+            review, updated_at, synced_at, finished_at, authored, review_requested, assigned)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                 CASE WHEN ?5 = ?14 THEN NULL ELSE ?13 END)
+                 CASE WHEN ?14 THEN NULL ELSE ?13 END, ?15, ?16, ?17)
          ON CONFLICT (repository_id, number) DO UPDATE SET
            title = excluded.title, url = excluded.url, state = excluded.state,
            draft = excluded.draft, head_ref = excluded.head_ref, base_ref = excluded.base_ref,
            author = excluded.author, checks = excluded.checks, review = excluded.review,
            updated_at = excluded.updated_at, synced_at = excluded.synced_at,
+           authored = excluded.authored, review_requested = excluded.review_requested,
+           assigned = excluded.assigned,
            unreachable_at = NULL,
-           finished_at = CASE WHEN excluded.state = ?14 THEN NULL
+           finished_at = CASE WHEN ?14 THEN NULL
                               ELSE COALESCE(finished_at, excluded.finished_at) END",
         params![
             pr.repository.id.get(),
@@ -407,7 +430,10 @@ fn write_row(conn: &Connection, pr: &RemotePr, synced_at: &str) -> Result<(), Db
             pr.review.map(|review| review.as_str()),
             pr.updated_at,
             synced_at,
-            PrState::Open.as_str(),
+            kept,
+            has(Yours::Authored),
+            has(Yours::ReviewRequested),
+            has(Yours::Assigned),
         ],
     )?;
     Ok(())

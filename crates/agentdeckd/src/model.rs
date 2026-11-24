@@ -3,7 +3,7 @@
 
 use agentdeck_core::{
     Agent, AgentState, ChecksState, Layout, PaneId, PaneKind, PrRef, PrState, RepositoryId,
-    RepositoryName, ReviewState, TabId, WorkspaceId,
+    RepositoryName, ReviewState, TabId, WorkspaceId, Yours,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -172,6 +172,11 @@ pub struct PullRequest {
     pub base_ref: String,
     /// The GitHub login of who opened it; `None` when that account is gone.
     pub author: Option<String>,
+    /// Why it is yours, in this order: `authored`, `review_requested` (a review request names
+    /// you), `assigned`; empty once it is none of these, when it is Finished (spec §8). Absent
+    /// from an older daemon, which read only the PRs you authored.
+    #[serde(default)]
+    pub yours: Vec<Yours>,
     /// The head commit's rolled-up checks; `None` when it has none.
     pub checks: Option<ChecksState>,
     /// The review decision; `None` when the Repository requires no review.

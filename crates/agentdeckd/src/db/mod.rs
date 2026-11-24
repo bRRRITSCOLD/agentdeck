@@ -27,6 +27,9 @@ const MIGRATION_LIST: &[M<'static>] = &[
     M::up(include_str!(
         "migrations/0002_workspaces_lose_their_folder.sql"
     )),
+    M::up(include_str!(
+        "migrations/0003_why_a_pull_request_is_yours.sql"
+    )),
 ];
 const MIGRATIONS: Migrations<'static> = Migrations::from_slice(MIGRATION_LIST);
 

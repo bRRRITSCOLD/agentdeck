@@ -1,11 +1,17 @@
 //! GitHub's GraphQL API (spec §8): the viewer's login and scopes, the list of the viewer's
-//! open PRs with light fields, the search for PRs updated since a time, PRs by number with
-//! every field, in batches, and closing a PR: its node id by number, in batches, then one
-//! `closePullRequest` each. And GitHub's REST API, for a Repository by name.
+//! open PRs with light fields, the searches for the viewer's open PRs and for those updated
+//! since a time, PRs by number with every field, in batches, and closing a PR: its node id by
+//! number, in batches, then one `closePullRequest` each. And GitHub's REST API, for a
+//! Repository by name.
+//!
+//! Every query for PRs asks for the viewer's login beside them, so why each PR is yours
+//! ([`Yours`]) is read against the login the token belongs to as GitHub answers.
 
 use std::time::Duration;
 
-use agentdeck_core::{ChecksState, PrState, RepositoryId, RepositoryName, ReviewState};
+use agentdeck_core::{
+    ChecksState, PrState, RepositoryId, RepositoryName, ReviewState, Yours, why_yours,
+};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
@@ -18,10 +24,41 @@ pub const DEFAULT_REST_ENDPOINT: &str = "https://api.github.com";
 /// The REST API version every REST request asks for.
 const REST_API_VERSION: &str = "2022-11-28";
 
-/// The incremental search: every PR the token's user authored, in any state, that changed at
-/// or after `since` (RFC 3339).
-pub fn updated_search(since: &str) -> String {
-    format!("is:pr author:@me updated:>={since}")
+/// Whose PRs a search asks for: the ways a PR is yours, by GitHub's search qualifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Whose {
+    /// `author:@me`: the PRs the token's user opened.
+    Authored,
+    /// `user-review-requested:@me`: the PRs whose review requests name the token's user. Not
+    /// `review-requested:@me`, which also finds requests to a team the user is on: a team's
+    /// request names no login, so such a PR would read as not yours (spec §8).
+    ReviewRequested,
+    /// `assignee:@me`: the PRs assigned to the token's user.
+    Assigned,
+}
+
+impl Whose {
+    /// Every way, in the order a sync searches them.
+    pub const ALL: [Whose; 3] = [Whose::Authored, Whose::ReviewRequested, Whose::Assigned];
+
+    fn qualifier(self) -> &'static str {
+        match self {
+            Whose::Authored => "author:@me",
+            Whose::ReviewRequested => "user-review-requested:@me",
+            Whose::Assigned => "assignee:@me",
+        }
+    }
+}
+
+/// An incremental search: every PR `whose` says, in any state, that changed at or after
+/// `since` (RFC 3339).
+pub fn updated_search(whose: Whose, since: &str) -> String {
+    format!("is:pr {} updated:>={since}", whose.qualifier())
+}
+
+/// A full sync's search: every open PR `whose` says, most recently updated first.
+pub fn open_search(whose: Whose) -> String {
+    format!("is:pr is:open {} sort:updated-desc", whose.qualifier())
 }
 
 /// Search results per page, and how many pages one sync reads at most.
@@ -49,16 +86,21 @@ const RETRY_WAITS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(
 const PR_FIELDS: &str = "fragment pr on PullRequest {
   number title url state isDraft headRefName baseRefName updatedAt
   author { login }
+  reviewRequests(first: 50) { nodes { requestedReviewer { ... on User { login } } } }
+  assignees(first: 10) { nodes { login } }
   repository { fullDatabaseId nameWithOwner url isPrivate isArchived }
   reviewDecision
   commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
 }";
 
 /// The list's light fields: no review and no checks, the costly ones (the rollup made a
-/// 100-PR page time out).
+/// 100-PR page time out). Review requests and assignees stay, to read why each is yours;
+/// GitHub allows 10 assignees.
 const LIGHT_FIELDS: &str = "fragment light on PullRequest {
   number title url state isDraft headRefName baseRefName updatedAt
   author { login }
+  reviewRequests(first: 50) { nodes { requestedReviewer { ... on User { login } } } }
+  assignees(first: 10) { nodes { login } }
   repository { fullDatabaseId nameWithOwner url isPrivate isArchived }
 }";
 
@@ -94,6 +136,8 @@ pub struct RemotePr {
     pub base_ref: String,
     /// The login of who opened it; `None` when that account is gone.
     pub author: Option<String>,
+    /// Why it is the token's user's, in [`Yours::ALL`]'s order; empty when it no longer is.
+    pub yours: Vec<Yours>,
     /// The head commit's rolled-up checks; `None` when it has none.
     pub checks: Option<ChecksState>,
     /// The review decision; `None` when the repo requires no review.
@@ -330,7 +374,8 @@ impl Github {
         })
     }
 
-    /// The page of the search `q` after cursor `after` (`None` for the first page).
+    /// The page of the search `q` after cursor `after` (`None` for the first page), each PR
+    /// with why it is the viewer's.
     pub async fn search_page(
         &self,
         token: &str,
@@ -339,6 +384,7 @@ impl Github {
     ) -> Result<SearchPage, GithubError> {
         let query = format!(
             "query($q: String!, $first: Int!, $after: String) {{
+  viewer {{ login }}
   search(query: $q, type: ISSUE, first: $first, after: $after) {{
     issueCount
     pageInfo {{ hasNextPage endCursor }}
@@ -352,7 +398,8 @@ impl Github {
     }
 
     /// The page of the viewer's open PRs after cursor `after` (`None` for the first), most
-    /// recently updated first, with light fields only: `checks` and `review` are `None`.
+    /// recently updated first, with light fields only: `checks` and `review` are `None`. Each
+    /// is the viewer's at least as authored.
     pub async fn list_page(
         &self,
         token: &str,
@@ -361,6 +408,7 @@ impl Github {
         let query = format!(
             "query($first: Int!, $after: String) {{
   viewer {{
+    login
     pullRequests(states: OPEN, first: $first, after: $after, orderBy: {{ field: UPDATED_AT, direction: DESC }}) {{
       totalCount
       pageInfo {{ hasNextPage endCursor }}
@@ -374,9 +422,9 @@ impl Github {
         parse_list(self.query(token, &query, variables).await?)
     }
 
-    /// Each of `wanted` (`(repo, number)`) by number with every field, in order: `BATCH_SIZE`
-    /// to a request, `BATCHES_IN_FLIGHT` requests at once. `None` for one GitHub no longer
-    /// shows to the token's user.
+    /// Each of `wanted` (`(repo, number)`) by number with every field and why it is the
+    /// viewer's, in order: `BATCH_SIZE` to a request, `BATCHES_IN_FLIGHT` requests at once.
+    /// `None` for one GitHub no longer shows to the token's user.
     pub async fn prs(
         &self,
         token: &str,
@@ -400,7 +448,7 @@ impl Github {
         token: &str,
         batch: Vec<(String, i64)>,
     ) -> Result<Vec<Option<RemotePr>>, GithubError> {
-        let (query, variables) = batch_query(&batch, "pr", PR_FIELDS);
+        let (query, variables) = batch_query(&batch, "pr", PR_FIELDS, true);
         let data = self.query(token, &query, variables).await?;
         parse_batch(data, batch.len())
     }
@@ -434,7 +482,7 @@ impl Github {
         token: &str,
         batch: Vec<(String, i64)>,
     ) -> Result<Vec<Result<String, String>>, GithubError> {
-        let (query, variables) = batch_query(&batch, "nodeId", NODE_ID_FIELDS);
+        let (query, variables) = batch_query(&batch, "nodeId", NODE_ID_FIELDS, false);
         match self.query_body(token, &query, variables).await {
             Ok((body, _)) => Ok(parse_node_ids(&body, batch.len())),
             Err(GithubError::Unauthorized) => Err(GithubError::Unauthorized),
@@ -834,6 +882,7 @@ fn parse_list(data: Value) -> Result<ListPage, GithubError> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Viewer {
+        login: String,
         pull_requests: List,
     }
     #[derive(Deserialize)]
@@ -850,12 +899,13 @@ fn parse_list(data: Value) -> Result<ListPage, GithubError> {
         end_cursor: Option<String>,
     }
 
-    let list = serde_json::from_value::<Data>(data)?.viewer.pull_requests;
+    let viewer = serde_json::from_value::<Data>(data)?.viewer;
+    let (login, list) = (viewer.login, viewer.pull_requests);
     Ok(ListPage {
         prs: list
             .nodes
             .into_iter()
-            .filter_map(LightNode::remote)
+            .filter_map(|node| node.remote(&login))
             .collect(),
         next: list
             .page_info
@@ -868,6 +918,7 @@ fn parse_list(data: Value) -> Result<ListPage, GithubError> {
 fn parse_search(data: Value) -> Result<SearchPage, GithubError> {
     #[derive(Deserialize)]
     struct Data {
+        viewer: Login,
         search: Search,
     }
     #[derive(Deserialize)]
@@ -899,7 +950,7 @@ fn parse_search(data: Value) -> Result<SearchPage, GithubError> {
         .nodes
         .into_iter()
         .filter_map(|node| match node {
-            SearchNode::Pr(pr) => pr.remote(),
+            SearchNode::Pr(pr) => pr.remote(&data.viewer.login),
             SearchNode::Other(_) => None,
         })
         .collect();
@@ -912,11 +963,20 @@ fn parse_search(data: Value) -> Result<SearchPage, GithubError> {
 }
 
 /// The query fetching `batch` by number with fragment `fragment` (named `spread`): PR `i` as
-/// alias `p<i>`, its owner, name and number in variables `o<i>`, `r<i>` and `n<i>`. A repo
-/// that isn't `owner/name` is asked for under an empty owner, which GitHub doesn't show.
-fn batch_query(batch: &[(String, i64)], spread: &str, fragment: &str) -> (String, Value) {
+/// alias `p<i>`, its owner, name and number in variables `o<i>`, `r<i>` and `n<i>`, and the
+/// viewer's login first when `viewer` is set. A repo that isn't `owner/name` is asked for
+/// under an empty owner, which GitHub doesn't show.
+fn batch_query(
+    batch: &[(String, i64)],
+    spread: &str,
+    fragment: &str,
+    viewer: bool,
+) -> (String, Value) {
     let mut params = Vec::with_capacity(batch.len());
-    let mut fields = Vec::with_capacity(batch.len());
+    let mut fields = Vec::with_capacity(batch.len() + 1);
+    if viewer {
+        fields.push("  viewer { login }".to_owned());
+    }
     let mut variables = serde_json::Map::new();
     for (i, (repo, number)) in batch.iter().enumerate() {
         let (owner, name) = repo.split_once('/').unwrap_or(("", repo));
@@ -936,7 +996,8 @@ fn batch_query(batch: &[(String, i64)], spread: &str, fragment: &str) -> (String
     (query, Value::Object(variables))
 }
 
-/// The `len` PRs of a batch's `data`, in order; `None` for each GitHub doesn't show.
+/// The `len` PRs of a batch's `data`, in order, each with why it is the viewer's; `None` for
+/// each GitHub doesn't show.
 fn parse_batch(data: Value, len: usize) -> Result<Vec<Option<RemotePr>>, GithubError> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -949,13 +1010,14 @@ fn parse_batch(data: Value, len: usize) -> Result<Vec<Option<RemotePr>>, GithubE
             "a batch's data isn't an object",
         )));
     };
+    let viewer: Login = serde_json::from_value(data.remove("viewer").unwrap_or(Value::Null))?;
     (0..len)
         .map(|i| {
             let repository: Option<Repository> =
                 serde_json::from_value(data.remove(&format!("p{i}")).unwrap_or(Value::Null))?;
             Ok(repository
                 .and_then(|repo| repo.pull_request)
-                .and_then(PrNode::remote))
+                .and_then(|pr| pr.remote(&viewer.login)))
         })
         .collect()
 }
@@ -973,13 +1035,17 @@ struct LightNode {
     base_ref_name: String,
     updated_at: String,
     author: Option<Author>,
+    review_requests: Nodes<ReviewRequest>,
+    assignees: Nodes<Author>,
     repository: RepositoryNode,
 }
 
 impl LightNode {
-    /// The PR, unless GitHub gave no id for its Repository, which then can't be stored.
-    fn remote(self) -> Option<RemotePr> {
+    /// The PR, `login`'s as far as GitHub shows, unless GitHub gave no id for its Repository,
+    /// which then can't be stored.
+    fn remote(self, login: &str) -> Option<RemotePr> {
         let node = self;
+        let yours = yours(login, &node.author, &node.review_requests, &node.assignees);
         Some(RemotePr {
             repository: node.repository.remote()?,
             number: node.number,
@@ -990,6 +1056,7 @@ impl LightNode {
             head_ref: node.head_ref_name,
             base_ref: node.base_ref_name,
             author: node.author.map(|author| author.login),
+            yours,
             checks: None,
             review: None,
             updated_at: node.updated_at,
@@ -1010,15 +1077,64 @@ struct PrNode {
     base_ref_name: String,
     updated_at: String,
     author: Option<Author>,
+    review_requests: Nodes<ReviewRequest>,
+    assignees: Nodes<Author>,
     repository: RepositoryNode,
     review_decision: Option<GqlReview>,
     commits: Commits,
 }
 
-/// A PR's `author`; null once the account is gone.
+/// A PR's `author`, or one of its assignees; an author is null once the account is gone.
 #[derive(Deserialize)]
 struct Author {
     login: String,
+}
+
+/// The viewer of a query: whom the token belongs to.
+#[derive(Deserialize)]
+struct Login {
+    login: String,
+}
+
+/// A connection's `nodes`.
+#[derive(Deserialize)]
+struct Nodes<T> {
+    nodes: Vec<T>,
+}
+
+/// One of a PR's review requests. Its reviewer is null when GitHub hides it, and has no
+/// `login` when it is a team.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewRequest {
+    requested_reviewer: Option<Reviewer>,
+}
+
+/// Whom a review request asks: a user's login, or none for a team.
+#[derive(Deserialize)]
+struct Reviewer {
+    #[serde(default)]
+    login: Option<String>,
+}
+
+/// Why a PR with `author`, `requests` and `assignees` is `login`'s (spec §8).
+fn yours(
+    login: &str,
+    author: &Option<Author>,
+    requests: &Nodes<ReviewRequest>,
+    assignees: &Nodes<Author>,
+) -> Vec<Yours> {
+    let requested = (requests.nodes.iter())
+        .filter_map(|request| request.requested_reviewer.as_ref()?.login.as_deref());
+    why_yours(
+        login,
+        author.as_ref().map(|author| author.login.as_str()),
+        requested,
+        assignees
+            .nodes
+            .iter()
+            .map(|assignee| assignee.login.as_str()),
+    )
 }
 
 /// A PR's `repository`.
@@ -1120,10 +1236,12 @@ enum GqlRollup {
 }
 
 impl PrNode {
-    /// The PR, unless GitHub gave no id for its Repository, which then can't be stored.
-    fn remote(self) -> Option<RemotePr> {
+    /// The PR, `login`'s as far as GitHub shows, unless GitHub gave no id for its Repository,
+    /// which then can't be stored.
+    fn remote(self, login: &str) -> Option<RemotePr> {
         let node = self;
         let repository = node.repository.remote()?;
+        let yours = yours(login, &node.author, &node.review_requests, &node.assignees);
         let checks = node
             .commits
             .nodes
@@ -1145,6 +1263,7 @@ impl PrNode {
             head_ref: node.head_ref_name,
             base_ref: node.base_ref_name,
             author: node.author.map(|author| author.login),
+            yours,
             checks,
             review: node.review_decision.map(|review| match review {
                 GqlReview::Approved => ReviewState::Approved,
@@ -1171,6 +1290,8 @@ mod tests {
             "baseRefName": "main",
             "updatedAt": "2026-11-01T10:00:00Z",
             "author": { "login": "octocat" },
+            "reviewRequests": { "nodes": [] },
+            "assignees": { "nodes": [] },
             "repository": {
                 "fullDatabaseId": "1296269",
                 "nameWithOwner": "acme/widgets",
@@ -1183,8 +1304,12 @@ mod tests {
         })
     }
 
+    /// The viewer the tests' queries answer as.
+    const ME: &str = "octocat";
+
     fn search(nodes: Vec<Value>, next: Option<&str>) -> Value {
         json!({
+            "viewer": { "login": ME },
             "search": {
                 "pageInfo": { "hasNextPage": next.is_some(), "endCursor": next.unwrap_or("end") },
                 "nodes": nodes
@@ -1394,6 +1519,7 @@ mod tests {
                     head_ref: "feat/sync".into(),
                     base_ref: "main".into(),
                     author: Some("octocat".into()),
+                    yours: vec![Yours::Authored],
                     checks: Some(ChecksState::Success),
                     review: Some(ReviewState::Approved),
                     updated_at: "2026-11-01T10:00:00Z".into(),
@@ -1495,7 +1621,7 @@ mod tests {
             let mut light = node("OPEN", json!("APPROVED"), json!({ "state": "SUCCESS" }));
             light.as_object_mut().unwrap().remove("reviewDecision");
             light.as_object_mut().unwrap().remove("commits");
-            let data = json!({ "viewer": { "pullRequests": {
+            let data = json!({ "viewer": { "login": ME, "pullRequests": {
                 "totalCount": 271,
                 "pageInfo": { "hasNextPage": true, "endCursor": "c1" },
                 "nodes": [ light ]
@@ -1511,6 +1637,7 @@ mod tests {
             assert_eq!((pr.checks, pr.review), (None, None));
             assert_eq!(pr.base_ref, "main");
             assert_eq!(pr.author.as_deref(), Some("octocat"));
+            assert_eq!(pr.yours, [Yours::Authored]);
             assert_eq!(pr.repository.id, RepositoryId::from(1_296_269));
         }
     }
@@ -1557,12 +1684,109 @@ mod tests {
         }
     }
 
+    mod yours {
+        use super::*;
+
+        /// Why the PR `node` is, with `edit` applied, the viewer's as a search reads it.
+        fn yours(edit: impl FnOnce(&mut Value)) -> Vec<Yours> {
+            let mut pr = node("OPEN", Value::Null, Value::Null);
+            edit(&mut pr);
+            parse_search(search(vec![pr], None)).unwrap().prs[0]
+                .yours
+                .clone()
+        }
+
+        #[test]
+        fn should_read_a_review_request_naming_the_viewer() {
+            let why = yours(|pr| {
+                pr["author"] = json!({ "login": "hubot" });
+                pr["reviewRequests"]["nodes"] = json!([
+                    { "requestedReviewer": { "login": "monalisa" } },
+                    { "requestedReviewer": { "login": ME } }
+                ]);
+            });
+
+            assert_eq!(why, [Yours::ReviewRequested]);
+        }
+
+        #[test]
+        fn should_read_an_assignee_who_is_the_viewer() {
+            let why = yours(|pr| {
+                pr["author"] = json!({ "login": "hubot" });
+                pr["assignees"]["nodes"] = json!([{ "login": ME }]);
+            });
+
+            assert_eq!(why, [Yours::Assigned]);
+        }
+
+        #[test]
+        fn should_not_read_a_teams_review_request_or_a_hidden_reviewer_as_the_viewers() {
+            let why = yours(|pr| {
+                pr["author"] = json!({ "login": "hubot" });
+                pr["reviewRequests"]["nodes"] = json!([
+                    { "requestedReviewer": {} },
+                    { "requestedReviewer": null }
+                ]);
+            });
+
+            assert_eq!(why, []);
+        }
+
+        #[test]
+        fn should_read_each_fetched_pr_against_the_viewer_of_its_batch() {
+            let mut theirs = node("OPEN", Value::Null, Value::Null);
+            theirs["author"] = json!({ "login": "hubot" });
+            theirs["assignees"]["nodes"] = json!([{ "login": "monalisa" }]);
+            let data = json!({
+                "viewer": { "login": "monalisa" },
+                "p0": { "pullRequest": theirs }
+            });
+
+            let prs = parse_batch(data, 1).unwrap();
+
+            assert_eq!(prs[0].as_ref().unwrap().yours, [Yours::Assigned]);
+        }
+    }
+
+    mod searches {
+        use super::*;
+
+        #[test]
+        fn should_ask_for_each_way_a_pr_is_yours_updated_since_a_time() {
+            let qs: Vec<String> = (Whose::ALL.iter())
+                .map(|whose| updated_search(*whose, "2026-11-14T10:00:00Z"))
+                .collect();
+
+            assert_eq!(
+                qs,
+                [
+                    "is:pr author:@me updated:>=2026-11-14T10:00:00Z",
+                    "is:pr user-review-requested:@me updated:>=2026-11-14T10:00:00Z",
+                    "is:pr assignee:@me updated:>=2026-11-14T10:00:00Z",
+                ]
+            );
+        }
+
+        #[test]
+        fn should_ask_for_open_prs_most_recently_updated_first() {
+            assert_eq!(
+                open_search(Whose::ReviewRequested),
+                "is:pr is:open user-review-requested:@me sort:updated-desc"
+            );
+            assert_eq!(
+                open_search(Whose::Assigned),
+                "is:pr is:open assignee:@me sort:updated-desc"
+            );
+        }
+    }
+
     mod parse_batch {
         use super::*;
 
         #[test]
         fn should_read_each_pr_in_order() {
             let data = json!({
+                "viewer": { "login": ME },
                 "p0": { "pullRequest": node("MERGED", Value::Null, Value::Null) },
                 "p1": { "pullRequest": node("OPEN", Value::Null, Value::Null) }
             });
@@ -1578,7 +1802,8 @@ mod tests {
 
         #[test]
         fn should_be_none_where_the_repo_or_the_pr_is_gone() {
-            let data = json!({ "p0": null, "p1": { "pullRequest": null } });
+            let data =
+                json!({ "viewer": { "login": ME }, "p0": null, "p1": { "pullRequest": null } });
 
             assert_eq!(parse_batch(data, 3).unwrap(), [None, None, None]);
         }
@@ -1593,8 +1818,10 @@ mod tests {
                 &[("acme/widgets".into(), 7), ("acme/gadgets".into(), 9)],
                 "pr",
                 PR_FIELDS,
+                true,
             );
 
+            assert!(query.contains("viewer { login }"));
             assert!(query.contains(
                 "p1: repository(owner: $o1, name: $r1) { pullRequest(number: $n1) { ...pr } }"
             ));

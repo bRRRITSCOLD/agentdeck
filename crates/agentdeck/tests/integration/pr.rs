@@ -33,10 +33,7 @@ mod pr_sync {
     fn should_run_a_full_sync_though_an_incremental_one_is_due() {
         use crate::support::github::{Pr, mock_open_prs};
         let github = httpmock::MockServer::start();
-        let seven = Pr {
-            repo: "acme/widgets",
-            number: 7,
-        };
+        let seven = Pr::open("acme/widgets", 7);
         let mocks = mock_open_prs(&github, "gho_test", &[seven]);
         let env = TestEnv::with_github(&github.url("/graphql"), "gho_test");
 
@@ -69,16 +66,10 @@ mod pr_ls {
     }
 
     fn widgets(number: i64) -> Pr {
-        Pr {
-            repo: "acme/widgets",
-            number,
-        }
+        Pr::open("acme/widgets", number)
     }
 
-    const GADGET: Pr = Pr {
-        repo: "acme/gadgets",
-        number: 9,
-    };
+    const GADGET: Pr = Pr::open("acme/gadgets", 9);
 
     #[test]
     fn should_list_each_pr_by_its_reference_with_its_state() {
@@ -127,6 +118,52 @@ mod pr_ls {
         assert_eq!(pr["author"], "octocat");
         assert_eq!(pr["repository"]["name"], "acme/widgets");
         assert!(pr["repository"]["id"].is_u64(), "{pr}");
+    }
+
+    #[test]
+    fn should_list_prs_you_review_or_are_assigned_with_why_each_is_yours_with_json() {
+        let github = MockServer::start();
+        let review = Pr {
+            author: "hubot",
+            requested: true,
+            ..widgets(8)
+        };
+        let assigned = Pr {
+            author: "hubot",
+            assigned: true,
+            ..GADGET
+        };
+        let env = synced(&github, &[widgets(7), review, assigned]);
+
+        let stdout = env.ok(&["pr", "ls"]);
+        let prs = env.json(&["pr", "ls"]);
+
+        assert_eq!(
+            stdout,
+            "PR              STATE  TITLE\n\
+             acme/gadgets#9  open   PR 9\n\
+             acme/widgets#7  open   PR 7\n\
+             acme/widgets#8  open   PR 8\n"
+        );
+        let yours: Vec<(String, Value)> = (prs.as_array().expect("a list").iter())
+            .map(|pr| {
+                (
+                    pr["reference"].as_str().unwrap().to_owned(),
+                    pr["yours"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            yours,
+            [
+                ("acme/gadgets#9".to_owned(), serde_json::json!(["assigned"])),
+                ("acme/widgets#7".to_owned(), serde_json::json!(["authored"])),
+                (
+                    "acme/widgets#8".to_owned(),
+                    serde_json::json!(["review_requested"])
+                ),
+            ]
+        );
     }
 
     #[test]
@@ -199,18 +236,9 @@ mod pr_close {
 
     const TOKEN: &str = "gho_test";
 
-    const SEVEN: Pr = Pr {
-        repo: "acme/widgets",
-        number: 7,
-    };
-    const EIGHT: Pr = Pr {
-        repo: "acme/widgets",
-        number: 8,
-    };
-    const NINE: Pr = Pr {
-        repo: "acme/gadgets",
-        number: 9,
-    };
+    const SEVEN: Pr = Pr::open("acme/widgets", 7);
+    const EIGHT: Pr = Pr::open("acme/widgets", 8);
+    const NINE: Pr = Pr::open("acme/gadgets", 9);
 
     /// A world whose daemon has synced `prs`.
     fn synced(github: &MockServer, prs: &[Pr]) -> TestEnv {
