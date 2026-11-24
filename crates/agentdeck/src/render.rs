@@ -690,6 +690,7 @@ mod tests {
                     reference.repository(),
                     reference.number()
                 ),
+                yours: vec![agentdeck_core::Yours::Authored],
             }
         }
 

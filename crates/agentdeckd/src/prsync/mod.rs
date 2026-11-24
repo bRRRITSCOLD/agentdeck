@@ -2,16 +2,23 @@
 //! PR's Repository is stored by GitHub's id, and each PR by that id and its number, so a rename
 //! or a transfer keeps both.
 //!
-//! The first sync, and one every [`FULL_SYNC_VAR`] seconds (an hour by default), is full: it
-//! lists the open PRs, most recently updated first, down to the age cutoff (`[pr_sync]
-//! max_age_days`, see [`crate::config`]), and fetches the stored ones that left the list; a
-//! stored one older than the cutoff is Finished instead. The rest are incremental: they
-//! search only the PRs updated since the last good sync began, in any state, then refresh the
-//! [`unsettled`] ones (a finished check run doesn't update a PR).
+//! Your PRs are the ones you authored, the ones where your review is requested and the ones
+//! assigned to you ([`Whose`]); each stores why it is yours ([`agentdeck_core::Yours`]), read
+//! from its author, review requests and assignees against the login the token belongs to.
 //!
-//! A PR is **Finished** from when a sync sees it merged or closed, a close from agentdeck
-//! closes it, or a full sync finds it open but older than the cutoff; GitHub showing it open
-//! within the cutoff again ends that. Each good sync then deletes the PRs Finished
+//! The first sync, and one every [`FULL_SYNC_VAR`] seconds (an hour by default), is full: it
+//! lists the open PRs you authored, then searches the open ones where your review is
+//! requested and those assigned to you, each most recently updated first, down to the age
+//! cutoff (`[pr_sync] max_age_days`, see [`crate::config`]), and fetches the stored ones that
+//! none showed; a stored one older than the cutoff is Finished instead. The rest are
+//! incremental: they search only the PRs updated since the last good sync began, in any
+//! state, one search per way a PR is yours, then refresh the ones that may have changed
+//! unseen ([`recheck`]: a finished check run doesn't update a PR, and a submitted review or
+//! an unassignment takes a PR out of every search).
+//!
+//! A PR is **Finished** from when a sync sees it merged or closed, or open but yours no way at
+//! all, a close from agentdeck closes it, or a full sync finds it open but older than the
+//! cutoff; GitHub showing it open, yours and within the cutoff again ends that. Each good sync then deletes the PRs Finished
 //! [`FINISHED_VAR`] seconds ago or longer (7 days by default), and the Repositories nothing
 //! references any more. A PR the GitHub sign-in can't see is never Finished by the cutoff,
 //! and is never deleted.
@@ -37,7 +44,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use agentdeck_core::ws::Entity;
-use agentdeck_core::{ChecksState, PrRef, PrState, ReviewState};
+use agentdeck_core::{ChecksState, PrRef, PrState, ReviewState, Yours};
 use chrono::{DateTime, SecondsFormat, Utc};
 use tokio::time::MissedTickBehavior;
 
@@ -46,7 +53,7 @@ use crate::db::{self, Db};
 use crate::events::Events;
 use crate::github_auth::GithubAuth;
 use crate::model::{GhLogin, PrCloseResult, PrSyncProgress, PrSyncStage, PrSyncStatus};
-use github::{Github, GithubError, PrKey, RemotePr};
+use github::{Github, GithubError, PrKey, RemotePr, Whose};
 
 /// How often the timer syncs.
 const INTERVAL: Duration = Duration::from_secs(120);
@@ -532,16 +539,18 @@ impl PrSync {
 
     /// A full read, in two phases.
     ///
-    /// 1. The list of open PRs, light fields only, stored page by page as it arrives. A
-    ///    stored PR keeps its checks and review for now. The list is most recently updated
-    ///    first, so it ends at the first PR older than `cutoff`, which isn't stored.
-    /// 2. Every field, fetched by number, for the PRs that need it: new ones, ones GitHub
-    ///    updated since they were stored, and [`unsettled`] ones.
+    /// 1. The list of open PRs you authored, light fields only, then the searches for open
+    ///    PRs where your review is requested and that are assigned to you, every field, each
+    ///    stored page by page as it arrives. A stored PR keeps its checks and review from the
+    ///    list for now. Each is most recently updated first, so it ends at the first PR older
+    ///    than `cutoff`, which isn't stored.
+    /// 2. Every field, fetched by number, for the listed PRs that need it and no search read
+    ///    whole: new ones, ones GitHub updated since they were stored, and [`unsettled`] ones.
     ///
-    /// Then the PRs stored as open that left the list are fetched by number, so a merge or
-    /// close is seen; one GitHub doesn't show to the token is marked unreachable, keeping its
-    /// state. One last updated before `cutoff` isn't fetched: it is Finished, unless it is
-    /// unreachable.
+    /// Then the PRs stored as open that no list or search showed are fetched by number, so a
+    /// merge, a close or a PR no longer yours is seen; one GitHub doesn't show to the token is
+    /// marked unreachable, keeping its state. One last updated before `cutoff` isn't fetched:
+    /// it is Finished, unless it is unreachable.
     async fn read_full(&self, token: &str, cutoff: Option<DateTime<Utc>>) -> Result<(), SyncError> {
         let github = &self.inner.github;
         let stored = self
@@ -549,9 +558,10 @@ impl PrSync {
             .db
             .call(|conn| db::pull_requests::open_prs(conn))
             .await?;
-        let mut seen: Vec<PrKey> = Vec::new();
+        let mut tally = Tally::default();
         let mut stale: Vec<RemotePr> = Vec::new();
         let mut after: Option<String> = None;
+        let mut listed: u32 = 0;
         for _ in 0..github::MAX_LIST_PAGES {
             let page = github.list_page(token, after.as_deref()).await?;
             let mut prs = Vec::with_capacity(page.prs.len());
@@ -561,7 +571,8 @@ impl PrSync {
                     past_cutoff = true;
                     break;
                 }
-                seen.push(pr.key());
+                tally.see(pr.key());
+                listed += 1;
                 match stored.iter().find(|old| old.key() == pr.key()) {
                     Some(old) => {
                         if old.updated_at != pr.updated_at || unsettled(old) {
@@ -580,21 +591,24 @@ impl PrSync {
                 }
             }
             self.store(prs, Vec::new()).await?;
-            let prs_done = u32::try_from(seen.len()).unwrap_or(u32::MAX);
-            self.set_progress(Some(PrSyncProgress {
-                prs_done,
-                // The list's count takes in the PRs past the cutoff, which this sync skips.
-                prs: if past_cutoff {
-                    prs_done
-                } else {
-                    page.total.max(prs_done)
-                },
-                stage: PrSyncStage::Listing,
-            }));
+            // The list's count takes in the PRs past the cutoff, which this sync skips.
+            let total = if past_cutoff { listed } else { page.total };
+            self.set_progress(Some(tally.progress(total)));
             match page.next {
                 Some(next) if !past_cutoff => after = Some(next),
-                _ => break,
+                _ => {
+                    tally.counted(total.max(listed));
+                    break;
+                }
             }
+        }
+        for whose in [Whose::ReviewRequested, Whose::Assigned] {
+            let q = github::open_search(whose);
+            let read = self
+                .search(token, &q, cutoff, true, &mut tally, |_| true)
+                .await?;
+            // Read whole: nothing to fetch for it.
+            stale.retain(|pr| !read.contains(&pr.key()));
         }
 
         self.details_stage();
@@ -609,7 +623,7 @@ impl PrSync {
             .await?;
         let (aged, left): (Vec<RemotePr>, Vec<RemotePr>) = stored
             .into_iter()
-            .filter(|pr| !seen.contains(&pr.key()))
+            .filter(|pr| !tally.seen.contains(&pr.key()))
             .partition(|pr| older_than(&pr.updated_at, cutoff));
         self.finish_aged(aged.iter().map(RemotePr::key).collect())
             .await?;
@@ -617,63 +631,98 @@ impl PrSync {
         self.store(left.found, left.missing).await
     }
 
-    /// An incremental read: the PRs updated at or after `since`, in any state, keeping a
-    /// merged or closed one only if it's stored as open, and none last updated before
-    /// `cutoff`; then the stored open PRs the search left out that are [`unsettled`] and
-    /// GitHub updated within `cutoff`, fetched by number. Nothing is gone: only a full read
-    /// says so.
+    /// An incremental read: a search for each way a PR is yours ([`Whose`]) for the PRs
+    /// updated at or after `since`, in any state, keeping a merged or closed one only if it's
+    /// stored as open, and none last updated before `cutoff`; then the stored open PRs the
+    /// searches left out that GitHub updated within `cutoff` and that may have changed unseen
+    /// ([`recheck`]), fetched by number. Nothing is gone: only a full read says so.
     async fn read_since(
         &self,
         token: &str,
         since: DateTime<Utc>,
         cutoff: Option<DateTime<Utc>>,
     ) -> Result<(), SyncError> {
-        let github = &self.inner.github;
         let stored = self
             .inner
             .db
             .call(|conn| db::pull_requests::open(conn))
             .await?;
-        let q = github::updated_search(&since.to_rfc3339_opts(SecondsFormat::Secs, true));
-        let mut seen: Vec<PrKey> = Vec::new();
-        let mut after: Option<String> = None;
-        for _ in 0..github::MAX_PAGES {
-            let page = github.search_page(token, &q, after.as_deref()).await?;
-            seen.extend(page.prs.iter().map(RemotePr::key));
-            let prs: Vec<RemotePr> = page
-                .prs
-                .into_iter()
-                .filter(|pr| pr.state == PrState::Open || stored.contains(&pr.key()))
-                .filter(|pr| !older_than(&pr.updated_at, cutoff))
-                .collect();
-            self.store(prs, Vec::new()).await?;
-            let prs_done = u32::try_from(seen.len()).unwrap_or(u32::MAX);
-            self.set_progress(Some(PrSyncProgress {
-                prs_done,
-                prs: page.total.max(prs_done),
-                stage: PrSyncStage::Listing,
-            }));
-            match page.next {
-                Some(next) => after = Some(next),
-                None => break,
-            }
+        let since = since.to_rfc3339_opts(SecondsFormat::Secs, true);
+        let mut tally = Tally::default();
+        for whose in Whose::ALL {
+            let q = github::updated_search(whose, &since);
+            self.search(token, &q, cutoff, false, &mut tally, |pr| {
+                pr.state == PrState::Open || stored.contains(&pr.key())
+            })
+            .await?;
         }
 
-        let unsettled: Vec<RemotePr> = self
+        let recheck: Vec<RemotePr> = self
             .inner
             .db
             .call(|conn| db::pull_requests::open_current(conn))
             .await?
             .into_iter()
             .filter(|pr| {
-                unsettled(pr) && !older_than(&pr.updated_at, cutoff) && !seen.contains(&pr.key())
+                recheck(pr)
+                    && !older_than(&pr.updated_at, cutoff)
+                    && !tally.seen.contains(&pr.key())
             })
             .collect();
-        if !unsettled.is_empty() {
+        if !recheck.is_empty() {
             self.details_stage();
         }
-        let fetched = self.fetch(token, &unsettled).await?;
+        let fetched = self.fetch(token, &recheck).await?;
         self.store(fetched.found, Vec::new()).await
+    }
+
+    /// Reads search `q` page by page, at most [`github::MAX_PAGES`], storing each page's PRs
+    /// that `keep` lets through and that GitHub updated within `cutoff` as it arrives, and
+    /// counting every PR read in `tally`. A `sorted` search, most recently updated first, ends
+    /// at the first PR older than `cutoff`, which isn't counted. Returns the keys of the PRs
+    /// it stored.
+    async fn search(
+        &self,
+        token: &str,
+        q: &str,
+        cutoff: Option<DateTime<Utc>>,
+        sorted: bool,
+        tally: &mut Tally,
+        keep: impl Fn(&RemotePr) -> bool,
+    ) -> Result<Vec<PrKey>, SyncError> {
+        let github = &self.inner.github;
+        let mut kept = Vec::new();
+        let mut read: u32 = 0;
+        let mut after: Option<String> = None;
+        for _ in 0..github::MAX_PAGES {
+            let page = github.search_page(token, q, after.as_deref()).await?;
+            let mut prs = Vec::with_capacity(page.prs.len());
+            let mut past_cutoff = false;
+            for pr in page.prs {
+                let old = older_than(&pr.updated_at, cutoff);
+                if old && sorted {
+                    past_cutoff = true;
+                    break;
+                }
+                tally.see(pr.key());
+                read += 1;
+                if !old && keep(&pr) {
+                    kept.push(pr.key());
+                    prs.push(pr);
+                }
+            }
+            self.store(prs, Vec::new()).await?;
+            let total = if past_cutoff { read } else { page.total };
+            self.set_progress(Some(tally.progress(total)));
+            match page.next {
+                Some(next) if !past_cutoff => after = Some(next),
+                _ => {
+                    tally.counted(total.max(read));
+                    break;
+                }
+            }
+        }
+        Ok(kept)
     }
 
     /// Fetches each of `asked` by number, by the name its Repository goes by as last read.
@@ -778,6 +827,39 @@ struct Fetched {
     missing: Vec<PrKey>,
 }
 
+/// How far a sync's reading has got, across the list and the searches it reads in turn.
+#[derive(Default)]
+struct Tally {
+    /// Every PR read so far, by key, each once.
+    seen: Vec<PrKey>,
+    /// How many PRs the lists and searches read to their end held.
+    counted: u32,
+}
+
+impl Tally {
+    /// Counts PR `key` as read.
+    fn see(&mut self, key: PrKey) {
+        if !self.seen.contains(&key) {
+            self.seen.push(key);
+        }
+    }
+
+    /// Adds `total`, how many PRs a list or search held, once it is read to its end.
+    fn counted(&mut self, total: u32) {
+        self.counted = self.counted.saturating_add(total);
+    }
+
+    /// The progress while reading a list or search holding `total` PRs.
+    fn progress(&self, total: u32) -> PrSyncProgress {
+        let prs_done = u32::try_from(self.seen.len()).unwrap_or(u32::MAX);
+        PrSyncProgress {
+            prs_done,
+            prs: self.counted.saturating_add(total).max(prs_done),
+            stage: PrSyncStage::Listing,
+        }
+    }
+}
+
 /// A hash of `token`, to tell whether a sync runs with the same token as the last good one
 /// without keeping the token.
 fn token_key(token: &str) -> u64 {
@@ -798,6 +880,13 @@ fn unsettled(pr: &RemotePr) -> bool {
             pr.review,
             Some(ReviewState::ReviewRequired | ReviewState::ChangesRequested)
         )
+}
+
+/// Whether an incremental sync fetches stored open PR `pr` by number when no search showed
+/// it: it is [`unsettled`], or yours only as a reviewer or an assignee. Submitting your review
+/// or being unassigned leaves every search, and is seen only by fetching the PR (spec §8).
+fn recheck(pr: &RemotePr) -> bool {
+    unsettled(pr) || !pr.yours.contains(&Yours::Authored)
 }
 
 /// Whether a PR last updated at `updated_at` (RFC 3339) is older than `cutoff`. One whose time
@@ -873,7 +962,7 @@ mod tests {
     mod unsettled {
         use super::*;
 
-        fn pr(checks: Option<ChecksState>, review: Option<ReviewState>) -> RemotePr {
+        pub(super) fn pr(checks: Option<ChecksState>, review: Option<ReviewState>) -> RemotePr {
             RemotePr {
                 repository: github::RemoteRepository {
                     id: agentdeck_core::RepositoryId::from(1_296_269),
@@ -890,6 +979,7 @@ mod tests {
                 head_ref: "feat/sync".into(),
                 base_ref: "main".into(),
                 author: None,
+                yours: vec![agentdeck_core::Yours::Authored],
                 checks,
                 review,
                 updated_at: "2026-11-01T10:00:00Z".into(),
@@ -919,6 +1009,84 @@ mod tests {
                     assert!(!unsettled(&pr(Some(checks), review)));
                 }
             }
+        }
+    }
+
+    mod recheck {
+        use super::*;
+
+        fn pr(yours: Vec<Yours>, checks: Option<ChecksState>) -> RemotePr {
+            RemotePr {
+                yours,
+                ..unsettled::pr(checks, None)
+            }
+        }
+
+        #[test]
+        fn should_recheck_a_settled_pr_yours_only_as_a_reviewer_or_an_assignee() {
+            for yours in [
+                vec![Yours::ReviewRequested],
+                vec![Yours::Assigned],
+                vec![Yours::ReviewRequested, Yours::Assigned],
+            ] {
+                assert!(recheck(&pr(yours, Some(ChecksState::Success))));
+            }
+        }
+
+        #[test]
+        fn should_not_recheck_a_settled_pr_you_authored() {
+            assert!(!recheck(&pr(
+                vec![Yours::Authored, Yours::ReviewRequested],
+                Some(ChecksState::Success)
+            )));
+        }
+
+        #[test]
+        fn should_recheck_an_unsettled_pr_you_authored() {
+            assert!(recheck(&pr(vec![Yours::Authored], None)));
+        }
+    }
+
+    mod tally {
+        use super::*;
+
+        fn key(number: i64) -> PrKey {
+            PrKey {
+                repository: agentdeck_core::RepositoryId::from(1),
+                number,
+            }
+        }
+
+        #[test]
+        fn should_count_a_pr_two_searches_read_once() {
+            let mut tally = Tally::default();
+            tally.see(key(7));
+            tally.see(key(7));
+
+            assert_eq!(tally.progress(0).prs_done, 1);
+        }
+
+        #[test]
+        fn should_add_the_total_of_the_one_reading_to_those_read_to_their_end() {
+            let mut tally = Tally::default();
+            tally.see(key(1));
+            tally.counted(1);
+            tally.see(key(2));
+
+            let progress = tally.progress(30);
+
+            assert_eq!((progress.prs_done, progress.prs), (2, 31));
+            assert_eq!(progress.stage, PrSyncStage::Listing);
+        }
+
+        #[test]
+        fn should_never_say_fewer_prs_than_it_has_read() {
+            let mut tally = Tally::default();
+            for number in 1..=3 {
+                tally.see(key(number));
+            }
+
+            assert_eq!(tally.progress(0).prs, 3);
         }
     }
 

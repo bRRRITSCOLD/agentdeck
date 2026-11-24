@@ -6,14 +6,34 @@ use httpmock::prelude::*;
 use httpmock::{Mock, MockServer};
 use serde_json::{Value, json};
 
+/// The signed-in login in these tests: GitHub answers each query for PRs as this viewer.
+pub const ME: &str = "octocat";
+
 /// An open PR on `repo`, from `feat/x` into `main`.
 #[derive(Clone, Copy)]
 pub struct Pr {
     pub repo: &'static str,
     pub number: i64,
+    /// Who opened it.
+    pub author: &'static str,
+    /// Whether its review requests name [`ME`].
+    pub requested: bool,
+    /// Whether it is assigned to [`ME`].
+    pub assigned: bool,
 }
 
 impl Pr {
+    /// PR `number` of `repo`, opened by [`ME`], with no review requests or assignees.
+    pub const fn open(repo: &'static str, number: i64) -> Pr {
+        Pr {
+            repo,
+            number,
+            author: ME,
+            requested: false,
+            assigned: false,
+        }
+    }
+
     pub fn node_id(&self) -> String {
         format!("PR_{}_{}", self.repo.replace('/', "_"), self.number)
     }
@@ -34,7 +54,13 @@ impl Pr {
             "headRefName": "feat/x",
             "baseRefName": "main",
             "updatedAt": "2026-11-01T10:00:00Z",
-            "author": { "login": "octocat" },
+            "author": { "login": self.author },
+            "reviewRequests": { "nodes": if self.requested {
+                json!([{ "requestedReviewer": { "login": ME } }])
+            } else {
+                json!([])
+            } },
+            "assignees": { "nodes": if self.assigned { json!([{ "login": ME }]) } else { json!([]) } },
             "repository": {
                 "fullDatabaseId": self.repository_id().to_string(),
                 "nameWithOwner": self.repo,
@@ -84,44 +110,79 @@ pub fn mock_repo_missing<'a>(server: &'a MockServer, repo: &str) -> Mock<'a> {
 
 /// The mocks [`mock_open_prs`] answers a sync with.
 pub struct OpenPrs<'a> {
-    /// The list of open PRs, which a full sync reads.
+    /// The list of open PRs you authored, which a full sync reads.
     pub list: Mock<'a>,
-    /// The search, which an incremental sync reads.
+    /// The searches for PRs updated since the last sync, which an incremental sync reads.
     pub search: Mock<'a>,
 }
 
-/// The viewer's open PRs, `prs`, however a sync reads them for `token`: the list (a full
-/// sync), the search (an incremental one) and their details by number.
+/// The viewer's open PRs, `prs`, however a sync reads them for `token`: the list of those
+/// [`ME`] authored and the searches for those where your review is requested and those
+/// assigned to you (a full sync), the searches for PRs updated since (an incremental one, all
+/// of `prs`), and the authored ones' details by number.
 pub fn mock_open_prs<'a>(server: &'a MockServer, token: &str, prs: &[Pr]) -> OpenPrs<'a> {
-    let nodes: Vec<Value> = prs.iter().map(Pr::node).collect();
+    let authored: Vec<Pr> = prs.iter().copied().filter(|pr| pr.author == ME).collect();
+    let list_nodes: Vec<Value> = authored.iter().map(Pr::node).collect();
     let list = server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
             .header("authorization", format!("Bearer {token}"))
             .body_includes("pullRequests(");
         then.status(200).json_body(json!({
-            "data": { "viewer": { "pullRequests": {
-                "totalCount": nodes.len(),
+            "data": { "viewer": { "login": ME, "pullRequests": {
+                "totalCount": list_nodes.len(),
                 "pageInfo": { "hasNextPage": false, "endCursor": null },
-                "nodes": nodes
+                "nodes": list_nodes
             } } }
         }));
     });
+    for (qualifier, whose) in [
+        (
+            "user-review-requested:@me",
+            (|pr: &Pr| pr.requested) as fn(&Pr) -> bool,
+        ),
+        ("assignee:@me", |pr: &Pr| pr.assigned),
+    ] {
+        let found: Vec<Pr> = prs.iter().copied().filter(whose).collect();
+        server.mock(|when, then| {
+            when.method(POST)
+                .path("/graphql")
+                .header("authorization", format!("Bearer {token}"))
+                .body_includes("search(")
+                .body_includes("is:open")
+                .body_includes(qualifier);
+            then.status(200).json_body(search_body(&found));
+        });
+    }
     let search = server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")
             .header("authorization", format!("Bearer {token}"))
-            .body_includes("search(");
-        then.status(200).json_body(json!({
-            "data": { "search": {
+            .body_includes("search(")
+            .body_includes("updated:>=");
+        then.status(200).json_body(search_body(prs));
+    });
+    if !authored.is_empty() {
+        by_number(server, "fragment pr on PullRequest", &authored, |pr| {
+            pr.node()
+        });
+    }
+    OpenPrs { list, search }
+}
+
+/// A search's response body: one page holding `prs`, as [`ME`] sees them.
+fn search_body(prs: &[Pr]) -> Value {
+    let nodes: Vec<Value> = prs.iter().map(Pr::node).collect();
+    json!({
+        "data": {
+            "viewer": { "login": ME },
+            "search": {
                 "issueCount": nodes.len(),
                 "pageInfo": { "hasNextPage": false, "endCursor": null },
                 "nodes": nodes
-            } }
-        }));
-    });
-    by_number(server, "fragment pr on PullRequest", prs, |pr| pr.node());
-    OpenPrs { list, search }
+            }
+        }
+    })
 }
 
 /// The lookup of `prs`' node ids before a close, in one request.
@@ -144,11 +205,12 @@ fn by_number<'a>(
 ) -> Mock<'a> {
     let first = prs[0];
     let (owner, name) = first.repo.split_once('/').expect("owner/name");
-    let data: serde_json::Map<String, Value> = prs
+    let mut data: serde_json::Map<String, Value> = prs
         .iter()
         .enumerate()
         .map(|(i, pr)| (format!("p{i}"), json!({ "pullRequest": pull_request(pr) })))
         .collect();
+    data.insert("viewer".into(), json!({ "login": ME }));
     server.mock(|when, then| {
         when.method(POST)
             .path("/graphql")

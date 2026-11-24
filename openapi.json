@@ -1031,6 +1031,14 @@
           "url": {
             "description": "Its GitHub page.",
             "type": "string"
+          },
+          "yours": {
+            "default": [],
+            "description": "Why it is yours, in this order: `authored`, `review_requested` (a review request names you), `assigned`; empty once it is none of these, when it is Finished (spec §8). Absent from an older daemon, which read only the PRs you authored.",
+            "items": {
+              "$ref": "#/components/schemas/Yours"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -1516,6 +1524,14 @@
           }
         },
         "type": "object"
+      },
+      "Yours": {
+        "enum": [
+          "authored",
+          "review_requested",
+          "assigned"
+        ],
+        "type": "string"
       }
     }
   },

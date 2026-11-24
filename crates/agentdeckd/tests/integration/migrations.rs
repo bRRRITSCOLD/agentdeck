@@ -1,7 +1,8 @@
 //! The database at start (spec §2, §3): a fresh data dir gets the schema from the one first
 //! migration, and a database from before the domain reset, one with a `tasks` table, is moved
 //! aside with its WAL and SHM files so the daemon starts empty. A database from the first
-//! migration loses its Workspaces' folder columns and keeps the rest.
+//! migration loses its Workspaces' folder columns and keeps the rest; one from the second keeps
+//! its PRs, each as one you authored.
 
 use std::path::{Path, PathBuf};
 
@@ -210,6 +211,53 @@ mod workspace_folders {
             .expect("list Repositories")
             .into_inner();
         assert_eq!(linked[0].workspaces, [workspaces[0].id]);
+    }
+}
+
+/// Writes a database under `root` as the second migration left it, before each PR stored why
+/// it is yours: PR 7 of `acme/widgets`, open, as PR sync then found every PR, as one you
+/// authored.
+fn second_migration_db(root: &Path) -> PathBuf {
+    let path = first_migration_db(root);
+    let conn = Connection::open(&path).expect("opening the database");
+    conn.execute_batch(include_str!(
+        "../../src/db/migrations/0002_workspaces_lose_their_folder.sql"
+    ))
+    .expect("the second migration");
+    conn.execute_batch(
+        "INSERT INTO pull_requests (repository_id, number, title, url, state, draft, head_ref,
+           base_ref, author, updated_at, synced_at)
+           VALUES (1296269, 7, 'Add PR sync', 'https://github.com/acme/widgets/pull/7', 'open',
+                   0, 'feat/sync', 'main', 'octocat', '2026-11-01T10:00:00Z',
+                   '2026-11-01T10:00:00.000000Z');
+         PRAGMA user_version = 2;",
+    )
+    .expect("a kept PR");
+    path
+}
+
+mod why_yours {
+    use agentdeck_core::Yours;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn should_keep_each_pr_as_one_you_authored() {
+        let dirs = tempfile::tempdir().expect("a temp dir");
+        let path = second_migration_db(dirs.path());
+
+        let daemon = TestDaemon::start_in(dirs).await;
+
+        let columns = columns(&path, "pull_requests");
+        for column in ["authored", "review_requested", "assigned"] {
+            assert!(columns.contains(&column.to_owned()), "{columns:?}");
+        }
+        let prs = (daemon.client.pr_list().send().await)
+            .expect("list PRs")
+            .into_inner();
+        assert_eq!(prs.len(), 1);
+        assert_eq!(prs[0].yours, [Yours::Authored]);
+        assert!(!prs[0].finished);
     }
 }
 

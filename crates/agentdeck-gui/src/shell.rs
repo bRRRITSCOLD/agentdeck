@@ -2748,7 +2748,7 @@ mod tests {
         /// in the Pull requests view, muted by the Workspaces linking its Repository.
         mod pr_alerts {
             use agentdeck_client::types::PullRequest;
-            use agentdeck_core::{RepositoryId, ReviewState};
+            use agentdeck_core::{RepositoryId, ReviewState, Yours};
 
             use super::*;
             use crate::gui_state;
@@ -2879,6 +2879,41 @@ mod tests {
                     let mut open = Open::new(holding(vec![theirs(ChecksState::Pending)]), cx);
 
                     open.sync(vec![theirs(ChecksState::Failure)]);
+
+                    assert_eq!(open.shown(), []);
+                }
+
+                #[gpui::test]
+                fn should_never_alert_for_a_pr_you_review_or_are_assigned(cx: &mut TestAppContext) {
+                    // Someone else's: yours as a reviewer, as an assignee, and as both.
+                    let theirs = |n, yours: &[Yours], checks, review| PullRequest {
+                        author: Some("hubot".into()),
+                        yours: yours.to_vec(),
+                        review,
+                        ..pr(n, "acme/web", checks)
+                    };
+                    let ways: [&[Yours]; 3] = [
+                        &[Yours::ReviewRequested],
+                        &[Yours::Assigned],
+                        &[Yours::ReviewRequested, Yours::Assigned],
+                    ];
+                    let required = Some(ReviewState::ReviewRequired);
+                    let before = (ways.iter().zip(5..))
+                        .map(|(yours, n)| theirs(n, yours, ChecksState::Pending, required))
+                        .collect();
+                    let after = [
+                        Some(ReviewState::Approved),
+                        Some(ReviewState::ChangesRequested),
+                    ];
+                    let mut open = Open::new(holding(before), cx);
+
+                    for review in after {
+                        open.sync(
+                            (ways.iter().zip(5..))
+                                .map(|(yours, n)| theirs(n, yours, ChecksState::Failure, review))
+                                .collect(),
+                        );
+                    }
 
                     assert_eq!(open.shown(), []);
                 }

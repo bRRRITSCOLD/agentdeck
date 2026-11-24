@@ -22,6 +22,7 @@ const CORE_TYPES: &[&str] = &[
     "PrState",
     "ChecksState",
     "ReviewState",
+    "Yours",
     "PaneKind",
     "Agent",
     "AgentState",

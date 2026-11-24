@@ -409,7 +409,12 @@ mod tests {
         #[test]
         fn should_give_every_way_it_is_yours_in_order() {
             assert_eq!(
-                why_yours("octocat", Some("octocat"), ["octocat"], ["hubot", "octocat"]),
+                why_yours(
+                    "octocat",
+                    Some("octocat"),
+                    ["octocat"],
+                    ["hubot", "octocat"]
+                ),
                 [Yours::Authored, Yours::ReviewRequested, Yours::Assigned]
             );
         }

@@ -730,6 +730,9 @@ pub mod types {
         pub updated_at: ::std::string::String,
         ///Its GitHub page.
         pub url: ::std::string::String,
+        ///Why it is yours, in this order: `authored`, `review_requested` (a review request names you), `assigned`; empty once it is none of these, when it is Finished (spec §8). Absent from an older daemon, which read only the PRs you authored.
+        #[serde(default, skip_serializing_if = "::std::vec::Vec::is_empty")]
+        pub yours: ::std::vec::Vec<agentdeck_core::Yours>,
     }
     impl PullRequest {
         pub fn builder() -> builder::PullRequest {
@@ -2887,6 +2890,10 @@ pub mod types {
             unreachable: ::std::result::Result<bool, ::std::string::String>,
             updated_at: ::std::result::Result<::std::string::String, ::std::string::String>,
             url: ::std::result::Result<::std::string::String, ::std::string::String>,
+            yours: ::std::result::Result<
+                ::std::vec::Vec<agentdeck_core::Yours>,
+                ::std::string::String,
+            >,
         }
         impl ::std::default::Default for PullRequest {
             fn default() -> Self {
@@ -2906,6 +2913,7 @@ pub mod types {
                     unreachable: Err("no value supplied for unreachable".to_string()),
                     updated_at: Err("no value supplied for updated_at".to_string()),
                     url: Err("no value supplied for url".to_string()),
+                    yours: Ok(Default::default()),
                 }
             }
         }
@@ -3060,6 +3068,16 @@ pub mod types {
                     .map_err(|e| format!("error converting supplied value for url: {e}"));
                 self
             }
+            pub fn yours<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::vec::Vec<agentdeck_core::Yours>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.yours = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for yours: {e}"));
+                self
+            }
         }
         impl ::std::convert::TryFrom<PullRequest> for super::PullRequest {
             type Error = super::error::ConversionError;
@@ -3082,6 +3100,7 @@ pub mod types {
                     unreachable: value.unreachable?,
                     updated_at: value.updated_at?,
                     url: value.url?,
+                    yours: value.yours?,
                 })
             }
         }
@@ -3103,6 +3122,7 @@ pub mod types {
                     unreachable: Ok(value.unreachable),
                     updated_at: Ok(value.updated_at),
                     url: Ok(value.url),
+                    yours: Ok(value.yours),
                 }
             }
         }
