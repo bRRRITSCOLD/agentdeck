@@ -147,7 +147,11 @@ mod tests {
             assert!(wildmatch("**/work/**", "/home/me/work/repo/.git", false));
             assert!(wildmatch("/home/**/.git", "/home/me/work/repo/.git", false));
             assert!(wildmatch("a/**/b", "a/b", false));
-            assert!(!wildmatch("/home/me/work/**", "/home/me/workshop/.git", false));
+            assert!(!wildmatch(
+                "/home/me/work/**",
+                "/home/me/workshop/.git",
+                false
+            ));
         }
 
         #[test]

@@ -58,7 +58,9 @@ pub fn parse(text: &str) -> Vec<Entry> {
             }
             c if c.is_ascii_alphabetic() => {
                 let mut key = String::new();
-                while let Some(&c) = chars.peek().filter(|c| c.is_ascii_alphanumeric() || **c == '-')
+                while let Some(&c) = chars
+                    .peek()
+                    .filter(|c| c.is_ascii_alphanumeric() || **c == '-')
                 {
                     key.push(c.to_ascii_lowercase());
                     chars.next();
@@ -379,10 +381,7 @@ mod tests {
 
         #[test]
         fn should_trim_a_value_and_keep_its_inner_spaces() {
-            assert_eq!(
-                listed(&parse("[a]\nb =   one two  \r\n")),
-                ["a.b=one two"]
-            );
+            assert_eq!(listed(&parse("[a]\nb =   one two  \r\n")), ["a.b=one two"]);
         }
 
         #[test]
@@ -493,7 +492,10 @@ mod tests {
         #[test]
         fn should_skip_an_include_that_cannot_be_read() {
             let f = Fixture::new();
-            write(&f.path("config"), "[include]\npath = missing.inc\n[a]\nb = 1\n");
+            write(
+                &f.path("config"),
+                "[include]\npath = missing.inc\n[a]\nb = 1\n",
+            );
 
             assert_eq!(f.read("config"), ["include.path=missing.inc", "a.b=1"]);
         }
@@ -539,10 +541,7 @@ mod tests {
                     &f,
                     &format!("gitdir:{}/", f.path("work").display())
                 ));
-                assert!(follows(
-                    &f,
-                    &format!("gitdir:{}", f.git_dir().display())
-                ));
+                assert!(follows(&f, &format!("gitdir:{}", f.git_dir().display())));
             }
 
             #[test]

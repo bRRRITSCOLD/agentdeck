@@ -117,9 +117,9 @@ fn linked_git_dir(dir: &Path, dot_git: &str) -> Option<PathBuf> {
 /// `upstream` when it is on GitHub, else `origin` when it is, each as `insteadOf` rewrites it.
 fn pick(entries: &[Entry]) -> Option<RepositoryName> {
     let remotes = remote_urls(entries);
-    ["upstream", "origin"].into_iter().find_map(|remote| {
-        RepositoryName::from_remote_url(&rewrite(remotes.get(remote)?, entries))
-    })
+    ["upstream", "origin"]
+        .into_iter()
+        .find_map(|remote| RepositoryName::from_remote_url(&rewrite(remotes.get(remote)?, entries)))
 }
 
 /// Each remote's URL by the remote's name: its first `url`, where an empty one clears those
