@@ -671,8 +671,8 @@ impl PrSync {
             .filter(|pr| fetched.missing.contains(&pr.key()))
             .filter_map(|pr| {
                 let now = now.iter().find(|r| r.id == pr.repository.id)?;
-                let renamed = !(now.name.to_string())
-                    .eq_ignore_ascii_case(&pr.repository.name.to_string());
+                let renamed =
+                    !(now.name.to_string()).eq_ignore_ascii_case(&pr.repository.name.to_string());
                 renamed.then(|| RemotePr {
                     repository: now.clone(),
                     ..pr.clone()
@@ -694,7 +694,11 @@ impl PrSync {
     /// Reads by GitHub's id every Repository a Workspace links that this full sync didn't
     /// find in `read`, so a linked Repository with no PR GitHub showed still follows a rename,
     /// a lost access (Unreachable, its Links kept) and a regained one (spec §8).
-    async fn read_linked(&self, token: &str, read: &BTreeSet<RepositoryId>) -> Result<(), SyncError> {
+    async fn read_linked(
+        &self,
+        token: &str,
+        read: &BTreeSet<RepositoryId>,
+    ) -> Result<(), SyncError> {
         let linked = (self.inner.db)
             .call(|conn| db::repositories::linked(conn))
             .await?;

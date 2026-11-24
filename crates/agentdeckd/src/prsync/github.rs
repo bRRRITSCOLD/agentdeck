@@ -315,7 +315,7 @@ impl Github {
     ) -> Result<Vec<Option<RemoteRepository>>, GithubError> {
         use futures_util::{StreamExt as _, TryStreamExt as _};
 
-        let reads = (ids.to_vec().into_iter()).map(|id| self.repository_by_id(token, id));
+        let reads = (ids.iter().copied()).map(|id| self.repository_by_id(token, id));
         futures_util::stream::iter(reads)
             .buffered(BATCHES_IN_FLIGHT)
             .try_collect()
@@ -332,7 +332,10 @@ impl Github {
         token: &str,
         id: RepositoryId,
     ) -> Result<Option<RemoteRepository>, GithubError> {
-        retrying(GithubError::may_pass, || self.repository_by_id_once(token, id)).await
+        retrying(GithubError::may_pass, || {
+            self.repository_by_id_once(token, id)
+        })
+        .await
     }
 
     /// [`Github::repository_by_id`], once.
@@ -1452,7 +1455,10 @@ mod tests {
 
         #[test]
         fn should_be_hidden_when_github_finds_none_or_blocks_it() {
-            for status in [StatusCode::NOT_FOUND, StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS] {
+            for status in [
+                StatusCode::NOT_FOUND,
+                StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS,
+            ] {
                 assert!(hidden(status, &HeaderMap::new()), "{status}");
             }
         }

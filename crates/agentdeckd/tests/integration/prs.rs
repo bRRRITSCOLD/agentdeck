@@ -2923,8 +2923,7 @@ mod repositories_by_id {
     /// sync saw the rename. Fetched by its last known name, GitHub answers with the newcomer's
     /// PR; read by id, its Repository's name now finds it.
     #[tokio::test]
-    async fn should_fetch_a_pr_under_its_repositorys_name_now_when_another_took_the_old_one_200()
-    {
+    async fn should_fetch_a_pr_under_its_repositorys_name_now_when_another_took_the_old_one_200() {
         let github = MockServer::start_async().await;
         let mut listing = mock_search(&github, TOKEN, &[Pr::open(7)]);
         let daemon = full_daemon(&github, Some(TOKEN)).await;
