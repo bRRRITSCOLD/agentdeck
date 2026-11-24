@@ -147,6 +147,95 @@ pub mod types {
             Default::default()
         }
     }
+    ///Where loading the GitHub repository list stands.
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum GithubListStatus {
+        ///Nothing asked for it yet this run, or since the sign-in changed.
+        #[serde(rename = "not_loaded")]
+        NotLoaded,
+        ///The first load runs: `repositories` holds the pages that have arrived.
+        #[serde(rename = "loading")]
+        Loading,
+        ///Every page loaded. A refresh runs quietly under it, the list changing once it ends.
+        #[serde(rename = "loaded")]
+        Loaded,
+        ///The load failed (no connection, a rate limit, a token GitHub rejects): `error` says why.
+        #[serde(rename = "failed")]
+        Failed,
+        ///There's no GitHub token to list with.
+        #[serde(rename = "signed_out")]
+        SignedOut,
+    }
+    impl ::std::fmt::Display for GithubListStatus {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::NotLoaded => f.write_str("not_loaded"),
+                Self::Loading => f.write_str("loading"),
+                Self::Loaded => f.write_str("loaded"),
+                Self::Failed => f.write_str("failed"),
+                Self::SignedOut => f.write_str("signed_out"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for GithubListStatus {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "not_loaded" => Ok(Self::NotLoaded),
+                "loading" => Ok(Self::Loading),
+                "loaded" => Ok(Self::Loaded),
+                "failed" => Ok(Self::Failed),
+                "signed_out" => Ok(Self::SignedOut),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for GithubListStatus {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for GithubListStatus {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`GET /v1/github/repositories`: every GitHub repository the sign-in can reach, as the Link picker offers them (spec §8), with how far loading them has got. Kept in memory for the run.
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct GithubRepositoryList {
+        ///Why the last load failed, while `status` is `failed`: GitHub's message, or why the request failed.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub error: ::std::option::Option<::std::string::String>,
+        ///How many repositories have loaded: `repositories`' length.
+        pub loaded: u32,
+        ///The repositories loaded so far, by `owner/name` as GitHub sorts them. While a list is refreshed, the one before it, whole.
+        pub repositories: ::std::vec::Vec<Repository>,
+        ///Where loading the list stands.
+        pub status: GithubListStatus,
+        ///About how many there are, from the last page's number in page 1's `Link` header, then exact once the last page has loaded; `None` until page 1 answers.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub total: ::std::option::Option<u32>,
+    }
+    impl GithubRepositoryList {
+        pub fn builder() -> builder::GithubRepositoryList {
+            Default::default()
+        }
+    }
     ///`PUT /v1/github/token`.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct GithubTokenBody {
@@ -1391,6 +1480,106 @@ pub mod types {
             fn from(value: super::GithubClientIdBody) -> Self {
                 Self {
                     client_id: Ok(value.client_id),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
+        pub struct GithubRepositoryList {
+            error: ::std::result::Result<
+                ::std::option::Option<::std::string::String>,
+                ::std::string::String,
+            >,
+            loaded: ::std::result::Result<u32, ::std::string::String>,
+            repositories:
+                ::std::result::Result<::std::vec::Vec<super::Repository>, ::std::string::String>,
+            status: ::std::result::Result<super::GithubListStatus, ::std::string::String>,
+            total: ::std::result::Result<::std::option::Option<u32>, ::std::string::String>,
+        }
+        impl ::std::default::Default for GithubRepositoryList {
+            fn default() -> Self {
+                Self {
+                    error: Ok(Default::default()),
+                    loaded: Err("no value supplied for loaded".to_string()),
+                    repositories: Err("no value supplied for repositories".to_string()),
+                    status: Err("no value supplied for status".to_string()),
+                    total: Ok(Default::default()),
+                }
+            }
+        }
+        impl GithubRepositoryList {
+            pub fn error<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<::std::string::String>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.error = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for error: {e}"));
+                self
+            }
+            pub fn loaded<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<u32>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.loaded = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for loaded: {e}"));
+                self
+            }
+            pub fn repositories<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::vec::Vec<super::Repository>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.repositories = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for repositories: {e}"));
+                self
+            }
+            pub fn status<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<super::GithubListStatus>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.status = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for status: {e}"));
+                self
+            }
+            pub fn total<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<u32>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.total = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for total: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<GithubRepositoryList> for super::GithubRepositoryList {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: GithubRepositoryList,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    error: value.error?,
+                    loaded: value.loaded?,
+                    repositories: value.repositories?,
+                    status: value.status?,
+                    total: value.total?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::GithubRepositoryList> for GithubRepositoryList {
+            fn from(value: super::GithubRepositoryList) -> Self {
+                Self {
+                    error: Ok(value.error),
+                    loaded: Ok(value.loaded),
+                    repositories: Ok(value.repositories),
+                    status: Ok(value.status),
+                    total: Ok(value.total),
                 }
             }
         }
@@ -3949,6 +4138,34 @@ impl Client {
     pub fn github_device_cancel(&self) -> builder::GithubDeviceCancel<'_> {
         builder::GithubDeviceCancel::new(self)
     }
+    ///Every GitHub repository the sign-in can reach, as the Link picker's All your repositories
+    ///
+    ///offers them, by `owner/name` as GitHub sorts them, with how far loading them has got: the list kept in memory for the run. Nothing loads until `POST /v1/github/repositories/refresh` asks; while the first load runs, the pages that have arrived. Never fails: a failed load is `status: failed` with its `error`.
+    ///
+    ///Sends a `GET` request to `/v1/github/repositories`
+    ///
+    ///```ignore
+    ///let response = client.github_repository_list()
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn github_repository_list(&self) -> builder::GithubRepositoryList<'_> {
+        builder::GithubRepositoryList::new(self)
+    }
+    ///Loads the GitHub repository list again (`GET /user/repos`, 100 a page: page 1, then the
+    ///
+    ///rest 4 at a time), answering 204 at once, before GitHub does. A list already loaded keeps showing until the new one has loaded whole; a load already running is left to finish. Each change to the list or its progress sends `changed github_repositories`. With no token the list reads `signed_out`.
+    ///
+    ///Sends a `POST` request to `/v1/github/repositories/refresh`
+    ///
+    ///```ignore
+    ///let response = client.github_repository_refresh()
+    ///    .send()
+    ///    .await;
+    ///```
+    pub fn github_repository_refresh(&self) -> builder::GithubRepositoryRefresh<'_> {
+        builder::GithubRepositoryRefresh::new(self)
+    }
     ///Checks a pasted token with GitHub and saves it in the system keyring, replacing any saved
     ///
     ///one; PR sync syncs at once. A blank token, or one GitHub answers 401 for, is 422 `invalid_token`; no keyring is 503 `no_keyring`; any other GitHub failure is 502 `github_error`.
@@ -4740,6 +4957,106 @@ pub mod builder {
                 .build()?;
             let info = OperationInfo {
                 operation_id: "github_device_cancel",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                204u16 => Ok(ResponseValue::empty(response)),
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::github_repository_list`]
+    ///
+    ///[`Client::github_repository_list`]: super::Client::github_repository_list
+    #[derive(Debug, Clone)]
+    pub struct GithubRepositoryList<'a> {
+        client: &'a super::Client,
+    }
+    impl<'a> GithubRepositoryList<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self { client: client }
+        }
+        ///Sends a `GET` request to `/v1/github/repositories`
+        pub async fn send(
+            self,
+        ) -> Result<ResponseValue<types::GithubRepositoryList>, Error<types::Error>> {
+            let Self { client } = self;
+            let url = format!("{}/v1/github/repositories", client.baseurl,);
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .get(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "github_repository_list",
+            };
+            client.pre(&mut request, &info).await?;
+            let result = client.exec(request, &info).await;
+            client.post(&result, &info).await?;
+            let response = result?;
+            match response.status().as_u16() {
+                200u16 => ResponseValue::from_response(response).await,
+                400u16..=499u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                500u16..=599u16 => Err(Error::ErrorResponse(
+                    ResponseValue::from_response(response).await?,
+                )),
+                _ => Err(Error::UnexpectedResponse(response)),
+            }
+        }
+    }
+    ///Builder for [`Client::github_repository_refresh`]
+    ///
+    ///[`Client::github_repository_refresh`]: super::Client::github_repository_refresh
+    #[derive(Debug, Clone)]
+    pub struct GithubRepositoryRefresh<'a> {
+        client: &'a super::Client,
+    }
+    impl<'a> GithubRepositoryRefresh<'a> {
+        pub fn new(client: &'a super::Client) -> Self {
+            Self { client: client }
+        }
+        ///Sends a `POST` request to `/v1/github/repositories/refresh`
+        pub async fn send(self) -> Result<ResponseValue<()>, Error<types::Error>> {
+            let Self { client } = self;
+            let url = format!("{}/v1/github/repositories/refresh", client.baseurl,);
+            let mut header_map = ::reqwest::header::HeaderMap::with_capacity(1usize);
+            header_map.append(
+                ::reqwest::header::HeaderName::from_static("api-version"),
+                ::reqwest::header::HeaderValue::from_static(super::Client::api_version()),
+            );
+            #[allow(unused_mut)]
+            let mut request = client
+                .client
+                .post(url)
+                .header(
+                    ::reqwest::header::ACCEPT,
+                    ::reqwest::header::HeaderValue::from_static("application/json"),
+                )
+                .headers(header_map)
+                .build()?;
+            let info = OperationInfo {
+                operation_id: "github_repository_refresh",
             };
             client.pre(&mut request, &info).await?;
             let result = client.exec(request, &info).await;

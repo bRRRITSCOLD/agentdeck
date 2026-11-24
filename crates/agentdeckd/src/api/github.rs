@@ -1,14 +1,16 @@
-//! The GitHub token and Sign in with GitHub: `/v1/github` (spec §4, §8). No route answers
-//! with the token or the client ID.
+//! The GitHub token, Sign in with GitHub and the GitHub repository list: `/v1/github` (spec
+//! §4, §8). No route answers with the token or the client ID.
 
 use dropshot::{
     ClientErrorStatusCode, ErrorStatusCode, HttpError, HttpResponseDeleted, HttpResponseOk,
-    RequestContext, TypedBody, endpoint,
+    HttpResponseUpdatedNoContent, RequestContext, TypedBody, endpoint,
 };
 
 use super::{ApiContext, Authorized, client_error, server_error};
 use crate::github_auth::AuthError;
-use crate::model::{DeviceSignIn, GithubAuthInfo, GithubClientIdBody, GithubTokenBody};
+use crate::model::{
+    DeviceSignIn, GithubAuthInfo, GithubClientIdBody, GithubRepositoryList, GithubTokenBody,
+};
 
 /// Where the GitHub token comes from, whose it is and what it may do, and whether an OAuth
 /// client ID is set. Never the token or the client ID.
@@ -103,6 +105,33 @@ pub(crate) async fn github_device_cancel(
 ) -> Result<HttpResponseDeleted, HttpError> {
     rqctx.context().github.cancel_sign_in();
     Ok(HttpResponseDeleted())
+}
+
+/// Every GitHub repository the sign-in can reach, as the Link picker's All your repositories
+/// offers them, by `owner/name` as GitHub sorts them, with how far loading them has got: the
+/// list kept in memory for the run. Nothing loads until `POST /v1/github/repositories/refresh`
+/// asks; while the first load runs, the pages that have arrived. Never fails: a failed load
+/// is `status: failed` with its `error`.
+#[endpoint { method = GET, path = "/v1/github/repositories" }]
+pub(crate) async fn github_repository_list(
+    rqctx: RequestContext<ApiContext>,
+    _auth: Authorized,
+) -> Result<HttpResponseOk<GithubRepositoryList>, HttpError> {
+    Ok(HttpResponseOk(rqctx.context().github_list.list()))
+}
+
+/// Loads the GitHub repository list again (`GET /user/repos`, 100 a page: page 1, then the
+/// rest 4 at a time), answering 204 at once, before GitHub does. A list already loaded keeps
+/// showing until the new one has loaded whole; a load already running is left to finish. Each
+/// change to the list or its progress sends `changed github_repositories`. With no token the
+/// list reads `signed_out`.
+#[endpoint { method = POST, path = "/v1/github/repositories/refresh" }]
+pub(crate) async fn github_repository_refresh(
+    rqctx: RequestContext<ApiContext>,
+    _auth: Authorized,
+) -> Result<HttpResponseUpdatedNoContent, HttpError> {
+    rqctx.context().github_list.refresh().await;
+    Ok(HttpResponseUpdatedNoContent())
 }
 
 /// The status and `error_code` of each failure.

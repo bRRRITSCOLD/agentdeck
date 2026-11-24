@@ -114,6 +114,41 @@ pub struct Repository {
     pub archived: bool,
 }
 
+/// `GET /v1/github/repositories`: every GitHub repository the sign-in can reach, as the Link
+/// picker offers them (spec §8), with how far loading them has got. Kept in memory for the run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct GithubRepositoryList {
+    /// Where loading the list stands.
+    pub status: GithubListStatus,
+    /// How many repositories have loaded: `repositories`' length.
+    pub loaded: u32,
+    /// About how many there are, from the last page's number in page 1's `Link` header, then
+    /// exact once the last page has loaded; `None` until page 1 answers.
+    pub total: Option<u32>,
+    /// Why the last load failed, while `status` is `failed`: GitHub's message, or why the
+    /// request failed.
+    pub error: Option<String>,
+    /// The repositories loaded so far, by `owner/name` as GitHub sorts them. While a list is
+    /// refreshed, the one before it, whole.
+    pub repositories: Vec<Repository>,
+}
+
+/// Where loading the GitHub repository list stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GithubListStatus {
+    /// Nothing asked for it yet this run, or since the sign-in changed.
+    NotLoaded,
+    /// The first load runs: `repositories` holds the pages that have arrived.
+    Loading,
+    /// Every page loaded. A refresh runs quietly under it, the list changing once it ends.
+    Loaded,
+    /// The load failed (no connection, a rate limit, a token GitHub rejects): `error` says why.
+    Failed,
+    /// There's no GitHub token to list with.
+    SignedOut,
+}
+
 /// A pull request PR sync keeps (spec §3, §8), as it last saw it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PullRequest {

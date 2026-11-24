@@ -195,6 +195,90 @@
         ],
         "type": "object"
       },
+      "GithubListStatus": {
+        "description": "Where loading the GitHub repository list stands.",
+        "oneOf": [
+          {
+            "description": "Nothing asked for it yet this run, or since the sign-in changed.",
+            "enum": [
+              "not_loaded"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "The first load runs: `repositories` holds the pages that have arrived.",
+            "enum": [
+              "loading"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "Every page loaded. A refresh runs quietly under it, the list changing once it ends.",
+            "enum": [
+              "loaded"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "The load failed (no connection, a rate limit, a token GitHub rejects): `error` says why.",
+            "enum": [
+              "failed"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "There's no GitHub token to list with.",
+            "enum": [
+              "signed_out"
+            ],
+            "type": "string"
+          }
+        ]
+      },
+      "GithubRepositoryList": {
+        "description": "`GET /v1/github/repositories`: every GitHub repository the sign-in can reach, as the Link picker offers them (spec §8), with how far loading them has got. Kept in memory for the run.",
+        "properties": {
+          "error": {
+            "description": "Why the last load failed, while `status` is `failed`: GitHub's message, or why the request failed.",
+            "nullable": true,
+            "type": "string"
+          },
+          "loaded": {
+            "description": "How many repositories have loaded: `repositories`' length.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "repositories": {
+            "description": "The repositories loaded so far, by `owner/name` as GitHub sorts them. While a list is refreshed, the one before it, whole.",
+            "items": {
+              "$ref": "#/components/schemas/Repository"
+            },
+            "type": "array"
+          },
+          "status": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/GithubListStatus"
+              }
+            ],
+            "description": "Where loading the list stands."
+          },
+          "total": {
+            "description": "About how many there are, from the last page's number in page 1's `Link` header, then exact once the last page has loaded; `None` until page 1 answers.",
+            "format": "uint32",
+            "minimum": 0,
+            "nullable": true,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "loaded",
+          "repositories",
+          "status"
+        ],
+        "type": "object"
+      },
       "GithubTokenBody": {
         "description": "`PUT /v1/github/token`.",
         "properties": {
@@ -1562,6 +1646,49 @@
           }
         },
         "summary": "Starts Sign in with GitHub (the OAuth device flow, scope `repo`), cancelling one already"
+      }
+    },
+    "/v1/github/repositories": {
+      "get": {
+        "description": "offers them, by `owner/name` as GitHub sorts them, with how far loading them has got: the list kept in memory for the run. Nothing loads until `POST /v1/github/repositories/refresh` asks; while the first load runs, the pages that have arrived. Never fails: a failed load is `status: failed` with its `error`.",
+        "operationId": "github_repository_list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubRepositoryList"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Every GitHub repository the sign-in can reach, as the Link picker's All your repositories"
+      }
+    },
+    "/v1/github/repositories/refresh": {
+      "post": {
+        "description": "rest 4 at a time), answering 204 at once, before GitHub does. A list already loaded keeps showing until the new one has loaded whole; a load already running is left to finish. Each change to the list or its progress sends `changed github_repositories`. With no token the list reads `signed_out`.",
+        "operationId": "github_repository_refresh",
+        "responses": {
+          "204": {
+            "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Loads the GitHub repository list again (`GET /user/repos`, 100 a page: page 1, then the"
       }
     },
     "/v1/github/token": {

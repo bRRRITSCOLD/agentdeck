@@ -13,6 +13,7 @@ mod daemon;
 mod db;
 mod events;
 mod github_auth;
+mod github_list;
 mod instance;
 mod logging;
 mod model;

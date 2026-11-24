@@ -1,12 +1,13 @@
 //! Repositories as the GUI reads them (spec §4 `GET /v1/repositories`, §11 Notifications),
 //! and the Links a Repository group's `…` menu makes and takes away (spec §4
 //! `/v1/workspaces/{id}/links`, §11 Pull requests view), and each Workspace's Suggestions
-//! (`/v1/workspaces/{id}/suggestions`).
+//! (`/v1/workspaces/{id}/suggestions`), and the GitHub repository list the Link picker's All
+//! your repositories offers (`/v1/github/repositories`).
 
 use agentdeck_core::{RepositoryId, RepositoryName, WorkspaceId};
 
 use crate::error::OLDER_DAEMON;
-use crate::types::{NewLink, Repository, RepositoryLinks};
+use crate::types::{GithubRepositoryList, NewLink, Repository, RepositoryLinks};
 use crate::{ApiError, Client};
 
 /// Every Repository the daemon keeps, by name, each with the Workspaces linking it, archived
@@ -114,5 +115,23 @@ pub async fn unlink(
         .repository(repository)
         .send()
         .await?;
+    Ok(())
+}
+
+/// Every GitHub repository the sign-in can reach, by `owner/name`, with how far loading them
+/// has got (spec §8): `status`, `loaded`, the `total` estimated from the last page, and why a
+/// load failed. The daemon keeps it in memory for the run; nothing loads until
+/// [`refresh_github_list`] asks.
+pub async fn github_list(client: &Client) -> Result<GithubRepositoryList, ApiError> {
+    let list = client.github_repository_list().send().await?;
+    Ok(list.into_inner())
+}
+
+/// Asks the daemon to load the GitHub repository list again, as each Link picker does when it
+/// opens. Answers at once: pages arrive in the background, each with a `changed
+/// github_repositories` event, and a list already loaded keeps showing until the new one has
+/// loaded whole.
+pub async fn refresh_github_list(client: &Client) -> Result<(), ApiError> {
+    client.github_repository_refresh().send().await?;
     Ok(())
 }

@@ -30,6 +30,7 @@ use crate::config::Config;
 use crate::db::{Db, DbError};
 use crate::events::Events;
 use crate::github_auth::GithubAuth;
+use crate::github_list::GithubList;
 use crate::prsync::PrSync;
 use crate::prsync::github::Github;
 use crate::suggestions::Suggestions;
@@ -60,6 +61,8 @@ pub struct ApiContext {
     pub events: Events,
     /// Each Workspace's Suggestions, for `/v1/workspaces/{id}/suggestions`.
     pub suggestions: Suggestions,
+    /// The GitHub repository list, for `/v1/github/repositories`.
+    pub github_list: GithubList,
 }
 
 /// Every endpoint.
@@ -94,6 +97,8 @@ pub fn api() -> ApiDescription<ApiContext> {
         api.register(github::github_client_id_delete),
         api.register(github::github_device_start),
         api.register(github::github_device_cancel),
+        api.register(github::github_repository_list),
+        api.register(github::github_repository_refresh),
         api.register(settings::settings_get),
         api.register(settings::settings_update),
         api.register(panes::pane_create),
@@ -235,7 +240,7 @@ mod tests {
         /// `openapi.json`'s fingerprint when [`agentdeck_core::API_VERSION`] was last set,
         /// and that version. Clients tell an older daemon by its API version, so a route or
         /// field added without a bump would go unnoticed: they would call it and get a 404.
-        const FINGERPRINT_AT_API_VERSION: (u64, u32) = (0xc935_79a3_d8ff_d5cc, 26);
+        const FINGERPRINT_AT_API_VERSION: (u64, u32) = (0xd70e_7ecf_0702_a3ac, 27);
 
         /// FNV-1a: stable across Rust releases, unlike `DefaultHasher`.
         fn fingerprint(text: &str) -> u64 {
