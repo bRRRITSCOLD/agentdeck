@@ -88,6 +88,45 @@ pub fn mock_rest_repo_missing<'a>(server: &'a MockServer, asked: &str) -> Mock<'
     })
 }
 
+/// `GET /repositories/{id}` for GitHub's id `id` with `token`, answered with `repo` as GitHub
+/// calls it now: the same name, or a new one after a rename or a transfer.
+pub fn mock_rest_repo_by_id<'a>(
+    server: &'a MockServer,
+    token: &str,
+    id: u64,
+    repo: RestRepo,
+) -> Mock<'a> {
+    server.mock(|when, then| {
+        when.method(GET)
+            .path(format!("/repositories/{id}"))
+            .header("authorization", format!("Bearer {token}"))
+            .header("x-github-api-version", "2022-11-28");
+        then.status(200).json_body(json!({
+            "id": id,
+            "node_id": "R_kgDOtest",
+            "name": repo.name.split_once('/').expect("owner/name").1,
+            "full_name": repo.name,
+            "html_url": repo.url(),
+            "private": repo.private,
+            "archived": false,
+            "default_branch": "main"
+        }));
+    })
+}
+
+/// `GET /repositories/{id}` for GitHub's id `id`, answered 404 as GitHub answers for a
+/// Repository deleted, or one the token can no longer see.
+pub fn mock_rest_repo_by_id_missing(server: &MockServer, id: u64) -> Mock<'_> {
+    server.mock(|when, then| {
+        when.method(GET).path(format!("/repositories/{id}"));
+        then.status(404).json_body(json!({
+            "message": "Not Found",
+            "documentation_url": "https://docs.github.com/rest",
+            "status": "404"
+        }));
+    })
+}
+
 /// `count` repositories a user can reach, as `GET /user/repos` sorts them: `acme/repo-000`,
 /// `acme/repo-001`…, every 7th private.
 pub fn user_repos(count: usize) -> Vec<RestRepo> {

@@ -304,6 +304,73 @@ impl Github {
         Ok(Some(repository.into()))
     }
 
+    /// Each Repository of `ids` by GitHub's id, in order, read with the REST API's
+    /// `GET /repositories/{id}`, [`BATCHES_IN_FLIGHT`] requests at once: its name, URL,
+    /// private and archived as GitHub gives them now, through any rename or transfer. `None`
+    /// for one GitHub doesn't show to `token` ([`Github::repository_by_id`]).
+    pub async fn repositories_by_id(
+        &self,
+        token: &str,
+        ids: &[RepositoryId],
+    ) -> Result<Vec<Option<RemoteRepository>>, GithubError> {
+        use futures_util::{StreamExt as _, TryStreamExt as _};
+
+        let reads = (ids.iter().copied()).map(|id| self.repository_by_id(token, id));
+        futures_util::stream::iter(reads)
+            .buffered(BATCHES_IN_FLIGHT)
+            .try_collect()
+            .await
+    }
+
+    /// Repository `id` by GitHub's id, read with the REST API's `GET /repositories/{id}`;
+    /// `None` when GitHub doesn't show it to `token`: a 404 (deleted, or no access), a 451
+    /// (blocked), or a 403 that isn't a rate limit (an organisation's SSO or OAuth app
+    /// restrictions). GraphQL has no lookup by this id, so this is a REST call. Tried again
+    /// after each of `RETRY_WAITS` while it fails for a reason that may pass.
+    pub async fn repository_by_id(
+        &self,
+        token: &str,
+        id: RepositoryId,
+    ) -> Result<Option<RemoteRepository>, GithubError> {
+        retrying(GithubError::may_pass, || {
+            self.repository_by_id_once(token, id)
+        })
+        .await
+    }
+
+    /// [`Github::repository_by_id`], once.
+    async fn repository_by_id_once(
+        &self,
+        token: &str,
+        id: RepositoryId,
+    ) -> Result<Option<RemoteRepository>, GithubError> {
+        let url = format!("{}/repositories/{id}", self.rest);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .header("accept", "application/vnd.github+json")
+            .header("x-github-api-version", REST_API_VERSION)
+            .send()
+            .await?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(GithubError::Unauthorized);
+        }
+        if hidden(status, response.headers()) {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(GithubError::Status {
+                status: status.as_u16(),
+                message: message(&body),
+            });
+        }
+        let repository: RestRepository = response.json().await?;
+        Ok(Some(repository.into()))
+    }
+
     /// Page `page` (from 1) of every repository the token's user can reach, read with the
     /// REST API's `GET /user/repos?sort=full_name&direction=asc&per_page=100`: owned,
     /// collaborator and organisation ones, by `owner/name`. Tried again after each of
@@ -666,6 +733,23 @@ fn last_page(header: &str) -> Option<u32> {
         let page = url.query_pairs().find(|(key, _)| key == "page")?.1;
         page.parse().ok()
     })
+}
+
+/// Whether a REST answer `status` with `headers` says GitHub doesn't show the token a
+/// Repository: 404 (none, or no access), 451 (blocked for legal reasons), or a 403 that isn't
+/// a rate limit, as an organisation's SAML SSO or OAuth app restrictions answer. A rate-limited
+/// 403 says so with `x-ratelimit-remaining: 0` or `retry-after`, and is a failure.
+fn hidden(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) -> bool {
+    use reqwest::StatusCode;
+    match status {
+        StatusCode::NOT_FOUND | StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS => true,
+        StatusCode::FORBIDDEN => {
+            let exhausted = (headers.get("x-ratelimit-remaining"))
+                .is_some_and(|remaining| remaining.as_bytes() == b"0");
+            !exhausted && !headers.contains_key(reqwest::header::RETRY_AFTER)
+        }
+        _ => false,
+    }
 }
 
 /// A Repository as the REST API's `GET /repos/{owner}/{repo}` and `GET /user/repos` answer it.
@@ -1353,6 +1437,57 @@ mod tests {
                 last_page("<https://api.github.com/user/repos>; rel=\"last\""),
                 None
             );
+        }
+    }
+
+    mod hidden {
+        use super::*;
+        use reqwest::StatusCode;
+        use reqwest::header::{HeaderMap, HeaderValue};
+
+        fn headers(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
+            let mut headers = HeaderMap::new();
+            for (name, value) in pairs {
+                headers.insert(*name, HeaderValue::from_static(value));
+            }
+            headers
+        }
+
+        #[test]
+        fn should_be_hidden_when_github_finds_none_or_blocks_it() {
+            for status in [
+                StatusCode::NOT_FOUND,
+                StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS,
+            ] {
+                assert!(hidden(status, &HeaderMap::new()), "{status}");
+            }
+        }
+
+        #[test]
+        fn should_be_hidden_when_an_organisation_refuses_the_token() {
+            let sso = headers(&[("x-ratelimit-remaining", "4999")]);
+
+            assert!(hidden(StatusCode::FORBIDDEN, &sso));
+        }
+
+        #[test]
+        fn should_not_be_hidden_when_a_403_is_a_rate_limit() {
+            let primary = headers(&[("x-ratelimit-remaining", "0")]);
+            let secondary = headers(&[("retry-after", "60")]);
+
+            assert!(!hidden(StatusCode::FORBIDDEN, &primary));
+            assert!(!hidden(StatusCode::FORBIDDEN, &secondary));
+        }
+
+        #[test]
+        fn should_not_be_hidden_when_github_answers_or_fails() {
+            for status in [
+                StatusCode::OK,
+                StatusCode::TOO_MANY_REQUESTS,
+                StatusCode::BAD_GATEWAY,
+            ] {
+                assert!(!hidden(status, &HeaderMap::new()), "{status}");
+            }
         }
     }
 

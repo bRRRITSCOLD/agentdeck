@@ -10,14 +10,24 @@ use crate::prsync::github::RemoteRepository;
 
 /// Stores `repository` as GitHub reports it now, by its id: a new one is created; a known one
 /// takes its new name, URL, private and archived, so a rename or a transfer keeps it the same
-/// Repository. Returns whether anything changed: `false` when it was stored as it is.
+/// Repository, and GitHub showing it clears its Unreachable mark. Returns whether anything
+/// changed: `false` when it was stored as it is.
 pub fn store(conn: &Connection, repository: &RemoteRepository) -> Result<bool, DbError> {
     let id = repository.id.get();
-    let stored: Option<(String, String, bool, bool)> = conn
+    let stored: Option<(String, String, bool, bool, bool)> = conn
         .query_row(
-            "SELECT full_name, url, private, archived FROM repositories WHERE id = ?1",
+            "SELECT full_name, url, private, archived, unreachable_at IS NOT NULL
+             FROM repositories WHERE id = ?1",
             [id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .optional()?;
     let now = (
@@ -25,6 +35,7 @@ pub fn store(conn: &Connection, repository: &RemoteRepository) -> Result<bool, D
         repository.url.clone(),
         repository.private,
         repository.archived,
+        false,
     );
     if stored.as_ref() == Some(&now) {
         return Ok(false);
@@ -34,10 +45,55 @@ pub fn store(conn: &Connection, repository: &RemoteRepository) -> Result<bool, D
          VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT (id) DO UPDATE SET
            full_name = excluded.full_name, url = excluded.url, private = excluded.private,
-           archived = excluded.archived",
+           archived = excluded.archived, unreachable_at = NULL",
         params![id, now.0, now.1, now.2, now.3],
     )?;
     Ok(true)
+}
+
+/// Marks stored Repository `id` Unreachable: GitHub doesn't show it to the sign-in. It keeps
+/// what GitHub last said of it, its Links and its pull requests. Returns whether it changed:
+/// `false` when it was marked already, or isn't stored.
+pub fn mark_unreachable(conn: &Connection, id: RepositoryId) -> Result<bool, DbError> {
+    let marked = conn.execute(
+        "UPDATE repositories SET unreachable_at = ?2 WHERE id = ?1 AND unreachable_at IS NULL",
+        params![id.get(), super::now()],
+    )?;
+    Ok(marked > 0)
+}
+
+/// Stores what GitHub read by id says of stored Repositories, in one transaction: each of
+/// `found` as GitHub shows it now ([`store`]), and each of `unreachable` marked Unreachable
+/// ([`mark_unreachable`]). One no longer stored (unlinked while GitHub was asked) is left
+/// out, so nothing is stored that nothing references. Returns those that changed.
+pub fn refresh(
+    conn: &mut Connection,
+    found: &[RemoteRepository],
+    unreachable: &[RepositoryId],
+) -> Result<Vec<RepositoryId>, DbError> {
+    let tx = conn.transaction()?;
+    let mut changed = Vec::new();
+    for repository in found {
+        if is_known(&tx, repository.id)? && store(&tx, repository)? {
+            changed.push(repository.id);
+        }
+    }
+    for id in unreachable {
+        if mark_unreachable(&tx, *id)? {
+            changed.push(*id);
+        }
+    }
+    tx.commit()?;
+    Ok(changed)
+}
+
+/// Every Repository a Workspace links, archived Workspaces' included, by id.
+pub fn linked(conn: &Connection) -> Result<Vec<RepositoryId>, DbError> {
+    let mut stmt = conn.prepare("SELECT DISTINCT repository_id FROM links ORDER BY 1")?;
+    let rows = stmt.query_map([], |row| row.get::<_, u64>(0))?;
+    Ok(rows
+        .map(|id| id.map(RepositoryId::from))
+        .collect::<rusqlite::Result<_>>()?)
 }
 
 /// What [`link`] and [`store_and_link`] did.
