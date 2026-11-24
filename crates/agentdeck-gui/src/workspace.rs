@@ -932,6 +932,7 @@ impl Render for WorkspaceView {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
     use std::rc::Rc;
 
     use agentdeck_client::types::Pane;
@@ -1022,6 +1023,12 @@ mod tests {
 
         fn pane(&self, n: usize, cx: &mut VisualTestContext) -> Entity<PaneView> {
             self.view.read_with(cx, |view, _| view.shown()[n].clone())
+        }
+
+        /// The folder a relative file path in the `n`th pane shown resolves against.
+        fn paths_dir(&self, n: usize, cx: &mut VisualTestContext) -> PathBuf {
+            let terminal = self.pane(n, cx).read_with(cx, |pane, _| pane.terminal());
+            terminal.read_with(cx, |terminal, _| terminal.paths_dir())
         }
 
         fn selected(&self, cx: &mut VisualTestContext) -> Option<TabId> {
@@ -1295,6 +1302,31 @@ mod tests {
 
             assert_eq!(harness.shown(cx), [id(7), id(8)]);
             assert_eq!(harness.pane(0, cx), before);
+        }
+
+        #[gpui::test]
+        fn should_resolve_file_paths_against_each_panes_folder_as_last_read(
+            cx: &mut TestAppContext,
+        ) {
+            let launched = Pane {
+                cwd: "/w".into(),
+                folder: "/w".into(),
+                ..shell_pane(7, id(1))
+            };
+            let (harness, cx) = Harness::open(
+                vec![tab(1, id(1), 0, Some(id(7)))],
+                vec![launched.clone()],
+                cx,
+            );
+            assert_eq!(harness.paths_dir(0, cx), Path::new("/w"));
+            harness.api.set_panes(vec![Pane {
+                folder: "/w/moved".into(),
+                ..launched
+            }]);
+
+            harness.changed(Changed::Pane, cx);
+
+            assert_eq!(harness.paths_dir(0, cx), Path::new("/w/moved"));
         }
 
         #[gpui::test]

@@ -151,8 +151,9 @@ impl PaneView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let cwd = pane.cwd.clone().into();
-        let terminal = cx.new(|cx| TerminalView::new(pane.id, cwd, connection, sender, window, cx));
+        let folder = pane.folder.clone().into();
+        let terminal =
+            cx.new(|cx| TerminalView::new(pane.id, folder, connection, sender, window, cx));
         let titles = cx.subscribe(&terminal, |this, _, event, cx| match event {
             TerminalEvent::Title(title) => {
                 this.live_title = Some(title.clone());
@@ -170,6 +171,12 @@ impl PaneView {
         }
     }
 
+    /// Its terminal.
+    #[cfg(test)]
+    pub fn terminal(&self) -> Entity<TerminalView> {
+        self.terminal.clone()
+    }
+
     /// The pane it shows.
     pub fn id(&self) -> PaneId {
         self.pane.id
@@ -182,6 +189,11 @@ impl PaneView {
                 (true, false) => self.left_title = Some(self.title()),
                 (_, true) => self.left_title = None,
                 (false, false) => {}
+            }
+            if self.pane.folder != pane.folder {
+                let folder = pane.folder.clone().into();
+                self.terminal
+                    .update(cx, |terminal, _| terminal.set_folder(folder));
             }
             self.pane = pane;
             cx.notify();
