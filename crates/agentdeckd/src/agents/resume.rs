@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use agentdeck_core::PaneKind;
 
-use crate::agents::restart::Restarter;
+use crate::agents::restart::{Restarter, existing_dir, home};
 use crate::agents::resume_argv;
 use crate::db::{self, DbError};
 use crate::terminal::env::default_shell;
@@ -82,18 +82,7 @@ pub async fn resume_panes(restarter: &Restarter) -> Result<(), DbError> {
 /// Where a pane resumes (spec §6): its last known `folder` while it is a directory, else
 /// `home` while that is; `None` when neither is.
 fn restore_folder(folder: &Path, home: Option<&Path>) -> Option<PathBuf> {
-    [Some(folder), home]
-        .into_iter()
-        .flatten()
-        .find(|dir| dir.is_absolute() && dir.is_dir())
-        .map(Path::to_path_buf)
-}
-
-/// The daemon's `$HOME`, which a pane's environment passes on too.
-fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
+    existing_dir([Some(folder), home])
 }
 
 #[cfg(test)]

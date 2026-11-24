@@ -429,12 +429,12 @@ pub mod types {
         pub argv: ::std::vec::Vec<::std::string::String>,
         ///When the pane was created.
         pub created_at: ::std::string::String,
-        ///The working directory it was launched in.
+        ///The working directory its process was launched in: by `POST /v1/panes`, or by its last `POST /v1/panes/{id}/respawn`. A respawn resumes its agent's session here, since the session started here (spec §4).
         pub cwd: ::std::string::String,
         ///The exit code, once the process has exited.
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub exit_code: ::std::option::Option<i64>,
-        ///Its current folder (spec §6): the folder its shell last reported with OSC 7, else its process's working directory, else `cwd`, the folder it launched in, as the daemon last read them. Kept after it exits; a pane resumed after a restart starts there.
+        ///Its current folder (spec §6): the folder its shell last reported with OSC 7, else its process's working directory, else `cwd`, the folder it launched in, as the daemon last read them. Kept after it exits; a pane resumed after a restart starts there, and so do Open shell and a fresh Restart agent (spec §4).
         pub folder: ::std::string::String,
         ///The agent a shell pane hosts: `claude` or `codex` while the user's own is its foreground process, else null. Its kind stays `shell`; it runs that agent's state rules meanwhile (spec §3, §7).
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -4293,9 +4293,11 @@ impl Client {
     pub fn pane_input(&self) -> builder::PaneInput<'_> {
         builder::PaneInput::new(self)
     }
-    ///Starts an exited pane again in place, keeping its id, its place in the tab's layout and
+    ///Starts an exited pane again in place, keeping its id and its place in the layout
     ///
-    ///its `cwd` (spec §4). `run: "agent"`, for an agent pane only (`unsupported_kind`), runs its agent again: claude and codex resume their session when it is known, else start fresh with a new session; an `other` agent runs its argv again. A resume that exits non-zero within 10 s, as one of a session the agent can no longer find does, is followed by a fresh start, once. `run: "shell"` turns the pane into a shell pane running `$SHELL`, with hosting on. The state starts over. `running` (409) while its process hasn't exited; `invalid_dir` when its `cwd` is gone; `invalid_argv` when the program can't start, and the pane stays exited.
+    ///`run: "agent"`, for an agent pane only (`unsupported_kind`), runs its agent again: claude and codex resume their session when it is known, else start fresh with a new session; an `other` agent runs its argv again. A resume that exits non-zero within 10 s, as one of a session the agent can no longer find does, is followed by a fresh start, once. `run: "shell"` turns the pane into a shell pane running `$SHELL`, with hosting on (spec §4).
+    ///
+    ///A resume runs in the pane's `cwd`, the folder its session started in, which Claude Code and Codex need; once that folder is gone, the agent starts fresh instead. Anything else starts in the pane's last known folder, else its `cwd`, else `~`. The folder it starts in becomes its `cwd` and its `folder`, and the state starts over. `running` (409) while its process hasn't exited; `invalid_dir` when none of those folders is there; `invalid_argv` when the program can't start, and the pane stays exited.
     ///
     ///Sends a `POST` request to `/v1/panes/{id}/respawn`
     ///

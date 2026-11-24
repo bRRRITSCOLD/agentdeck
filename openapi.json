@@ -595,7 +595,7 @@
             "type": "string"
           },
           "cwd": {
-            "description": "The working directory it was launched in.",
+            "description": "The working directory its process was launched in: by `POST /v1/panes`, or by its last `POST /v1/panes/{id}/respawn`. A respawn resumes its agent's session here, since the session started here (spec §4).",
             "type": "string"
           },
           "exit_code": {
@@ -605,7 +605,7 @@
             "type": "integer"
           },
           "folder": {
-            "description": "Its current folder (spec §6): the folder its shell last reported with OSC 7, else its process's working directory, else `cwd`, the folder it launched in, as the daemon last read them. Kept after it exits; a pane resumed after a restart starts there.",
+            "description": "Its current folder (spec §6): the folder its shell last reported with OSC 7, else its process's working directory, else `cwd`, the folder it launched in, as the daemon last read them. Kept after it exits; a pane resumed after a restart starts there, and so do Open shell and a fresh Restart agent (spec §4).",
             "type": "string"
           },
           "hosted_agent": {
@@ -1933,7 +1933,7 @@
     },
     "/v1/panes/{id}/respawn": {
       "post": {
-        "description": "its `cwd` (spec §4). `run: \"agent\"`, for an agent pane only (`unsupported_kind`), runs its agent again: claude and codex resume their session when it is known, else start fresh with a new session; an `other` agent runs its argv again. A resume that exits non-zero within 10 s, as one of a session the agent can no longer find does, is followed by a fresh start, once. `run: \"shell\"` turns the pane into a shell pane running `$SHELL`, with hosting on. The state starts over. `running` (409) while its process hasn't exited; `invalid_dir` when its `cwd` is gone; `invalid_argv` when the program can't start, and the pane stays exited.",
+        "description": "`run: \"agent\"`, for an agent pane only (`unsupported_kind`), runs its agent again: claude and codex resume their session when it is known, else start fresh with a new session; an `other` agent runs its argv again. A resume that exits non-zero within 10 s, as one of a session the agent can no longer find does, is followed by a fresh start, once. `run: \"shell\"` turns the pane into a shell pane running `$SHELL`, with hosting on (spec §4).\n\nA resume runs in the pane's `cwd`, the folder its session started in, which Claude Code and Codex need; once that folder is gone, the agent starts fresh instead. Anything else starts in the pane's last known folder, else its `cwd`, else `~`. The folder it starts in becomes its `cwd` and its `folder`, and the state starts over. `running` (409) while its process hasn't exited; `invalid_dir` when none of those folders is there; `invalid_argv` when the program can't start, and the pane stays exited.",
         "operationId": "pane_respawn",
         "parameters": [
           {
@@ -1974,7 +1974,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Starts an exited pane again in place, keeping its id, its place in the tab's layout and"
+        "summary": "Starts an exited pane again in place, keeping its id and its place in the layout."
       }
     },
     "/v1/panes/{id}/stop": {
