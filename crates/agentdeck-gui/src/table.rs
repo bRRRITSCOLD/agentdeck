@@ -143,7 +143,7 @@ pub fn spaced(item: AnyElement) -> AnyElement {
     div().pb(space::S0_5).child(item).into_any_element()
 }
 
-/// The fixed column widths of Penpot's `Columns` and `TaskRow` (`wide`): raw there too, as
+/// The fixed column widths of Penpot's `Columns` and `PrRow` (`wide`): raw there too, as
 /// no sizing token matches them. The title column takes what's left.
 pub struct Columns;
 
