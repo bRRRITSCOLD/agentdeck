@@ -1,7 +1,7 @@
 //! Panes: `/v1/panes` and `/v1/panes/{id}` (spec §4, §6).
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path as FsPath, PathBuf};
 
 use agentdeck_core::ws::Entity;
 use agentdeck_core::{Agent, AgentState, PaneId, PaneKind};
@@ -12,7 +12,7 @@ use dropshot::{
 };
 
 use super::{ApiContext, Authorized, IdPath, client_error};
-use crate::agents::restart::{Respawn, RestartError, Restarter};
+use crate::agents::restart::{self, Respawn, RestartError, Restarter};
 use crate::agents::{self, codex};
 use crate::db;
 use crate::model::{
@@ -202,14 +202,20 @@ pub(crate) async fn pane_get(
     Ok(HttpResponseOk(with_live_status(context, pane)))
 }
 
-/// Starts an exited pane again in place, keeping its id, its place in the tab's layout and
-/// its `cwd` (spec §4). `run: "agent"`, for an agent pane only
-/// (`unsupported_kind`), runs its agent again: claude and codex resume their session when it
-/// is known, else start fresh with a new session; an `other` agent runs its argv again.
-/// A resume that exits non-zero within 10 s, as one of a session the agent can no longer
-/// find does, is followed by a fresh start, once. `run: "shell"` turns the pane into a shell
-/// pane running `$SHELL`, with hosting on. The state starts over. `running` (409) while its process hasn't exited; `invalid_dir` when its
-/// `cwd` is gone; `invalid_argv` when the program can't start, and the pane stays exited.
+/// Starts an exited pane again in place, keeping its id and its place in the layout.
+///
+/// `run: "agent"`, for an agent pane only (`unsupported_kind`), runs its agent
+/// again: claude and codex resume their session when it is known, else start fresh with a new
+/// session; an `other` agent runs its argv again. A resume that exits non-zero within 10 s,
+/// as one of a session the agent can no longer find does, is followed by a fresh start, once.
+/// `run: "shell"` turns the pane into a shell pane running `$SHELL`, with hosting on (spec §4).
+///
+/// A resume runs in the pane's `cwd`, the folder its session started in, which Claude Code
+/// and Codex need; once that folder is gone, the agent starts fresh instead. Anything else
+/// starts in the pane's last known folder, else its `cwd`, else `~`. The folder it starts in
+/// becomes its `cwd` and its `folder`, and the state starts over. `running` (409) while its
+/// process hasn't exited; `invalid_dir` when none of those folders is there; `invalid_argv`
+/// when the program can't start, and the pane stays exited.
 #[endpoint { method = POST, path = "/v1/panes/{id}/respawn" }]
 pub(crate) async fn pane_respawn(
     rqctx: RequestContext<ApiContext>,
@@ -221,23 +227,19 @@ pub(crate) async fn pane_respawn(
     let id = path.into_inner().id;
     let run = body.into_inner().run;
     let row = context.db.call(move |c| db::panes::get(c, id)).await?;
-    let state = context
-        .terminals
-        .get(id)
-        .map_or(row.state, |live| live.status().state);
-    if state != AgentState::Exited {
+    let row = with_live_status(context, row);
+    if row.state != AgentState::Exited {
         return Err(client_error(
             ClientErrorStatusCode::CONFLICT,
             "running",
             format!("pane {id}'s process is still running"),
         ));
     }
-    let cwd = check_cwd(&row.cwd)?;
     let respawn = match (run, row.kind, row.agent) {
         (PaneRun::Shell, ..) => Respawn::Shell,
         (PaneRun::Agent, PaneKind::Agent, Some(agent)) => {
             match agents::resume_argv(Some(agent), row.session_id.as_deref()) {
-                Some(argv) => Respawn::Again(agent, argv),
+                Some(argv) => Respawn::Resume(agent, argv),
                 None if agent == Agent::Other => Respawn::Again(agent, row.argv.clone()),
                 None => Respawn::Fresh(agent),
             }
@@ -250,13 +252,33 @@ pub(crate) async fn pane_respawn(
             ));
         }
     };
+    let resume = matches!(respawn, Respawn::Resume(..));
+    let home = restart::home();
+    let (cwd, folder) = (FsPath::new(&row.cwd), FsPath::new(&row.folder));
+    let Some((respawn, start_in)) = restart::place(respawn, cwd, folder, home.as_deref()) else {
+        return Err(client_error(
+            ClientErrorStatusCode::BAD_REQUEST,
+            "invalid_dir",
+            format!(
+                "none of {}, {} and ~ is an existing directory",
+                row.folder, row.cwd
+            ),
+        ));
+    };
+    if resume && matches!(respawn, Respawn::Fresh(_)) {
+        tracing::info!(
+            "pane {id}'s session started in {}, which is gone: starting it afresh in {}",
+            row.cwd,
+            start_in.display()
+        );
+    }
     let restarter = Restarter {
         db: context.db.clone(),
         terminals: context.terminals.clone(),
         events: context.events.clone(),
     };
     let pane = restarter
-        .respawn(id, respawn, cwd)
+        .respawn(id, respawn, start_in)
         .await
         .map_err(|err| match err {
             RestartError::Db(err) => err.into(),

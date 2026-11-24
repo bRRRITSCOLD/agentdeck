@@ -472,11 +472,14 @@ pub struct Pane {
     /// The command as first launched. A resumed pane runs its
     /// agent's resume command, or a fresh shell, instead.
     pub argv: Vec<String>,
-    /// The working directory it was launched in.
+    /// The working directory its process was launched in: by `POST /v1/panes`, or by its last
+    /// `POST /v1/panes/{id}/respawn`. A respawn resumes its agent's session here, since the
+    /// session started here (spec §4).
     pub cwd: String,
     /// Its current folder (spec §6): the folder its shell last reported with OSC 7, else its
     /// process's working directory, else `cwd`, the folder it launched in, as the daemon last
-    /// read them. Kept after it exits; a pane resumed after a restart starts there.
+    /// read them. Kept after it exits; a pane resumed after a restart starts there, and so do
+    /// Open shell and a fresh Restart agent (spec §4).
     pub folder: String,
     /// The agent's session id: chosen at launch for `claude`, found after launch for `codex`
     /// (null until Codex has written its session file).

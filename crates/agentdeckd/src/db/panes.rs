@@ -242,7 +242,8 @@ pub fn become_shell(conn: &Connection, id: PaneId, argv: &[String]) -> Result<Pa
 }
 
 /// Starts pane `id`'s state over as it is spawned again in `folder` (spec §4): `unknown`, no
-/// exit code, no hosted agent, its last known folder `folder`. A fresh launch passes the
+/// exit code, no hosted agent, and `folder` both its launch folder (`cwd`), where a resume of
+/// the session it starts there runs, and its last known folder. A fresh launch passes the
 /// `argv` and `session_id` it starts with.
 pub fn respawned(
     conn: &Connection,
@@ -251,7 +252,8 @@ pub fn respawned(
     fresh: Option<(&[String], Option<&str>)>,
 ) -> Result<(), DbError> {
     conn.execute(
-        "UPDATE panes SET state = 'unknown', exit_code = NULL, hosted_agent = NULL, folder = ?2
+        "UPDATE panes SET state = 'unknown', exit_code = NULL, hosted_agent = NULL, cwd = ?2,
+                          folder = ?2
          WHERE id = ?1",
         params![id.to_string(), folder],
     )?;

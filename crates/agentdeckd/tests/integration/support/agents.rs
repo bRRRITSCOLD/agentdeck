@@ -1,6 +1,6 @@
 //! Stub `claude` and `codex` CLIs on the daemon's `PATH`, ahead of any real one, so no test
-//! ever runs a real agent. Each records what it was launched with (its argv) and what is
-//! typed into it under `<root>/agents/<pane id>/`.
+//! ever runs a real agent. Each records what it was launched with (its argv), the folder it
+//! started in and what is typed into it under `<root>/agents/<pane id>/`.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -9,7 +9,7 @@ use agentdeck_core::PaneId;
 
 use super::TestDaemon;
 
-/// Records its argv; then sets the idle title and reads what is typed as
+/// Records its folder and argv; then sets the idle title and reads what is typed as
 /// [`READ_LIKE_A_TUI`] does. It stays in the foreground (no `exec`), so the pane's foreground
 /// process is `claude` and the claude rules apply.
 ///
@@ -19,6 +19,7 @@ use super::TestDaemon;
 const STUB_CLAUDE: &str = r#"#!/bin/sh
 log="$(dirname "$0")/../agents/$AGENTDECK_PANE"
 mkdir -p "$log"
+pwd >> "$log/cwd"
 { for arg in "$@"; do printf '%s\0' "$arg"; done; printf '\036'; } >> "$log/argv"
 session=; previous=
 for arg in "$@"; do [ "$previous" = --resume ] && session=$arg; previous=$arg; done
@@ -30,7 +31,7 @@ stty raw -echo
 printf '\033[?2004h\033]0;\342\234\263 Claude Code\007> '
 "#;
 
-/// Records its argv; unless resuming (a `resume` argument), writes a
+/// Records its folder and argv; unless resuming (a `resume` argument), writes a
 /// session file as Codex does, under `$CODEX_HOME/sessions` (default `$HOME/.codex/sessions`),
 /// and records the id in `session`; then reads what is typed as [`READ_LIKE_A_TUI`] does.
 ///
@@ -40,6 +41,7 @@ printf '\033[?2004h\033]0;\342\234\263 Claude Code\007> '
 const STUB_CODEX: &str = r#"#!/bin/sh
 log="$(dirname "$0")/../agents/$AGENTDECK_PANE"
 mkdir -p "$log"
+pwd >> "$log/cwd"
 { for arg in "$@"; do printf '%s\0' "$arg"; done; printf '\036'; } >> "$log/argv"
 resuming=; session=; previous=
 for arg in "$@"; do
@@ -114,6 +116,13 @@ fn argv_records(text: &str) -> Vec<Vec<String>> {
         .split_terminator('\u{1e}')
         .map(|record| record.split_terminator('\0').map(str::to_owned).collect())
         .collect()
+}
+
+/// The folder the pane's stub agent started in at each launch, oldest first. Each stub
+/// records it before its argv, so it is there for every launch [`launches`] returns.
+pub fn launch_folders(daemon: &TestDaemon, pane: PaneId) -> Vec<PathBuf> {
+    let text = std::fs::read_to_string(log(daemon, pane).join("cwd")).unwrap_or_default();
+    text.lines().map(PathBuf::from).collect()
 }
 
 /// Every prompt the pane's stub agent submitted, each ended by `\n`.

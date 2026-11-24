@@ -1,11 +1,12 @@
 //! Starting an exited pane's process again in place (spec §4, §6): its agent's session
-//! resumed, its agent afresh with a new session, or a shell. A Claude Code
+//! resumed, its agent afresh with a new session, or a shell, and where each starts
+//! ([`place`]). A Claude Code
 //! or Codex resume, by `POST /v1/panes/{id}/respawn` or after a restart, that exits non-zero
 //! within [`FAILED_RESUME_WITHIN`] is taken for a session the agent can no longer find, and
 //! the agent starts afresh, once (#237).
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agentdeck_core::ws::{Entity, ServerMessage};
@@ -28,14 +29,59 @@ use crate::terminal::pane::{Launch, SpawnError};
 pub const FAILED_RESUME_WITHIN: Duration = Duration::from_secs(10);
 
 /// What a respawn runs in a pane, decided from its row.
+#[derive(Debug, PartialEq, Eq)]
 pub enum Respawn {
-    /// Its agent's resume command on its session, or an `other` agent's argv: the row's
-    /// `argv` and `session_id` stay.
+    /// Claude Code's or Codex's resume command on its session: the row's `argv` and
+    /// `session_id` stay.
+    Resume(Agent, Vec<String>),
+    /// An `other` agent's argv, run again: the row's `argv` stays.
     Again(Agent, Vec<String>),
     /// Claude Code or Codex with no known session: a fresh launch, as a new pane's.
     Fresh(Agent),
     /// A shell, which the pane becomes.
     Shell,
+}
+
+/// Where a respawn of a pane launched in `launched_in` (its `cwd`), whose last known folder
+/// is `folder`, starts, and what it runs there (spec §4):
+/// - a resume runs where its session started, `launched_in`: Claude Code finds a session by
+///   the folder it started in, and Codex, which finds one anywhere, asks which folder to
+///   work in when it isn't the one the session recorded. Once `launched_in` is gone, the
+///   session can't be resumed there, so the agent starts afresh where a fresh start does;
+/// - anything else (a fresh start, an `other` agent again, a shell) starts in `folder`, else
+///   `launched_in`, else `home`.
+///
+/// `None` when none of them is an existing directory.
+pub fn place(
+    respawn: Respawn,
+    launched_in: &Path,
+    folder: &Path,
+    home: Option<&Path>,
+) -> Option<(Respawn, PathBuf)> {
+    let elsewhere = || existing_dir([Some(folder), Some(launched_in), home]);
+    match respawn {
+        Respawn::Resume(agent, argv) => match existing_dir([Some(launched_in)]) {
+            Some(dir) => Some((Respawn::Resume(agent, argv), dir)),
+            None => Some((Respawn::Fresh(agent), elsewhere()?)),
+        },
+        respawn => Some((respawn, elsewhere()?)),
+    }
+}
+
+/// The first of `folders` that is an existing absolute directory.
+pub fn existing_dir<'a>(folders: impl IntoIterator<Item = Option<&'a Path>>) -> Option<PathBuf> {
+    folders
+        .into_iter()
+        .flatten()
+        .find(|dir| dir.is_absolute() && dir.is_dir())
+        .map(Path::to_path_buf)
+}
+
+/// The daemon's `$HOME`, which a pane's environment passes on too.
+pub fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
 }
 
 /// Why a pane couldn't start again.
@@ -74,19 +120,21 @@ pub struct Restarter {
 }
 
 impl Restarter {
-    /// Runs `respawn` in exited pane `id`, in `cwd`, and returns its row as it is now. Its
-    /// state starts over; `changed` goes out for it. A resume that fails at once is followed
-    /// by a fresh start ([`Restarter::fall_back_if_resume_fails`]).
+    /// Runs `respawn` in exited pane `id`, in `cwd` ([`place`]), and returns its row as it is
+    /// now. `cwd` becomes its `cwd` and its `folder`, and its state starts over; `changed`
+    /// goes out for it. A resume that fails at once is followed by a fresh start
+    /// ([`Restarter::fall_back_if_resume_fails`]).
     pub async fn respawn(
         &self,
         id: PaneId,
         respawn: Respawn,
         cwd: PathBuf,
     ) -> Result<Pane, RestartError> {
-        let (agent, argv) = match respawn {
+        let (agent, argv, resumed) = match respawn {
             Respawn::Fresh(agent) => return self.fresh(id, agent, cwd).await,
-            Respawn::Shell => (None, vec![default_shell()]),
-            Respawn::Again(agent, argv) => (Some(agent), argv),
+            Respawn::Shell => (None, vec![default_shell()], None),
+            Respawn::Resume(agent, argv) => (Some(agent), argv, Some(agent)),
+            Respawn::Again(agent, argv) => (Some(agent), argv, None),
         };
         let shell = agent.is_none().then(|| argv.clone());
         let folder = cwd.to_string_lossy().into_owned();
@@ -100,8 +148,6 @@ impl Restarter {
                 Ok((db::panes::get(c, id)?, db::panes::workspace_of(c, id)?))
             })
             .await?;
-        // `Again` for Claude Code or Codex is always a resume of its session.
-        let resumed = agent.filter(|agent| *agent != Agent::Other);
         let feed = self.events.subscribe();
         self.start(&pane, workspace, agent, argv, cwd.clone(), false)
             .await?;
@@ -234,6 +280,141 @@ impl Restarter {
                 }
                 Err(RecvError::Closed) => return None,
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod place {
+        use super::*;
+
+        /// A launch folder, a last known folder and a home, each a real dir.
+        struct Dirs {
+            launched_in: tempfile::TempDir,
+            folder: tempfile::TempDir,
+            home: tempfile::TempDir,
+        }
+
+        impl Dirs {
+            fn new() -> Dirs {
+                let dir = || tempfile::tempdir().expect("a temp dir");
+                Dirs {
+                    launched_in: dir(),
+                    folder: dir(),
+                    home: dir(),
+                }
+            }
+
+            fn place(&self, respawn: Respawn) -> Option<(Respawn, PathBuf)> {
+                place(
+                    respawn,
+                    self.launched_in.path(),
+                    self.folder.path(),
+                    Some(self.home.path()),
+                )
+            }
+        }
+
+        fn resume() -> Respawn {
+            Respawn::Resume(Agent::Claude, vec!["claude".into(), "--resume".into()])
+        }
+
+        #[test]
+        fn should_resume_in_the_launch_folder_not_the_last_known_one() {
+            let dirs = Dirs::new();
+
+            let placed = dirs.place(resume());
+
+            assert_eq!(placed, Some((resume(), dirs.launched_in.path().into())));
+        }
+
+        #[test]
+        fn should_start_afresh_in_the_last_known_folder_once_the_launch_folder_is_gone() {
+            let dirs = Dirs::new();
+            let gone = dirs.launched_in.path().join("gone");
+
+            let placed = place(resume(), &gone, dirs.folder.path(), Some(dirs.home.path()));
+
+            assert_eq!(
+                placed,
+                Some((Respawn::Fresh(Agent::Claude), dirs.folder.path().into()))
+            );
+        }
+
+        #[test]
+        fn should_start_a_shell_in_the_last_known_folder() {
+            let dirs = Dirs::new();
+
+            let placed = dirs.place(Respawn::Shell);
+
+            assert_eq!(placed, Some((Respawn::Shell, dirs.folder.path().into())));
+        }
+
+        #[test]
+        fn should_start_afresh_in_the_last_known_folder() {
+            let dirs = Dirs::new();
+
+            let placed = dirs.place(Respawn::Fresh(Agent::Codex));
+
+            assert_eq!(
+                placed,
+                Some((Respawn::Fresh(Agent::Codex), dirs.folder.path().into()))
+            );
+        }
+
+        #[test]
+        fn should_fall_back_to_the_launch_folder_once_the_last_known_one_is_gone() {
+            let dirs = Dirs::new();
+            let gone = dirs.folder.path().join("gone");
+
+            let placed = place(
+                Respawn::Shell,
+                dirs.launched_in.path(),
+                &gone,
+                Some(dirs.home.path()),
+            );
+
+            assert_eq!(
+                placed,
+                Some((Respawn::Shell, dirs.launched_in.path().into()))
+            );
+        }
+
+        #[test]
+        fn should_fall_back_to_home_once_both_are_gone() {
+            let dirs = Dirs::new();
+            let gone = dirs.home.path().join("gone");
+
+            let placed = place(Respawn::Shell, &gone, &gone, Some(dirs.home.path()));
+
+            assert_eq!(placed, Some((Respawn::Shell, dirs.home.path().into())));
+        }
+
+        #[test]
+        fn should_be_none_once_every_folder_is_gone() {
+            let gone = Path::new("/no/such/dir");
+
+            assert_eq!(place(resume(), gone, gone, None), None);
+        }
+
+        #[test]
+        fn should_skip_a_relative_folder() {
+            let dirs = Dirs::new();
+
+            let placed = place(
+                Respawn::Shell,
+                dirs.launched_in.path(),
+                Path::new("."),
+                None,
+            );
+
+            assert_eq!(
+                placed,
+                Some((Respawn::Shell, dirs.launched_in.path().into()))
+            );
         }
     }
 }
