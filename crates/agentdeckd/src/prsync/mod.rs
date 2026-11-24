@@ -33,18 +33,25 @@
 //! A stored PR GitHub doesn't show to the token, fetched by number, is marked unreachable: it
 //! keeps its state, and the next full sync fetches it again.
 //!
+//! A full sync also reads Repositories by GitHub's id (REST `GET /repositories/{id}`, as
+//! GraphQL has no lookup by that id): each one with a PR that a fetch by its last known name
+//! didn't find, so a rename whose old name another Repository took is followed, and every
+//! linked one no PR showed, so a Link follows a rename too. One GitHub doesn't show is marked
+//! Unreachable, keeping its Links; GitHub showing it again, by id or with a PR, clears that.
+//!
 //! One sync runs at a time: the timer and `POST /v1/prs/sync` queue behind each other.
 //! Closing PRs (`POST /v1/prs/close`) queues behind them too, so a sync that read a PR as
 //! open before the close never stores it open again after.
 
 pub mod github;
 
+use std::collections::BTreeSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use agentdeck_core::ws::Entity;
-use agentdeck_core::{ChecksState, PrRef, PrState, ReviewState, Yours};
+use agentdeck_core::{ChecksState, PrRef, PrState, RepositoryId, ReviewState, Yours};
 use chrono::{DateTime, SecondsFormat, Utc};
 use tokio::time::MissedTickBehavior;
 
@@ -548,9 +555,10 @@ impl PrSync {
     ///    whole: new ones, ones GitHub updated since they were stored, and [`unsettled`] ones.
     ///
     /// Then the PRs stored as open that no list or search showed are fetched by number, so a
-    /// merge, a close or a PR no longer yours is seen; one GitHub doesn't show to the token is
-    /// marked unreachable, keeping its state. One last updated before `cutoff` isn't fetched:
-    /// it is Finished, unless it is unreachable.
+    /// merge, a close or a PR no longer yours is seen ([`PrSync::fetch_left`]); one GitHub
+    /// doesn't show to the token is marked unreachable, keeping its state. One last updated
+    /// before `cutoff` isn't fetched: it is Finished, unless it is unreachable. Last, every
+    /// linked Repository GitHub showed nothing of is read by id ([`PrSync::read_linked`]).
     async fn read_full(&self, token: &str, cutoff: Option<DateTime<Utc>>) -> Result<(), SyncError> {
         let github = &self.inner.github;
         let stored = self
@@ -627,8 +635,108 @@ impl PrSync {
             .partition(|pr| older_than(&pr.updated_at, cutoff));
         self.finish_aged(aged.iter().map(RemotePr::key).collect())
             .await?;
-        let left = self.fetch(token, &left).await?;
-        self.store(left.found, left.missing).await
+        // The Repositories GitHub showed this sync, with a PR in the list or a search (the
+        // details fetched are theirs), then with a PR fetched or by id.
+        let mut read: BTreeSet<RepositoryId> =
+            (tally.seen.iter()).map(|pr| pr.repository).collect();
+        let left = self.fetch_left(token, &left, &mut read).await?;
+        self.store(left.found, left.missing).await?;
+        self.read_linked(token, &read).await
+    }
+
+    /// Fetches `left`, stored open PRs that no list or search showed, by number under the
+    /// name each one's Repository last went by. Then reads by GitHub's id each Repository
+    /// that GitHub showed no PR of, here or in `read`, and that has a PR it didn't show as
+    /// asked (none, or another Repository's: its name was taken after a rename agentdeck
+    /// hadn't seen). One GitHub shows under a new name is stored so, and those PRs are fetched
+    /// again under it; one it doesn't show is marked Unreachable, and they are missing. Adds
+    /// every Repository GitHub showed to `read`.
+    async fn fetch_left(
+        &self,
+        token: &str,
+        left: &[RemotePr],
+        read: &mut BTreeSet<RepositoryId>,
+    ) -> Result<Fetched, SyncError> {
+        let mut fetched = self.fetch(token, left).await?;
+        read.extend(fetched.found.iter().map(|pr| pr.repository.id));
+        let unread: BTreeSet<RepositoryId> = (fetched.missing.iter())
+            .map(|pr| pr.repository)
+            .filter(|id| !read.contains(id))
+            .collect();
+        if unread.is_empty() {
+            return Ok(fetched);
+        }
+        let now = self.read_by_id(token, unread, read).await?;
+        let again: Vec<RemotePr> = (left.iter())
+            .filter(|pr| fetched.missing.contains(&pr.key()))
+            .filter_map(|pr| {
+                let now = now.iter().find(|r| r.id == pr.repository.id)?;
+                let renamed = !(now.name.to_string())
+                    .eq_ignore_ascii_case(&pr.repository.name.to_string());
+                renamed.then(|| RemotePr {
+                    repository: now.clone(),
+                    ..pr.clone()
+                })
+            })
+            .collect();
+        if again.is_empty() {
+            return Ok(fetched);
+        }
+        let refetched = self.fetch(token, &again).await?;
+        fetched
+            .missing
+            .retain(|key| !again.iter().any(|pr| pr.key() == *key));
+        fetched.found.extend(refetched.found);
+        fetched.missing.extend(refetched.missing);
+        Ok(fetched)
+    }
+
+    /// Reads by GitHub's id every Repository a Workspace links that this full sync didn't
+    /// find in `read`, so a linked Repository with no PR GitHub showed still follows a rename,
+    /// a lost access (Unreachable, its Links kept) and a regained one (spec §8).
+    async fn read_linked(&self, token: &str, read: &BTreeSet<RepositoryId>) -> Result<(), SyncError> {
+        let linked = (self.inner.db)
+            .call(|conn| db::repositories::linked(conn))
+            .await?;
+        let unread: BTreeSet<RepositoryId> = (linked.into_iter())
+            .filter(|id| !read.contains(id))
+            .collect();
+        if !unread.is_empty() {
+            self.read_by_id(token, unread, &mut BTreeSet::new()).await?;
+        }
+        Ok(())
+    }
+
+    /// Reads each of `ids` by GitHub's id and stores what GitHub says: its name, URL, private
+    /// and archived now, or, for one it doesn't show, the Unreachable mark; tells clients which
+    /// changed. Adds those GitHub showed to `read`, and returns them.
+    async fn read_by_id(
+        &self,
+        token: &str,
+        ids: BTreeSet<RepositoryId>,
+        read: &mut BTreeSet<RepositoryId>,
+    ) -> Result<Vec<github::RemoteRepository>, SyncError> {
+        let ids: Vec<RepositoryId> = ids.into_iter().collect();
+        let answers = self.inner.github.repositories_by_id(token, &ids).await?;
+        let mut found = Vec::new();
+        let mut unreachable = Vec::new();
+        for (id, answer) in ids.into_iter().zip(answers) {
+            match answer {
+                Some(repository) => {
+                    read.insert(id);
+                    found.push(repository);
+                }
+                None => unreachable.push(id),
+            }
+        }
+        let stored = found.clone();
+        let changed = (self.inner.db)
+            .call(move |conn| db::repositories::refresh(conn, &stored, &unreachable))
+            .await?;
+        for repository in changed {
+            self.inner.events.changed(Entity::Repository, repository);
+        }
+        Ok(found)
     }
 
     /// An incremental read: a search for each way a PR is yours ([`Whose`]) for the PRs

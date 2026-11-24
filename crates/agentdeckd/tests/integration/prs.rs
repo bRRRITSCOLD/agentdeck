@@ -2717,3 +2717,248 @@ mod yours {
         }
     }
 }
+
+/// Repositories read by GitHub's id (spec §8): at each full sync, every linked Repository no
+/// PR showed, so a rename, lost access (Unreachable) or regained access shows without a PR to
+/// carry it; and the Repository of a PR that left the list and that a fetch by its last known
+/// name didn't find, so a renamed Repository's PR is fetched under its name now.
+mod repositories_by_id {
+    use super::*;
+    use crate::support::github::{
+        RestRepo, mock_rest_repo, mock_rest_repo_by_id, mock_rest_repo_by_id_missing,
+    };
+    use agentdeck_client::types::RepositoryLinks;
+    use agentdeck_core::WorkspaceId;
+
+    const WIDGETS: &str = "acme/widgets";
+
+    /// GitHub's id for `acme/widgets`, which keeps it through a rename.
+    fn widgets_id() -> u64 {
+        repository_id(WIDGETS)
+    }
+
+    /// `acme/widgets` as GitHub shows it by id once renamed to `name`.
+    fn widgets_named(name: &'static str) -> RestRepo {
+        RestRepo {
+            id: widgets_id(),
+            ..RestRepo::new(name)
+        }
+    }
+
+    /// A daemon whose every sync is full, on a GitHub showing no PR, with a Workspace `web`
+    /// linking `acme/widgets`, which has none.
+    async fn linked(github: &MockServer) -> (TestDaemon, WorkspaceId) {
+        mock_search(github, TOKEN, &[]);
+        let daemon = full_daemon(github, Some(TOKEN)).await;
+        let web = link(&daemon.client, github).await;
+        (daemon, web)
+    }
+
+    /// Creates Workspace `web` and links it to `acme/widgets`, which GitHub finds by name.
+    async fn link(client: &Client, github: &MockServer) -> WorkspaceId {
+        let mut lookup = mock_rest_repo(github, TOKEN, WIDGETS, RestRepo::new(WIDGETS));
+        let web = (client.workspace_create())
+            .body(NewWorkspace {
+                name: "web".into(),
+                link: Vec::new(),
+            })
+            .send()
+            .await
+            .expect("create a workspace")
+            .into_inner();
+        let response = (client.link_create())
+            .id(web.id)
+            .body(NewLink::named(WIDGETS.parse().expect("a Repository")))
+            .send()
+            .await
+            .expect("link");
+        assert_eq!(response.status().as_u16(), 200);
+        lookup.delete();
+        web.id
+    }
+
+    /// Every Repository agentdeck keeps, as `GET /v1/repositories` lists them.
+    async fn repositories(client: &Client) -> Vec<RepositoryLinks> {
+        let response = client.repository_list().send().await;
+        response.expect("list Repositories").into_inner()
+    }
+
+    /// `repo`, as `GET /v1/repositories` lists it, linked by `web`.
+    fn listed(repo: RestRepo, unreachable: bool, web: WorkspaceId) -> RepositoryLinks {
+        RepositoryLinks {
+            id: RepositoryId::from(repo.id),
+            name: repo.name.parse().unwrap(),
+            url: repo.url(),
+            private: repo.private,
+            archived: false,
+            unreachable,
+            workspaces: vec![web],
+        }
+    }
+
+    #[tokio::test]
+    async fn should_follow_a_rename_of_a_linked_repository_with_no_prs_and_keep_its_link_200() {
+        let github = MockServer::start_async().await;
+        let (daemon, web) = linked(&github).await;
+        mock_rest_repo_by_id(&github, TOKEN, widgets_id(), widgets_named("acme/gizmos"));
+
+        let status = sync(&daemon.client).await;
+
+        assert_eq!(status.last_error, None);
+        assert_eq!(
+            repositories(&daemon.client).await,
+            [listed(widgets_named("acme/gizmos"), false, web)]
+        );
+    }
+
+    #[tokio::test]
+    async fn should_mark_a_linked_repository_github_no_longer_shows_unreachable_and_keep_its_link_200()
+     {
+        let github = MockServer::start_async().await;
+        let (daemon, web) = linked(&github).await;
+        mock_rest_repo_by_id_missing(&github, widgets_id());
+
+        let status = sync(&daemon.client).await;
+
+        assert_eq!(status.last_error, None);
+        assert_eq!(
+            repositories(&daemon.client).await,
+            [listed(RestRepo::new(WIDGETS), true, web)]
+        );
+    }
+
+    #[tokio::test]
+    async fn should_clear_the_mark_once_github_shows_it_again_200() {
+        let github = MockServer::start_async().await;
+        let (daemon, web) = linked(&github).await;
+        let mut missing = mock_rest_repo_by_id_missing(&github, widgets_id());
+        sync(&daemon.client).await;
+        assert!(repositories(&daemon.client).await[0].unreachable);
+
+        missing.delete();
+        mock_rest_repo_by_id(&github, TOKEN, widgets_id(), RestRepo::new(WIDGETS));
+        sync(&daemon.client).await;
+
+        assert_eq!(
+            repositories(&daemon.client).await,
+            [listed(RestRepo::new(WIDGETS), false, web)]
+        );
+    }
+
+    #[tokio::test]
+    async fn should_tell_websocket_clients_a_repository_became_unreachable_200() {
+        let github = MockServer::start_async().await;
+        let (daemon, _web) = linked(&github).await;
+        let mut ws = Ws::connect(&daemon).await;
+        mock_rest_repo_by_id_missing(&github, widgets_id());
+
+        sync(&daemon.client).await;
+
+        let changed = ws
+            .until(|frame| match frame {
+                Frame::Message(ServerMessage::Changed {
+                    entity: Entity::Repository,
+                    id,
+                }) => Some(id),
+                _ => None,
+            })
+            .await;
+        assert_eq!(changed, widgets_id().to_string());
+    }
+
+    #[tokio::test]
+    async fn should_not_read_a_repository_by_id_while_github_shows_it_with_a_pr_200() {
+        let github = MockServer::start_async().await;
+        let mut listing = mock_search(&github, TOKEN, &[Pr::open(7)]);
+        let daemon = full_daemon(&github, Some(TOKEN)).await;
+        sync(&daemon.client).await;
+        link(&daemon.client, &github).await;
+        let by_id = mock_rest_repo_by_id(&github, TOKEN, widgets_id(), RestRepo::new(WIDGETS));
+        // Listed, then merged and fetched by number: both show its Repository.
+        sync(&daemon.client).await;
+        listing.delete();
+        mock_search(&github, TOKEN, &[]);
+        mock_fetch(
+            &github,
+            &[Pr {
+                state: "MERGED",
+                ..Pr::open(7)
+            }],
+        );
+
+        sync(&daemon.client).await;
+
+        by_id.assert_calls(0);
+    }
+
+    #[tokio::test]
+    async fn should_mark_the_repository_of_a_pr_github_no_longer_shows_unreachable_with_it_200() {
+        let github = MockServer::start_async().await;
+        let mut listing = mock_search(&github, TOKEN, &[Pr::open(7)]);
+        let daemon = full_daemon(&github, Some(TOKEN)).await;
+        sync(&daemon.client).await;
+
+        listing.delete();
+        mock_search(&github, TOKEN, &[]);
+        mock_hidden(&github, TOKEN, &Pr::open(7));
+        mock_rest_repo_by_id_missing(&github, widgets_id());
+        sync(&daemon.client).await;
+
+        let pr = pr_numbered(&daemon.client, 7).await;
+        assert!(pr.unreachable);
+        assert_eq!(pr.state, PrState::Open);
+        let repositories = repositories(&daemon.client).await;
+        assert_eq!(names_and_marks(&repositories), [(WIDGETS.to_owned(), true)]);
+    }
+
+    /// Each Repository's name and whether it is Unreachable.
+    fn names_and_marks(repositories: &[RepositoryLinks]) -> Vec<(String, bool)> {
+        (repositories.iter())
+            .map(|r| (r.name.to_string(), r.unreachable))
+            .collect()
+    }
+
+    /// #390: `acme/widgets` renamed to `acme/gizmos`, another Repository then created as
+    /// `acme/widgets` with a PR 7 of its own, and the renamed one's PR 7 merged before any
+    /// sync saw the rename. Fetched by its last known name, GitHub answers with the newcomer's
+    /// PR; read by id, its Repository's name now finds it.
+    #[tokio::test]
+    async fn should_fetch_a_pr_under_its_repositorys_name_now_when_another_took_the_old_one_200()
+    {
+        let github = MockServer::start_async().await;
+        let mut listing = mock_search(&github, TOKEN, &[Pr::open(7)]);
+        let daemon = full_daemon(&github, Some(TOKEN)).await;
+        sync(&daemon.client).await;
+        let newcomer = Pr {
+            repo_id: Some(repository_id("acme/widgets, the second")),
+            title: "Start over",
+            ..Pr::open(7)
+        };
+        let merged = Pr {
+            repo: "acme/gizmos",
+            repo_id: Some(widgets_id()),
+            state: "MERGED",
+            ..Pr::open(7)
+        };
+
+        listing.delete();
+        mock_search(&github, TOKEN, &[]);
+        mock_fetch(&github, &[newcomer]);
+        mock_rest_repo_by_id(&github, TOKEN, widgets_id(), widgets_named("acme/gizmos"));
+        mock_fetch(&github, &[merged]);
+        let status = sync(&daemon.client).await;
+
+        assert_eq!(status.last_error, None);
+        let prs = kept_prs(&daemon.client).await;
+        assert_eq!(prs.len(), 1, "{prs:?}");
+        assert_eq!(prs[0].reference.to_string(), "acme/gizmos#7");
+        assert_eq!(prs[0].repository.id, RepositoryId::from(widgets_id()));
+        assert_eq!(prs[0].state, PrState::Merged);
+        assert!(prs[0].finished);
+        assert!(!prs[0].unreachable);
+        assert_eq!(
+            names_and_marks(&repositories(&daemon.client).await),
+            [("acme/gizmos".to_owned(), false)]
+        );
+    }
+}
