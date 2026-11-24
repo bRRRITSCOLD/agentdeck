@@ -27,8 +27,8 @@
 //! underlined and the pointer is a pointing hand.
 //!
 //! File paths are links too (spec §11): `src/main.rs:42:7` in the text, resolved against the
-//! directory the shell last reported with OSC 7, else the pane's launch dir, and a `file://`
-//! OSC 8 link for this host. Only an existing regular file is one; a click runs
+//! directory the shell last reported with OSC 7, else the pane's current folder as the daemon
+//! last read it ([`TerminalView::set_folder`]), and a `file://` OSC 8 link for this host. Only an existing regular file is one; a click runs
 //! `terminal.file_opener` on it ([`open`]), and a failure toasts. A URL wins over a path.
 
 use std::ops::{Range, RangeInclusive};
@@ -116,9 +116,9 @@ pub enum TerminalEvent {
 /// A pane's terminal.
 pub struct TerminalView {
     pane: PaneId,
-    /// The pane's launch dir, which relative paths resolve against until the shell reports
-    /// its own with OSC 7.
-    cwd: PathBuf,
+    /// The pane's current folder as the daemon last read it (its `folder`): what relative
+    /// paths resolve against while the shell reports none with OSC 7.
+    folder: PathBuf,
     channel: Channel,
     sender: ws::Sender,
     attachment: Attachment,
@@ -140,10 +140,11 @@ pub struct TerminalView {
 }
 
 impl TerminalView {
-    /// Attaches `pane`, launched in `cwd`, over `connection`'s socket, through `sender`.
+    /// Attaches `pane`, whose current folder is `folder`, over `connection`'s socket, through
+    /// `sender`.
     pub fn new(
         pane: PaneId,
-        cwd: PathBuf,
+        folder: PathBuf,
         connection: &Entity<Connection>,
         sender: ws::Sender,
         window: &mut Window,
@@ -158,7 +159,7 @@ impl TerminalView {
         let focus = cx.focus_handle();
         let view = TerminalView {
             pane,
-            cwd,
+            folder,
             channel,
             sender,
             attachment: Attachment::Attaching,
@@ -174,6 +175,22 @@ impl TerminalView {
         };
         view.attach();
         view
+    }
+
+    /// Takes the pane's current folder from a fresh read of the pane.
+    pub fn set_folder(&mut self, folder: PathBuf) {
+        self.folder = folder;
+    }
+
+    /// The folder a relative path resolves against (spec §11): the one the shell last reported
+    /// with OSC 7, else the pane's current folder as the daemon last read it.
+    pub fn paths_dir(&self) -> PathBuf {
+        let reported = match &self.attachment {
+            Attachment::Live(screen) => screen.reported_cwd(),
+            _ => None,
+        };
+        (reported.and_then(|uri| path::file_uri(uri, path::this_host())))
+            .unwrap_or_else(|| self.folder.clone())
     }
 
     fn attach(&self) {
@@ -474,11 +491,7 @@ impl TerminalView {
             });
         }
         let found = screen.path_at(at)?;
-        let cwd = screen
-            .reported_cwd()
-            .and_then(|uri| path::file_uri(uri, host))
-            .unwrap_or_else(|| self.cwd.clone());
-        let file = path::resolve(&found.path.path, &cwd, path::home().as_deref())?;
+        let file = path::resolve(&found.path.path, &self.paths_dir(), path::home().as_deref())?;
         path::is_file(&file).then_some(Hovered {
             target: Target::File {
                 path: file,
@@ -2415,6 +2428,47 @@ mod tests {
 
                 ctrl_click(&harness, 0, 2, cx);
                 ctrl_click(&harness, 0, 12, cx);
+
+                assert_eq!(
+                    harness.started(),
+                    [["xdg-open".to_owned(), file.display().to_string()]]
+                );
+            }
+
+            #[gpui::test]
+            fn should_resolve_against_the_panes_folder_without_osc_7(cx: &mut TestAppContext) {
+                let (harness, cx) = showing("notes.txt", cx);
+                let moved_to = tempfile::tempdir().unwrap();
+                let file = touch(moved_to.path(), "notes.txt");
+                touch(harness.cwd.path(), "notes.txt");
+                // The daemon read the shell's folder from /proc after a `cd`.
+                let view = harness.view(cx);
+                view.update(cx, |view, _| view.set_folder(moved_to.path().into()));
+
+                ctrl_click(&harness, 0, 2, cx);
+
+                assert_eq!(
+                    harness.started(),
+                    [["xdg-open".to_owned(), file.display().to_string()]]
+                );
+            }
+
+            #[gpui::test]
+            fn should_prefer_the_dir_the_shell_reported_to_the_panes_folder(
+                cx: &mut TestAppContext,
+            ) {
+                let (harness, cx) = showing("", cx);
+                let reported = tempfile::tempdir().unwrap();
+                let file = touch(reported.path(), "notes.txt");
+                let read = tempfile::tempdir().unwrap();
+                touch(read.path(), "notes.txt");
+                let view = harness.view(cx);
+                view.update(cx, |view, _| view.set_folder(read.path().into()));
+                let text = format!("\x1b]7;file://{}\x1b\\notes.txt", reported.path().display());
+                harness.deliver(Event::Output(1, text.into_bytes()), cx);
+                harness.draw(cx);
+
+                ctrl_click(&harness, 0, 2, cx);
 
                 assert_eq!(
                     harness.started(),
