@@ -32,7 +32,6 @@ use gpui::{
     px,
 };
 use gpui_base::DialogHandle;
-use gpui_base::actions::Confirm;
 
 use crate::api::Api;
 use crate::notice::Notice;
@@ -560,62 +559,63 @@ impl<K: Key> Render for ClosePrs<K> {
         let targets = (self.asking.as_ref()).map_or(&[][..], |asking| asking.targets());
         let n = targets.len();
         let id = self.id;
-        // Enter, and the Close button, dispatch the dialog's `Confirm`; it is caught on its
-        // way down to the dialog, which then closes, so both close the PRs once.
-        div()
-            .capture_action(cx.listener(|this, _: &Confirm, window, cx| this.confirm(window, cx)))
-            .child(
-                AlertDialog::new(SharedString::from(format!("{id}-close-prs")))
-                    .handle(self.dialog.clone())
-                    .content(
-                        AlertDialogContent::new()
-                            .header(
-                                AlertDialogHeader::new()
-                                    .title(AlertDialogTitle::new(format!(
-                                        "Close {} on GitHub?",
-                                        prs(n)
-                                    )))
-                                    .description(AlertDialogDescription::new(
-                                        "Their repos' owners will see them closed. You can \
+        // core-gpui runs the action's `on_click` on every confirm: the Close button, Enter on
+        // it, or Enter on the dialog, each closing the PRs once.
+        div().child(
+            AlertDialog::new(SharedString::from(format!("{id}-close-prs")))
+                .handle(self.dialog.clone())
+                .content(
+                    AlertDialogContent::new()
+                        .header(
+                            AlertDialogHeader::new()
+                                .title(AlertDialogTitle::new(format!(
+                                    "Close {} on GitHub?",
+                                    prs(n)
+                                )))
+                                .description(AlertDialogDescription::new(
+                                    "Their repos' owners will see them closed. You can \
                                          reopen a PR on GitHub.",
-                                    )),
-                            )
-                            // core-gpui's content has no body part, so the list leads the
-                            // footer's column, `space.6` above the buttons, as Penpot places
-                            // it between the header and the footer.
-                            .footer(
-                                AlertDialogFooter::new()
-                                    .flex_col()
-                                    .gap(space::S6)
-                                    .child(self.repo_list(targets, cx))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .justify_end()
-                                            .gap(space::S2)
-                                            .child(AlertDialogCancel::new(
-                                                SharedString::from(format!("{id}-close-cancel")),
-                                                "Cancel",
-                                            ))
-                                            .child(
-                                                div()
-                                                    .debug_selector(move || {
-                                                        format!("{id} close confirm")
-                                                    })
-                                                    .child(
-                                                        AlertDialogAction::new(
-                                                            SharedString::from(format!(
-                                                                "{id}-close-confirm"
-                                                            )),
-                                                            format!("Close {}", prs(n)),
-                                                        )
-                                                        .variant(ButtonVariant::Destructive),
-                                                    ),
-                                            ),
-                                    ),
-                            ),
-                    ),
-            )
+                                )),
+                        )
+                        // core-gpui's content has no body part, so the list leads the
+                        // footer's column, `space.6` above the buttons, as Penpot places
+                        // it between the header and the footer.
+                        .footer(
+                            AlertDialogFooter::new()
+                                .flex_col()
+                                .gap(space::S6)
+                                .child(self.repo_list(targets, cx))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .justify_end()
+                                        .gap(space::S2)
+                                        .child(AlertDialogCancel::new(
+                                            SharedString::from(format!("{id}-close-cancel")),
+                                            "Cancel",
+                                        ))
+                                        .child(
+                                            div()
+                                                .debug_selector(move || {
+                                                    format!("{id} close confirm")
+                                                })
+                                                .child(
+                                                    AlertDialogAction::new(
+                                                        SharedString::from(format!(
+                                                            "{id}-close-confirm"
+                                                        )),
+                                                        format!("Close {}", prs(n)),
+                                                    )
+                                                    .variant(ButtonVariant::Destructive)
+                                                    .on_click(cx.listener(|this, _, window, cx| {
+                                                        this.confirm(window, cx)
+                                                    })),
+                                                ),
+                                        ),
+                                ),
+                        ),
+                ),
+        )
     }
 }
 
