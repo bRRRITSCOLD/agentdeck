@@ -53,7 +53,6 @@ use gpui::{
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
-use gpui_base::actions::Confirm;
 
 use crate::api::Api;
 use crate::connection::{Connection, Status};
@@ -311,9 +310,8 @@ impl Shell {
     }
 
     /// "Quit agentdeck?", Penpot "Screens" → "Quit · agents running" (and "· stop ticked"): the
-    /// running count over Don't ask again and Stop the agents, then Cancel and Quit. Enter and
-    /// the Quit button dispatch the dialog's `Confirm`, caught here on its way down to the
-    /// dialog, which then closes.
+    /// running count over Don't ask again and Stop the agents, then Cancel and Quit. Quit's
+    /// `on_click` runs on every confirm: the button, Enter on it, or Enter on the dialog.
     fn quit_confirmation(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // core-gpui's content has no body part, so the options lead the footer's column,
         // `space.3` apart and `space.6` above the buttons, as Penpot places them between the
@@ -338,46 +336,44 @@ impl Shell {
                 |shell, on| shell.stop_agents = on,
                 cx,
             ));
-        div()
-            .capture_action(cx.listener(|this, _: &Confirm, window, cx| {
-                this.quit_confirmed(window, cx);
-            }))
-            .child(
-                AlertDialog::new("quit")
-                    .handle(self.quit_dialog.clone())
-                    .content(
-                        AlertDialogContent::new()
-                            .header(
-                                AlertDialogHeader::new()
-                                    .title(AlertDialogTitle::new("Quit agentdeck?"))
-                                    .description(AlertDialogDescription::new(quit::still_running(
-                                        self.quit_running.len(),
-                                        self.stop_agents,
-                                    ))),
-                            )
-                            .footer(
-                                AlertDialogFooter::new()
-                                    .flex_col()
-                                    .gap(space::S6)
-                                    .child(options)
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .justify_end()
-                                            .gap(space::S2)
-                                            .child(AlertDialogCancel::new("quit-cancel", "Cancel"))
-                                            .child(
-                                                div()
-                                                    .debug_selector(|| "quit confirm".into())
-                                                    .child(AlertDialogAction::new(
-                                                        "quit-confirm",
-                                                        "Quit",
+        div().child(
+            AlertDialog::new("quit")
+                .handle(self.quit_dialog.clone())
+                .content(
+                    AlertDialogContent::new()
+                        .header(
+                            AlertDialogHeader::new()
+                                .title(AlertDialogTitle::new("Quit agentdeck?"))
+                                .description(AlertDialogDescription::new(quit::still_running(
+                                    self.quit_running.len(),
+                                    self.stop_agents,
+                                ))),
+                        )
+                        .footer(
+                            AlertDialogFooter::new()
+                                .flex_col()
+                                .gap(space::S6)
+                                .child(options)
+                                .child(
+                                    div()
+                                        .flex()
+                                        .justify_end()
+                                        .gap(space::S2)
+                                        .child(AlertDialogCancel::new("quit-cancel", "Cancel"))
+                                        .child(
+                                            div().debug_selector(|| "quit confirm".into()).child(
+                                                AlertDialogAction::new("quit-confirm", "Quit")
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            this.quit_confirmed(window, cx)
+                                                        },
                                                     )),
                                             ),
-                                    ),
-                            ),
-                    ),
-            )
+                                        ),
+                                ),
+                        ),
+                ),
+        )
     }
 
     /// Opens a sidebar on a new session, and drops it and the selected view once the

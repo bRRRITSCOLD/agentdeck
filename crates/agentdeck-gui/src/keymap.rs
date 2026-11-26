@@ -161,6 +161,21 @@ fn bindings(cx: &App) -> Vec<KeyBinding> {
         .collect()
 }
 
+/// Presses and releases `key` on whatever has focus. GPUI clicks a focused button on the release
+/// of Enter or Space, which `simulate_keystrokes` never sends.
+#[cfg(test)]
+pub(crate) fn press_and_release(cx: &mut gpui::VisualTestContext, key: &str) {
+    let keystroke = cx
+        .update(|_, cx| gpui::Keystroke::parse_with_os(key, cx.platform_info().os).expect("a key"));
+    cx.simulate_event(gpui::KeyDownEvent {
+        keystroke: keystroke.clone(),
+        is_held: false,
+        prefer_character_input: false,
+    });
+    cx.simulate_event(gpui::KeyUpEvent { keystroke });
+    cx.run_until_parked();
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
