@@ -12,8 +12,15 @@
 //! An agent pane whose agent exited names no agent (Penpot "Screens" → "Pane · agent
 //! exited"): its title is "Agent exited", and its header offers Restart agent and Open shell,
 //! which the workspace carries out.
+//!
+//! A shell pane whose hosted agent left shows a strip under its header (Penpot "Screens ·
+//! Main" → "Pane · hosted agent exited"): "**Claude Code** exited. Resume its session in this
+//! shell?", then Resume · Dismiss. Resume asks the workspace to type the agent's resume
+//! command into the shell; Dismiss hides the strip until an agent leaves again.
 
-use agentdeck_client::types::Pane;
+use std::rc::Rc;
+
+use agentdeck_client::types::{LastHosted, Pane};
 use agentdeck_client::ws;
 use agentdeck_core::ws::ServerMessage;
 use agentdeck_core::{Agent, AgentState, PaneId, PaneKind, SplitDirection};
@@ -21,7 +28,7 @@ use brrritscold_core_gpui::{
     ActiveTheme as _, Button, ButtonSize, ButtonVariant, DropdownMenu, DropdownMenuContent,
     DropdownMenuItem, DropdownMenuItemVariant, DropdownMenuSeparator, IconName, Separator,
 };
-use brrritscold_core_gpui_tokens::primitive::opacity;
+use brrritscold_core_gpui_tokens::primitive::{opacity, space};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
@@ -30,7 +37,9 @@ use gpui::{
 };
 
 use crate::connection::{Connection, DaemonEvent};
+use crate::new_agent::agent_name;
 use crate::pane_header::PaneHeader;
+use crate::suggestion_strip::{RowAction, Sentence, suggestion_row};
 use crate::terminal::{self, TerminalEvent, TerminalView};
 
 /// The agent running in `pane`: an agent pane's while its process runs, or the one a shell
@@ -83,6 +92,33 @@ pub fn shown_title(live: Option<&str>, pane: &Pane, left: Option<&str>) -> Share
     program.unwrap_or("shell").to_owned().into()
 }
 
+/// What the hosted agent exited strip says after the agent's name.
+pub const EXITED_TAIL: &str = "\u{a0}exited. Resume its session in this shell?";
+
+/// The agent a shell pane hosted last, while the pane offers to resume it (spec §11): a
+/// shell pane whose shell runs and that hosts no agent now. Dismissing it is the view's.
+pub fn hosted_exit(pane: &Pane) -> Option<&LastHosted> {
+    let shell = pane.kind == PaneKind::Shell && pane.state != AgentState::Exited;
+    (shell && pane.hosted_agent.is_none())
+        .then_some(pane.last_hosted.as_ref())
+        .flatten()
+}
+
+/// What Resume types into the shell for the agent that left: `claude --resume <id>` or `codex
+/// resume <id>` on its session; with none known, `claude --continue` or `codex resume
+/// --last`, the latest session in the shell's folder. Only a UUID is typed as a session.
+pub fn resume_command(last: &LastHosted) -> Option<String> {
+    let session = (last.session_id.as_deref())
+        .filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
+    Some(match (last.agent, session) {
+        (Agent::Claude, Some(id)) => format!("claude --resume {id}"),
+        (Agent::Claude, None) => "claude --continue".to_owned(),
+        (Agent::Codex, Some(id)) => format!("codex resume {id}"),
+        (Agent::Codex, None) => "codex resume --last".to_owned(),
+        (Agent::Other, _) => return None,
+    })
+}
+
 /// What a pane's header menu asks of the workspace holding it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneRequest {
@@ -96,6 +132,9 @@ pub enum PaneRequest {
     OpenShell,
     /// Copy its id, for `agentdeck agent send <pane>` and the like: every pane.
     CopyId,
+    /// Type the resume command of the agent it hosted last into its shell: a shell pane's
+    /// hosted agent exited strip ([`hosted_exit`]).
+    ResumeHosted,
 }
 
 /// The buttons an exited agent pane's header offers, in order: Restart agent, then Open shell
@@ -138,6 +177,8 @@ pub struct PaneView {
     left_title: Option<SharedString>,
     /// Being closed: shown dimmed until it goes.
     closing: bool,
+    /// The hosted agent exit whose strip was dismissed, or resumed; GUI state only.
+    dismissed: Option<LastHosted>,
     terminal: Entity<TerminalView>,
     _subscriptions: [Subscription; 2],
 }
@@ -166,6 +207,7 @@ impl PaneView {
             live_title: None,
             left_title: None,
             closing: false,
+            dismissed: None,
             terminal,
             _subscriptions: [titles, states],
         }
@@ -231,6 +273,77 @@ impl PaneView {
     /// Asks the workspace holding it for `request`.
     pub fn request(&mut self, request: PaneRequest, cx: &mut Context<Self>) {
         cx.emit(request);
+    }
+
+    /// The agent its hosted agent exited strip offers to resume, while it shows.
+    pub fn hosted_exit(&self) -> Option<&LastHosted> {
+        hosted_exit(&self.pane).filter(|last| self.dismissed.as_ref() != Some(*last))
+    }
+
+    /// Hides the hosted agent exited strip until another agent leaves.
+    pub fn dismiss_hosted_exit(&mut self, cx: &mut Context<Self>) {
+        self.dismissed = self.pane.last_hosted.clone();
+        cx.notify();
+    }
+
+    /// Hides the strip and asks the workspace to resume the agent in the shell.
+    pub fn resume_hosted(&mut self, cx: &mut Context<Self>) {
+        self.dismiss_hosted_exit(cx);
+        self.request(PaneRequest::ResumeHosted, cx);
+    }
+
+    /// Shows the strip again after a resume that failed.
+    pub fn show_hosted_exit(&mut self, cx: &mut Context<Self>) {
+        self.dismissed = None;
+        cx.notify();
+    }
+
+    /// The hosted agent exited strip (Penpot "Pane · hosted agent exited"): a
+    /// `SuggestionRow` with an `Info` icon, padded `space.3` across. Tests find it as `hosted
+    /// exit`, its text as `hosted exit text` and its buttons as `resume hosted` and `dismiss
+    /// hosted`.
+    fn hosted_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let last = self.hosted_exit()?;
+        let this = cx.entity().downgrade();
+        let resume = this.clone();
+        let id = self.pane.id;
+        let row = suggestion_row(
+            "hosted exit row".into(),
+            IconName::Info,
+            Sentence {
+                selector: "hosted exit text".into(),
+                lead: "",
+                name: agent_name(last.agent).into(),
+                tail: EXITED_TAIL,
+            },
+            [
+                RowAction {
+                    id: format!("resume-hosted-{id}").into(),
+                    label: "Resume",
+                    selector: "resume hosted".into(),
+                    on_click: Rc::new(move |_, cx| {
+                        let _ = resume.update(cx, |pane, cx| pane.resume_hosted(cx));
+                    }),
+                },
+                RowAction {
+                    id: format!("dismiss-hosted-{id}").into(),
+                    label: "Dismiss",
+                    selector: "dismiss hosted".into(),
+                    on_click: Rc::new(move |_, cx| {
+                        let _ = this.update(cx, |pane, cx| pane.dismiss_hosted_exit(cx));
+                    }),
+                },
+            ],
+            cx,
+        );
+        Some(
+            div()
+                .debug_selector(|| "hosted exit".into())
+                .flex_none()
+                .px(space::S3)
+                .child(row)
+                .into_any_element(),
+        )
     }
 
     /// The header's `Menu` part: a ghost icon-xs `Ellipsis` button opening the pane's actions.
@@ -323,8 +436,10 @@ impl Render for PaneView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let s = cx.theme().semantic();
         let header = self.header(cx);
+        let strip = self.hosted_strip(cx);
         // Penpot "Pane A": `background`, a `border` stroke inside, `radius-md`, clipped;
-        // Header / HeaderRule / Terminal.
+        // Header / HeaderRule / Terminal, with the hosted agent exited strip and its own rule
+        // between the header's rule and the terminal while it shows.
         div()
             .flex_1()
             .min_w_0()
@@ -340,8 +455,12 @@ impl Render for PaneView {
             .bg(s.background)
             .child(header)
             .child(Separator::new())
+            .when_some(strip, |pane, strip| {
+                pane.child(strip).child(Separator::new())
+            })
             .child(
                 div()
+                    .debug_selector(|| "pane terminal".into())
                     .flex_1()
                     .min_h_0()
                     .child(terminal::cached(self.terminal.clone())),
@@ -366,6 +485,7 @@ pub(crate) mod fixtures {
             exit_code: None,
             folder: "/w".into(),
             hosted_agent: None,
+            last_hosted: None,
             id: id(n),
             kind: PaneKind::Shell,
             session_id: None,
@@ -428,6 +548,104 @@ mod tests {
                 ..shell_pane(1, id(1))
             };
             assert!(header_actions(&shell).is_empty());
+        }
+    }
+
+    const SESSION: &str = "5973b6c0-94b8-487b-a530-2aeb6098ae0e";
+
+    fn last(agent: Agent, session_id: Option<&str>) -> LastHosted {
+        LastHosted {
+            agent,
+            session_id: session_id.map(str::to_owned),
+            left_at: "2026-11-27T10:00:00Z".into(),
+        }
+    }
+
+    mod resume_command {
+        use super::*;
+
+        #[test]
+        fn should_resume_the_agents_session() {
+            assert_eq!(
+                resume_command(&last(Agent::Claude, Some(SESSION))).unwrap(),
+                format!("claude --resume {SESSION}")
+            );
+            assert_eq!(
+                resume_command(&last(Agent::Codex, Some(SESSION))).unwrap(),
+                format!("codex resume {SESSION}")
+            );
+        }
+
+        #[test]
+        fn should_resume_the_folders_latest_session_without_a_known_one() {
+            assert_eq!(
+                resume_command(&last(Agent::Claude, None)).unwrap(),
+                "claude --continue"
+            );
+            assert_eq!(
+                resume_command(&last(Agent::Codex, None)).unwrap(),
+                "codex resume --last"
+            );
+        }
+
+        #[test]
+        fn should_type_only_a_uuid_into_the_shell() {
+            assert_eq!(
+                resume_command(&last(Agent::Claude, Some("x; rm -rf ~"))).unwrap(),
+                "claude --continue"
+            );
+        }
+
+        #[test]
+        fn should_have_none_for_another_agent() {
+            assert_eq!(resume_command(&last(Agent::Other, None)), None);
+        }
+    }
+
+    mod hosted_exit {
+        use super::*;
+
+        fn left(agent: Agent) -> Pane {
+            Pane {
+                last_hosted: Some(last(agent, None)),
+                ..shell_pane(1, id(1))
+            }
+        }
+
+        #[test]
+        fn should_offer_the_agent_a_shell_hosted_last() {
+            assert_eq!(
+                hosted_exit(&left(Agent::Codex)),
+                Some(&last(Agent::Codex, None))
+            );
+        }
+
+        #[test]
+        fn should_offer_none_while_the_shell_hosts_an_agent() {
+            let hosting = Pane {
+                hosted_agent: Some(Agent::Claude),
+                ..left(Agent::Claude)
+            };
+            assert_eq!(hosted_exit(&hosting), None);
+        }
+
+        #[test]
+        fn should_offer_none_once_the_shell_exited() {
+            let exited = Pane {
+                state: AgentState::Exited,
+                ..left(Agent::Claude)
+            };
+            assert_eq!(hosted_exit(&exited), None);
+        }
+
+        #[test]
+        fn should_offer_none_in_an_agent_pane_or_a_shell_that_hosted_none() {
+            let agent = Pane {
+                last_hosted: Some(last(Agent::Claude, None)),
+                ..exited(Agent::Claude)
+            };
+            assert_eq!(hosted_exit(&agent), None);
+            assert_eq!(hosted_exit(&shell_pane(1, id(1))), None);
         }
     }
 

@@ -36,7 +36,7 @@ use std::sync::Arc;
 use agentdeck_client::types::{Pane, PaneRun, Tab};
 use agentdeck_client::ws;
 use agentdeck_core::ws::{Entity as Changed, ServerMessage};
-use agentdeck_core::{AgentState, Layout, PaneId, SplitDirection, TabId, WorkspaceId};
+use agentdeck_core::{Agent, AgentState, Layout, PaneId, SplitDirection, TabId, WorkspaceId};
 use brrritscold_core_gpui::{
     ActiveTheme as _, AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
     AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, Button,
@@ -338,6 +338,7 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let view = pane.clone();
         let pane = pane.read(cx).pane();
         let at = PaneAt {
             workspace: self.workspace,
@@ -367,6 +368,16 @@ impl WorkspaceView {
             PaneRequest::CopyId => {
                 crate::notice::copy(at.pane.to_string(), "Copied pane id", window, cx);
             }
+            PaneRequest::ResumeHosted => {
+                let Some(last) = crate::pane::hosted_exit(pane) else {
+                    return;
+                };
+                let (agent, id) = (last.agent, pane.id);
+                let Some(command) = crate::pane::resume_command(last) else {
+                    return;
+                };
+                self.resume_hosted(&view, id, command, agent, window, cx);
+            }
             PaneRequest::OpenShell => {
                 let id = pane.id;
                 self.respawn(
@@ -378,6 +389,34 @@ impl WorkspaceView {
                 );
             }
         }
+    }
+
+    /// Types `command`, `agent`'s resume command, into shell `pane` (shown by `view`) and
+    /// submits it, then focuses the pane, whose shell then hosts the agent (spec §11). A failure
+    /// toasts why and shows the pane's hosted agent exited strip again.
+    fn resume_hosted(
+        &mut self,
+        view: &Entity<PaneView>,
+        pane: PaneId,
+        command: String,
+        agent: Agent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let typing = self.api.submit_input(pane, command, cx);
+        let failure = format!("Couldn't resume {}", agent_name(agent));
+        let shown = view.downgrade();
+        cx.spawn_in(window, async move |this, cx| {
+            let Err(err) = typing.await else {
+                return;
+            };
+            let _ = this.update_in(cx, |_, window, cx| {
+                failed(failure, &err, window, cx);
+                let _ = shown.update(cx, |pane, cx| pane.show_hosted_exit(cx));
+            });
+        })
+        .detach();
+        window.focus(&view.focus_handle(cx), cx);
     }
 
     /// Starts exited `pane` again in place running `run`, then shows it afresh and focuses
@@ -2368,6 +2407,201 @@ mod tests {
                 ("sh".into(), AgentState::Unknown, false)
             );
             assert_eq!(tab_labels(&harness, cx), ["shell"]);
+        }
+    }
+
+    mod hosted_agent_exited {
+        use agentdeck_client::types::LastHosted;
+        use agentdeck_core::PaneKind;
+        use gpui::Modifiers;
+
+        use super::*;
+
+        const SESSION: &str = "5973b6c0-94b8-487b-a530-2aeb6098ae0e";
+
+        /// Pane 7, a shell whose hosted `agent` left at `left_at`, its session `session`.
+        fn left(agent: Agent, session: Option<&str>, left_at: &str) -> Pane {
+            Pane {
+                last_hosted: Some(LastHosted {
+                    agent,
+                    session_id: session.map(str::to_owned),
+                    left_at: left_at.into(),
+                }),
+                state: AgentState::Unknown,
+                ..shell_pane(7, id(1))
+            }
+        }
+
+        fn claude_left() -> Pane {
+            left(Agent::Claude, Some(SESSION), "2026-11-27T10:00:00Z")
+        }
+
+        /// Pane 7 hosting `agent` again.
+        fn hosting(agent: Agent) -> Pane {
+            Pane {
+                hosted_agent: Some(agent),
+                state: AgentState::Working,
+                ..shell_pane(7, id(1))
+            }
+        }
+
+        fn open(pane: Pane, cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
+            Harness::open(vec![tab(1, id(1), 0, Some(id(7)))], vec![pane], cx)
+        }
+
+        fn becomes(harness: &Harness, pane: Pane, cx: &mut VisualTestContext) {
+            harness.api.set_panes(vec![pane]);
+            harness.changed(Changed::Pane, cx);
+        }
+
+        fn shows_strip(harness: &Harness, cx: &mut VisualTestContext) -> bool {
+            harness.draw(cx);
+            cx.debug_bounds("hosted exit").is_some()
+        }
+
+        fn click(harness: &Harness, selector: &'static str, cx: &mut VisualTestContext) {
+            harness.draw(cx);
+            let at = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} shown"));
+            cx.simulate_click(at.center(), Modifiers::default());
+            cx.run_until_parked();
+        }
+
+        fn inputs(harness: &Harness) -> Vec<(PaneId, String)> {
+            harness.api.inputs.lock().unwrap().clone()
+        }
+
+        #[gpui::test]
+        fn should_offer_to_resume_once_a_hosted_agent_leaves(cx: &mut TestAppContext) {
+            let (harness, cx) = open(shell_pane(7, id(1)), cx);
+            becomes(&harness, hosting(Agent::Claude), cx);
+            assert!(!shows_strip(&harness, cx), "not while it is hosted");
+
+            becomes(&harness, claude_left(), cx);
+
+            assert!(shows_strip(&harness, cx));
+            assert!(cx.debug_bounds("hosted exit text").is_some());
+            assert!(
+                cx.debug_bounds("in shell").is_none(),
+                "a shell's header again"
+            );
+            let offered = harness
+                .pane(0, cx)
+                .read_with(cx, |pane, _| pane.hosted_exit().map(|last| last.agent));
+            assert_eq!(offered, Some(Agent::Claude));
+        }
+
+        #[gpui::test]
+        fn should_not_offer_it_in_a_shell_that_hosted_no_agent(cx: &mut TestAppContext) {
+            let (harness, cx) = open(shell_pane(7, id(1)), cx);
+
+            assert!(!shows_strip(&harness, cx));
+        }
+
+        #[gpui::test]
+        fn should_keep_the_exited_header_of_an_agent_pane(cx: &mut TestAppContext) {
+            let exited = Pane {
+                kind: PaneKind::Agent,
+                agent: Some(Agent::Claude),
+                state: AgentState::Exited,
+                exit_code: Some(0),
+                ..claude_left()
+            };
+            let (harness, cx) = open(exited, cx);
+
+            assert!(!shows_strip(&harness, cx));
+            assert!(cx.debug_bounds("Restart agent").is_some());
+        }
+
+        #[gpui::test]
+        fn should_type_the_resume_command_into_the_shell_and_focus_it(cx: &mut TestAppContext) {
+            let (harness, cx) = open(claude_left(), cx);
+
+            click(&harness, "resume hosted", cx);
+
+            assert_eq!(
+                inputs(&harness),
+                [(id(7), format!("claude --resume {SESSION}"))]
+            );
+            assert!(!shows_strip(&harness, cx), "the strip goes");
+            assert_eq!(harness.focused(cx), Some(id(7)));
+        }
+
+        #[gpui::test]
+        fn should_resume_the_latest_session_without_a_known_one(cx: &mut TestAppContext) {
+            let (harness, cx) = open(left(Agent::Codex, None, "2026-11-27T10:00:00Z"), cx);
+
+            click(&harness, "resume hosted", cx);
+
+            assert_eq!(
+                inputs(&harness),
+                [(id(7), "codex resume --last".to_owned())]
+            );
+        }
+
+        #[gpui::test]
+        fn should_toast_and_offer_it_again_when_the_resume_fails(cx: &mut TestAppContext) {
+            let (harness, cx) = open(claude_left(), cx);
+            harness.api.fail_next("pane 7's process has exited");
+
+            click(&harness, "resume hosted", cx);
+
+            let shown = cx.update(|_, cx| crate::notice::shown(cx));
+            let toast = shown.last().expect("a toast");
+            assert_eq!(toast.title, "Couldn't resume Claude Code");
+            assert!(shows_strip(&harness, cx));
+        }
+
+        #[gpui::test]
+        fn should_hide_it_on_dismiss_until_an_agent_leaves_again(cx: &mut TestAppContext) {
+            let (harness, cx) = open(claude_left(), cx);
+
+            click(&harness, "dismiss hosted", cx);
+            assert!(!shows_strip(&harness, cx));
+            assert!(inputs(&harness).is_empty(), "nothing typed");
+            becomes(&harness, claude_left(), cx);
+            assert!(!shows_strip(&harness, cx), "the same exit read again");
+
+            becomes(&harness, hosting(Agent::Claude), cx);
+            becomes(
+                &harness,
+                left(Agent::Claude, Some(SESSION), "2026-11-27T10:05:00Z"),
+                cx,
+            );
+
+            assert!(shows_strip(&harness, cx));
+        }
+
+        /// Penpot "Pane · hosted agent exited": the strip takes the terminal's place under the
+        /// header's rule, then a 1px rule, then the terminal; its row is `h-8`, padded
+        /// `space.3` across, Dismiss's button ending `space.3` from the edge.
+        #[gpui::test]
+        fn should_sit_between_the_headers_rule_and_the_terminal(cx: &mut TestAppContext) {
+            let (harness, cx) = open(claude_left(), cx);
+            harness.draw(cx);
+            let at = |selector: &'static str, cx: &mut VisualTestContext| {
+                cx.debug_bounds(selector)
+                    .unwrap_or_else(|| panic!("{selector} shown"))
+            };
+            let strip = at("hosted exit", cx);
+            let row = at("hosted exit row", cx);
+            let dismiss = at("dismiss hosted", cx);
+            let terminal = at("pane terminal", cx);
+            click(&harness, "dismiss hosted", cx);
+            harness.draw(cx);
+            let unstripped = at("pane terminal", cx);
+
+            let px = f32::from;
+            assert_eq!(
+                px(strip.top()),
+                px(unstripped.top()),
+                "under the header's rule"
+            );
+            assert_eq!(px(row.size.height), 32.);
+            assert_eq!(px(row.left() - strip.left()), 12.);
+            assert_eq!(px(strip.right() - dismiss.right()), 12.);
+            assert_eq!(px(terminal.top() - strip.bottom()), 1., "a 1px rule");
         }
     }
 

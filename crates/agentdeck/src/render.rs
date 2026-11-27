@@ -471,6 +471,7 @@ mod tests {
                     exit_code: None,
                     folder: "/work/web".into(),
                     hosted_agent: None,
+                    last_hosted: None,
                     id: id.parse().unwrap(),
                     kind,
                     session_id: None,

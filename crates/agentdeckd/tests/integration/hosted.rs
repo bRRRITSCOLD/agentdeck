@@ -6,12 +6,12 @@
 use std::time::Duration;
 
 use agentdeck_client::Client;
-use agentdeck_client::types::{InputWhen, Pane, PaneInput};
+use agentdeck_client::types::{InputWhen, LastHosted, Pane, PaneInput};
 use agentdeck_core::ws::{Entity, ServerMessage};
 use agentdeck_core::{Agent, AgentState, PaneId, PaneKind};
 
 use crate::support::TestDaemon;
-use crate::support::agents::{launches, typed};
+use crate::support::agents::{claude_session, codex_session, launches, typed};
 use crate::support::terminal::{Place, eventually, holds_for, in_state, printed};
 use crate::support::ws::{Frame, Ws};
 
@@ -213,6 +213,119 @@ mod input {
         .await;
 
         submitted(&daemon, pane.id, "Use the staging DB\nthen test\n").await;
+    }
+}
+
+mod last_hosted {
+    use super::*;
+
+    const SESSION: &str = "5973b6c0-94b8-487b-a530-2aeb6098ae0e";
+
+    /// Waits until `pane` reports the agent it hosted last, and returns it.
+    async fn left(client: &Client, pane: PaneId) -> LastHosted {
+        eventually("the pane to report its last hosted agent", || async {
+            read(client, pane).await.last_hosted
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn should_name_the_session_its_command_line_resumed() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let pane = shell(&daemon, &place).await;
+        run(
+            &daemon.client,
+            pane.id,
+            &format!("claude --resume {SESSION}"),
+        )
+        .await;
+        let hosted = hosting(&daemon.client, pane.id, Some(Agent::Claude)).await;
+        assert_eq!(hosted.last_hosted, None);
+
+        exit_agent(&daemon.client, pane.id).await;
+
+        let last = left(&daemon.client, pane.id).await;
+        assert_eq!(
+            (last.agent, last.session_id.as_deref()),
+            (Agent::Claude, Some(SESSION))
+        );
+    }
+
+    #[tokio::test]
+    async fn should_find_the_session_file_a_typed_claude_wrote_before_telling_clients() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let pane = shell(&daemon, &place).await;
+        run(&daemon.client, pane.id, "claude").await;
+        hosting(&daemon.client, pane.id, Some(Agent::Claude)).await;
+        let mut ws = Ws::connect(&daemon).await;
+
+        exit_agent(&daemon.client, pane.id).await;
+        ws.until(|frame| match frame {
+            Frame::Message(ServerMessage::Changed {
+                entity: Entity::Pane,
+                id,
+            }) if id == pane.id.to_string() => Some(()),
+            _ => None,
+        })
+        .await;
+
+        let read = read(&daemon.client, pane.id).await;
+        assert_eq!(read.hosted_agent, None);
+        let last = read.last_hosted.expect("found before the event");
+        assert_eq!(last.agent, Agent::Claude);
+        assert_eq!(last.session_id, claude_session(&daemon, pane.id));
+        assert!(last.session_id.is_some(), "the stub wrote one");
+    }
+
+    #[tokio::test]
+    async fn should_find_the_session_file_a_typed_codex_wrote_for_its_folder() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let pane = shell(&daemon, &place).await;
+        run(&daemon.client, pane.id, "codex").await;
+        hosting(&daemon.client, pane.id, Some(Agent::Codex)).await;
+
+        exit_agent(&daemon.client, pane.id).await;
+
+        let last = left(&daemon.client, pane.id).await;
+        assert_eq!(last.agent, Agent::Codex);
+        assert_eq!(last.session_id, codex_session(&daemon, pane.id));
+        assert!(last.session_id.is_some(), "the stub wrote one");
+    }
+
+    #[tokio::test]
+    async fn should_forget_it_while_the_shell_hosts_an_agent_again() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let pane = shell(&daemon, &place).await;
+        run(&daemon.client, pane.id, "claude").await;
+        hosting(&daemon.client, pane.id, Some(Agent::Claude)).await;
+        exit_agent(&daemon.client, pane.id).await;
+        left(&daemon.client, pane.id).await;
+
+        run(
+            &daemon.client,
+            pane.id,
+            &format!("claude --resume {SESSION}"),
+        )
+        .await;
+
+        let hosted = hosting(&daemon.client, pane.id, Some(Agent::Claude)).await;
+        assert_eq!(hosted.last_hosted, None);
+    }
+
+    #[tokio::test]
+    async fn should_report_none_for_a_shell_that_hosted_no_agent() {
+        let daemon = TestDaemon::start().await;
+        let place = Place::new(&daemon).await;
+        let pane = shell(&daemon, &place).await;
+
+        run(&daemon.client, pane.id, "echo plain-$((40+2))").await;
+        printed(&daemon.client, pane.id, "plain-42").await;
+
+        assert_eq!(read(&daemon.client, pane.id).await.last_hosted, None);
     }
 }
 

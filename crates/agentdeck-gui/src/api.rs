@@ -5,8 +5,9 @@
 use agentdeck_client::daemon::Daemon;
 use agentdeck_client::panes::{self, pane_if_any};
 use agentdeck_client::types::{
-    DeviceSignIn, GithubAuthInfo, GithubClientIdBody, GithubRepositoryList, GithubTokenBody, Pane,
-    PaneRun, PrClose, PrCloseResult, Repository, Settings, SettingsPatch, Tab,
+    DeviceSignIn, GithubAuthInfo, GithubClientIdBody, GithubRepositoryList, GithubTokenBody,
+    InputWhen, Pane, PaneInput, PaneRun, PrClose, PrCloseResult, Repository, Settings,
+    SettingsPatch, Tab,
 };
 pub use agentdeck_client::workspaces::Change;
 use agentdeck_client::{ApiError, Client};
@@ -52,6 +53,11 @@ pub trait Api: Send + Sync {
     /// Stops `pane`'s agent and keeps the pane (spec §4): an agent pane's process, which then
     /// reads as exited, or the agent a shell pane hosts, leaving the shell running.
     fn stop_pane(&self, pane: PaneId, cx: &App) -> Task<anyhow::Result<()>>;
+
+    /// Types `text` into `pane` now and presses Enter, as a submitted message (spec §4
+    /// `POST /v1/panes/{id}/input` with `submit`). A refusal is an [`ApiError`], such as
+    /// `exited`.
+    fn submit_input(&self, pane: PaneId, text: String, cx: &App) -> Task<anyhow::Result<()>>;
 
     /// Makes a workspace as `request` says; its id. A refusal is an [`ApiError`];
     /// `invalid_name` means the name is blank.
@@ -236,6 +242,25 @@ impl Api for Daemon {
     fn stop_pane(&self, pane: PaneId, cx: &App) -> Task<anyhow::Result<()>> {
         let client = self.client.clone();
         runtime::spawn(cx, async move { Ok(panes::stop(&client, pane).await?) })
+    }
+
+    fn submit_input(&self, pane: PaneId, text: String, cx: &App) -> Task<anyhow::Result<()>> {
+        let client = self.client.clone();
+        runtime::spawn(cx, async move {
+            let input = PaneInput {
+                text,
+                when: InputWhen::Now,
+                submit: true,
+            };
+            client
+                .pane_input()
+                .id(pane)
+                .body(input)
+                .send()
+                .await
+                .map_err(ApiError::from)?;
+            Ok(())
+        })
     }
 
     fn new_workspace(&self, request: Request, cx: &App) -> Task<anyhow::Result<WorkspaceId>> {
@@ -612,6 +637,8 @@ pub(crate) mod fake {
         pub stopped: Mutex<Vec<PaneId>>,
         /// Holds the next stop's answer until its sender sends or drops.
         held_stop: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        /// The messages submitted to panes: the pane and the text, in order.
+        pub inputs: Mutex<Vec<(PaneId, String)>>,
         /// The workspaces archived, in order.
         pub archived: Mutex<Vec<WorkspaceId>>,
         /// The workspaces unarchived, in order.
@@ -1058,6 +1085,14 @@ pub(crate) mod fake {
                 }),
                 None => Task::ready(Ok(())),
             }
+        }
+
+        fn submit_input(&self, pane: PaneId, text: String, _cx: &App) -> Task<anyhow::Result<()>> {
+            if let Some(err) = self.failure() {
+                return Task::ready(Err(err));
+            }
+            self.inputs.lock().unwrap().push((pane, text));
+            Task::ready(Ok(()))
         }
 
         fn new_workspace(&self, request: Request, _cx: &App) -> Task<anyhow::Result<WorkspaceId>> {

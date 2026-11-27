@@ -97,7 +97,8 @@ fn exited(id: PaneId) -> HttpError {
 }
 
 /// The stored pane, with the live title, state, exit code, hosted agent and folder while this
-/// daemon holds it (they reach the database a little later).
+/// daemon holds it (they reach the database a little later), and the agent it hosted last,
+/// which only the live pane knows.
 fn with_live_status(context: &ApiContext, mut pane: Pane) -> Pane {
     if let Some(live) = context.terminals.get(pane.id) {
         let status = live.status();
@@ -105,6 +106,7 @@ fn with_live_status(context: &ApiContext, mut pane: Pane) -> Pane {
         pane.state = status.state;
         pane.exit_code = status.exit_code;
         pane.hosted_agent = status.hosted;
+        pane.last_hosted = status.last_hosted;
         pane.folder = live.folder().to_string_lossy().into_owned();
     }
     pane

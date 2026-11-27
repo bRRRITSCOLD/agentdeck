@@ -15,17 +15,31 @@ use super::TestDaemon;
 ///
 /// When its folder holds a file named `lost-session`, a resume (`--resume <id>`) prints what
 /// Claude Code prints for a session it can't find and exits 1 at once; with a file named
-/// `broken`, every start does.
+/// `broken`, every start does. Unless resuming, it writes a session file as Claude Code
+/// does, `$CLAUDE_CONFIG_DIR/projects/<folder, each character but letters and digits a ->/
+/// <id>.jsonl` (default `$HOME/.claude`), for its `--session-id` or a new id, which it records
+/// in `claude-session`.
 const STUB_CLAUDE: &str = r#"#!/bin/sh
 log="$(dirname "$0")/../agents/$AGENTDECK_PANE"
 mkdir -p "$log"
 pwd >> "$log/cwd"
 { for arg in "$@"; do printf '%s\0' "$arg"; done; printf '\036'; } >> "$log/argv"
-session=; previous=
-for arg in "$@"; do [ "$previous" = --resume ] && session=$arg; previous=$arg; done
+session=; chosen=; previous=
+for arg in "$@"; do
+  [ "$previous" = --resume ] && session=$arg
+  [ "$previous" = --session-id ] && chosen=$arg
+  previous=$arg
+done
 if [ -e broken ] || { [ -n "$session" ] && [ -e lost-session ]; }; then
   printf 'No conversation found with session ID: %s\r\n' "$session"
   exit 1
+fi
+if [ -z "$session" ]; then
+  id=${chosen:-$(cat /proc/sys/kernel/random/uuid)}
+  project="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$(pwd -P | sed 's/[^A-Za-z0-9]/-/g')"
+  mkdir -p "$project"
+  : > "$project/$id.jsonl"
+  printf '%s' "$id" > "$log/claude-session"
 fi
 stty raw -echo
 printf '\033[?2004h\033]0;\342\234\263 Claude Code\007> '
@@ -33,7 +47,8 @@ printf '\033[?2004h\033]0;\342\234\263 Claude Code\007> '
 
 /// Records its folder and argv; unless resuming (a `resume` argument), writes a
 /// session file as Codex does, under `$CODEX_HOME/sessions` (default `$HOME/.codex/sessions`),
-/// and records the id in `session`; then reads what is typed as [`READ_LIKE_A_TUI`] does.
+/// its first line the `session_meta` recording its folder, and records the id in `session`;
+/// then reads what is typed as [`READ_LIKE_A_TUI`] does.
 ///
 /// When its folder holds a file named `lost-session`, a resume (`resume <id>`) does what
 /// codex-cli 0.169.0 does for a session it can't find (#262): prints its error, after its
@@ -58,7 +73,8 @@ if [ -z "$resuming" ]; then
   id=$(cat /proc/sys/kernel/random/uuid)
   dir="${CODEX_HOME:-$HOME/.codex}/sessions/2026/11/11"
   mkdir -p "$dir"
-  : > "$dir/rollout-2026-11-11T09-00-00-$id.jsonl"
+  printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$id" "$(pwd -P)" \
+    > "$dir/rollout-2026-11-11T09-00-00-$id.jsonl"
   printf '%s' "$id" > "$log/session"
 fi
 stty raw -echo
@@ -133,6 +149,11 @@ pub fn typed(daemon: &TestDaemon, pane: PaneId) -> String {
 /// An argv as the stub agents record it, program name left out.
 pub fn args(args: &[&str]) -> Vec<String> {
     args.iter().map(|arg| (*arg).to_owned()).collect()
+}
+
+/// The session id the pane's stub claude last wrote a session file for.
+pub fn claude_session(daemon: &TestDaemon, pane: PaneId) -> Option<String> {
+    std::fs::read_to_string(log(daemon, pane).join("claude-session")).ok()
 }
 
 /// The session id the pane's stub codex wrote a session file for.

@@ -25,6 +25,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Pane> {
         kind: text(row, "kind")?,
         agent: opt_text(row, "agent")?,
         hosted_agent: opt_text(row, "hosted_agent")?,
+        last_hosted: None,
         argv,
         folder: folder.unwrap_or_else(|| cwd.clone()),
         cwd,
