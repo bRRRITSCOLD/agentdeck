@@ -3,10 +3,12 @@
 //! pasting or `agentdeck agent send`.
 //!
 //! - [`codex`]: finding the session id a Codex pane's CLI chose.
+//! - [`hosted`]: finding the session an agent hosted in a shell pane ran, once it leaves.
 //! - [`restart`]: starting an exited pane again, afresh once when its resume fails at once.
 //! - [`resume`]: re-spawning the panes that were alive when the daemon last stopped.
 
 pub mod codex;
+pub mod hosted;
 pub mod restart;
 pub mod resume;
 

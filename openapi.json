@@ -368,6 +368,33 @@
           }
         ]
       },
+      "LastHosted": {
+        "description": "The agent a shell pane hosted last, once it has left (spec §7).",
+        "properties": {
+          "agent": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Agent"
+              }
+            ],
+            "description": "The agent: `claude` or `codex`."
+          },
+          "left_at": {
+            "description": "When it left, RFC 3339: each time an agent leaves is told apart by it.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "The session it ran, when found: the one its command line named (`--resume <id>`, `--session-id <id>`, `codex resume <id>`), else the newest session file it wrote for its folder while hosted. Always a UUID; null when none was found.",
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent",
+          "left_at"
+        ],
+        "type": "object"
+      },
       "Layout": {
         "anyOf": [
           {
@@ -632,6 +659,15 @@
               }
             ],
             "description": "An agent or a shell."
+          },
+          "last_hosted": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LastHosted"
+              }
+            ],
+            "description": "The agent a shell pane hosted last, once it has left and the shell is back: which one, and its session when the daemon found it. Null while the pane hosts an agent, before it hosted any, once its shell exits and after a daemon restart (spec §3, §7).",
+            "nullable": true
           },
           "session_id": {
             "description": "The agent's session id: chosen at launch for `claude`, found after launch for `codex` (null until Codex has written its session file).",

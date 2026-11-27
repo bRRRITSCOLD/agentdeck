@@ -469,6 +469,10 @@ pub struct Pane {
     /// foreground process, else null. Its kind stays `shell`; it runs that agent's state rules
     /// meanwhile (spec §3, §7).
     pub hosted_agent: Option<Agent>,
+    /// The agent a shell pane hosted last, once it has left and the shell is back: which one,
+    /// and its session when the daemon found it. Null while the pane hosts an agent, before it
+    /// hosted any, once its shell exits and after a daemon restart (spec §3, §7).
+    pub last_hosted: Option<LastHosted>,
     /// The command as first launched. A resumed pane runs its
     /// agent's resume command, or a fresh shell, instead.
     pub argv: Vec<String>,
@@ -492,6 +496,19 @@ pub struct Pane {
     pub exit_code: Option<i64>,
     /// When the pane was created.
     pub created_at: String,
+}
+
+/// The agent a shell pane hosted last, once it has left (spec §7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LastHosted {
+    /// The agent: `claude` or `codex`.
+    pub agent: Agent,
+    /// The session it ran, when found: the one its command line named (`--resume <id>`,
+    /// `--session-id <id>`, `codex resume <id>`), else the newest session file it wrote for its
+    /// folder while hosted. Always a UUID; null when none was found.
+    pub session_id: Option<String>,
+    /// When it left, RFC 3339: each time an agent leaves is told apart by it.
+    pub left_at: String,
 }
 
 /// `POST /v1/panes`.

@@ -2,7 +2,8 @@
 //! "Workspace · Pull requests · suggestion", "· suggestions" and "Workspace · no repositories ·
 //! suggestions": one row per Suggestion, stacked in one strip drawn as core-gpui's default
 //! `Alert` box. An app-local composition (Penpot `agentdeck/SuggestionRow`), since an `Alert`
-//! holds one title and one action.
+//! holds one title and one action; [`suggestion_row`] draws it, for a pane's hosted agent
+//! exited strip too.
 //!
 //! A row reads "Panes here work in **owner/name**. Link it to this workspace?", then **Link** ·
 //! **Not now**. What each does is the view's: this only draws them.
@@ -13,6 +14,7 @@ use agentdeck_client::types::Repository;
 use agentdeck_core::RepositoryId;
 use brrritscold_core_gpui::{ActiveTheme as _, Button, ButtonSize, ButtonVariant, Icon, IconName};
 use brrritscold_core_gpui_tokens::primitive::{font_size, font_weight, space};
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
     Styled as _, Window, div, px,
@@ -66,41 +68,111 @@ pub fn strip(
     )
 }
 
-/// Penpot `agentdeck/SuggestionRow`: a 16px `GitBranch`, the sentence with the name in
-/// medium, then Link · Not now at the end, `space.2-5` apart, as an Alert's icon and text.
+/// One Suggestion's row: a `GitBranch`, "Panes here work in **owner/name**. Link it to this
+/// workspace?", then Link · Not now.
 fn row(repository: &Repository, on_link: OnLink, on_not_now: OnNotNow, cx: &App) -> AnyElement {
-    let s = cx.theme().semantic();
     let name = repository.name.to_string();
-    let selector = |what: &str| {
-        let selector = format!("{what}{name}");
-        move || selector.clone()
-    };
     let (held, id) = (repository.clone(), repository.id);
+    suggestion_row(
+        format!("suggestion {name}"),
+        IconName::GitBranch,
+        Sentence {
+            selector: format!("suggestion text {name}"),
+            lead: LEAD,
+            name: name.clone().into(),
+            tail: TAIL,
+        },
+        [
+            RowAction {
+                id: format!("link-suggestion-{id}").into(),
+                label: "Link",
+                selector: format!("link suggestion {name}"),
+                on_click: Rc::new(move |window, cx| on_link(held.clone(), window, cx)),
+            },
+            RowAction {
+                id: format!("not-now-{id}").into(),
+                label: "Not now",
+                selector: format!("not now {name}"),
+                on_click: Rc::new(move |window, cx| on_not_now(id, window, cx)),
+            },
+        ],
+        cx,
+    )
+}
+
+/// A [`suggestion_row`]'s sentence: `lead`, then `name` in medium, then `tail`.
+pub struct Sentence {
+    /// What tests find the sentence by.
+    pub selector: String,
+    /// What comes before the name, a space after it; none when empty.
+    pub lead: &'static str,
+    /// The name, in `font-weight.medium`.
+    pub name: SharedString,
+    /// What comes after the name, its own leading space included.
+    pub tail: &'static str,
+}
+
+/// What a click on a [`RowAction`] does.
+pub type OnAction = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// One of a [`suggestion_row`]'s two link buttons.
+pub struct RowAction {
+    /// The button's element id.
+    pub id: SharedString,
+    /// Its label.
+    pub label: &'static str,
+    /// What tests find it by.
+    pub selector: String,
+    /// What a click does.
+    pub on_click: OnAction,
+}
+
+/// Penpot `agentdeck/SuggestionRow`: a 16px `icon` in `foreground`, the sentence (sm), then
+/// the two actions at the end as link sm buttons with a `muted-foreground` "·" between them,
+/// `space.2-5` apart, as an Alert's icon and text; `h-8`. Tests find it by `selector`.
+pub fn suggestion_row(
+    selector: String,
+    icon: IconName,
+    sentence: Sentence,
+    actions: [RowAction; 2],
+    cx: &App,
+) -> AnyElement {
+    let s = cx.theme().semantic();
+    let found = |selector: String| move || selector;
+    let button = |action: RowAction| {
+        let on_click = action.on_click;
+        div().debug_selector(found(action.selector)).child(
+            Button::new(action.id)
+                .variant(ButtonVariant::Link)
+                .size(ButtonSize::Sm)
+                .label(action.label)
+                .on_click(move |_, window, cx| on_click(window, cx)),
+        )
+    };
+    let [first, second] = actions;
+    let Sentence {
+        selector: text,
+        lead,
+        name,
+        tail,
+    } = sentence;
     div()
-        .debug_selector(selector("suggestion "))
+        .debug_selector(found(selector))
         .flex()
         .items_center()
         .gap(space::S2_5)
         .h(space::S8)
         .text_size(font_size::SM)
-        .child(
-            Icon::new(IconName::GitBranch)
-                .size(px(16.))
-                .text_color(s.foreground),
-        )
+        .child(Icon::new(icon).size(px(16.)).text_color(s.foreground))
         .child(
             div()
-                .debug_selector(selector("suggestion text "))
+                .debug_selector(found(text))
                 .min_w_0()
                 .flex()
                 .whitespace_nowrap()
-                .child(format!("{LEAD}\u{a0}"))
-                .child(
-                    div()
-                        .font_weight(font_weight::MEDIUM)
-                        .child(SharedString::from(name.clone())),
-                )
-                .child(TAIL),
+                .when(!lead.is_empty(), |text| text.child(format!("{lead}\u{a0}")))
+                .child(div().font_weight(font_weight::MEDIUM).child(name))
+                .child(tail),
         )
         .child(div().flex_1())
         .child(
@@ -108,25 +180,9 @@ fn row(repository: &Repository, on_link: OnLink, on_not_now: OnNotNow, cx: &App)
                 .flex_none()
                 .flex()
                 .items_center()
-                .child(
-                    div().debug_selector(selector("link suggestion ")).child(
-                        Button::new(SharedString::from(format!("link-suggestion-{id}")))
-                            .variant(ButtonVariant::Link)
-                            .size(ButtonSize::Sm)
-                            .label("Link")
-                            .on_click(move |_, window, cx| on_link(held.clone(), window, cx)),
-                    ),
-                )
+                .child(button(first))
                 .child(div().text_color(s.muted_foreground).child("·"))
-                .child(
-                    div().debug_selector(selector("not now ")).child(
-                        Button::new(SharedString::from(format!("not-now-{id}")))
-                            .variant(ButtonVariant::Link)
-                            .size(ButtonSize::Sm)
-                            .label("Not now")
-                            .on_click(move |_, window, cx| on_not_now(id, window, cx)),
-                    ),
-                ),
+                .child(button(second)),
         )
         .into_any_element()
 }

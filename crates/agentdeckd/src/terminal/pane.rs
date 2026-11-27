@@ -37,7 +37,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use agentdeck_core::state::osc::file_uri;
 use agentdeck_core::state::{
@@ -58,7 +58,9 @@ use super::env::{daemon_dir, pane_env};
 use super::fanout::{Fanout, Outbox, Outgoing, ResizeDecision, Size, SubscriberId};
 use super::tail::{TAIL_CAPACITY, Tail};
 use super::{palette, snapshot};
+use crate::agents::hosted::{HostedRun, SessionHomes};
 use crate::events::Events;
+use crate::model::LastHosted;
 
 /// What to run in a new pane.
 #[derive(Debug, Clone)]
@@ -109,7 +111,12 @@ pub enum Rules {
     },
 }
 
-/// A shell pane's rules for itself and for each agent it can host, and the agent it hosts.
+/// How long before the tick that noticed an agent hosted it may have started: a session
+/// file written since then is the hosted agent's (spec §7).
+const HOSTED_SLACK: Duration = Duration::from_secs(1);
+
+/// A shell pane's rules for itself and for each agent it can host, the agent it hosts, and
+/// the one it hosted last.
 struct Hosting {
     shell: RuleSet,
     agents: Vec<(Agent, RuleSet)>,
@@ -117,6 +124,15 @@ struct Hosting {
     /// Whether the modes were reset since the hosted agent handed the terminal back to the
     /// shell, ahead of the observation that it left ([`Pane::agent_left`]).
     modes_reset: bool,
+    /// Where the pane's agents write their sessions.
+    homes: SessionHomes,
+    /// What the agent hosted now runs, recorded as it started being hosted.
+    run: Option<HostedRun>,
+    /// The agent hosted last, once it left and its session was looked for.
+    last: Option<LastHosted>,
+    /// How many times an agent started being hosted, so a session found for one that left
+    /// isn't kept once another is hosted ([`Pane::set_last_hosted`]).
+    hostings: u64,
 }
 
 impl Hosting {
@@ -134,6 +150,17 @@ impl Hosting {
     }
 }
 
+/// A hosted agent that just left, for the daemon to look for its session.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Left {
+    /// Which hosting it was ([`Pane::set_last_hosted`]).
+    pub hosting: u64,
+    /// What it ran.
+    pub run: HostedRun,
+    /// Where the pane's agents write their sessions.
+    pub homes: SessionHomes,
+}
+
 /// What one observation of a pane changed, for the daemon to save.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Observed {
@@ -143,6 +170,8 @@ pub struct Observed {
     pub hosted: Option<Option<Agent>>,
     /// The pane's current folder, when it moved since it was last read.
     pub folder: Option<PathBuf>,
+    /// The agent the shell pane hosted, when it just left.
+    pub left: Option<Left>,
 }
 
 /// How often, at most, a pane that keeps printing has its folder read again (spec §6).
@@ -284,6 +313,8 @@ pub struct Status {
     pub exit_code: Option<i64>,
     /// The agent a shell pane hosts.
     pub hosted: Option<Agent>,
+    /// The agent a shell pane hosted last, once it left and its session was looked for.
+    pub last_hosted: Option<LastHosted>,
 }
 
 /// How a pane's process ended, for the daemon to save.
@@ -399,6 +430,10 @@ impl Pane {
                     agents,
                     hosted: None,
                     modes_reset: false,
+                    homes: SessionHomes::from_env(&launch.env),
+                    run: None,
+                    last: None,
+                    hostings: 0,
                 };
                 (shell, Some(hosting), LastOutput::shell())
             }
@@ -582,6 +617,8 @@ impl Pane {
         live.queued.clear();
         if let Some(hosting) = &mut live.hosting {
             hosting.hosted = None;
+            hosting.run = None;
+            hosting.last = None;
         }
         let Some(state) = live.tracker.exit() else {
             return;
@@ -616,11 +653,11 @@ impl Pane {
             // The shell leads its own process group: it is in front when no command is.
             live.last_output.shell_in_front(Some(leader) == self.pid);
         }
-        if let Some(hosted) = foreground
-            .as_ref()
-            .and_then(|fg| self.rehost(&mut live, fg))
+        if let Some((hosted, left)) = (foreground.as_ref().zip(leader))
+            .and_then(|(fg, leader)| self.rehost(&mut live, fg, leader))
         {
             observed.hosted = Some(hosted);
+            observed.left = left;
             if live.tracker.state() == AgentState::Unknown {
                 observed.state = Some((AgentState::Unknown, live.title.clone()));
             }
@@ -689,18 +726,44 @@ impl Pane {
         Some(current)
     }
 
-    /// Hosts the agent `foreground` is, if that changed: switches to its rules (or back to
-    /// the shell's), which starts the state over, and drops the queued input, so nothing meant
-    /// for the agent is typed into the shell, nor the other way round. Once no agent is hosted,
-    /// resets the modes the one that left had on, unless the shell's output already did.
-    /// Returns the agent hosted now when it changed.
-    fn rehost(&self, live: &mut Live, foreground: &Foreground) -> Option<Option<Agent>> {
+    /// Hosts the agent `foreground` (led by process `leader`) is, if that changed: switches to
+    /// its rules (or back to the shell's), which starts the state over, and drops the queued
+    /// input, so nothing meant for the agent is typed into the shell, nor the other way round.
+    /// An agent starting to be hosted has what it runs recorded, and forgets the one hosted
+    /// before. Once no agent is hosted, resets the modes the one that left had on, unless the
+    /// shell's output already did. Returns the agent hosted now when it changed, with the one
+    /// that just left, if one did.
+    fn rehost(
+        &self,
+        live: &mut Live,
+        foreground: &Foreground,
+        leader: i32,
+    ) -> Option<(Option<Agent>, Option<Left>)> {
         let (hosted, rules) = live.hosting.as_ref()?.change(foreground)?;
+        let folder = live.folder.clone();
         let hosting = live.hosting.as_mut()?;
-        let left = hosting.hosted.is_some() && hosted.is_none() && !hosting.modes_reset;
+        let reset = hosting.hosted.is_some() && hosted.is_none() && !hosting.modes_reset;
         hosting.hosted = hosted;
         hosting.modes_reset = false;
-        if left {
+        let left = match hosted {
+            Some(agent) => {
+                hosting.hostings += 1;
+                hosting.last = None;
+                hosting.run = Some(HostedRun {
+                    agent,
+                    args: foreground.args.clone(),
+                    cwd: process_cwd(leader).unwrap_or(folder),
+                    since: SystemTime::now() - HOSTED_SLACK,
+                });
+                None
+            }
+            None => hosting.run.take().map(|run| Left {
+                hosting: hosting.hostings,
+                run,
+                homes: hosting.homes.clone(),
+            }),
+        };
+        if reset {
             reset_modes(live);
         }
         live.queued.clear();
@@ -710,7 +773,23 @@ impl Pane {
                 state,
             });
         }
-        Some(hosted)
+        Some((hosted, left))
+    }
+
+    /// Records `last` as the agent the shell pane hosted last, once the session of the one
+    /// that left at `hosting` ([`Left`]) was looked for: unless another agent is hosted since,
+    /// or the shell has exited. Returns whether it was recorded.
+    pub fn set_last_hosted(&self, hosting: u64, last: LastHosted) -> bool {
+        let mut live = self.live();
+        let exited = live.tracker.state() == AgentState::Exited;
+        let Some(shell) = live.hosting.as_mut() else {
+            return false;
+        };
+        if exited || shell.hosted.is_some() || shell.hostings != hosting {
+            return false;
+        }
+        shell.last = Some(last);
+        true
     }
 
     /// Whether the agent the pane hosts has handed the terminal back to the shell, whose own
@@ -859,6 +938,10 @@ impl Pane {
             state: live.tracker.state(),
             exit_code: live.exit_code,
             hosted: live.hosting.as_ref().and_then(|hosting| hosting.hosted),
+            last_hosted: live
+                .hosting
+                .as_ref()
+                .and_then(|hosting| hosting.last.clone()),
         }
     }
 

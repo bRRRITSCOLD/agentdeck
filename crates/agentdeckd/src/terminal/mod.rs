@@ -33,9 +33,11 @@ use nix::sys::signal::Signal;
 use tokio::runtime::Handle;
 
 use self::fanout::SubscriberId;
-use self::pane::{Ended, Launch, NothingToStop, Observed, Pane, Rules, SpawnError};
+use self::pane::{Ended, Launch, Left, NothingToStop, Observed, Pane, Rules, SpawnError};
+use crate::agents::hosted;
 use crate::db::{self, Db};
 use crate::events::Events;
+use crate::model::LastHosted;
 
 /// How often each pane's screen is observed for its state. Settling takes 400 ms by
 /// default, so a state publishes within this of having settled.
@@ -198,6 +200,7 @@ impl Terminals {
                 state,
                 hosted,
                 folder,
+                left,
             } = pane.observe(now);
             let id = pane.id();
             if let Some(folder) = folder {
@@ -213,6 +216,10 @@ impl Terminals {
                     tracing::warn!("saving pane {id}'s state: {err}");
                 }
             }
+            // Ahead of `hosted`, so the `changed` it sends carries the agent that left.
+            if let Some(left) = left {
+                self.left(&pane, left).await;
+            }
             if let Some(hosted) = hosted {
                 self.hosted(id, hosted).await;
             }
@@ -225,6 +232,34 @@ impl Terminals {
         let moved = self.get(id).and_then(|pane| pane.refresh_folder());
         if let Some(folder) = moved {
             self.shared.save_folder(id, &folder).await;
+        }
+    }
+
+    /// Looks for the session of the agent that just `left` live shell `pane` and records it
+    /// as the agent the pane hosted last (spec §7). The files are read off the runtime.
+    async fn left(&self, pane: &Pane, left: Left) {
+        let Left {
+            hosting,
+            run,
+            homes,
+        } = left;
+        let claimed = match self.shared.db.call(|c| db::panes::session_ids(c)).await {
+            Ok(claimed) => claimed,
+            Err(err) => {
+                tracing::warn!("reading the sessions panes own: {err}");
+                HashSet::new()
+            }
+        };
+        let agent = run.agent;
+        let looking = tokio::task::spawn_blocking(move || hosted::session(&run, &homes, &claimed));
+        let session_id = looking.await.ok().flatten();
+        let last = LastHosted {
+            agent,
+            session_id,
+            left_at: db::now(),
+        };
+        if pane.set_last_hosted(hosting, last) {
+            tracing::info!("pane {} hosted {agent} last", pane.id());
         }
     }
 

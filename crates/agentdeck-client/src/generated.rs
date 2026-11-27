@@ -347,6 +347,22 @@ pub mod types {
             value.parse()
         }
     }
+    ///The agent a shell pane hosted last, once it has left (spec §7).
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+    pub struct LastHosted {
+        ///The agent: `claude` or `codex`.
+        pub agent: agentdeck_core::Agent,
+        ///When it left, RFC 3339: each time an agent leaves is told apart by it.
+        pub left_at: ::std::string::String,
+        ///The session it ran, when found: the one its command line named (`--resume <id>`, `--session-id <id>`, `codex resume <id>`), else the newest session file it wrote for its folder while hosted. Always a UUID; null when none was found.
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub session_id: ::std::option::Option<::std::string::String>,
+    }
+    impl LastHosted {
+        pub fn builder() -> builder::LastHosted {
+            Default::default()
+        }
+    }
     ///`POST /v1/workspaces/{id}/links`: the Repository to link, by name, or by GitHub's id with what the client holds of it.
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
     pub struct NewLink {
@@ -443,6 +459,9 @@ pub mod types {
         pub id: agentdeck_core::PaneId,
         ///An agent or a shell.
         pub kind: agentdeck_core::PaneKind,
+        ///The agent a shell pane hosted last, once it has left and the shell is back: which one, and its session when the daemon found it. Null while the pane hosts an agent, before it hosted any, once its shell exits and after a daemon restart (spec §3, §7).
+        #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+        pub last_hosted: ::std::option::Option<LastHosted>,
         ///The agent's session id: chosen at launch for `claude`, found after launch for `codex` (null until Codex has written its session file).
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         pub session_id: ::std::option::Option<::std::string::String>,
@@ -1801,6 +1820,77 @@ pub mod types {
             }
         }
         #[derive(Clone, Debug)]
+        pub struct LastHosted {
+            agent: ::std::result::Result<agentdeck_core::Agent, ::std::string::String>,
+            left_at: ::std::result::Result<::std::string::String, ::std::string::String>,
+            session_id: ::std::result::Result<
+                ::std::option::Option<::std::string::String>,
+                ::std::string::String,
+            >,
+        }
+        impl ::std::default::Default for LastHosted {
+            fn default() -> Self {
+                Self {
+                    agent: Err("no value supplied for agent".to_string()),
+                    left_at: Err("no value supplied for left_at".to_string()),
+                    session_id: Ok(Default::default()),
+                }
+            }
+        }
+        impl LastHosted {
+            pub fn agent<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<agentdeck_core::Agent>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.agent = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for agent: {e}"));
+                self
+            }
+            pub fn left_at<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::string::String>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.left_at = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for left_at: {e}"));
+                self
+            }
+            pub fn session_id<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<::std::string::String>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.session_id = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for session_id: {e}"));
+                self
+            }
+        }
+        impl ::std::convert::TryFrom<LastHosted> for super::LastHosted {
+            type Error = super::error::ConversionError;
+            fn try_from(
+                value: LastHosted,
+            ) -> ::std::result::Result<Self, super::error::ConversionError> {
+                Ok(Self {
+                    agent: value.agent?,
+                    left_at: value.left_at?,
+                    session_id: value.session_id?,
+                })
+            }
+        }
+        impl ::std::convert::From<super::LastHosted> for LastHosted {
+            fn from(value: super::LastHosted) -> Self {
+                Self {
+                    agent: Ok(value.agent),
+                    left_at: Ok(value.left_at),
+                    session_id: Ok(value.session_id),
+                }
+            }
+        }
+        #[derive(Clone, Debug)]
         pub struct NewLink {
             archived: ::std::result::Result<::std::option::Option<bool>, ::std::string::String>,
             id: ::std::result::Result<
@@ -2141,6 +2231,10 @@ pub mod types {
             >,
             id: ::std::result::Result<agentdeck_core::PaneId, ::std::string::String>,
             kind: ::std::result::Result<agentdeck_core::PaneKind, ::std::string::String>,
+            last_hosted: ::std::result::Result<
+                ::std::option::Option<super::LastHosted>,
+                ::std::string::String,
+            >,
             session_id: ::std::result::Result<
                 ::std::option::Option<::std::string::String>,
                 ::std::string::String,
@@ -2161,6 +2255,7 @@ pub mod types {
                     hosted_agent: Ok(Default::default()),
                     id: Err("no value supplied for id".to_string()),
                     kind: Err("no value supplied for kind".to_string()),
+                    last_hosted: Ok(Default::default()),
                     session_id: Ok(Default::default()),
                     state: Err("no value supplied for state".to_string()),
                     tab_id: Err("no value supplied for tab_id".to_string()),
@@ -2259,6 +2354,16 @@ pub mod types {
                     .map_err(|e| format!("error converting supplied value for kind: {e}"));
                 self
             }
+            pub fn last_hosted<T>(mut self, value: T) -> Self
+            where
+                T: ::std::convert::TryInto<::std::option::Option<super::LastHosted>>,
+                T::Error: ::std::fmt::Display,
+            {
+                self.last_hosted = value
+                    .try_into()
+                    .map_err(|e| format!("error converting supplied value for last_hosted: {e}"));
+                self
+            }
             pub fn session_id<T>(mut self, value: T) -> Self
             where
                 T: ::std::convert::TryInto<::std::option::Option<::std::string::String>>,
@@ -2313,6 +2418,7 @@ pub mod types {
                     hosted_agent: value.hosted_agent?,
                     id: value.id?,
                     kind: value.kind?,
+                    last_hosted: value.last_hosted?,
                     session_id: value.session_id?,
                     state: value.state?,
                     tab_id: value.tab_id?,
@@ -2332,6 +2438,7 @@ pub mod types {
                     hosted_agent: Ok(value.hosted_agent),
                     id: Ok(value.id),
                     kind: Ok(value.kind),
+                    last_hosted: Ok(value.last_hosted),
                     session_id: Ok(value.session_id),
                     state: Ok(value.state),
                     tab_id: Ok(value.tab_id),
