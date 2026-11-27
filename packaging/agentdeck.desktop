@@ -3,6 +3,9 @@ Type=Application
 Name=agentdeck
 Comment=Run and watch coding agents
 Exec=agentdeck-gui
+# The icon theme's `agentdeck`, from packaging/icons/hicolor (installed under
+# ~/.local/share/icons/hicolor).
+Icon=agentdeck
 Terminal=false
 Categories=Development;
 # The GUI's Wayland app id (and X11 WM_CLASS) is `agentdeck`, this file's id, so the desktop ties

@@ -24,6 +24,10 @@ use zbus::Variant;
 /// The name the server shows on each notification.
 const APP_NAME: &str = "agentdeck";
 
+/// The icon each notification shows: the icon theme's `agentdeck`, the desktop file's `Icon`,
+/// installed from `packaging/icons/hicolor`. A server that can't find it shows none.
+const APP_ICON: &str = "agentdeck";
+
 /// The app's desktop file id, `agentdeck.desktop` without its suffix: the `desktop-entry` hint,
 /// by which the desktop groups the notifications with the app's window (its app id, the
 /// file's `StartupWMClass`).
@@ -222,7 +226,7 @@ async fn connect() -> zbus::Result<(zbus::Connection, zbus::MessageStream)> {
 }
 
 /// Shows `notification` in place of notification `replaces`, when that is still open: named
-/// [`APP_NAME`] with the [`DESKTOP_ENTRY`] hint, no icon, the server's own timeout, and the
+/// [`APP_NAME`] with [`APP_ICON`] and the [`DESKTOP_ENTRY`] hint, the server's own timeout, and the
 /// default action alone. Answers the id the server gave it.
 async fn notify(
     connection: &zbus::Connection,
@@ -240,7 +244,7 @@ async fn notify(
             &(
                 APP_NAME,
                 replaces.unwrap_or(0),
-                "",
+                APP_ICON,
                 notification.title.as_str(),
                 notification.body.as_str(),
                 actions.as_slice(),
