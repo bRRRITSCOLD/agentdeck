@@ -89,7 +89,7 @@ mod show {
 
         assert_eq!(
             (call.app_name.as_str(), call.replaces_id, call.icon.as_str()),
-            ("agentdeck", 0, "")
+            ("agentdeck", 0, "agentdeck")
         );
         assert_eq!(
             (call.summary.as_str(), call.body.as_str()),

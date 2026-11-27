@@ -79,10 +79,11 @@ Its log is `$XDG_STATE_HOME/agentdeck/agentdeckd.log`. `AGENTDECK_GITHUB_API`, `
 
 ### Desktop entry
 
-For GNOME to group the window and its notifications under one dock icon, install the desktop file once (its `Exec=agentdeck-gui` needs the binary on your session's `PATH`):
+For GNOME to group the window and its notifications under one dock icon, and show the app's icon there, install the desktop file and the icons once (its `Exec=agentdeck-gui` needs the binary on your session's `PATH`):
 
 ```sh
 install -Dm644 packaging/agentdeck.desktop ~/.local/share/applications/agentdeck.desktop
+mkdir -p ~/.local/share/icons && cp -r packaging/icons/hicolor ~/.local/share/icons/
 ```
 
 | Crate | Kind | |
