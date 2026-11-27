@@ -42,8 +42,8 @@ use brrritscold_core_gpui::{
     ActiveTheme as _, Alert, AlertAction, AlertDescription, AlertDialog, AlertDialogAction,
     AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter,
     AlertDialogHeader, AlertDialogTitle, AlertTitle, AlertVariant, Button, ButtonSize,
-    ButtonVariant, Checkbox, DialogHandle, Field, FieldContent, FieldLabel, FieldOrientation,
-    IconName, Separator, SeparatorOrientation,
+    ButtonVariant, Checkbox, DialogHandle, Field, FieldContent, FieldDescription, FieldLabel,
+    FieldOrientation, IconName, Separator, SeparatorOrientation,
 };
 use brrritscold_core_gpui_tokens::primitive::space;
 use futures_util::future::{self, Either};
@@ -269,13 +269,15 @@ impl Shell {
         .detach();
     }
 
-    /// One of the quit dialog's horizontal Fields: a Checkbox, `on` or not, labelled `label`,
-    /// whose tick `set` saves; clicking the label ticks it too. Its checkbox is element `id`,
-    /// its label `<id>-label`, and `selector` finds it under test.
+    /// One of the quit dialog's horizontal Fields: a Checkbox, `on` or not, labelled `label`
+    /// over an optional `description`, whose tick `set` saves; clicking the label ticks it too.
+    /// Its checkbox is element `id`, its label `<id>-label`, and `selector` finds it under test
+    /// (`<selector> hint` its description).
     fn quit_option(
         id: &'static str,
         selector: &'static str,
         label: &'static str,
+        description: Option<&'static str>,
         on: bool,
         set: fn(&mut Shell, bool),
         cx: &mut Context<Self>,
@@ -299,13 +301,19 @@ impl Shell {
                 ),
             )
             .content(
-                FieldContent::new().child(
-                    div()
-                        .id(SharedString::from(format!("{id}-label")))
-                        .cursor_pointer()
-                        .on_click(move |_, _, cx| tick_label(!on, cx))
-                        .child(FieldLabel::new().child(label)),
-                ),
+                FieldContent::new()
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("{id}-label")))
+                            .cursor_pointer()
+                            .on_click(move |_, _, cx| tick_label(!on, cx))
+                            .child(FieldLabel::new().child(label)),
+                    )
+                    .children(description.map(|text| {
+                        div()
+                            .debug_selector(move || format!("{selector} hint"))
+                            .child(FieldDescription::new(text))
+                    })),
             )
     }
 
@@ -324,6 +332,8 @@ impl Shell {
                 "quit-dont-ask-again",
                 "quit dont ask again",
                 "Don't ask again",
+                // Nothing remembers Stop the agents (#323), so the dialog says so.
+                Some("Agents keep running on later quits."),
                 self.dont_ask_again,
                 |shell, on| shell.dont_ask_again = on,
                 cx,
@@ -332,6 +342,7 @@ impl Shell {
                 "quit-stop-agents",
                 "quit stop agents",
                 "Stop the agents",
+                None,
                 self.stop_agents,
                 |shell, on| shell.stop_agents = on,
                 cx,
@@ -3545,11 +3556,13 @@ mod tests {
             assert!(ticked);
         }
 
-        /// Penpot "Quit · agents running" (#288): each option is a Field whose label is a
-        /// `Field/Label`, core-react's FieldLabel (`leading-snug`, 19.25px), the options
-        /// `space.3` apart and `space.6` above the buttons. Each top is as core-react lays
-        /// it out, within the pixel GPUI snaps to; Penpot draws each label 20px tall, so its
-        /// lines sit 0.75px lower per option (32 and 76).
+        /// Penpot "Quit · agents running" (#288, #323): each option is a Field whose label is
+        /// a `Field/Label`, core-react's FieldLabel (`leading-snug`, 19.25px). Don't ask
+        /// again's description sits `space.1` under its label (FieldContent's gap) and is
+        /// one sm `leading-normal` line (21px); the options are `space.3` apart and
+        /// `space.6` above the buttons. Each top is as core-react lays it out, within the
+        /// pixel GPUI snaps to; Penpot draws each label 20px tall, so its lines sit 0.75px
+        /// lower per label (24, 57 and 101).
         #[gpui::test]
         fn should_space_the_options_and_buttons_by_their_field_labels(cx: &mut TestAppContext) {
             let (harness, cx) = Harness::open(daemon(vec![agent(1)], true), cx);
@@ -3560,11 +3573,13 @@ mod tests {
             };
 
             let dont_ask = top("quit dont ask again", cx);
+            let hint = top("quit dont ask again hint", cx) - dont_ask;
             let stop = top("quit stop agents", cx) - dont_ask;
             let buttons = top("quit confirm", cx) - dont_ask;
 
-            assert!((stop - 31.25).abs() <= 1., "Stop the agents {stop}px down");
-            assert!((buttons - 74.5).abs() <= 1., "the buttons {buttons}px down");
+            assert!((hint - 23.25).abs() <= 1., "the description {hint}px down");
+            assert!((stop - 56.25).abs() <= 1., "Stop the agents {stop}px down");
+            assert!((buttons - 99.5).abs() <= 1., "the buttons {buttons}px down");
         }
 
         #[gpui::test]
